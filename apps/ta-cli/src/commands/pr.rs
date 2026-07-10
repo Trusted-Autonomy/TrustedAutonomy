@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::draft;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum PrCommands {
     /// Build a PR package from overlay workspace diffs.
     Build {

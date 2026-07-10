@@ -22,7 +22,7 @@ use ta_runtime::{build_channel, AgentFrameworkManifest, ChannelType, HumanNote, 
 use ta_session::workflow_session::AdvisorSecurity;
 use ta_session::{AdvisorContext, AdvisorSession};
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum AdvisorCommands {
     /// Ask the advisor a question or give it a natural language instruction.
     ///

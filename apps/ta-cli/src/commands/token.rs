@@ -4,7 +4,7 @@ use clap::Subcommand;
 use ta_events::tokens::TokenStore;
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum TokenCommands {
     /// Create a new approval token.
     Create {

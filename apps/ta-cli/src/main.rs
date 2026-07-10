@@ -50,7 +50,7 @@ struct Cli {
 }
 
 /// Subcommands for `ta gc` that target specific subsystems.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GcSubcommand {
     /// Remove unreferenced SHA blobs from the managed-paths store (v0.17.0).
     ///
@@ -72,8 +72,134 @@ enum GcSubcommand {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
+    // ── VERB-SET CONSOLIDATION (v0.17.0.12.16) ────────────────────────────────
+    //
+    // Primary CLI surface per docs/design/ta-concepts-and-architecture.md §5/§11:
+    // ten orthogonal verbs, nouns as positional subjects
+    // (`ta <verb> <noun> [id] [flags]`). `run` (below) and `draft`'s
+    // `apply`/`approve`/`deny` already fit this shape and need no change.
+    // See `apps/ta-cli/src/commands/verb.rs` for the noun/verb mapping table.
+    /// Create a resource (provisioning) — replaces New/Init/Add/Install.
+    ///
+    /// Examples:
+    ///   ta create persona reviewer
+    ///   ta create plugin ./plugins/my-plugin
+    ///   ta create agent my-framework
+    ///
+    /// Run `ta create --help` to see the full noun list, or docs/USAGE.md's
+    /// CLI Verb Reference for the old→new lookup table.
+    Create {
+        /// Resource kind (e.g. "goal", "persona", "plugin", "agent").
+        noun: String,
+        /// Resource ID/name, if applicable.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// List resources of a given kind — replaces the 15+ independent List implementations.
+    ///
+    /// Examples: `ta list goal`, `ta list draft`, `ta list plugin`
+    List {
+        /// Resource kind (e.g. "goal", "draft", "session").
+        noun: String,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Show single-item detail — replaces View/Status/Inspect naming inconsistency.
+    ///
+    /// Examples: `ta show goal <id>`, `ta show draft <id>`, `ta show agent <name>`
+    Show {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Update a resource — replaces Set/Assign/MoveItem/AddItem/Reload.
+    ///
+    /// Examples: `ta update team implementer claude-opus-4-8`, `ta update persona reviewer --agent auto`
+    Update {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Remove a resource — replaces Delete/Remove/Revoke/Uninstall.
+    ///
+    /// Examples: `ta remove goal <id>`, `ta remove plugin <name>`
+    ///
+    /// `ta remove goal` fixed the phase-reset-even-when-done bug (found
+    /// 2026-07-03) as part of this unification: a `done` plan phase is never
+    /// reset to `pending` on goal removal, only an `in_progress` one is.
+    Remove {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Approve a draft (or other Decision-gated resource) for the next graph stage.
+    ///
+    /// Already fits the verb+noun shape via `ta draft approve` — this is the
+    /// top-level spelling. Example: `ta approve draft <id>`
+    Approve {
+        /// Resource kind (currently only "draft").
+        noun: String,
+        /// Resource ID.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Deny a draft (or other Decision-gated resource) with a reason.
+    ///
+    /// Example: `ta deny draft <id> --reason "..."`
+    Deny {
+        /// Resource kind (currently only "draft").
+        noun: String,
+        /// Resource ID.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Fire the Commit stage for a resource — TA's defining action.
+    ///
+    /// Already fits the verb+noun shape via `ta draft apply` — this is the
+    /// top-level spelling. Example: `ta apply draft <id>`
+    Apply {
+        /// Resource kind (currently only "draft").
+        noun: String,
+        /// Resource ID.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Correctness check — replaces Validate/Verify/Check/Audit naming inconsistency.
+    ///
+    /// Examples: `ta check plan-phase v0.15.0`, `ta check agent claude-code`
+    Check {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name, if applicable.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+
     // ── DASHBOARD ───────────────────────────────────────────────────────────
     /// Project-wide status dashboard: active agents, pending drafts, next phase.
     ///
@@ -797,12 +923,23 @@ enum Commands {
         #[arg(long)]
         test: bool,
     },
-    /// Sync the local workspace with upstream changes.
+    /// Sync the local workspace with upstream changes, or reconcile a resource
+    /// with its remote/registry — replaces Gc/Prune/Migrate/reconcile-with-remote.
     ///
-    /// Calls the configured VCS adapter's sync operation (e.g., git fetch + merge/rebase).
-    /// Emits `sync_completed` or `sync_conflict` events. Configure sync behavior
-    /// in `[source.sync]` in `.ta/workflow.toml`.
-    Sync,
+    /// With no noun: calls the configured VCS adapter's sync operation (e.g., git
+    /// fetch + merge/rebase). Emits `sync_completed` or `sync_conflict` events.
+    /// Configure sync behavior in `[source.sync]` in `.ta/workflow.toml`.
+    ///
+    /// With a noun: reconciles that resource, e.g. `ta sync goal` (garbage-collect
+    /// zombie goals), `ta sync agent` (migrate a framework), `ta sync community`
+    /// (refresh cached resources).
+    Sync {
+        /// Resource kind to sync. Omit for the default VCS workspace sync.
+        noun: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
     /// Run pre-draft verification checks against a staging workspace.
     ///
     /// Runs the [verify] commands from .ta/workflow.toml in the staging
@@ -982,7 +1119,32 @@ fn try_resolve_phase(candidate: &str, project_root: &std::path::Path) -> Option<
     Some((title, phase.id.clone()))
 }
 
+/// Windows' default main-thread stack (1MB) is far smaller than
+/// Linux/macOS's (8MB default). Debug builds' uninlined stack frames for
+/// clap's generated subcommand dispatch can exceed that 1MB limit on
+/// Windows even though the same code path is fine elsewhere — confirmed by
+/// `scripts/diagnose-windows-stack-overflow.ps1` (PR #537): the crash is
+/// 100% deterministic at the default stack and 100% clean at 64MB, with no
+/// signs of unbounded/infinite recursion. Running the real work on a
+/// spawned thread with an explicit larger stack fixes it for every
+/// invocation of the binary, not just the two tests that first exposed it.
 fn main() -> anyhow::Result<()> {
+    match std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn ta worker thread")
+        .join()
+    {
+        Ok(result) => result,
+        Err(_) => {
+            // The worker thread's own panic hook already printed the
+            // panic message/backtrace; just propagate a nonzero exit.
+            std::process::exit(101);
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let startup_begin = std::time::Instant::now();
     let cli = Cli::parse();
     let t_parse = startup_begin.elapsed();
@@ -1101,12 +1263,169 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    dispatch_raw(command, &config, &project_root, cli.no_version_check, true)
+}
+
+/// Build the one-line, non-fatal deprecation notice for a legacy noun-first
+/// invocation, pointing at the new verb+noun equivalent when one is mapped
+/// (v0.17.0.12.16). A pure function (no I/O) so the exact wording is
+/// unit-testable; `print_deprecation_notice` is the thin I/O wrapper.
+fn deprecation_notice_text<T: std::fmt::Debug>(legacy_top: &str, cmd: &T) -> String {
+    let action = commands::verb::action_word_from_debug(cmd);
+    match commands::verb::new_form_for(legacy_top, &action) {
+        Some(new_form) => format!(
+            "[deprecated-cli] `ta {legacy_top} {action}` \u{2192} use `{new_form}` instead (same behavior). See docs/USAGE.md's CLI Verb Reference."
+        ),
+        None => format!(
+            "[deprecated-cli] `ta {legacy_top}` subcommands are being consolidated into the 10-verb CLI (create/list/show/update/remove/run/approve/deny/apply/check/sync, v0.17.0.12.16). This action isn't mapped to a new verb yet and continues to work unchanged. See docs/USAGE.md."
+        ),
+    }
+}
+
+/// Print a one-line, non-fatal deprecation notice for a legacy noun-first
+/// invocation. Never blocks execution — the legacy form keeps working.
+/// Called exactly once per process, only for a directly-typed legacy
+/// invocation (`dispatch_raw`'s `warn_legacy = true` path) — a verb+noun
+/// invocation that internally forwards to the same legacy `Commands` variant
+/// (`run_verb_noun`) always passes `warn_legacy = false`, so the notice never
+/// double-prints and never prints for the new primary surface.
+fn print_deprecation_notice<T: std::fmt::Debug>(legacy_top: &str, cmd: &T) {
+    eprintln!("{}", deprecation_notice_text(legacy_top, cmd));
+}
+
+/// Resolve a `ta <verb> <noun> [id] [extra...]` invocation to its legacy
+/// equivalent and dispatch it through the exact same code path as a direct
+/// legacy invocation (`dispatch_raw` with `warn_legacy = false`) — the new
+/// verb+noun surface and the legacy noun-first surface always execute
+/// identical code, never two copies of the same behavior.
+fn run_verb_noun(
+    verb: &str,
+    noun: &str,
+    id: Option<&str>,
+    extra: &[String],
+    config: &GatewayConfig,
+    project_root: &std::path::Path,
+    no_version_check: bool,
+) -> anyhow::Result<()> {
+    let argv = commands::verb::resolve(verb, noun, id, extra)?;
+    let parsed = Cli::try_parse_from(&argv)?;
+    let resolved = parsed.command.ok_or_else(|| {
+        anyhow::anyhow!(
+            "internal error: `ta {verb} {noun}` resolved to an argv with no command (this is a bug in commands::verb::resolve, please report it)"
+        )
+    })?;
+    dispatch_raw(&resolved, config, project_root, no_version_check, false)
+}
+
+/// The full command dispatch table. Shared by direct CLI invocation
+/// (`main`, `warn_legacy = true`) and by verb+noun forwarding
+/// (`run_verb_noun`, `warn_legacy = false`) so both surfaces run byte-identical
+/// code for every command (v0.17.0.12.16).
+fn dispatch_raw(
+    command: &Commands,
+    config: &GatewayConfig,
+    project_root: &std::path::Path,
+    no_version_check: bool,
+    warn_legacy: bool,
+) -> anyhow::Result<()> {
     match command {
-        Commands::Status { deep } => commands::status::execute(&config, *deep),
-        Commands::Goal { command } => commands::goal::execute(command, &config),
-        Commands::Draft { command } => commands::draft::execute(command, &config),
-        Commands::Pr { command } => commands::pr::execute(command, &config),
-        Commands::Audit { command } => commands::audit::execute(command, &config),
+        Commands::Status { deep } => commands::status::execute(config, *deep),
+        Commands::Goal { command } => {
+            if warn_legacy {
+                print_deprecation_notice("goal", command);
+            }
+            commands::goal::execute(command, config)
+        }
+        Commands::Draft { command } => {
+            if warn_legacy {
+                print_deprecation_notice("draft", command);
+            }
+            commands::draft::execute(command, config)
+        }
+        Commands::Pr { command } => commands::pr::execute(command, config),
+        Commands::Audit { command } => commands::audit::execute(command, config),
+        // ── Verb-set consolidation (v0.17.0.12.16) — primary CLI surface ──
+        Commands::Create { noun, id, extra } => run_verb_noun(
+            "create",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::List { noun, extra } => run_verb_noun(
+            "list",
+            noun,
+            None,
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Show { noun, id, extra } => run_verb_noun(
+            "show",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Update { noun, id, extra } => run_verb_noun(
+            "update",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Remove { noun, id, extra } => run_verb_noun(
+            "remove",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Approve { noun, id, extra } => run_verb_noun(
+            "approve",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Deny { noun, id, extra } => run_verb_noun(
+            "deny",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Apply { noun, id, extra } => run_verb_noun(
+            "apply",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Check { noun, id, extra } => run_verb_noun(
+            "check",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
         Commands::Run {
             title,
             agent,
@@ -1144,7 +1463,7 @@ fn main() -> anyhow::Result<()> {
             // Phase-aware title resolution: if the positional title looks like
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
             // look it up in PLAN.md and use the phase title + set --phase.
-            let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
+            let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, project_root);
 
             // Agent runtime resolution (v0.17.0.12.13): --agent → persona
             // binding → workflow YAML/workflow.toml → workload type →
@@ -1156,7 +1475,7 @@ fn main() -> anyhow::Result<()> {
                 persona.as_deref(),
                 workload.as_deref(),
                 resolved_title.as_deref(),
-                &project_root,
+                project_root,
             );
 
             // Routing brain (v0.17.0.12.20): resolve team/persona/security_tier/
@@ -1175,7 +1494,7 @@ fn main() -> anyhow::Result<()> {
                 priority.as_deref(),
                 workflow.as_deref(),
                 workload.as_deref(),
-                &project_root,
+                project_root,
             );
 
             // serial-phases: dispatch to execute_serial_phases when --phases is provided.
@@ -1184,7 +1503,7 @@ fn main() -> anyhow::Result<()> {
                     if !phase_list.is_empty() {
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
                         return commands::run::execute_serial_phases(
-                            &config,
+                            config,
                             run_title,
                             &resolved_agent,
                             objective,
@@ -1200,7 +1519,7 @@ fn main() -> anyhow::Result<()> {
             if !sub_goals.is_empty() {
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
                 return commands::run::execute_swarm(
-                    &config,
+                    config,
                     run_title,
                     &resolved_agent,
                     objective,
@@ -1213,7 +1532,7 @@ fn main() -> anyhow::Result<()> {
 
             // Default: single-agent execution.
             commands::run::execute(
-                &config,
+                config,
                 resolved_title.as_deref(),
                 &resolved_agent,
                 source.as_deref(),
@@ -1236,38 +1555,83 @@ fn main() -> anyhow::Result<()> {
                 context.as_deref(),
             )
         }
-        Commands::Events { command } => commands::events::execute(command, &config),
-        Commands::Token { command } => commands::token::execute(command, &config),
+        Commands::Events { command } => {
+            if warn_legacy {
+                print_deprecation_notice("events", command);
+            }
+            commands::events::execute(command, config)
+        }
+        Commands::Token { command } => {
+            if warn_legacy {
+                print_deprecation_notice("token", command);
+            }
+            commands::token::execute(command, config)
+        }
         Commands::Dev {
             agent,
             unrestricted,
         } => commands::dev::execute(
-            &config,
-            &project_root,
+            config,
+            project_root,
             agent.as_deref(),
             *unrestricted,
-            cli.no_version_check,
+            no_version_check,
         ),
-        Commands::Session { command } => commands::session::execute(command, &config),
-        Commands::Plan { command } => commands::plan::execute(command, &config),
-        Commands::Persona { command } => commands::persona::execute(command, &config),
-        Commands::Context { command } => commands::context::execute(command, &config),
-        Commands::Credentials { command } => commands::credentials::execute(command, &config),
-        Commands::Advisor { command } => commands::advisor::execute(command, &config),
-        Commands::Advise { message, goal } => {
-            commands::advisor::advise(&config, message, goal.as_deref())
+        Commands::Session { command } => {
+            if warn_legacy {
+                print_deprecation_notice("session", command);
+            }
+            commands::session::execute(command, config)
         }
-        Commands::Agent { command } => commands::agent::execute(command, &config),
+        Commands::Plan { command } => {
+            if warn_legacy {
+                print_deprecation_notice("plan", command);
+            }
+            commands::plan::execute(command, config)
+        }
+        Commands::Persona { command } => {
+            if warn_legacy {
+                print_deprecation_notice("persona", command);
+            }
+            commands::persona::execute(command, config)
+        }
+        Commands::Context { command } => {
+            if warn_legacy {
+                print_deprecation_notice("context", command);
+            }
+            commands::context::execute(command, config)
+        }
+        Commands::Credentials { command } => {
+            if warn_legacy {
+                print_deprecation_notice("credentials", command);
+            }
+            commands::credentials::execute(command, config)
+        }
+        Commands::Advisor { command } => commands::advisor::execute(command, config),
+        Commands::Advise { message, goal } => {
+            commands::advisor::advise(config, message, goal.as_deref())
+        }
+        Commands::Agent { command } => {
+            if warn_legacy {
+                print_deprecation_notice("agent", command);
+            }
+            commands::agent::execute(command, config)
+        }
         Commands::Style { command } => commands::style::execute(command),
-        Commands::Team { command } => commands::team::execute(command, &config),
-        Commands::Constitution { command } => commands::constitution::execute(command, &config),
-        Commands::Memory { command } => commands::memory::execute(command, &config),
-        Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
-        Commands::Install => commands::install::execute(&project_root),
-        Commands::Setup { command } => commands::setup::execute(command, &config),
-        Commands::Init { command } => commands::init::execute(command, &config),
-        Commands::New { command } => commands::new::execute(command, &config),
-        Commands::Release { command } => commands::release::execute(command, &config),
+        Commands::Team { command } => {
+            if warn_legacy {
+                print_deprecation_notice("team", command);
+            }
+            commands::team::execute(command, config)
+        }
+        Commands::Constitution { command } => commands::constitution::execute(command, config),
+        Commands::Memory { command } => commands::memory::execute(command, config),
+        Commands::Adapter { command } => commands::adapter::execute(command, project_root),
+        Commands::Install => commands::install::execute(project_root),
+        Commands::Setup { command } => commands::setup::execute(command, config),
+        Commands::Init { command } => commands::init::execute(command, config),
+        Commands::New { command } => commands::new::execute(command, config),
+        Commands::Release { command } => commands::release::execute(command, config),
         Commands::Shell {
             init,
             tui,
@@ -1283,37 +1647,65 @@ fn main() -> anyhow::Result<()> {
 
             if use_tui {
                 commands::shell::execute(
-                    &project_root,
+                    project_root,
                     attach.as_deref(),
                     url.as_deref(),
                     *init,
                     *classic,
-                    cli.no_version_check,
+                    no_version_check,
                 )
             } else if *init {
-                commands::shell::init_config(&project_root)
+                commands::shell::init_config(project_root)
             } else {
-                commands::shell::open_web_shell(&project_root, url.as_deref())
+                commands::shell::open_web_shell(project_root, url.as_deref())
             }
         }
-        Commands::Daemon { command } => commands::daemon::execute(command, &project_root),
-        Commands::Office { command } => commands::office::execute(command, &project_root),
+        Commands::Daemon { command } => {
+            if warn_legacy {
+                print_deprecation_notice("daemon", command);
+            }
+            commands::daemon::execute(command, project_root)
+        }
+        Commands::Office { command } => {
+            if warn_legacy {
+                print_deprecation_notice("office", command);
+            }
+            commands::office::execute(command, project_root)
+        }
         Commands::Plugin { command } => {
-            commands::plugin::run_plugin(&project_root, command)?;
+            if warn_legacy {
+                print_deprecation_notice("plugin", command);
+            }
+            commands::plugin::run_plugin(project_root, command)?;
             Ok(())
         }
-        Commands::Intake { command } => commands::intake::run_intake(&project_root, command),
-        Commands::Template { command } => commands::template::execute(command, &config),
-        Commands::Publish { message, yes } => {
-            commands::publish::execute(&project_root, message.as_deref(), *yes)
+        Commands::Intake { command } => commands::intake::run_intake(project_root, command),
+        Commands::Template { command } => {
+            if warn_legacy {
+                print_deprecation_notice("template", command);
+            }
+            commands::template::execute(command, config)
         }
-        Commands::Workflow { command } => commands::workflow::execute(command, &config),
-        Commands::Stats { command } => commands::stats::execute(command, &config),
-        Commands::Community { command } => commands::community::execute(command, &config),
-        Commands::Manifest { command } => commands::manifest::execute(command, &config),
-        Commands::Link { command } => commands::link::execute(command, &config),
-        Commands::Policy { command } => commands::policy::execute(command, &config),
-        Commands::Config { command } => commands::config::execute(command, &config),
+        Commands::Publish { message, yes } => {
+            commands::publish::execute(project_root, message.as_deref(), *yes)
+        }
+        Commands::Workflow { command } => {
+            if warn_legacy {
+                print_deprecation_notice("workflow", command);
+            }
+            commands::workflow::execute(command, config)
+        }
+        Commands::Stats { command } => commands::stats::execute(command, config),
+        Commands::Community { command } => {
+            if warn_legacy {
+                print_deprecation_notice("community", command);
+            }
+            commands::community::execute(command, config)
+        }
+        Commands::Manifest { command } => commands::manifest::execute(command, config),
+        Commands::Link { command } => commands::link::execute(command, config),
+        Commands::Policy { command } => commands::policy::execute(command, config),
+        Commands::Config { command } => commands::config::execute(command, config),
         Commands::Gc {
             dry_run,
             threshold_days,
@@ -1330,9 +1722,9 @@ fn main() -> anyhow::Result<()> {
             Some(GcSubcommand::GovernedPaths {
                 retain_days,
                 dry_run: gp_dry_run,
-            }) => commands::gc::execute_governed_paths(&config, *retain_days, *gp_dry_run),
+            }) => commands::gc::execute_governed_paths(config, *retain_days, *gp_dry_run),
             None => commands::gc::execute(
-                &config,
+                config,
                 *dry_run,
                 *threshold_days,
                 *all,
@@ -1345,24 +1737,40 @@ fn main() -> anyhow::Result<()> {
                 *delete_stale,
             ),
         },
-        Commands::Operations { command } => commands::operations::execute(command, &config),
-        Commands::Runbook { command } => commands::runbook::execute(command, &config),
-        Commands::Connector { command } => commands::connector::execute(command, &config),
-        Commands::Compression { command } => commands::compression::execute(command, &config),
-        Commands::Webhook { command } => commands::webhook::execute(command, &config),
-        Commands::Meridian { command } => commands::meridian::execute(command, &config),
+        Commands::Operations { command } => commands::operations::execute(command, config),
+        Commands::Runbook { command } => commands::runbook::execute(command, config),
+        Commands::Connector { command } => {
+            if warn_legacy {
+                print_deprecation_notice("connector", command);
+            }
+            commands::connector::execute(command, config)
+        }
+        Commands::Compression { command } => commands::compression::execute(command, config),
+        Commands::Webhook { command } => commands::webhook::execute(command, config),
+        Commands::Meridian { command } => commands::meridian::execute(command, config),
         Commands::Tools { command } => commands::tools::execute(command),
         Commands::Serve => {
             // First-run gate: warn if provider is not yet configured.
             // TA_SKIP_ONBOARD_CHECK=1 bypasses in CI.
             let skip = std::env::var("TA_SKIP_ONBOARD_CHECK").is_ok_and(|v| v == "1");
             commands::onboard::check_provider_configured(skip)?;
-            commands::serve::execute(&project_root)
+            commands::serve::execute(project_root)
         }
-        Commands::Build { test } => commands::build::execute(&config, *test),
-        Commands::Sync => commands::sync::execute(&config),
-        Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
-        Commands::Analysis { command } => commands::analysis::execute(command, &config),
+        Commands::Build { test } => commands::build::execute(config, *test),
+        Commands::Sync { noun, extra } => match noun {
+            Some(n) => run_verb_noun(
+                "sync",
+                n,
+                None,
+                extra,
+                config,
+                project_root,
+                no_version_check,
+            ),
+            None => commands::sync::execute(config),
+        },
+        Commands::Verify { goal_id } => commands::verify::execute(config, goal_id.as_deref()),
+        Commands::Analysis { command } => commands::analysis::execute(command, config),
         Commands::Doctor {
             json,
             fix_denied,
@@ -1373,11 +1781,11 @@ fn main() -> anyhow::Result<()> {
             [sub, comp, ..] if sub == "fix" && comp == "projfs" => {
                 commands::doctor::execute_fix_projfs()
             }
-            _ => commands::doctor::execute(&config, *json, *fix_denied, *fix, *yes),
+            _ => commands::doctor::execute(config, *json, *fix_denied, *fix, *yes),
         },
-        Commands::Upgrade(args) => commands::upgrade::execute(&config, args),
+        Commands::Upgrade(args) => commands::upgrade::execute(config, args),
         Commands::Conversation { goal_id, json } => {
-            commands::conversation::execute(&config, goal_id, *json)
+            commands::conversation::execute(config, goal_id, *json)
         }
         Commands::Onboard {
             web,
@@ -1402,7 +1810,7 @@ fn main() -> anyhow::Result<()> {
             api_key.as_deref(),
             agent.as_deref(),
             planning_framework.as_deref(),
-            &project_root,
+            project_root,
         ),
         // Already handled above.
         Commands::AcceptTerms { .. }
@@ -1422,5 +1830,183 @@ fn requires_terms_acceptance(cmd: &Commands) -> bool {
         Commands::Init { .. } | Commands::Run { .. } => true,
         Commands::Goal { command } => commands::goal::is_start_command(command),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod verb_dispatch_tests {
+    use super::*;
+
+    /// Parse a `ta ...` argv into `Commands` the same way the real binary does.
+    ///
+    /// Runs on a dedicated large-stack thread: `Commands` is a large enum
+    /// (the `Run` variant alone has ~25 fields, `#[allow(clippy::large_enum_variant)]`
+    /// above), and clap's derive-generated parser builds it on the stack —
+    /// large enough to overflow the default ~2MB test-thread stack.
+    fn parse(args: &[&str]) -> Commands {
+        let owned: Vec<String> = std::iter::once("ta".to_string())
+            .chain(args.iter().map(|s| s.to_string()))
+            .collect();
+        parse_argv(owned)
+    }
+
+    /// Same as `parse`, but takes an already-built argv (e.g. from
+    /// `commands::verb::resolve`) instead of individual args.
+    fn parse_argv(argv: Vec<String>) -> Commands {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                Cli::try_parse_from(&argv)
+                    .unwrap_or_else(|e| panic!("failed to parse {argv:?}: {e}"))
+                    .command
+                    .unwrap_or_else(|| panic!("no command parsed from {argv:?}"))
+            })
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
+    }
+
+    #[test]
+    fn parses_all_ten_verb_shapes() {
+        assert!(matches!(
+            parse(&["create", "persona", "reviewer"]),
+            Commands::Create { noun, id: Some(id), .. } if noun == "persona" && id == "reviewer"
+        ));
+        assert!(matches!(
+            parse(&["list", "goal"]),
+            Commands::List { noun, .. } if noun == "goal"
+        ));
+        assert!(matches!(
+            parse(&["show", "goal", "abc123"]),
+            Commands::Show { noun, id: Some(id), .. } if noun == "goal" && id == "abc123"
+        ));
+        assert!(matches!(
+            parse(&["update", "team", "implementer", "claude-opus-4-8"]),
+            Commands::Update { noun, id: Some(id), .. } if noun == "team" && id == "implementer"
+        ));
+        assert!(matches!(
+            parse(&["remove", "goal", "abc123"]),
+            Commands::Remove { noun, id: Some(id), .. } if noun == "goal" && id == "abc123"
+        ));
+        assert!(matches!(
+            parse(&["approve", "draft", "d1"]),
+            Commands::Approve { noun, id: Some(id), .. } if noun == "draft" && id == "d1"
+        ));
+        assert!(matches!(
+            parse(&["deny", "draft", "d1", "--reason", "no"]),
+            Commands::Deny { noun, id: Some(id), .. } if noun == "draft" && id == "d1"
+        ));
+        assert!(matches!(
+            parse(&["apply", "draft", "d1"]),
+            Commands::Apply { noun, id: Some(id), .. } if noun == "draft" && id == "d1"
+        ));
+        assert!(matches!(
+            parse(&["check", "plan-phase", "v0.15.0"]),
+            Commands::Check { noun, id: Some(id), .. } if noun == "plan-phase" && id == "v0.15.0"
+        ));
+        assert!(matches!(
+            parse(&["sync", "goal"]),
+            Commands::Sync { noun: Some(n), .. } if n == "goal"
+        ));
+        // `ta sync` with no noun still parses (bare VCS sync, unchanged).
+        assert!(matches!(
+            parse(&["sync"]),
+            Commands::Sync { noun: None, .. }
+        ));
+    }
+
+    #[test]
+    fn extra_flags_pass_through_the_trailing_var_arg() {
+        match parse(&["remove", "goal", "abc123", "--reason", "stale work"]) {
+            Commands::Remove { noun, id, extra } => {
+                assert_eq!(noun, "goal");
+                assert_eq!(id.as_deref(), Some("abc123"));
+                assert_eq!(extra, vec!["--reason", "stale work"]);
+            }
+            other => panic!("expected Commands::Remove, got {other:?}"),
+        }
+    }
+
+    /// End-to-end proof that the new verb+noun surface and the legacy
+    /// noun-first surface resolve to the *exact same* `Commands` value —
+    /// not just equivalent-looking ones. `ta remove goal <id>` must
+    /// round-trip through `commands::verb::resolve` + `Cli::try_parse_from`
+    /// to literally `Commands::Goal { command: GoalCommands::Delete { .. } }`,
+    /// the same variant `ta goal delete <id>` produces directly. Both are
+    /// then dispatched by the same `dispatch_raw`, so behavior is identical
+    /// by construction, including the goal-delete phase-reset-even-when-done
+    /// fix (v0.17.0.12.16 item 3) — there is only one `delete_goal` code path.
+    #[test]
+    fn remove_goal_resolves_to_the_same_command_as_legacy_goal_delete() {
+        let legacy = parse(&["goal", "delete", "abc123", "--reason", "no longer needed"]);
+        let argv = commands::verb::resolve(
+            "remove",
+            "goal",
+            Some("abc123"),
+            &["--reason".to_string(), "no longer needed".to_string()],
+        )
+        .unwrap();
+        let via_verb = parse_argv(argv);
+
+        match (&legacy, &via_verb) {
+            (
+                Commands::Goal {
+                    command:
+                        commands::goal::GoalCommands::Delete {
+                            id: id1,
+                            reason: r1,
+                        },
+                },
+                Commands::Goal {
+                    command:
+                        commands::goal::GoalCommands::Delete {
+                            id: id2,
+                            reason: r2,
+                        },
+                },
+            ) => {
+                assert_eq!(id1, id2);
+                assert_eq!(r1, r2);
+            }
+            other => panic!("expected both to resolve to Goal::Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draft_apply_top_level_resolves_to_same_command_as_draft_apply() {
+        let legacy = parse(&["draft", "apply", "d1"]);
+        let argv = commands::verb::resolve("apply", "draft", Some("d1"), &[]).unwrap();
+        let via_verb = parse_argv(argv);
+        assert!(matches!(legacy, Commands::Draft { .. }));
+        assert!(matches!(via_verb, Commands::Draft { .. }));
+    }
+
+    #[test]
+    fn deprecation_notice_names_the_new_form_when_mapped() {
+        let cmd = commands::goal::GoalCommands::Delete {
+            id: "abc123".to_string(),
+            reason: None,
+        };
+        let text = deprecation_notice_text("goal", &cmd);
+        assert!(text.contains("ta goal delete"));
+        assert!(text.contains("ta remove goal"));
+        assert!(text.starts_with("[deprecated-cli]"));
+    }
+
+    #[test]
+    fn deprecation_notice_is_generic_for_unmapped_actions() {
+        let cmd = commands::goal::GoalCommands::Input {
+            id: "abc123".to_string(),
+            text: "hello".to_string(),
+        };
+        let text = deprecation_notice_text("goal", &cmd);
+        assert!(text.starts_with("[deprecated-cli]"));
+        assert!(text.contains("isn't mapped to a new verb yet"));
+    }
+
+    #[test]
+    fn unknown_noun_via_new_surface_is_a_clean_error_not_a_panic() {
+        let err = commands::verb::resolve("list", "spaceship", None, &[]).unwrap_err();
+        assert!(err.to_string().contains("Unknown noun"));
     }
 }

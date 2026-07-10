@@ -6,7 +6,7 @@ use clap::Subcommand;
 use ta_goal::{ActionSeverity, ActionStatus, OperationsLog};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum OperationsCommands {
     /// View the history of corrective actions detected by the daemon.
     ///

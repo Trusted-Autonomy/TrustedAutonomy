@@ -28,7 +28,7 @@ use ta_intake::{
     TriggerEvent, TriggerSource,
 };
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum IntakeCommands {
     /// List configured trigger types from `.ta/triggers/*.toml`.
     List,

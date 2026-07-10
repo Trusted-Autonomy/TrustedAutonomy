@@ -13,7 +13,7 @@ use serde_yaml;
 use ta_changeset::plugin;
 use toml;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum PluginCommands {
     /// List installed channel and agent plugins from project and global directories.
     List {

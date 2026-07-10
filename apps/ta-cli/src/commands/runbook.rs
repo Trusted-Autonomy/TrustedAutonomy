@@ -17,7 +17,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum RunbookCommands {
     /// List all available runbooks (built-in + project-local).
     List,

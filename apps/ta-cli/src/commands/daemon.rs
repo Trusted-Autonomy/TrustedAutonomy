@@ -13,7 +13,7 @@ use std::process::Command;
 use clap::Subcommand;
 
 /// `ta daemon` subcommands.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum DaemonCommands {
     /// Start the daemon in the background.
     Start {

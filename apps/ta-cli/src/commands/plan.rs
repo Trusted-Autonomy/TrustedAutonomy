@@ -30,7 +30,7 @@ use ta_goal::{extract_human_review_items, HumanReviewStore};
 use ta_mcp_gateway::GatewayConfig;
 use ta_submit::WorkflowConfig as TaWorkflowConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum PlanCommands {
     /// List all plan phases with their status.
     List,
@@ -455,7 +455,7 @@ pub enum PlanCommands {
 }
 
 /// Subcommands for `ta plan review`.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ReviewCommands {
     /// List pending human review items (default: all phases).
     List {

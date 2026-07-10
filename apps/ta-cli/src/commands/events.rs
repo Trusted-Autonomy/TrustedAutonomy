@@ -8,7 +8,7 @@ use ta_events::store::{EventQueryFilter, FsEventStore};
 use ta_events::{EventStore, HookConfig, HookRunner};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum EventsCommands {
     /// Stream events to stdout as NDJSON (one JSON object per line).
     Listen {
@@ -42,7 +42,7 @@ pub enum EventsCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum RoutingCommands {
     /// List active event responders and their strategies.
     List,

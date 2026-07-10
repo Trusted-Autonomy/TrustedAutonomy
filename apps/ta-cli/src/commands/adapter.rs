@@ -20,7 +20,7 @@ use ta_submit::{
     find_messaging_plugin, find_social_plugin, MessagingPluginManifest, SocialPluginManifest,
 };
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum AdapterCommands {
     /// List available agent adapters.
     List,
@@ -68,7 +68,7 @@ pub enum AdapterCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum CredentialsCommands {
     /// Get a credential by key.
     Get {

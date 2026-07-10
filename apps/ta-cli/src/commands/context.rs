@@ -10,7 +10,7 @@ use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
 use ta_memory::{memory_store_from_config, KeySchema, MemoryQuery, MemoryStore};
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ContextCommands {
     /// Store a memory entry.
     Store {
