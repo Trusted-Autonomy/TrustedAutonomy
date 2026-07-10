@@ -546,17 +546,17 @@ Nightly pre-releases are built automatically from the latest commit on `main`. T
 
 ```bash
 # macOS (Apple Silicon) — nightly
-curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly/ta-nightly-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly-latest/ta-nightly-aarch64-apple-darwin.tar.gz
 tar xzf ta-nightly-aarch64-apple-darwin.tar.gz
 sudo cp ta ta-daemon /usr/local/bin/
 
 # Linux (x86_64) — nightly
-curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly/ta-nightly-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly-latest/ta-nightly-x86_64-unknown-linux-musl.tar.gz
 tar xzf ta-nightly-x86_64-unknown-linux-musl.tar.gz
 sudo cp ta ta-daemon /usr/local/bin/
 ```
 
-Each nightly archive contains both `ta` and `ta-daemon`. See the [nightly release page](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly) for all platforms and the build history.
+Each nightly archive contains both `ta` and `ta-daemon`. See the [nightly release page](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly-latest) for all platforms and the build history.
 
 **Option D -- Docker** *(Coming Soon)*
 

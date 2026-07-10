@@ -18,7 +18,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: ta
-  NIGHTLY_TAG: nightly
+  # Renamed from "nightly" (2026-07-08): that tag got permanently locked by
+  # GitHub's Immutable Releases feature (GA 2025-10-28) -- once a release
+  # under a tag is published immutable, the tag name is blocked from reuse
+  # forever (422 "tag_name was used by an immutable release"), even after
+  # deleting the release and the tag. Do not reuse the old "nightly" tag name.
+  NIGHTLY_TAG: nightly-latest
   NIGHTLY_HISTORY_LIMIT: 60
 
 jobs:
@@ -337,7 +342,7 @@ jobs:
           BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           # Asset URL base for this nightly release
-          ASSET_BASE="https://github.com/${REPO}/releases/download/nightly"
+          ASSET_BASE="https://github.com/${REPO}/releases/download/${NIGHTLY_TAG}"
 
           # New row for the history table
           NEW_ROW="| ${BUILD_DATE} | [${HEAD_SHA_SHORT}](https://github.com/${REPO}/commit/${HEAD_SHA}) | ${TRIGGER_TYPE} | [Linux x86](${ASSET_BASE}/ta-nightly-x86_64-unknown-linux-musl.tar.gz) [Linux ARM](${ASSET_BASE}/ta-nightly-aarch64-unknown-linux-musl.tar.gz) [macOS Intel](${ASSET_BASE}/ta-nightly-x86_64-apple-darwin.tar.gz) [macOS ARM](${ASSET_BASE}/ta-nightly-aarch64-apple-darwin.tar.gz) [Windows MSI](${ASSET_BASE}/ta-nightly-x86_64-pc-windows-msvc.msi) [Windows zip](${ASSET_BASE}/ta-nightly-x86_64-pc-windows-msvc.zip) |"
@@ -345,8 +350,8 @@ jobs:
           # Fetch existing release body to extract and update the history table.
           # On first run, start fresh.
           EXISTING_BODY=""
-          if gh release view nightly --json body 2>/dev/null | grep -q '"body"'; then
-            EXISTING_BODY=$(gh release view nightly --json body --jq '.body')
+          if gh release view "$NIGHTLY_TAG" --json body 2>/dev/null | grep -q '"body"'; then
+            EXISTING_BODY=$(gh release view "$NIGHTLY_TAG" --json body --jq '.body')
           fi
 
           # Extract existing history rows (lines starting with "| 20") from the body.
@@ -448,39 +453,54 @@ jobs:
           # workflow previously only ever called `--draft` and never un-set it —
           # there was no publish step at all, not an auth/ID/ordering bug. A draft
           # release is invisible to anonymous/public viewers (the badge and the
-          # `releases/tag/nightly` link both 404 for non-collaborators), so it must
-          # be un-drafted after each successful run.
-          if [ "$(gh release view nightly --json isDraft --jq '.isDraft' 2>/dev/null)" = "false" ]; then
-            echo "Existing nightly release is published — reverting to draft so assets can be replaced..."
-            gh release edit nightly --draft
+          # `releases/tag/$NIGHTLY_TAG` link both 404 for non-collaborators), so it
+          # must be un-drafted after each successful run.
+          if [ "$(gh release view "$NIGHTLY_TAG" --json isDraft --jq '.isDraft' 2>/dev/null)" = "false" ]; then
+            echo "Existing $NIGHTLY_TAG release is published — reverting to draft so assets can be replaced..."
+            if ! gh release edit "$NIGHTLY_TAG" --draft; then
+              echo ""
+              echo "ERROR: could not revert '$NIGHTLY_TAG' back to draft. If this is a"
+              echo "'tag_name was used by an immutable release' error, the tag is"
+              echo "permanently locked by GitHub's Immutable Releases feature -- delete"
+              echo "and recreate is NOT a valid recovery (the lock survives tag deletion)."
+              echo "Fix: pick a new NIGHTLY_TAG value in .github/workflows/nightly.yml"
+              echo "and .github/workflows/nightly-validate.yml, and update README.md +"
+              echo "docs/USAGE.md's badge/download URLs to match."
+              exit 1
+            fi
           fi
 
-          if gh release view nightly 2>/dev/null; then
-            echo "Updating existing nightly release..."
-            gh release edit nightly \
+          if gh release view "$NIGHTLY_TAG" 2>/dev/null; then
+            echo "Updating existing $NIGHTLY_TAG release..."
+            gh release edit "$NIGHTLY_TAG" \
               --title "$RELEASE_TITLE" \
               --notes-file nightly-body.md \
               --prerelease \
               --draft
             # Replace all assets (clobber existing ones)
-            gh release upload nightly artifacts/* --clobber
+            gh release upload "$NIGHTLY_TAG" artifacts/* --clobber
           else
-            echo "Creating first nightly release..."
-            gh release create nightly \
+            echo "Creating first $NIGHTLY_TAG release..."
+            gh release create "$NIGHTLY_TAG" \
               --title "$RELEASE_TITLE" \
               --notes-file nightly-body.md \
               --prerelease \
               --draft
-            gh release upload nightly artifacts/* --clobber
+            gh release upload "$NIGHTLY_TAG" artifacts/* --clobber
           fi
 
           # Publish (un-draft) now that all assets are uploaded — this is the step
           # that was missing before, leaving nightly permanently draft.
-          echo "Publishing nightly release (un-drafting)..."
-          gh release edit nightly --draft=false
+          echo "Publishing $NIGHTLY_TAG release (un-drafting)..."
+          if ! gh release edit "$NIGHTLY_TAG" --draft=false; then
+            echo ""
+            echo "ERROR: could not publish '$NIGHTLY_TAG'. See the guidance above if this"
+            echo "is an immutable-release tag lock."
+            exit 1
+          fi
 
           echo ""
           echo "Nightly release published:"
           echo "  Title: ${RELEASE_TITLE}"
           echo "  SHA: ${{ needs.check-for-changes.outputs.head_sha }}"
-          echo "  URL: https://github.com/${{ github.repository }}/releases/tag/nightly"
+          echo "  URL: https://github.com/${{ github.repository }}/releases/tag/${NIGHTLY_TAG}"
