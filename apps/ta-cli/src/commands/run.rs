@@ -922,6 +922,134 @@ pub fn read_agent_recommendations(workspace_root: &std::path::Path) -> Vec<Agent
         .collect()
 }
 
+// ── Routing brain wiring (v0.17.0.12.20) ─────────────────────────
+
+/// Resolve the full `RoutingDecision` (team/persona/agent/security_tier/
+/// priority) for an explicit `ta run` invocation via `ta_brain::route()`,
+/// then log and persist it to `.ta/routing-decisions.jsonl` — the same
+/// Observable & Actionable treatment `agent = "auto"` recommendations
+/// already get (see `log_agent_recommendation` above). This is the explicit
+/// path's call into the same `route()` function the `ta intake fire`
+/// triggered path calls, so the two entry points never duplicate routing
+/// logic (v0.17.0.12.20 item 2).
+#[allow(clippy::too_many_arguments)]
+pub fn route_and_log(
+    goal_title: &str,
+    objective: &str,
+    resolved_agent: &str,
+    persona: Option<&str>,
+    team: Option<&str>,
+    security: Option<&str>,
+    priority: Option<&str>,
+    workflow_name_or_path: Option<&str>,
+    workload: Option<&str>,
+    workspace_root: &Path,
+) -> ta_brain::RoutingDecision {
+    let request = ta_brain::ExplicitGoalRequest {
+        goal_title: goal_title.to_string(),
+        objective: objective.to_string(),
+        // `resolved_agent` was already fully resolved (including any
+        // "auto" recommendation) by `resolve_effective_agent_full` above;
+        // passing it as the explicit tier here means `route()`'s own agent
+        // tier trivially matches tier 1 rather than recomputing "auto".
+        cli_agent: Some(resolved_agent.to_string()),
+        cli_persona: persona.map(str::to_string),
+        cli_team: team.map(str::to_string),
+        cli_security: security.map(str::to_string),
+        cli_priority: priority.map(str::to_string),
+        workflow_name_or_path: workflow_name_or_path.map(str::to_string),
+        workload_type_override: workload.map(str::to_string),
+    };
+    let decision = ta_brain::route(
+        &ta_brain::RoutingInput::ExplicitGoal(request),
+        workspace_root,
+    );
+    log_routing_decision(workspace_root, goal_title, &decision);
+    decision
+}
+
+/// Log and persist a `RoutingDecision` (Observable & Actionable).
+fn log_routing_decision(
+    workspace_root: &Path,
+    goal_title: &str,
+    decision: &ta_brain::RoutingDecision,
+) {
+    tracing::info!(
+        goal_title = %goal_title,
+        team = %decision.team,
+        persona = ?decision.persona,
+        agent = %decision.agent,
+        security_tier = %decision.security_tier,
+        priority = %decision.priority,
+        workload_type = %decision.workload_type,
+        "routing decision resolved"
+    );
+    println!(
+        "[routing] team={} persona={} agent={} security={} priority={} workload={} ({:.0}% confidence)",
+        decision.team,
+        decision.persona.as_deref().unwrap_or("-"),
+        decision.agent,
+        decision.security_tier,
+        decision.priority,
+        decision.workload_type,
+        decision.workload_confidence * 100.0
+    );
+
+    #[derive(serde::Serialize)]
+    struct RoutingLogEntry<'a> {
+        timestamp: String,
+        goal_title: &'a str,
+        decision: &'a ta_brain::RoutingDecision,
+    }
+    let entry = RoutingLogEntry {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        goal_title,
+        decision,
+    };
+
+    let log_path = workspace_root.join(".ta").join("routing-decisions.jsonl");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(line) = serde_json::to_string(&entry) else {
+        tracing::warn!("Failed to serialize routing decision for persistence");
+        return;
+    };
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(mut f) => {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{}", line);
+        }
+        Err(e) => {
+            tracing::warn!(path = %log_path.display(), error = %e, "Failed to write routing decision log");
+        }
+    }
+}
+
+/// Read all recorded routing decisions from `.ta/routing-decisions.jsonl`,
+/// most recent last.
+pub fn read_routing_decisions(workspace_root: &Path) -> Vec<ta_brain::RoutingDecision> {
+    #[derive(serde::Deserialize)]
+    struct RoutingLogEntry {
+        decision: ta_brain::RoutingDecision,
+    }
+    let log_path = workspace_root.join(".ta").join("routing-decisions.jsonl");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<RoutingLogEntry>(l).ok())
+        .map(|e| e.decision)
+        .collect()
+}
+
 // ── Serial phases workflow (v0.13.7) ────────────────────────────
 
 /// Execute a serial-phases workflow: run each phase in order, evaluate gates

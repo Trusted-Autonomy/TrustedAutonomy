@@ -347,11 +347,28 @@ enum Commands {
         /// Workload type for the workload-type-level agent tier (v0.17.0.12.13).
         ///
         /// Looked up in .ta/workflow.toml's [workload_agents] table (e.g.
-        /// `bugfix = "claude-opus-4-8"`). Full automatic workload
-        /// classification lands in v0.17.0.12.20 (`ta-brain`); until then this
-        /// is an explicit, opt-in override.
+        /// `bugfix = "claude-opus-4-8"`). When omitted, `ta-brain` (v0.17.0.12.20)
+        /// classifies the workload type automatically from the goal title.
         #[arg(long)]
         workload: Option<String>,
+        /// Team role that owns this goal (v0.17.0.12.20 routing brain).
+        ///
+        /// Resolves through `ta-brain`'s routing tiers when omitted: this flag →
+        /// `.ta/workflow.toml`'s `[workload_types.<type>].team` → `[team].default`
+        /// → a built-in workload-type heuristic → `"implementer"`.
+        #[arg(long)]
+        team: Option<String>,
+        /// Security tier for this goal: read_only, suggest, or auto
+        /// (v0.17.0.12.20 routing brain, reuses the advisor's `AdvisorSecurity`
+        /// tri-state). `"auto"` is downgraded to `"suggest"` when workload
+        /// classification confidence is too low to trust with full autonomy.
+        #[arg(long)]
+        security: Option<String>,
+        /// Priority relative to other pending requests: low, normal, high, or
+        /// urgent (v0.17.0.12.20 routing brain). When omitted, resolves from
+        /// `.ta/workflow.toml` config or is detected from the goal title.
+        #[arg(long)]
+        priority: Option<String>,
     },
     /// Review and manage draft packages.
     Draft {
@@ -756,6 +773,8 @@ enum Commands {
     ///   ta intake fire schedule
     ///   ta intake fire inbound-email --dry-run
     ///   ta intake queue
+    ///   ta intake coordinate
+    ///   ta intake routing --limit 10
     Intake {
         #[command(subcommand)]
         command: commands::intake::IntakeCommands,
@@ -1434,6 +1453,9 @@ fn dispatch_raw(
             skip_onboard_check,
             context,
             workload,
+            team,
+            security,
+            priority,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -1454,6 +1476,25 @@ fn dispatch_raw(
                 workload.as_deref(),
                 resolved_title.as_deref(),
                 project_root,
+            );
+
+            // Routing brain (v0.17.0.12.20): resolve team/persona/security_tier/
+            // priority through `ta_brain::route()` — the same function the
+            // ta-intake-driven listener calls for triggered goals, so the
+            // explicit and triggered paths never duplicate routing logic.
+            // `resolved_agent` is passed through as the explicit tier so this
+            // call reuses (not recomputes) the agent decision above.
+            commands::run::route_and_log(
+                resolved_title.as_deref().unwrap_or(""),
+                objective,
+                &resolved_agent,
+                persona.as_deref(),
+                team.as_deref(),
+                security.as_deref(),
+                priority.as_deref(),
+                workflow.as_deref(),
+                workload.as_deref(),
+                &project_root,
             );
 
             // serial-phases: dispatch to execute_serial_phases when --phases is provided.

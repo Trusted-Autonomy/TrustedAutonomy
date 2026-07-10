@@ -15409,7 +15409,89 @@ ta intake queue
 
 Each trigger type tracks its own watermark (last-fired timestamp) at `.ta/triggers/.state/<type>.watermark`, so repeated `ta intake fire` calls only act on genuinely new events.
 
-`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, a later phase) will become the primary consumer, deriving not just "create a goal" but also team/persona/security-tier from the same normalized event.
+`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, see below) is the primary consumer: every fired event is routed through `ta_brain::route()` before a goal is created, deriving team/persona/agent/security-tier/priority from the same normalized event.
+
+---
+
+## Routing Brain (`ta-brain`)
+
+Every goal request — whether an explicit `ta run` invocation or a fired trigger event (`ta-intake`, above) — is resolved through one shared function: `ta_brain::route()`. It answers five questions the same way regardless of how the request arrived:
+
+- **team** — which team role (`.ta/team.toml`) owns this work
+- **persona** — which persona (`.ta/personas/<name>.toml`), if any
+- **agent** — which agent/model framework runs it
+- **security_tier** — how autonomously it can proceed (`read_only` / `suggest` / `auto`)
+- **priority** — how urgent it is relative to other pending requests (`low` / `normal` / `high` / `urgent`)
+
+Each is resolved through the same shape of tiered lookup already used for `agent` since the `Switch` action landed (most-specific override wins):
+
+1. An explicit flag (`--team`, `--persona`, `--agent`, `--security`, `--priority` on `ta run`)
+2. A per-workload-type binding in `.ta/workflow.toml`
+3. A workflow-level default (`.ta/team.toml`'s per-role binding for `security`/`persona`; `.ta/workflow.toml`'s `[team]`/`[security]`/`[priority]` defaults otherwise)
+4. A built-in heuristic or fallback
+
+### Workload classification
+
+Before resolving the tiers above, `ta-brain` classifies the request's **workload type** — `bugfix`, `docs`, `feature`, `refactor`, `test`, `release`, `security`, `chore`, or `other` — from the goal title (and, for triggers, the event payload), unless `--workload` (or a trigger's `settings.workload`) gives it explicitly. This is the same `--workload` flag introduced for the agent tier; it now also drives team/persona/security/priority resolution.
+
+Workload classification is a simple, auditable keyword heuristic (not a model) — every classification includes a confidence score, and low-confidence classifications are treated conservatively: **`security_tier = "auto"` is automatically downgraded to `"suggest"`** whenever workload-classification confidence is below 65%, so an uncertain guess never hands full autonomy to the advisor. The downgrade (and its reason) is always included in the routing decision's rationale.
+
+### Config surface
+
+`.ta/workflow.toml` gains three new top-level defaults and one new per-workload-type table, all additive — the existing `[agent]`/`[workload_agents]` tables from the `Switch` action are untouched:
+
+```toml
+[team]
+default = "implementer"
+
+[security]
+default = "suggest"
+
+[priority]
+default = "normal"
+
+# Per-workload-type overrides — sibling to [workload_agents], one table
+# per classified (or explicit) workload type.
+[workload_types.bugfix]
+team = "implementer"
+persona = "careful-reviewer"
+security = "suggest"
+priority = "high"
+
+[workload_types.security]
+team = "reviewer"
+security = "read_only"
+priority = "urgent"
+```
+
+A triggered event can supply the same hints via its `.ta/triggers/<type>.toml`'s `[settings]` table (`team`, `persona`, `security`, `priority`, `workload`) — read the same untyped way other per-type settings already are, so a community trigger type needs no `ta-brain` code change to participate.
+
+### `ta run` flags
+
+```bash
+ta run "Fix the login bug" --team implementer --security suggest --priority high
+```
+
+`--team`, `--security`, and `--priority` are new alongside the existing `--agent`, `--persona`, and `--workload`. Every `ta run` invocation logs its full routing decision (team/persona/agent/security/priority/workload + rationale) to `.ta/routing-decisions.jsonl` and prints a `[routing]` summary line — view the history with:
+
+```bash
+ta intake routing --limit 10
+```
+
+### Team coordinator
+
+The "team coordinator" — something that watches pending/queued work and recommends who should handle it next — is a **capability of the existing Advisor**, not a new persistent role (see `PLAN.md`'s v0.17.0.12.20 entry for the full rationale: it reuses the Advisor's existing `AdvisorSecurity` trust tri-state rather than inventing a second one).
+
+```bash
+# Read-only: priority-ordered recommendations for everything in
+# .ta/intake-queue.jsonl, with full rationale.
+ta intake coordinate
+
+# Also act: dispatch (create a goal for, then dequeue) every recommendation
+# whose resolved security_tier is "auto"; leave everything else queued for
+# `ta intake fire` or manual review.
+ta intake coordinate --dispatch
+```
 
 ---
 

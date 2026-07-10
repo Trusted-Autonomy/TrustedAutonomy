@@ -9516,24 +9516,24 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.20 — Routing Brain (`ta-brain`): Workload Classification + Privilege Derivation + Team Coordinator
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.13 (agent-switching tiers), v0.17.0.12.19 (`ta-intake`)
 
 **Goal**: Build tier 2 of the 3-tier model — extract the §3 mapping tree into one reusable library function, extending v0.17.0.12.13's agent-only `Switch` resolution into full workload classification, prioritization, and privilege derivation. Resolve the open §13 question: is the "team coordinator" a new persistent role, or a capability of the existing Advisor?
 
 **Items**:
-1. [ ] New library crate `ta-brain`, no CLI/daemon-specific glue: one pure function `route(input: RoutingInput) -> RoutingDecision` where `RoutingInput` is either an explicit goal request or a `ta-intake::TriggerEvent`, and `RoutingDecision = {team, persona, agent, security_tier, priority}`.
-2. [ ] Wire `ta run` (explicit path) and a new `ta-intake`-driven listener (triggered path) to both call this same function — no duplicated routing logic between the two entry points.
-3. [ ] Extend the agent-resolution tiers from v0.17.0.12.13 so `security_tier` and `priority` are derived the same way `agent` already is (including an `"auto"`-equivalent for security tier, gated by workload classification, not just role).
-4. [ ] Decide and implement the team-coordinator question: either (a) a new persistent, non-Write role that watches the incoming-request queue across concurrent goals and assigns/prioritizes via `ta-brain`, or (b) extend the existing Advisor with this capability. Document the decision and rationale in this phase's PLAN.md entry once made — don't leave it open.
-5. [ ] Tests: `route()` produces an identical `RoutingDecision` for equivalent explicit-vs-triggered inputs; priority ordering is correct when more than one request is pending; the team-coordinator path correctly surfaces its recommendation + rationale (Observable & Actionable).
-6. [ ] USAGE.md: document the routing/prioritization model and the team-coordinator role.
+1. [x] New library crate `ta-brain`, no CLI/daemon-specific glue: one pure function `route(input: RoutingInput) -> RoutingDecision` where `RoutingInput` is either an explicit goal request or a `ta-intake::TriggerEvent`, and `RoutingDecision = {team, persona, agent, security_tier, priority}`.
+2. [x] Wire `ta run` (explicit path) and a new `ta-intake`-driven listener (triggered path) to both call this same function — no duplicated routing logic between the two entry points.
+3. [x] Extend the agent-resolution tiers from v0.17.0.12.13 so `security_tier` and `priority` are derived the same way `agent` already is (including an `"auto"`-equivalent for security tier, gated by workload classification, not just role).
+4. [x] Decide and implement the team-coordinator question: either (a) a new persistent, non-Write role that watches the incoming-request queue across concurrent goals and assigns/prioritizes via `ta-brain`, or (b) extend the existing Advisor with this capability. Document the decision and rationale in this phase's PLAN.md entry once made — don't leave it open.
+5. [x] Tests: `route()` produces an identical `RoutingDecision` for equivalent explicit-vs-triggered inputs; priority ordering is correct when more than one request is pending; the team-coordinator path correctly surfaces its recommendation + rationale (Observable & Actionable).
+6. [x] USAGE.md: document the routing/prioritization model and the team-coordinator role.
 
 #### Version: `0.17.0-alpha.12.20`
 
 ---
 ### v0.17.0.12.21 — Data-Format Specs + Studio Boundary Enforcement
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.19, v0.17.0.12.20
 
 **Goal**: Publish the versioned data-format specs that are the real interface boundary between TA's core, Studio, and community-authored trigger-configs/plugins (per §13.1) — the mechanism that lets the system stay a monorepo without becoming tightly coupled.

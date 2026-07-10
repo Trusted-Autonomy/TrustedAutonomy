@@ -9,9 +9,11 @@
 //! which already aggregates that state for the existing Advisor tab.
 
 pub mod classify;
+pub mod coordinator;
 
 pub use classify::{
     build_confirmation_card, classify as classify_advisor_intent, next_clarify_step,
     AdvisorClassification, AdvisorIntent, ClarifyOutcome, ClarifyState, ConfirmationCard,
     DraftActionKind, AMBIGUOUS_CONFIDENCE_THRESHOLD, MAX_CLARIFY_ROUNDS,
 };
+pub use coordinator::{build_report, CoordinationReport, CoordinatorRecommendation};
