@@ -29,17 +29,48 @@ Write-Host "=== TrustedAutonomy Windows dev setup ===" -ForegroundColor Cyan
 Write-Host ""
 
 # --- 1. MSVC Build Tools (link.exe) ---
+# Checked by looking for link.exe directly rather than requiring the Visual
+# Studio Installer specifically -- MSVC can legitimately come from the full
+# VS Installer (any edition), the standalone Build Tools installer, or a
+# manually-placed toolchain, and none of those require vswhere.exe to exist.
 Write-Host "--- Checking MSVC Build Tools ---"
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $hasMsvc = $false
-if (Test-Path $vswhere) {
-    $vsInstall = & $vswhere -latest -products * `
-        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-        -property installationPath
-    if ($vsInstall) { $hasMsvc = $true }
+
+# (a) Already on PATH (e.g. running inside a Developer Prompt already).
+if (Test-Command "link") {
+    $hasMsvc = $true
 }
+
+# (b) Search the standard MSVC install tree under both Program Files roots
+#     -- this is the same layout used by VS Installer-based installs
+#     (Community/Professional/Enterprise/BuildTools) regardless of which
+#     one was used, and by the standalone Build Tools archive.
+if (-not $hasMsvc) {
+    $msvcGlobs = @(
+        "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe",
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe"
+    )
+    foreach ($glob in $msvcGlobs) {
+        if (Get-Item -Path $glob -ErrorAction SilentlyContinue) {
+            $hasMsvc = $true
+            break
+        }
+    }
+}
+
+# (c) Last resort: ask the VS Installer's own locator, if present.
+if (-not $hasMsvc) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $vsInstall = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+        if ($vsInstall) { $hasMsvc = $true }
+    }
+}
+
 if ($hasMsvc) {
-    Write-Host "OK: MSVC Build Tools (C++ workload) found." -ForegroundColor Green
+    Write-Host "OK: MSVC Build Tools (link.exe) found." -ForegroundColor Green
 } else {
     Write-Host "MISSING: MSVC Build Tools not detected." -ForegroundColor Yellow
     if (Test-Command "winget") {
