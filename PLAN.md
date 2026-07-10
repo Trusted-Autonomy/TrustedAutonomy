@@ -9550,7 +9550,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.22 — CLI Surface Completion: Full Verb+Noun Coverage + Curated Help
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.16
 
 **Goal**: 12.16 intentionally shipped partial (18 of 42 noun-areas mapped onto the 10-verb set, per `docs/design/ta-cli-verb-reference.md`) with the rest still legacy-only. Finish the mapping, and give the CLI a genuinely simple default surface — today only 7 of 61 commands are hidden from `--help` (installer-internal, not a curated "common ops" set), so a new user sees the entire flat command list.
