@@ -11,7 +11,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum OfficeCommands {
     /// Start the multi-project daemon with an office configuration.
     Start {
@@ -42,7 +42,7 @@ pub enum OfficeCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ProjectCommands {
     /// Add a project to the running office.
     Add {

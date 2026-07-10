@@ -9451,17 +9451,17 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.16 — CLI Verb-Set Consolidation
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.14, v0.17.0.12.15
 
 **Goal**: Collapse the ~250-action CLI surface onto the 10-verb set from `docs/design/ta-concepts-and-architecture.md` §5/§11 (create/list/show/update/remove/run/approve/deny/apply/check/sync), shipped with a deprecation/alias window, not a hard cutover.
 
 **Items**:
-1. [ ] Implement the 10 top-level verbs as the primary CLI surface, nouns as positional subjects (`ta list goal`, `ta show draft <id>`).
-2. [ ] Every existing subcommand becomes an alias forwarding to the new verb+noun form, printing a one-line deprecation notice (not an error).
-3. [ ] Fix the `ta goal delete` phase-reset-even-when-done bug (found 2026-07-03) as part of unifying delete/remove onto `remove` — don't carry it forward.
-4. [ ] USAGE.md: full rewrite of the command reference around the new verb structure, with an old→new lookup table.
-5. [ ] Tests: every old subcommand invocation produces identical behavior through its alias; the deprecation notice appears exactly once per invocation.
+1. [x] Implement the 10 top-level verbs as the primary CLI surface, nouns as positional subjects (`ta list goal`, `ta show draft <id>`).
+2. [x] Every existing subcommand becomes an alias forwarding to the new verb+noun form, printing a one-line deprecation notice (not an error).
+3. [x] Fix the `ta goal delete` phase-reset-even-when-done bug (found 2026-07-03) as part of unifying delete/remove onto `remove` — don't carry it forward.
+4. [x] USAGE.md: full rewrite of the command reference around the new verb structure, with an old→new lookup table.
+5. [x] Tests: every old subcommand invocation produces identical behavior through its alias; the deprecation notice appears exactly once per invocation.
 
 #### Version: `0.17.0-alpha.12.16`
 

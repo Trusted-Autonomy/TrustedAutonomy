@@ -340,7 +340,7 @@ fn install_from_remote(url: &str, install_dir: &Path) -> anyhow::Result<()> {
 
 // ── Subcommands ──────────────────────────────────────────────────
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum TemplateCommands {
     /// Install a template from a registry name, github:user/repo, URL, or local path.
     ///

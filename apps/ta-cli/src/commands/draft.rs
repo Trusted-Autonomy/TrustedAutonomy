@@ -50,7 +50,7 @@ pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatter
     excludes
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum DraftCommands {
     /// Build a draft package from overlay workspace diffs.
     Build {
@@ -392,7 +392,7 @@ pub enum DraftCommands {
 }
 
 /// Review session subcommands for multi-turn artifact review.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ReviewCommands {
     /// Start or resume a review session for a draft package.
     Start {
@@ -1438,7 +1438,7 @@ pub fn auto_check_covered_items(plan_content: &str, diff_content: &str) -> Strin
                     println!(
                         "[apply] Auto-checked item {} (coverage match): {}",
                         item_number,
-                        &item_text.chars().take(60).collect::<String>()
+                        item_text.chars().take(60).collect::<String>()
                     );
                     result = result.replacen(&pattern, &replacement, 1);
                 }

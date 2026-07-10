@@ -153,7 +153,7 @@ pub fn start_goal_extending_parent(
     Ok(goal)
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum GoalCommands {
     /// Start a new goal run with an overlay workspace.
     Start {
@@ -318,7 +318,7 @@ pub enum GoalCommands {
 }
 
 /// Access constitution subcommands (v0.4.3).
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ConstitutionCommands {
     /// View the access constitution for a goal.
     View {

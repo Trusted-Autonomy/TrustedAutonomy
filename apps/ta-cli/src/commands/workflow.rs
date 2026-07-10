@@ -31,7 +31,7 @@ use ta_workflow::{
 use super::email_manager;
 use super::governed_workflow::{self, RunOptions};
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum WorkflowCommands {
     /// Execute a named governed workflow end-to-end (v0.14.8.2).
     ///

@@ -29,7 +29,7 @@ fn ta_config_dir() -> std::path::PathBuf {
         .join("ta")
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum AgentCommands {
     /// Scaffold a new agent configuration YAML file.
     New {

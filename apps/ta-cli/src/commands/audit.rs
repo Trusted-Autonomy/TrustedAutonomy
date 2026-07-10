@@ -9,7 +9,7 @@ use ta_audit::{
 use ta_goal::{MessagingAuditLog, SocialAuditLog};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum AuditCommands {
     /// Verify the audit log hash chain integrity.
     Verify {
@@ -161,7 +161,7 @@ pub enum AuditCommands {
 }
 
 /// Subcommands for the goal audit ledger.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum LedgerCommands {
     /// Export the goal audit ledger as JSONL or CSV.
     Export {
