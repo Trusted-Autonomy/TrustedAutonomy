@@ -9582,7 +9582,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.24 — Windows CI Toolchain Parity
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none (independent, low-effort; discovered 2026-07-10 while fixing PR #537)
 
 **Goal**: `windows-build` in `ci.yml` uses `dtolnay/rust-toolchain@stable`, which re-resolves live on every run against whatever Rust actually calls "stable" *today* (observed 1.97 on 2026-07-10). `lint-and-test` (ubuntu/macos) builds via Nix's `fromRustupToolchainFile ./rust-toolchain.toml`, which reads the same file's `channel = "stable"` but resolves it through `flake.lock`'s time-frozen nixpkgs/rust-overlay snapshot (observed 1.94 locally) — Nix has no native Windows support, so Windows never went through this path. The two "stable"s silently diverged by three-plus point releases over time, not by design. This let 5 real clippy lints in `shell_tui.rs`/`draft.rs`/`follow_up.rs` go uncaught on two of three platforms, and produces "clean everywhere except Windows" CI signals that look like flakiness but are actually a genuine toolchain-version gap.
@@ -9590,11 +9590,11 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 Recommendation: converge forward onto an explicit pinned version rather than pin Windows backward to match Nix's stale snapshot — pinning backward just inverts which platform drifts next time nixpkgs updates. `flake.nix` already uses `oxalica/rust-overlay`, which supports pinning `rust-toolchain.toml`'s `channel` to an exact version string (not just `"stable"`/`"beta"`/`"nightly"`) — so a single explicit version in that one file can drive both Nix (already reads it) and native `rustup` on every GitHub-hosted runner (ubuntu/macos/windows all ship rustup preinstalled and auto-install/select whatever `rust-toolchain.toml` pins on first `cargo`/`rustc` invocation, no action needed). This removes the `dtolnay/rust-toolchain@stable` step's independent floating resolution entirely, converging all three platforms on the one file that's already this project's single source of truth for the toolchain.
 
 **Items**:
-1. [ ] Pin `rust-toolchain.toml`'s `channel` to an explicit version (the current real stable, e.g. `1.97.x` — confirm exact patch via `rustc --version` on a fresh runner) instead of the literal word `"stable"`.
-2. [ ] Confirm `flake.lock`'s `rust-overlay`/`nixpkgs` inputs are recent enough to offer that version via `nix flake update`; bump if not.
-3. [ ] Remove (or repurpose) the `dtolnay/rust-toolchain@stable` step in `ci.yml`'s `windows-build` job — rely on the runner's preinstalled `rustup` auto-detecting `rust-toolchain.toml`, matching how `lint-and-test`'s Nix shell already resolves the same file.
-4. [ ] Full clean `build`/`clippy`/`fmt`/`test` run on all three CI platforms at the newly-pinned version; fix any lints the version bump newly surfaces before merging.
-5. [ ] CLAUDE.md: document the shared pinned version and the rule that no CI platform may resolve its own Rust toolchain independently of `rust-toolchain.toml` again.
+1. [x] Pin `rust-toolchain.toml`'s `channel` to an explicit version (the current real stable, e.g. `1.97.x` — confirm exact patch via `rustc --version` on a fresh runner) instead of the literal word `"stable"`.
+2. [x] Confirm `flake.lock`'s `rust-overlay`/`nixpkgs` inputs are recent enough to offer that version via `nix flake update`; bump if not.
+3. [x] Remove (or repurpose) the `dtolnay/rust-toolchain@stable` step in `ci.yml`'s `windows-build` job — rely on the runner's preinstalled `rustup` auto-detecting `rust-toolchain.toml`, matching how `lint-and-test`'s Nix shell already resolves the same file.
+4. [x] Full clean `build`/`clippy`/`fmt`/`test` run on all three CI platforms at the newly-pinned version; fix any lints the version bump newly surfaces before merging.
+5. [x] CLAUDE.md: document the shared pinned version and the rule that no CI platform may resolve its own Rust toolchain independently of `rust-toolchain.toml` again.
 
 #### Version: `0.17.0-alpha.12.24`
 

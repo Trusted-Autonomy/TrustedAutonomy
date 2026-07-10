@@ -17,9 +17,9 @@ chrono = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.20" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.20" }
-ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.20" }
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.24" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.24" }
+ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.24" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -17,7 +17,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.20" }
+ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.24" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
