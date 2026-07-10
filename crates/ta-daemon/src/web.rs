@@ -7,6 +7,7 @@
 //   GET  /                         → embedded HTML review UI
 //   GET  /api/drafts               → list drafts (JSON array)
 //   GET  /api/drafts/:id           → draft detail (DraftPackage JSON)
+//   GET  /api/drafts/:id/artifact  → raw bytes of one artifact, for image/video preview (?uri=<resource_uri>) (v0.17.0.12.17)
 //   POST /api/drafts/:id/approve   → approve a draft
 //   POST /api/drafts/:id/deny      → deny a draft { reason }
 //   POST /api/drafts/:id/apply     → apply a draft in the background, returns { status, job_id } (v0.17.0.12.5)
@@ -462,6 +463,132 @@ async fn get_draft(
         }
         Ok(None) => (StatusCode::NOT_FOUND, "draft not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Query params for `GET /api/drafts/:id/artifact`.
+#[derive(Debug, Deserialize)]
+struct ArtifactContentQuery {
+    uri: String,
+}
+
+/// `GET /api/drafts/:id/artifact?uri=<resource_uri>` — serve the raw bytes of
+/// one artifact already listed on the draft, for inline image/video preview
+/// in the draft review panel (v0.17.0.12.17 item 5: Studio previously showed
+/// `ArtifactKind::Image`/`Video` artifacts as a bare file path despite the
+/// backend already carrying width/height/format/duration metadata for them).
+///
+/// Resolves `resource_uri` (`fs://workspace/<path>`) against the goal's
+/// staging workspace first (pre-apply — what the agent actually produced),
+/// falling back to the project root (post-apply). Both the artifact-uri
+/// membership check and a canonicalized-path prefix check guard against
+/// serving anything outside those two directories.
+async fn get_artifact_content(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ArtifactContentQuery>,
+) -> impl IntoResponse {
+    let uuid = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid UUID").into_response(),
+    };
+    let draft = match load_draft(&state.pr_packages_dir, uuid) {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, "draft not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let Some(artifact) = draft
+        .changes
+        .artifacts
+        .iter()
+        .find(|a| a.resource_uri == q.uri)
+    else {
+        return (StatusCode::NOT_FOUND, "artifact not found on this draft").into_response();
+    };
+
+    let Some(relative) = artifact.resource_uri.strip_prefix("fs://workspace/") else {
+        return (StatusCode::BAD_REQUEST, "unsupported resource_uri scheme").into_response();
+    };
+    let relative_path = std::path::Path::new(relative);
+    if relative_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    }
+
+    let project_root = project_root_from_pr_packages_dir(&state.pr_packages_dir);
+
+    let mut candidate_bases = Vec::new();
+    let goals_dir = project_root.join(".ta").join("goals");
+    if let Ok(store) = ta_goal::store::GoalRunStore::new(&goals_dir) {
+        if let Ok(goals) = store.list() {
+            if let Some(goal) = goals.iter().find(|g| g.pr_package_id == Some(uuid)) {
+                candidate_bases.push(
+                    project_root
+                        .join(".ta")
+                        .join("staging")
+                        .join(goal.goal_run_id.to_string()),
+                );
+            }
+        }
+    }
+    candidate_bases.push(project_root.clone());
+
+    for base in &candidate_bases {
+        let full_path = base.join(relative_path);
+        let Ok(canonical) = full_path.canonicalize() else {
+            continue;
+        };
+        let Ok(canonical_base) = base.canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(&canonical_base) {
+            continue; // Path traversal guard.
+        }
+        if let Ok(bytes) = std::fs::read(&canonical) {
+            let content_type = artifact_content_type(artifact, relative_path);
+            return ([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response();
+        }
+    }
+
+    (StatusCode::NOT_FOUND, "artifact file not found on disk").into_response()
+}
+
+/// Best-effort MIME type for an artifact preview: prefer the declared
+/// `ArtifactKind::Image`/`Video` format, fall back to a file-extension guess.
+fn artifact_content_type(
+    artifact: &ta_changeset::draft_package::Artifact,
+    path: &std::path::Path,
+) -> String {
+    use ta_changeset::artifact_kind::ArtifactKind;
+    if let Some(kind) = &artifact.kind {
+        match kind {
+            ArtifactKind::Image {
+                format: Some(fmt), ..
+            } => return format!("image/{}", fmt.to_lowercase()),
+            ArtifactKind::Video {
+                format: Some(fmt), ..
+            } => return format!("video/{}", fmt.to_lowercase()),
+            _ => {}
+        }
+    }
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png".to_string(),
+        Some("jpg") | Some("jpeg") => "image/jpeg".to_string(),
+        Some("gif") => "image/gif".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("svg") => "image/svg+xml".to_string(),
+        Some("mp4") => "video/mp4".to_string(),
+        Some("mov") => "video/quicktime".to_string(),
+        Some("webm") => "video/webm".to_string(),
+        _ => "application/octet-stream".to_string(),
     }
 }
 
@@ -1008,6 +1135,7 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
         // Draft routes
         .route("/api/drafts", get(list_drafts))
         .route("/api/drafts/{id}", get(get_draft))
+        .route("/api/drafts/{id}/artifact", get(get_artifact_content))
         .route("/api/drafts/{id}/approve", post(approve_draft))
         .route("/api/drafts/{id}/deny", post(deny_draft))
         .route("/api/drafts/{id}/apply", post(apply_draft_endpoint))
@@ -1815,6 +1943,184 @@ mod tests {
             serde_json::to_string_pretty(&v).unwrap(),
         )
         .unwrap();
+    }
+
+    // ── Artifact content preview (v0.17.0.12.17 item 5) ───────────────────
+
+    /// project_root = pr_packages_dir.parent().parent(), so tests that need
+    /// project-root-relative file resolution must nest packages under
+    /// `<root>/.ta/pr_packages` (matching the real on-disk layout), not the
+    /// flat `<root>/packages` used by tests that don't touch project_root.
+    fn test_router_with_project_root(project_root: &std::path::Path) -> Router {
+        let packages_dir = project_root.join(".ta").join("pr_packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        build_router(packages_dir)
+    }
+
+    fn image_artifact_draft_json(id: Uuid, uri: &str) -> serde_json::Value {
+        let mut v = minimal_draft_json(id);
+        v.as_object_mut().unwrap().insert(
+            "changes".to_string(),
+            serde_json::json!({
+                "artifacts": [{
+                    "resource_uri": uri,
+                    "change_type": "add",
+                    "diff_ref": "changeset:0",
+                    "kind": {"type": "image", "format": "PNG"}
+                }],
+                "patch_sets": [],
+                "pending_actions": []
+            }),
+        );
+        v
+    }
+
+    #[tokio::test]
+    async fn get_artifact_content_serves_bytes_from_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join(".ta").join("pr_packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        let draft = image_artifact_draft_json(id, "fs://workspace/output.png");
+        std::fs::write(
+            packages_dir.join(format!("{}.json", id)),
+            serde_json::to_string_pretty(&draft).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("output.png"), b"fake-png-bytes").unwrap();
+
+        let app = test_router_with_project_root(dir.path());
+        let resp = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/drafts/{}/artifact?uri=fs%3A%2F%2Fworkspace%2Foutput.png",
+                    id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "image/png");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"fake-png-bytes");
+    }
+
+    #[tokio::test]
+    async fn get_artifact_content_prefers_goal_staging_dir_over_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join(".ta").join("pr_packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        let draft = image_artifact_draft_json(id, "fs://workspace/output.png");
+        std::fs::write(
+            packages_dir.join(format!("{}.json", id)),
+            serde_json::to_string_pretty(&draft).unwrap(),
+        )
+        .unwrap();
+
+        // Register the owning goal, pointed at this package.
+        let goals_dir = dir.path().join(".ta").join("goals");
+        let store = ta_goal::store::GoalRunStore::new(&goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "Test goal",
+            "test",
+            "test-agent",
+            dir.path().join(".ta/staging/placeholder"),
+            goals_dir.join("placeholder"),
+        );
+        goal.pr_package_id = Some(id);
+        store.save(&goal).unwrap();
+
+        let staging_dir = dir
+            .path()
+            .join(".ta")
+            .join("staging")
+            .join(goal.goal_run_id.to_string());
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(staging_dir.join("output.png"), b"staging-bytes").unwrap();
+        // Different content at the project root — staging must win.
+        std::fs::write(dir.path().join("output.png"), b"applied-bytes").unwrap();
+
+        let app = test_router_with_project_root(dir.path());
+        let resp = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/drafts/{}/artifact?uri=fs%3A%2F%2Fworkspace%2Foutput.png",
+                    id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"staging-bytes");
+    }
+
+    #[tokio::test]
+    async fn get_artifact_content_rejects_uri_not_on_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join(".ta").join("pr_packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        let draft = image_artifact_draft_json(id, "fs://workspace/output.png");
+        std::fs::write(
+            packages_dir.join(format!("{}.json", id)),
+            serde_json::to_string_pretty(&draft).unwrap(),
+        )
+        .unwrap();
+        // A file that exists on disk but was never listed as an artifact on
+        // this draft must not be servable through it.
+        std::fs::write(dir.path().join("secret.txt"), b"nope").unwrap();
+
+        let app = test_router_with_project_root(dir.path());
+        let resp = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/drafts/{}/artifact?uri=fs%3A%2F%2Fworkspace%2Fsecret.txt",
+                    id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_artifact_content_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join(".ta").join("pr_packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        let draft = image_artifact_draft_json(id, "fs://workspace/../../etc/passwd");
+        std::fs::write(
+            packages_dir.join(format!("{}.json", id)),
+            serde_json::to_string_pretty(&draft).unwrap(),
+        )
+        .unwrap();
+
+        let app = test_router_with_project_root(dir.path());
+        let resp = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/drafts/{}/artifact?uri=fs%3A%2F%2Fworkspace%2F..%2F..%2Fetc%2Fpasswd",
+                    id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -9467,19 +9467,19 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.17 — Studio IA Redesign
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12, v0.17.0.12.13, v0.17.0.12.14, v0.17.0.12.15, v0.17.0.12.16
 
 **Goal**: Collapse Studio's 15 nav tabs into the ~4 real destinations identified in `docs/design/ta-concepts-and-architecture.md` §6 (Attention, Activity, Configuration, Advisor). Sequenced last — building new UI against a still-fragmented backend recreates the sprawl.
 
 **Items**:
-1. [ ] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
-2. [ ] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
-3. [ ] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
-4. [ ] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
-5. [ ] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
-6. [ ] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
-7. [ ] Verification: manual browser walkthrough, not just unit tests — this is UI.
+1. [x] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
+2. [x] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
+3. [x] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
+4. [x] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
+5. [x] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
+6. [x] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
+7. [x] Verification: manual browser walkthrough, not just unit tests — this is UI.
 
 #### Version: `0.17.0-alpha.12.17`
 
