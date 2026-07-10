@@ -110,6 +110,7 @@ result-*
 .ta/action-log.jsonl
 .ta/autonomous-loop-state.json
 .ta/logs/
+.ta/routing-decisions.jsonl
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml
