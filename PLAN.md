@@ -9582,7 +9582,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.24 — Windows CI Toolchain Parity
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none (independent, low-effort; discovered 2026-07-10 while fixing PR #537)
 
 **Goal**: `windows-build` in `ci.yml` uses `dtolnay/rust-toolchain@stable`, which re-resolves live on every run against whatever Rust actually calls "stable" *today* (observed 1.97 on 2026-07-10). `lint-and-test` (ubuntu/macos) builds via Nix's `fromRustupToolchainFile ./rust-toolchain.toml`, which reads the same file's `channel = "stable"` but resolves it through `flake.lock`'s time-frozen nixpkgs/rust-overlay snapshot (observed 1.94 locally) — Nix has no native Windows support, so Windows never went through this path. The two "stable"s silently diverged by three-plus point releases over time, not by design. This let 5 real clippy lints in `shell_tui.rs`/`draft.rs`/`follow_up.rs` go uncaught on two of three platforms, and produces "clean everywhere except Windows" CI signals that look like flakiness but are actually a genuine toolchain-version gap.
