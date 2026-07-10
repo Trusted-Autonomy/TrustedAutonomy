@@ -1438,7 +1438,7 @@ pub fn auto_check_covered_items(plan_content: &str, diff_content: &str) -> Strin
                     println!(
                         "[apply] Auto-checked item {} (coverage match): {}",
                         item_number,
-                        &item_text.chars().take(60).collect::<String>()
+                        item_text.chars().take(60).collect::<String>()
                     );
                     result = result.replacen(&pattern, &replacement, 1);
                 }

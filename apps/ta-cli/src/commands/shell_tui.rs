@@ -1402,7 +1402,7 @@ async fn process_input_event(
                     chrono::Local::now().format("%H:%M:%S%.3f"),
                     before.len(),
                     app.input.len(),
-                    &app.input,
+                    app.input,
                 );
             }
         }
@@ -3267,7 +3267,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             chars_fmt, line_count
         );
         // Build display: any typed prefix + yellow indicator + optional preview.
-        let prefix_display = format!("{}{}", &prompt, &app.input);
+        let prefix_display = format!("{}{}", prompt, app.input);
         let mut text_lines: Vec<Line> = Vec::new();
         // First line: typed prefix + indicator in a distinct style.
         text_lines.push(Line::from(vec![
@@ -3316,7 +3316,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Normal (no pending paste): show typed input with live cursor.
-    let display = format!("{}{}", &prompt, &app.input);
+    let display = format!("{}{}", prompt, app.input);
     let paragraph = Paragraph::new(display.clone())
         .wrap(Wrap { trim: false })
         .block(block);
