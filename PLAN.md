@@ -9467,7 +9467,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.17 — Studio IA Redesign
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.12, v0.17.0.12.13, v0.17.0.12.14, v0.17.0.12.15, v0.17.0.12.16
 
 **Goal**: Collapse Studio's 15 nav tabs into the ~4 real destinations identified in `docs/design/ta-concepts-and-architecture.md` §6 (Attention, Activity, Configuration, Advisor). Sequenced last — building new UI against a still-fragmented backend recreates the sprawl.
