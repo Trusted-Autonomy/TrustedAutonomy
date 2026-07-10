@@ -9565,7 +9565,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.23 — Advisor-Driven Goal Creation: Natural-Language Intent + Clarification
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.19 (`ta-intake`), v0.17.0.12.20 (`ta-brain`)
 
 **Goal**: Two intent-handling systems exist today and don't talk to each other — `ta-workflow::intent::resolve_intent` (confidence-gated matching against known workflow *templates*, with real clarifying questions, but only reachable from `ta workflow` commands) and `ta-brain::classify`/`route` (resolves team/persona/security/priority, but requires an already-structured title/objective — it never parses raw free text itself). Neither is exposed as "hand the Advisor a sentence and get a routed goal." Unify them so a general user can do exactly that, with a real clarification question asked when confidence is low — reusing the existing `ta_ask_human`-backed headless-agent mechanism already built for draft-review conversations (`ta-session::advisor_agent::spawn_advisor_agent`) rather than building a new conversational loop from scratch.
