@@ -9533,18 +9533,18 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.21 — Data-Format Specs + Studio Boundary Enforcement
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.19, v0.17.0.12.20
 
 **Goal**: Publish the versioned data-format specs that are the real interface boundary between TA's core, Studio, and community-authored trigger-configs/plugins (per §13.1) — the mechanism that lets the system stay a monorepo without becoming tightly coupled.
 
 **Items**:
-1. [ ] Publish `schemars`-derived JSON Schema for `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, `Persona`. Version each schema explicitly.
-2. [ ] Publish a human-readable spec doc (`docs/design/ta-data-format-spec.md` or similar) referencing the generated schemas, in the same reference style as `ta-action-reference.md`.
-3. [ ] Audit Studio's existing API usage for any direct coupling to internal `ta-*` crate types rather than the versioned spec; fix any found.
-4. [ ] Add a documented rule (and a lint/CI check if feasible) flagging new Studio code that imports internal `ta-*` crate types directly instead of going through the HTTP/SSE API + spec.
-5. [ ] Tests: schema round-trip / backward-compatibility check (a schema change that breaks an existing serialized example fails CI).
-6. [ ] USAGE.md: document the spec location and the "Studio only talks to the versioned spec" rule for future contributors.
+1. [x] Publish `schemars`-derived JSON Schema for `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, `Persona`. Version each schema explicitly.
+2. [x] Publish a human-readable spec doc (`docs/design/ta-data-format-spec.md` or similar) referencing the generated schemas, in the same reference style as `ta-action-reference.md`.
+3. [x] Audit Studio's existing API usage for any direct coupling to internal `ta-*` crate types rather than the versioned spec; fix any found.
+4. [x] Add a documented rule (and a lint/CI check if feasible) flagging new Studio code that imports internal `ta-*` crate types directly instead of going through the HTTP/SSE API + spec.
+5. [x] Tests: schema round-trip / backward-compatibility check (a schema change that breaks an existing serialized example fails CI).
+6. [x] USAGE.md: document the spec location and the "Studio only talks to the versioned spec" rule for future contributors.
 
 #### Version: `0.17.0-alpha.12.21`
 

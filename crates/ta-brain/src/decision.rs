@@ -10,7 +10,7 @@ use ta_session::workflow_session::AdvisorSecurity;
 
 use crate::priority::Priority;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RoutingDecision {
     /// Which team role handles this request (§3's "Role" node).
     pub team: TeamRole,

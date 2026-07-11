@@ -21,7 +21,7 @@ use crate::artifact_kind::ArtifactKind;
 // ---- Goal ----
 
 /// The high-level goal this PR package contributes to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Goal {
     pub goal_id: String,
     pub title: String,
@@ -39,7 +39,7 @@ pub struct Goal {
 // ---- Iteration ----
 
 /// Which iteration of the goal this package represents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Iteration {
     pub iteration_id: String,
     pub sequence: u32,
@@ -47,7 +47,7 @@ pub struct Iteration {
 }
 
 /// Reference to the workspace where changes were staged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRef {
     #[serde(rename = "type")]
     pub ref_type: String,
@@ -60,7 +60,7 @@ pub struct WorkspaceRef {
 // ---- Agent Identity ----
 
 /// Identity of the agent that produced this PR package.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentIdentity {
     pub agent_id: String,
     pub agent_type: String,
@@ -73,7 +73,7 @@ pub struct AgentIdentity {
 // ---- Summary ----
 
 /// Human-readable summary of what changed and why.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Summary {
     pub what_changed: String,
     pub why: String,
@@ -91,7 +91,7 @@ pub struct Summary {
 ///
 /// Agents report which options they evaluated and why they chose one over others.
 /// Displayed under "Design Decisions" in `ta draft view`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DesignAlternative {
     /// The option that was considered (e.g., "Use a HashMap for lookup").
     pub option: String,
@@ -106,7 +106,7 @@ pub struct DesignAlternative {
 
 /// The changes section: artifacts (local FS changes) + patch_sets (external changes)
 /// + pending_actions (intercepted MCP tool calls, v0.5.1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Changes {
     pub artifacts: Vec<Artifact>,
     pub patch_sets: Vec<PatchSet>,
@@ -122,7 +122,7 @@ pub struct Changes {
 /// When an agent calls an external MCP tool (e.g., `gmail_send`, `slack_post`),
 /// TA intercepts the call, records it here, and holds it for human approval.
 /// Read-only calls (search, list, get) pass through immediately.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PendingAction {
     /// Unique identifier for this action instance.
     pub action_id: Uuid,
@@ -145,7 +145,7 @@ pub struct PendingAction {
 }
 
 /// How an intercepted MCP tool call is classified.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     /// Read-only — no side effects. Passed through without interception.
@@ -170,7 +170,7 @@ impl fmt::Display for ActionKind {
 ///
 /// Agents populate this via `.diff.explanation.yaml` sidecar files.
 /// Enables tiered review: top (one-line) → medium (paragraph) → full (with diff).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExplanationTiers {
     /// One-line summary (e.g., "Refactored auth middleware to use JWT").
     pub summary: String,
@@ -185,7 +185,7 @@ pub struct ExplanationTiers {
 }
 
 /// A local filesystem change artifact.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Artifact {
     pub resource_uri: String,
     pub change_type: ChangeType,
@@ -221,7 +221,7 @@ pub struct Artifact {
 /// Record of a human amendment to an artifact (v0.3.4).
 ///
 /// Tracks who amended the artifact, when, and how — for audit trail purposes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AmendmentRecord {
     /// Who performed the amendment (e.g., "human", reviewer name).
     pub amended_by: String,
@@ -235,7 +235,7 @@ pub struct AmendmentRecord {
 }
 
 /// The type of amendment applied to an artifact (v0.3.4).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AmendmentType {
     /// Artifact content replaced with a corrected file (--file).
@@ -253,7 +253,7 @@ pub enum AmendmentType {
 ///
 /// Tracks the reviewer's decision on each individual artifact,
 /// enabling selective approval (approve some, reject others, discuss the rest).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactDisposition {
     /// Not yet reviewed.
@@ -282,7 +282,7 @@ impl fmt::Display for ArtifactDisposition {
 ///
 /// Reported by the agent via .ta/change_summary.json, used by the
 /// reviewer to understand which changes can be independently accepted/rejected.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ChangeDependency {
     /// The resource_uri of the related artifact.
     pub target_uri: String,
@@ -291,7 +291,7 @@ pub struct ChangeDependency {
 }
 
 /// How two artifacts are related.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyKind {
     /// This artifact requires the target (can't apply without it).
@@ -301,7 +301,7 @@ pub enum DependencyKind {
 }
 
 /// The type of filesystem change.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeType {
     Add,
@@ -311,7 +311,7 @@ pub enum ChangeType {
 }
 
 /// A staged change to an external resource (Drive, Gmail, DB, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PatchSet {
     pub patch_set_id: String,
     pub target_uri: String,
@@ -322,7 +322,7 @@ pub struct PatchSet {
 }
 
 /// Action types for external patch sets.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PatchAction {
     WritePatch,
@@ -336,7 +336,7 @@ pub enum PatchAction {
 // ---- Risk ----
 
 /// Risk assessment for the PR package.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Risk {
     pub risk_score: u32,
     pub findings: Vec<RiskFinding>,
@@ -464,7 +464,7 @@ fn score_findings(findings: &[RiskFinding]) -> u32 {
 }
 
 /// A single risk finding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RiskFinding {
     pub category: RiskCategory,
     pub severity: Severity,
@@ -475,7 +475,7 @@ pub struct RiskFinding {
     pub mitigation: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskCategory {
     Pii,
@@ -487,7 +487,7 @@ pub enum RiskCategory {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Low,
@@ -497,7 +497,7 @@ pub enum Severity {
 }
 
 /// A recorded policy decision relevant to this PR.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PolicyDecisionRecord {
     pub rule_id: String,
     pub effect: String,
@@ -517,13 +517,13 @@ pub struct PolicyDecisionRecord {
 // ---- Provenance ----
 
 /// Provenance information: where inputs came from.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Provenance {
     pub inputs: Vec<ProvenanceInput>,
     pub tool_trace_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProvenanceInput {
     pub source_type: String,
     #[serde(rename = "ref")]
@@ -533,7 +533,7 @@ pub struct ProvenanceInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLevel {
     Trusted,
@@ -544,7 +544,7 @@ pub enum TrustLevel {
 // ---- Review Requests ----
 
 /// What approvals this PR needs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReviewRequests {
     pub requested_actions: Vec<RequestedAction>,
     pub reviewers: Vec<String>,
@@ -558,7 +558,7 @@ fn default_required_approvals() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RequestedAction {
     pub action: String,
     pub targets: Vec<String>,
@@ -567,7 +567,7 @@ pub struct RequestedAction {
 // ---- Signatures ----
 
 /// Cryptographic signatures for the PR package.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Signatures {
     pub package_hash: String,
     pub agent_signature: String,
@@ -582,7 +582,7 @@ pub struct Signatures {
 /// Multiple `ApprovalRecord`s accumulate in `DraftPackage::pending_approvals`
 /// until the governance quorum is reached, at which point the draft transitions
 /// to `DraftStatus::Approved`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApprovalRecord {
     /// Reviewer identity (name or email).
     pub reviewer: String,
@@ -596,7 +596,7 @@ pub struct ApprovalRecord {
 ///
 /// This is the central artifact of Trusted Autonomy. Every goal iteration
 /// produces one of these for human review.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DraftPackage {
     pub package_version: String,
     pub package_id: Uuid,
@@ -741,7 +741,7 @@ pub struct DraftPackage {
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VcsTrackingInfo {
     /// Branch name the changes were committed to.
     pub branch: String,
@@ -762,7 +762,7 @@ pub struct VcsTrackingInfo {
 }
 
 /// A warning from a pre-draft verification command failure (v0.10.8).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VerificationWarning {
     /// The command that failed.
     pub command: String,
@@ -775,7 +775,7 @@ pub struct VerificationWarning {
 /// A gitignored artifact encountered during `ta draft apply --submit` (v0.13.17.5).
 ///
 /// Classified as either known-safe (silently dropped) or unexpected (requires attention).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct IgnoredArtifact {
     /// Relative path of the artifact that was gitignored.
     pub path: String,
@@ -784,7 +784,7 @@ pub struct IgnoredArtifact {
 }
 
 /// Result of one `required_checks` entry run after agent exit (v0.13.17).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ValidationEntry {
     /// The command that was run.
     pub command: String,
@@ -797,7 +797,7 @@ pub struct ValidationEntry {
 }
 
 /// Execution plan included in the PR package.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Plan {
     pub completed_steps: Vec<String>,
     pub next_steps: Vec<String>,
@@ -806,7 +806,7 @@ pub struct Plan {
 }
 
 /// Implementation step from the work planner (v0.15.20).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkPlanDataStep {
     pub step: u32,
     pub file: String,
@@ -816,7 +816,7 @@ pub struct WorkPlanDataStep {
 }
 
 /// Decision from the work planner (v0.15.20).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkPlanDataDecision {
     pub decision: String,
     pub rationale: String,
@@ -829,7 +829,7 @@ pub struct WorkPlanDataDecision {
 }
 
 /// Structured work plan data for rendering in `ta draft view` (v0.15.20).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkPlanData {
     pub goal: String,
     pub decisions: Vec<WorkPlanDataDecision>,
@@ -846,7 +846,7 @@ impl WorkPlanData {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DecisionLogEntry {
     pub decision: String,
     pub rationale: String,
@@ -865,14 +865,14 @@ pub struct DecisionLogEntry {
 }
 
 /// A structured alternative considered during a decision (v0.3.3).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AlternativeConsidered {
     pub description: String,
     pub rejected_reason: String,
 }
 
 /// How a draft was applied — provenance for [`DraftStatus::Applied`] (v0.15.14.0).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 #[serde(tag = "via", rename_all = "snake_case")]
 pub enum ApplyProvenance {
     /// Triggered by an explicit `ta draft apply` CLI invocation.
@@ -895,7 +895,7 @@ impl std::fmt::Display for ApplyProvenance {
 }
 
 /// Review status of a draft package (internal tracking, not in JSON schema).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DraftStatus {
     #[default]

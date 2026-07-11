@@ -311,8 +311,19 @@ async fn list_drafts(State(state): State<Arc<WebState>>) -> impl IntoResponse {
 /// from the current draft's own review — e.g. a follow-up draft that didn't
 /// re-run the supervisor still lets Studio show "the initial supervisor
 /// review output from the goal's audit trail."
+///
+/// `draft` is flattened directly from `ta_changeset::draft_package::DraftPackage`
+/// rather than mapped to a separate response DTO — intentional, per the
+/// Studio-boundary rule in `docs/design/ta-data-format-spec.md`: `Draft` is
+/// itself one of the versioned spec types (v0.17.0.12.21), so returning it
+/// verbatim *is* going through the spec, not around it. `schema_version`
+/// makes that explicit so a consumer always knows which spec version this
+/// response conforms to, even as the flattened fields evolve.
 #[derive(Debug, Serialize)]
 struct DraftDetailResponse {
+    /// Version of the `Draft` spec (`schema/draft.schema.json`) this
+    /// response conforms to. See `ta_data_spec::SPECS`.
+    schema_version: u32,
     #[serde(flatten)]
     draft: DraftPackage,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -454,6 +465,7 @@ async fn get_draft(
             let (conflicts, pending_advisor_patches) =
                 find_conflicts_and_patches(&project_root, uuid);
             Json(DraftDetailResponse {
+                schema_version: ta_data_spec::version_of("draft"),
                 draft,
                 initial_supervisor_review,
                 conflicts,

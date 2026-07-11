@@ -1,0 +1,1764 @@
+{
+  "$defs": {
+    "ActionKind": {
+      "description": "How an intercepted MCP tool call is classified.",
+      "oneOf": [
+        {
+          "const": "read_only",
+          "description": "Read-only — no side effects. Passed through without interception.",
+          "type": "string"
+        },
+        {
+          "const": "state_changing",
+          "description": "Produces a side effect — captured for human review.",
+          "type": "string"
+        },
+        {
+          "const": "unclassified",
+          "description": "Cannot be automatically classified — requires human review.",
+          "type": "string"
+        }
+      ]
+    },
+    "AgentIdentity": {
+      "description": "Identity of the agent that produced this PR package.",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "agent_type": {
+          "type": "string"
+        },
+        "capability_manifest_hash": {
+          "type": "string"
+        },
+        "constitution_id": {
+          "type": "string"
+        },
+        "orchestrator_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id",
+        "agent_type",
+        "constitution_id",
+        "capability_manifest_hash"
+      ],
+      "type": "object"
+    },
+    "AlternativeConsidered": {
+      "description": "A structured alternative considered during a decision (v0.3.3).",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "rejected_reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "rejected_reason"
+      ],
+      "type": "object"
+    },
+    "AmendmentRecord": {
+      "description": "Record of a human amendment to an artifact (v0.3.4).\n\nTracks who amended the artifact, when, and how — for audit trail purposes.",
+      "properties": {
+        "amended_at": {
+          "description": "When the amendment was made.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "amended_by": {
+          "description": "Who performed the amendment (e.g., \"human\", reviewer name).",
+          "type": "string"
+        },
+        "amendment_type": {
+          "$ref": "#/$defs/AmendmentType",
+          "description": "What kind of amendment was performed."
+        },
+        "reason": {
+          "description": "Optional reason for the amendment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "amended_by",
+        "amended_at",
+        "amendment_type"
+      ],
+      "type": "object"
+    },
+    "AmendmentType": {
+      "description": "The type of amendment applied to an artifact (v0.3.4).",
+      "oneOf": [
+        {
+          "const": "file_replaced",
+          "description": "Artifact content replaced with a corrected file (--file).",
+          "type": "string"
+        },
+        {
+          "const": "patch_applied",
+          "description": "A patch was applied to the artifact (--patch).",
+          "type": "string"
+        },
+        {
+          "const": "dropped",
+          "description": "Artifact was removed from the draft (--drop).",
+          "type": "string"
+        },
+        {
+          "const": "added",
+          "description": "A new artifact was inserted via --file on a URI not yet in the draft\n(v0.17.0.12.11 — recovers files an agent described but never tracked).",
+          "type": "string"
+        }
+      ]
+    },
+    "ApplyProvenance": {
+      "description": "How a draft was applied — provenance for [`DraftStatus::Applied`] (v0.15.14.0).",
+      "oneOf": [
+        {
+          "description": "Triggered by an explicit `ta draft apply` CLI invocation.",
+          "properties": {
+            "via": {
+              "const": "manual",
+              "type": "string"
+            }
+          },
+          "required": [
+            "via"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Triggered by a background or agent task.",
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "via": {
+              "const": "background_task",
+              "type": "string"
+            }
+          },
+          "required": [
+            "via",
+            "task_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Triggered by an auto-merge hook.",
+          "properties": {
+            "via": {
+              "const": "auto_merge",
+              "type": "string"
+            }
+          },
+          "required": [
+            "via"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalRecord": {
+      "description": "Records a single reviewer's approval of a draft package (v0.14.2).\n\nMultiple `ApprovalRecord`s accumulate in `DraftPackage::pending_approvals`\nuntil the governance quorum is reached, at which point the draft transitions\nto `DraftStatus::Approved`.",
+      "properties": {
+        "approved_at": {
+          "description": "When this approval was recorded.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "reviewer": {
+          "description": "Reviewer identity (name or email).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewer",
+        "approved_at"
+      ],
+      "type": "object"
+    },
+    "Artifact": {
+      "description": "A local filesystem change artifact.",
+      "properties": {
+        "amendment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AmendmentRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Amendment record if this artifact was amended after initial creation (v0.3.4)."
+        },
+        "change_type": {
+          "$ref": "#/$defs/ChangeType"
+        },
+        "comments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommentThread"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Comment thread for this artifact (v0.3.0 — Review Sessions).\nComments from ReviewSession are merged here during draft finalization."
+        },
+        "dependencies": {
+          "description": "Dependencies: other artifacts this one requires or is required by.",
+          "items": {
+            "$ref": "#/$defs/ChangeDependency"
+          },
+          "type": "array"
+        },
+        "diff_ref": {
+          "type": "string"
+        },
+        "disposition": {
+          "$ref": "#/$defs/ArtifactDisposition",
+          "default": "pending",
+          "description": "Per-artifact review disposition (defaults to Pending)."
+        },
+        "explanation_tiers": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExplanationTiers"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Three-tier explanation (summary, explanation, tags) from sidecar YAML (v0.2.3)."
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Semantic kind of the artifact (v0.14.15). When present, the renderer\nuses kind-specific display logic (e.g. image artifacts suppress the\nbinary diff and show a human-readable frame/resolution summary)."
+        },
+        "rationale": {
+          "description": "Why this change was made (from agent's change_summary.json).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_uri": {
+          "type": "string"
+        },
+        "tests_run": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "resource_uri",
+        "change_type",
+        "diff_ref"
+      ],
+      "type": "object"
+    },
+    "ArtifactDisposition": {
+      "description": "Per-artifact review disposition.\n\nTracks the reviewer's decision on each individual artifact,\nenabling selective approval (approve some, reject others, discuss the rest).",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Not yet reviewed.",
+          "type": "string"
+        },
+        {
+          "const": "approved",
+          "description": "Approved — will be applied.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "Rejected — will not be applied.",
+          "type": "string"
+        },
+        {
+          "const": "discuss",
+          "description": "Needs discussion before deciding.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactKind": {
+      "description": "Semantic kind of an artifact produced by a connector or agent.\n\nStored on [`Artifact`] as an optional field. When absent, the artifact is\ntreated as a generic file. The `ta draft view` renderer uses this to pick\nthe appropriate display format (e.g. suppress binary diffs for images).\n\n# Extensibility\nFuture connectors can add new variants here (e.g. `Audio`, `PointCloud`).\nThe `Image` and `Video` variants are intentionally generic — they are not\ntied to Unreal Engine or any other specific connector.\n\n[`Artifact`]: crate::draft_package::Artifact",
+      "oneOf": [
+        {
+          "description": "A raster image artifact (PNG, EXR, JPEG, …).\n\nFields are optional — connectors fill in what they know. Width and\nheight are in pixels; `frame_index` is zero-based within a sequence.",
+          "properties": {
+            "format": {
+              "description": "File format string, e.g. `\"PNG\"`, `\"EXR\"`, `\"JPEG\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "frame_index": {
+              "description": "Zero-based frame index within a render sequence, if applicable.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "height": {
+              "description": "Image height in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "image",
+              "type": "string"
+            },
+            "width": {
+              "description": "Image width in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A video artifact (MP4, MOV, WebM, …) produced by render pipelines.\n\nText diff is suppressed — `ta draft view` shows a metadata summary like\n\"Video: 1920×1080, 24fps, 6.2s, MP4\" instead of binary content.",
+          "properties": {
+            "duration_secs": {
+              "description": "Duration in seconds, if known.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "format": {
+              "description": "Container/format string, e.g. `\"MP4\"`, `\"MOV\"`, `\"WebM\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fps": {
+              "description": "Frames per second, if known.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "frame_count": {
+              "description": "Total frame count, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "height": {
+              "description": "Frame height in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "video",
+              "type": "string"
+            },
+            "width": {
+              "description": "Frame width in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An opaque binary artifact (compiled output, archive, model weights, …).\n\nText diff is suppressed — `ta draft view` shows a hex summary or\n`(binary file, N bytes)` instead.",
+          "properties": {
+            "byte_size": {
+              "description": "File size in bytes, if known.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mime_type": {
+              "description": "MIME type string, e.g. `\"application/octet-stream\"`, `\"application/zip\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "binary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A raw text artifact (generated script, config file, data file, …).\n\nFull unified diff is rendered in `ta draft view`.",
+          "properties": {
+            "encoding": {
+              "description": "Character encoding, e.g. `\"utf-8\"`, `\"latin-1\"`. Defaults to UTF-8 if absent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "line_count": {
+              "description": "Number of lines in the file, if known.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A memory summary artifact produced by an analysis/learning goal run (v0.15.13.2).\n\nProduced when `ta draft build` detects an empty overlay diff but finds memory\nentries written by this goal run. The changeset holds a rendered summary of all\nentries (key, scope, value) for human review.\n\nOn approve: entries remain in the store — they were written during the run.\nOn deny: entries are removed from the store using `entry_ids`.",
+          "properties": {
+            "entry_count": {
+              "description": "Number of memory entries created during this goal run.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "entry_ids": {
+              "description": "Entry IDs (as strings) used by `ta draft deny` to remove them from the store.\n\nThese are the `entry_id` (UUID) values from each `MemoryEntry`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "memory_summary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "entry_count"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ChangeDependency": {
+      "description": "A dependency relationship between artifacts.\n\nReported by the agent via .ta/change_summary.json, used by the\nreviewer to understand which changes can be independently accepted/rejected.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DependencyKind",
+          "description": "The nature of the dependency."
+        },
+        "target_uri": {
+          "description": "The resource_uri of the related artifact.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_uri",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ChangeType": {
+      "description": "The type of filesystem change.",
+      "enum": [
+        "add",
+        "modify",
+        "delete",
+        "rename"
+      ],
+      "type": "string"
+    },
+    "Changes": {
+      "description": "The changes section: artifacts (local FS changes) + patch_sets (external changes)\n+ pending_actions (intercepted MCP tool calls, v0.5.1).",
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "type": "array"
+        },
+        "patch_sets": {
+          "items": {
+            "$ref": "#/$defs/PatchSet"
+          },
+          "type": "array"
+        },
+        "pending_actions": {
+          "description": "MCP tool calls intercepted for human review (v0.5.1).\nState-changing external actions are captured here instead of being\nexecuted immediately. Read-only calls pass through unintercepted.",
+          "items": {
+            "$ref": "#/$defs/PendingAction"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "artifacts",
+        "patch_sets"
+      ],
+      "type": "object"
+    },
+    "Comment": {
+      "description": "A single comment in a thread.",
+      "properties": {
+        "commenter": {
+          "description": "Who wrote the comment (human reviewer, agent, etc.).",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "When the comment was created.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewReasoning"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured reasoning for this review decision (v0.3.3).\nReviewer can explain *why* they approved/rejected, not just leave text."
+        },
+        "text": {
+          "description": "Comment text (markdown supported).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commenter",
+        "text",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "CommentThread": {
+      "description": "A thread of comments on an artifact.\n\nSupports multi-party discussion: reviewer, agent, other reviewers, etc.",
+      "properties": {
+        "comments": {
+          "items": {
+            "$ref": "#/$defs/Comment"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "comments"
+      ],
+      "type": "object"
+    },
+    "DecisionLogEntry": {
+      "properties": {
+        "alternatives": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "alternatives_considered": {
+          "description": "Structured alternatives with rejection reasons (v0.3.3).",
+          "items": {
+            "$ref": "#/$defs/AlternativeConsidered"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "description": "Optional agent confidence in this decision (0.0–1.0) (v0.14.7).",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "context": {
+          "description": "What external need, feature, or constraint triggered this decision (v0.14.9.2).\nShown as the header line in collapsed state.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision": {
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision",
+        "rationale"
+      ],
+      "type": "object"
+    },
+    "DependencyKind": {
+      "description": "How two artifacts are related.",
+      "oneOf": [
+        {
+          "const": "depends_on",
+          "description": "This artifact requires the target (can't apply without it).",
+          "type": "string"
+        },
+        {
+          "const": "depended_by",
+          "description": "The target requires this artifact (target breaks if this is reverted).",
+          "type": "string"
+        }
+      ]
+    },
+    "DesignAlternative": {
+      "description": "A design alternative considered during agent work (v0.9.5).\n\nAgents report which options they evaluated and why they chose one over others.\nDisplayed under \"Design Decisions\" in `ta draft view`.",
+      "properties": {
+        "chosen": {
+          "default": false,
+          "description": "Whether this was the chosen approach.",
+          "type": "boolean"
+        },
+        "option": {
+          "description": "The option that was considered (e.g., \"Use a HashMap for lookup\").",
+          "type": "string"
+        },
+        "rationale": {
+          "description": "Why this option was chosen or rejected.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "option",
+        "rationale"
+      ],
+      "type": "object"
+    },
+    "DraftStatus": {
+      "description": "Review status of a draft package (internal tracking, not in JSON schema).",
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "draft",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "pending_review",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "approved_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "approved_by": {
+              "type": "string"
+            },
+            "status": {
+              "const": "approved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "approved_by",
+            "approved_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "denied_by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "denied_by"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "applied_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "applied_via": {
+              "$ref": "#/$defs/ApplyProvenance",
+              "default": {
+                "via": "manual"
+              },
+              "description": "How the draft was applied (v0.15.14.0). Defaults to `Manual` for\nbackward-compatible deserialization of older draft files."
+            },
+            "status": {
+              "const": "applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "applied_at"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "This draft has been superseded by a follow-up goal's draft.",
+          "properties": {
+            "status": {
+              "const": "superseded",
+              "type": "string"
+            },
+            "superseded_by": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "superseded_by"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "This draft has been manually closed (abandoned, hand-merged, or obsolete).",
+          "properties": {
+            "closed_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "closed_by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "const": "closed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "closed_at",
+            "closed_by"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExplanationTiers": {
+      "description": "Three-tier explanation for an artifact (v0.2.3).\n\nAgents populate this via `.diff.explanation.yaml` sidecar files.\nEnables tiered review: top (one-line) → medium (paragraph) → full (with diff).",
+      "properties": {
+        "explanation": {
+          "description": "Paragraph explaining what changed and why, dependencies affected.",
+          "type": "string"
+        },
+        "related_artifacts": {
+          "description": "Related artifacts (URIs) that are connected to this change.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "One-line summary (e.g., \"Refactored auth middleware to use JWT\").",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags for categorization (e.g., \"security\", \"breaking-change\").",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "summary",
+        "explanation"
+      ],
+      "type": "object"
+    },
+    "Goal": {
+      "description": "The high-level goal this PR package contributes to.",
+      "properties": {
+        "constraints": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parent_goal_title": {
+          "description": "Title of the root/parent goal this is a follow-up to (v0.13.0.1).\nPreserved so draft view and apply can show the chain context even if\nthe parent goal record is no longer available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "success_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal_id",
+        "title",
+        "objective",
+        "success_criteria"
+      ],
+      "type": "object"
+    },
+    "IgnoredArtifact": {
+      "description": "A gitignored artifact encountered during `ta draft apply --submit` (v0.13.17.5).\n\nClassified as either known-safe (silently dropped) or unexpected (requires attention).",
+      "properties": {
+        "known_safe": {
+          "description": "Whether the path matched the known-safe drop list (e.g., .mcp.json).",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Relative path of the artifact that was gitignored.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "known_safe"
+      ],
+      "type": "object"
+    },
+    "Iteration": {
+      "description": "Which iteration of the goal this package represents.",
+      "properties": {
+        "iteration_id": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace_ref": {
+          "$ref": "#/$defs/WorkspaceRef"
+        }
+      },
+      "required": [
+        "iteration_id",
+        "sequence",
+        "workspace_ref"
+      ],
+      "type": "object"
+    },
+    "PatchAction": {
+      "description": "Action types for external patch sets.",
+      "enum": [
+        "write_patch",
+        "create_draft",
+        "label_change",
+        "permission_change",
+        "db_patch",
+        "schedule_post"
+      ],
+      "type": "string"
+    },
+    "PatchSet": {
+      "description": "A staged change to an external resource (Drive, Gmail, DB, etc.).",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PatchAction"
+        },
+        "commit_intent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patch_set_id": {
+          "type": "string"
+        },
+        "preview_ref": {
+          "type": "string"
+        },
+        "target_uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "patch_set_id",
+        "target_uri",
+        "action",
+        "preview_ref"
+      ],
+      "type": "object"
+    },
+    "PendingAction": {
+      "description": "An MCP tool call intercepted during agent execution, pending human review.\n\nWhen an agent calls an external MCP tool (e.g., `gmail_send`, `slack_post`),\nTA intercepts the call, records it here, and holds it for human approval.\nRead-only calls (search, list, get) pass through immediately.",
+      "properties": {
+        "action_id": {
+          "description": "Unique identifier for this action instance.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description for the reviewer.",
+          "type": "string"
+        },
+        "disposition": {
+          "$ref": "#/$defs/ArtifactDisposition",
+          "default": "pending",
+          "description": "Whether this action has been approved for replay."
+        },
+        "intercepted_at": {
+          "description": "When the tool call was intercepted.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ActionKind",
+          "description": "How this action was classified."
+        },
+        "parameters": {
+          "description": "Serialized tool parameters as provided by the agent (credentials redacted)."
+        },
+        "target_uri": {
+          "description": "Resource this action targets (URI scheme, e.g., \"mcp://gmail/send\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_name": {
+          "description": "The MCP tool name that was called (e.g., \"gmail_send\", \"slack_post\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "tool_name",
+        "parameters",
+        "kind",
+        "intercepted_at",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Plan": {
+      "description": "Execution plan included in the PR package.",
+      "properties": {
+        "completed_steps": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "decision_log": {
+          "items": {
+            "$ref": "#/$defs/DecisionLogEntry"
+          },
+          "type": "array"
+        },
+        "next_steps": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "completed_steps",
+        "next_steps"
+      ],
+      "type": "object"
+    },
+    "PolicyDecisionRecord": {
+      "description": "A recorded policy decision relevant to this PR.",
+      "properties": {
+        "effect": {
+          "type": "string"
+        },
+        "evaluation_steps": {
+          "description": "Evaluation steps the policy engine performed (v0.3.3).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "grants_checked": {
+          "description": "Grants that were checked during evaluation (v0.3.3).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "matching_grant": {
+          "description": "The grant that matched (if any) (v0.3.3).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rule_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "description": "Provenance information: where inputs came from.",
+      "properties": {
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/ProvenanceInput"
+          },
+          "type": "array"
+        },
+        "tool_trace_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inputs",
+        "tool_trace_hash"
+      ],
+      "type": "object"
+    },
+    "ProvenanceInput": {
+      "properties": {
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "type": "string"
+        },
+        "source_type": {
+          "type": "string"
+        },
+        "trust_level": {
+          "$ref": "#/$defs/TrustLevel"
+        }
+      },
+      "required": [
+        "source_type",
+        "ref",
+        "trust_level"
+      ],
+      "type": "object"
+    },
+    "RequestedAction": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "ReviewReasoning": {
+      "description": "Structured reasoning attached to a review comment (v0.3.3).\n\nEnables compliance reporting: reviewers document *why* they approved or rejected,\nwhat alternatives they considered, and what principles guided the decision.",
+      "properties": {
+        "alternatives_considered": {
+          "description": "Alternatives the reviewer considered.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "applied_principles": {
+          "description": "Principles or policies that informed the decision.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rationale": {
+          "description": "The reviewer's rationale for their decision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rationale"
+      ],
+      "type": "object"
+    },
+    "ReviewRequests": {
+      "description": "What approvals this PR needs.",
+      "properties": {
+        "notes_to_reviewer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested_actions": {
+          "items": {
+            "$ref": "#/$defs/RequestedAction"
+          },
+          "type": "array"
+        },
+        "required_approvals": {
+          "default": 1,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reviewers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "requested_actions",
+        "reviewers"
+      ],
+      "type": "object"
+    },
+    "Risk": {
+      "description": "Risk assessment for the PR package.",
+      "properties": {
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/RiskFinding"
+          },
+          "type": "array"
+        },
+        "policy_decisions": {
+          "items": {
+            "$ref": "#/$defs/PolicyDecisionRecord"
+          },
+          "type": "array"
+        },
+        "risk_score": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "risk_score",
+        "findings",
+        "policy_decisions"
+      ],
+      "type": "object"
+    },
+    "RiskCategory": {
+      "enum": [
+        "pii",
+        "secrets",
+        "exfiltration",
+        "external_comm",
+        "prompt_injection",
+        "policy_violation",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "RiskFinding": {
+      "description": "A single risk finding.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/RiskCategory"
+        },
+        "description": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mitigation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "category",
+        "severity",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "Signatures": {
+      "description": "Cryptographic signatures for the PR package.",
+      "properties": {
+        "agent_signature": {
+          "type": "string"
+        },
+        "gateway_attestation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "package_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_hash",
+        "agent_signature"
+      ],
+      "type": "object"
+    },
+    "Summary": {
+      "description": "Human-readable summary of what changed and why.",
+      "properties": {
+        "alternatives_considered": {
+          "description": "Design alternatives considered during this work (v0.9.5).\nPopulated by agents via the `alternatives` parameter on `ta_pr_build`.",
+          "items": {
+            "$ref": "#/$defs/DesignAlternative"
+          },
+          "type": "array"
+        },
+        "impact": {
+          "type": "string"
+        },
+        "open_questions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rollback_plan": {
+          "type": "string"
+        },
+        "what_changed": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "what_changed",
+        "why",
+        "impact",
+        "rollback_plan"
+      ],
+      "type": "object"
+    },
+    "SupervisorReview": {
+      "description": "The result of an AI supervisor reviewing staged changes.\nEmbedded in `DraftPackage.supervisor_review`.",
+      "properties": {
+        "agent": {
+          "description": "Which supervisor produced this review (\"builtin\", \"claude-code\", \"codex\", etc.).",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.5,
+          "description": "Confidence (0.0-1.0) the supervisor had in this verdict, computed from\nthe verdict severity, scope check, and finding count — consumed by the\nshared Decision gate (`ta-decision::decide`) alongside `risk_score`.",
+          "format": "double",
+          "type": "number"
+        },
+        "duration_secs": {
+          "description": "How long the supervisor took in seconds.",
+          "format": "float",
+          "type": "number"
+        },
+        "findings": {
+          "description": "Specific findings from the review (concerns, observations).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scope_ok": {
+          "description": "Whether changes stayed within the goal's declared scope.",
+          "type": "boolean"
+        },
+        "summary": {
+          "description": "One-sentence summary of the review.",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/SupervisorVerdict",
+          "description": "Overall verdict: pass, warn, or block."
+        }
+      },
+      "required": [
+        "verdict",
+        "scope_ok",
+        "findings",
+        "summary",
+        "agent",
+        "duration_secs"
+      ],
+      "type": "object"
+    },
+    "SupervisorVerdict": {
+      "description": "Verdict from the supervisor agent review.",
+      "oneOf": [
+        {
+          "const": "pass",
+          "description": "Changes are aligned with the goal and constitution.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Minor concerns but not blocking — shown in draft view with yellow.",
+          "type": "string"
+        },
+        {
+          "const": "block",
+          "description": "Significant alignment or constitution violation — can block approval.",
+          "type": "string"
+        }
+      ]
+    },
+    "TrustLevel": {
+      "enum": [
+        "trusted",
+        "untrusted",
+        "quarantined"
+      ],
+      "type": "string"
+    },
+    "ValidationEntry": {
+      "description": "Result of one `required_checks` entry run after agent exit (v0.13.17).",
+      "properties": {
+        "command": {
+          "description": "The command that was run.",
+          "type": "string"
+        },
+        "duration_secs": {
+          "description": "How long the command took.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_code": {
+          "description": "Exit code (0 = success).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "stdout_tail": {
+          "description": "Last 20 lines of combined stdout+stderr output.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "exit_code",
+        "duration_secs",
+        "stdout_tail"
+      ],
+      "type": "object"
+    },
+    "VcsTrackingInfo": {
+      "description": "VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).",
+      "properties": {
+        "branch": {
+          "description": "Branch name the changes were committed to.",
+          "type": "string"
+        },
+        "commit_sha": {
+          "description": "Commit SHA of the applied changes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_checked": {
+          "description": "When VCS status was last checked/updated.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "review_id": {
+          "description": "PR/review identifier (e.g., PR number).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_state": {
+          "description": "PR/review state: \"open\", \"merged\", \"closed\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_url": {
+          "description": "PR/review URL (e.g., GitHub PR URL).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "branch",
+        "last_checked"
+      ],
+      "type": "object"
+    },
+    "VerificationWarning": {
+      "description": "A warning from a pre-draft verification command failure (v0.10.8).",
+      "properties": {
+        "command": {
+          "description": "The command that failed.",
+          "type": "string"
+        },
+        "exit_code": {
+          "description": "The exit code (if available).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "Captured stderr/stdout output (truncated to 2000 chars).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "output"
+      ],
+      "type": "object"
+    },
+    "WorkspaceRef": {
+      "description": "Reference to the workspace where changes were staged.",
+      "properties": {
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ref"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/draft.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The Draft Package — a complete, reviewable milestone deliverable.\n\nThis is the central artifact of Trusted Autonomy. Every goal iteration\nproduces one of these for human review.",
+  "properties": {
+    "agent_decision_log": {
+      "description": "Agent-authored decision log (v0.14.7).\n\nPopulated from `.ta-decisions.json` written by the agent during its run.\nRecords non-obvious implementation choices with alternatives and rationale.\nDistinct from `plan.decision_log` which is extracted from `change_summary.json`.\nShown as the \"Agent Decision Log\" section in `ta draft view`.",
+      "items": {
+        "$ref": "#/$defs/DecisionLogEntry"
+      },
+      "type": "array"
+    },
+    "agent_identity": {
+      "$ref": "#/$defs/AgentIdentity"
+    },
+    "baseline_artifacts": {
+      "description": "Artifact URIs inherited from the parent draft (v0.14.3.5).\n\nPopulated when building a follow-up draft. Contains all `resource_uri` values\nfrom the parent draft's artifact list at build time. During `ta draft apply`,\nfiles in this list that are unchanged in staging (staging hash == source hash)\nare skipped — they were already settled by the parent apply and staging just\nhas an older copy.\n\nThis prevents \"follow-up staging drift\": applying a follow-up draft from\nstaging that predates the parent commit would otherwise revert files\n(PLAN.md, USAGE.md, shared source) that the parent apply had already updated.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "changes": {
+      "$ref": "#/$defs/Changes"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "display_id": {
+      "description": "Human-friendly display ID derived from the goal ID (v0.10.11).\nFormat: `<goal-id-prefix>-NN` (e.g., `511e0465-01`).\nFalls back to `package_id` short prefix for legacy drafts.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "draft_seq": {
+      "default": 0,
+      "description": "Sequence number for this draft within its goal (v0.14.7.3).\n\nFirst draft for a goal is 1, second is 2, etc. Combined with `goal_shortref`\nto produce the `<shortref>/<seq>` display identifier (e.g., `2159d87e/1`).\nDefaults to 0 for legacy drafts without this field.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "goal": {
+      "$ref": "#/$defs/Goal"
+    },
+    "goal_shortref": {
+      "description": "Goal shortref inherited from the parent GoalRun (v0.14.7.3).\n\nFirst 8 lowercase hex characters of `goal.goal_id`. Populated at `ta draft build`\ntime. Used to display drafts as `<goal_shortref>/<draft_seq>` across all CLI\nsurfaces (list, view, PR title, audit log). Allows `grep 2159d87e audit.jsonl`\nto find all entries for a goal.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ignored_artifacts": {
+      "description": "Gitignored artifacts encountered during apply --submit (v0.13.17.5).\nPopulated by the VCS adapter when `git add` would fail on ignored paths.\nKnown-safe artifacts (.mcp.json, *.local.toml, .ta/ runtime files) are\nrecorded here but silently dropped from the commit.\nUnexpected-ignored artifacts are highlighted in `ta draft view`.",
+      "items": {
+        "$ref": "#/$defs/IgnoredArtifact"
+      },
+      "type": "array"
+    },
+    "iteration": {
+      "$ref": "#/$defs/Iteration"
+    },
+    "package_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "package_version": {
+      "type": "string"
+    },
+    "parent_draft_id": {
+      "description": "Parent draft ID for follow-up goals (v0.12.2.1).\nWhen set, this draft is a follow-up to the parent draft. Used for chain\ndisplay (`ta draft view` combined impact) and chain apply (`ta draft apply --chain`).",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pending_approvals": {
+      "description": "Accumulated reviewer approvals for multi-party governance (v0.14.2).\nEmpty for single-approver workflows (legacy / require_approvals = 1).\nGrows as each reviewer calls `ta draft approve --as <identity>`.\nWhen `pending_approvals.len() >= require_approvals` the draft transitions\nto `DraftStatus::Approved`.",
+      "items": {
+        "$ref": "#/$defs/ApprovalRecord"
+      },
+      "type": "array"
+    },
+    "plan": {
+      "$ref": "#/$defs/Plan"
+    },
+    "plan_md_base": {
+      "description": "PLAN.md content at staging-creation time (v0.15.24.5).\n\nCaptured from `<staging>/.ta/plan_base.md` at `ta draft build` time.\nUsed during `ta draft apply` to perform a 3-way merge: agent additions\n(base→staging diff) are applied on top of source (which may have accumulated\nits own changes since the goal started). Preserves both the agent's new\nphase sections AND source's item history that the agent never saw.\n\n`None` for legacy drafts built before v0.15.24.5 — apply falls back to\nkeeping source unchanged and logging a warning.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "plan_phase": {
+      "description": "Plan phase ID linked to this draft (v0.15.15.2).\n\nPopulated from `GoalRun.plan_phase` at `ta draft build` time.\nShown prominently in `ta draft view` (below the draft title) and as\na column in `ta draft list`. Empty for goals not linked to a plan phase.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "review_requests": {
+      "$ref": "#/$defs/ReviewRequests"
+    },
+    "risk": {
+      "$ref": "#/$defs/Risk"
+    },
+    "signatures": {
+      "$ref": "#/$defs/Signatures"
+    },
+    "status": {
+      "$ref": "#/$defs/DraftStatus",
+      "default": {
+        "status": "draft"
+      },
+      "description": "Tracks the review status (not in the JSON schema — internal state)."
+    },
+    "summary": {
+      "$ref": "#/$defs/Summary"
+    },
+    "supervisor_review": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SupervisorReview"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "AI supervisor review embedded after agent exit (v0.13.17.4).\nPresent when supervisor is enabled; `None` when disabled or skipped."
+    },
+    "tag": {
+      "description": "Human-friendly goal tag inherited from the parent GoalRun (v0.11.2.3).\nThe primary display identifier in all draft listing contexts.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "validation_log": {
+      "description": "Hard evidence that required checks passed/failed (v0.13.17).\nEach entry records the outcome of one required_check command.\nNon-zero exit_code blocks `ta draft approve` unless --override is passed.",
+      "items": {
+        "$ref": "#/$defs/ValidationEntry"
+      },
+      "type": "array"
+    },
+    "vcs_status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VcsTrackingInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "VCS tracking information populated during commit/push/open_review (v0.11.2.3).\nTracks the PR lifecycle after apply."
+    },
+    "verification_warnings": {
+      "description": "Verification warnings from pre-draft verification gate (v0.10.8).\nPopulated when `[verify] on_failure = \"warn\"` and a command fails.",
+      "items": {
+        "$ref": "#/$defs/VerificationWarning"
+      },
+      "type": "array"
+    },
+    "work_plan": {
+      "description": "Planner work plan (v0.15.20).\n\nPopulated from `.ta/work-plan.json` when a `plan_work` stage preceded the\nimplementor. Shown as the \"Implementation Plan\" section in `ta draft view`\nbefore the file diff, giving reviewers reasoning context before code."
+    }
+  },
+  "required": [
+    "package_version",
+    "package_id",
+    "created_at",
+    "goal",
+    "iteration",
+    "agent_identity",
+    "summary",
+    "plan",
+    "changes",
+    "risk",
+    "provenance",
+    "review_requests",
+    "signatures"
+  ],
+  "title": "DraftPackage",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

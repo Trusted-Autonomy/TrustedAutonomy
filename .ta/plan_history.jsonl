@@ -464,6 +464,7 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.20","source":"daemon_claim","timestamp":"2026-07-09T06:24:31.131370+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.17.0.12.20","timestamp":"2026-07-09T06:53:33.410964+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.21","source":"daemon_claim","timestamp":"2026-07-09T08:40:38.618346+00:00"}
+{"new_status":"done","old_status":"in_progress","phase_id":"v0.17.0.12.21","timestamp":"2026-07-09T09:58:51.661242+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.17","source":"daemon_claim","timestamp":"2026-07-10T17:50:23.972498+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.22","source":"daemon_claim","timestamp":"2026-07-10T17:50:50.063413+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.23","source":"daemon_claim","timestamp":"2026-07-10T17:51:06.999855+00:00"}

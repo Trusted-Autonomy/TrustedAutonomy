@@ -105,7 +105,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
 # JSON Schema generation — used by rmcp for MCP tool parameter schemas.
-schemars = "1"
+schemars = { version = "1", features = ["uuid1"] }
 
 # YAML configuration parsing — used for agent launch configs.
 serde_yaml = "0.9"

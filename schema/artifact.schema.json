@@ -1,0 +1,528 @@
+{
+  "$defs": {
+    "AmendmentRecord": {
+      "description": "Record of a human amendment to an artifact (v0.3.4).\n\nTracks who amended the artifact, when, and how — for audit trail purposes.",
+      "properties": {
+        "amended_at": {
+          "description": "When the amendment was made.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "amended_by": {
+          "description": "Who performed the amendment (e.g., \"human\", reviewer name).",
+          "type": "string"
+        },
+        "amendment_type": {
+          "$ref": "#/$defs/AmendmentType",
+          "description": "What kind of amendment was performed."
+        },
+        "reason": {
+          "description": "Optional reason for the amendment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "amended_by",
+        "amended_at",
+        "amendment_type"
+      ],
+      "type": "object"
+    },
+    "AmendmentType": {
+      "description": "The type of amendment applied to an artifact (v0.3.4).",
+      "oneOf": [
+        {
+          "const": "file_replaced",
+          "description": "Artifact content replaced with a corrected file (--file).",
+          "type": "string"
+        },
+        {
+          "const": "patch_applied",
+          "description": "A patch was applied to the artifact (--patch).",
+          "type": "string"
+        },
+        {
+          "const": "dropped",
+          "description": "Artifact was removed from the draft (--drop).",
+          "type": "string"
+        },
+        {
+          "const": "added",
+          "description": "A new artifact was inserted via --file on a URI not yet in the draft\n(v0.17.0.12.11 — recovers files an agent described but never tracked).",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactDisposition": {
+      "description": "Per-artifact review disposition.\n\nTracks the reviewer's decision on each individual artifact,\nenabling selective approval (approve some, reject others, discuss the rest).",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Not yet reviewed.",
+          "type": "string"
+        },
+        {
+          "const": "approved",
+          "description": "Approved — will be applied.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "Rejected — will not be applied.",
+          "type": "string"
+        },
+        {
+          "const": "discuss",
+          "description": "Needs discussion before deciding.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactKind": {
+      "description": "Semantic kind of an artifact produced by a connector or agent.\n\nStored on [`Artifact`] as an optional field. When absent, the artifact is\ntreated as a generic file. The `ta draft view` renderer uses this to pick\nthe appropriate display format (e.g. suppress binary diffs for images).\n\n# Extensibility\nFuture connectors can add new variants here (e.g. `Audio`, `PointCloud`).\nThe `Image` and `Video` variants are intentionally generic — they are not\ntied to Unreal Engine or any other specific connector.\n\n[`Artifact`]: crate::draft_package::Artifact",
+      "oneOf": [
+        {
+          "description": "A raster image artifact (PNG, EXR, JPEG, …).\n\nFields are optional — connectors fill in what they know. Width and\nheight are in pixels; `frame_index` is zero-based within a sequence.",
+          "properties": {
+            "format": {
+              "description": "File format string, e.g. `\"PNG\"`, `\"EXR\"`, `\"JPEG\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "frame_index": {
+              "description": "Zero-based frame index within a render sequence, if applicable.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "height": {
+              "description": "Image height in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "image",
+              "type": "string"
+            },
+            "width": {
+              "description": "Image width in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A video artifact (MP4, MOV, WebM, …) produced by render pipelines.\n\nText diff is suppressed — `ta draft view` shows a metadata summary like\n\"Video: 1920×1080, 24fps, 6.2s, MP4\" instead of binary content.",
+          "properties": {
+            "duration_secs": {
+              "description": "Duration in seconds, if known.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "format": {
+              "description": "Container/format string, e.g. `\"MP4\"`, `\"MOV\"`, `\"WebM\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fps": {
+              "description": "Frames per second, if known.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "frame_count": {
+              "description": "Total frame count, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "height": {
+              "description": "Frame height in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "video",
+              "type": "string"
+            },
+            "width": {
+              "description": "Frame width in pixels, if known.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An opaque binary artifact (compiled output, archive, model weights, …).\n\nText diff is suppressed — `ta draft view` shows a hex summary or\n`(binary file, N bytes)` instead.",
+          "properties": {
+            "byte_size": {
+              "description": "File size in bytes, if known.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mime_type": {
+              "description": "MIME type string, e.g. `\"application/octet-stream\"`, `\"application/zip\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "binary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A raw text artifact (generated script, config file, data file, …).\n\nFull unified diff is rendered in `ta draft view`.",
+          "properties": {
+            "encoding": {
+              "description": "Character encoding, e.g. `\"utf-8\"`, `\"latin-1\"`. Defaults to UTF-8 if absent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "line_count": {
+              "description": "Number of lines in the file, if known.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A memory summary artifact produced by an analysis/learning goal run (v0.15.13.2).\n\nProduced when `ta draft build` detects an empty overlay diff but finds memory\nentries written by this goal run. The changeset holds a rendered summary of all\nentries (key, scope, value) for human review.\n\nOn approve: entries remain in the store — they were written during the run.\nOn deny: entries are removed from the store using `entry_ids`.",
+          "properties": {
+            "entry_count": {
+              "description": "Number of memory entries created during this goal run.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "entry_ids": {
+              "description": "Entry IDs (as strings) used by `ta draft deny` to remove them from the store.\n\nThese are the `entry_id` (UUID) values from each `MemoryEntry`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "memory_summary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "entry_count"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ChangeDependency": {
+      "description": "A dependency relationship between artifacts.\n\nReported by the agent via .ta/change_summary.json, used by the\nreviewer to understand which changes can be independently accepted/rejected.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DependencyKind",
+          "description": "The nature of the dependency."
+        },
+        "target_uri": {
+          "description": "The resource_uri of the related artifact.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_uri",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ChangeType": {
+      "description": "The type of filesystem change.",
+      "enum": [
+        "add",
+        "modify",
+        "delete",
+        "rename"
+      ],
+      "type": "string"
+    },
+    "Comment": {
+      "description": "A single comment in a thread.",
+      "properties": {
+        "commenter": {
+          "description": "Who wrote the comment (human reviewer, agent, etc.).",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "When the comment was created.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewReasoning"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured reasoning for this review decision (v0.3.3).\nReviewer can explain *why* they approved/rejected, not just leave text."
+        },
+        "text": {
+          "description": "Comment text (markdown supported).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commenter",
+        "text",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "CommentThread": {
+      "description": "A thread of comments on an artifact.\n\nSupports multi-party discussion: reviewer, agent, other reviewers, etc.",
+      "properties": {
+        "comments": {
+          "items": {
+            "$ref": "#/$defs/Comment"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "comments"
+      ],
+      "type": "object"
+    },
+    "DependencyKind": {
+      "description": "How two artifacts are related.",
+      "oneOf": [
+        {
+          "const": "depends_on",
+          "description": "This artifact requires the target (can't apply without it).",
+          "type": "string"
+        },
+        {
+          "const": "depended_by",
+          "description": "The target requires this artifact (target breaks if this is reverted).",
+          "type": "string"
+        }
+      ]
+    },
+    "ExplanationTiers": {
+      "description": "Three-tier explanation for an artifact (v0.2.3).\n\nAgents populate this via `.diff.explanation.yaml` sidecar files.\nEnables tiered review: top (one-line) → medium (paragraph) → full (with diff).",
+      "properties": {
+        "explanation": {
+          "description": "Paragraph explaining what changed and why, dependencies affected.",
+          "type": "string"
+        },
+        "related_artifacts": {
+          "description": "Related artifacts (URIs) that are connected to this change.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "One-line summary (e.g., \"Refactored auth middleware to use JWT\").",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags for categorization (e.g., \"security\", \"breaking-change\").",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "summary",
+        "explanation"
+      ],
+      "type": "object"
+    },
+    "ReviewReasoning": {
+      "description": "Structured reasoning attached to a review comment (v0.3.3).\n\nEnables compliance reporting: reviewers document *why* they approved or rejected,\nwhat alternatives they considered, and what principles guided the decision.",
+      "properties": {
+        "alternatives_considered": {
+          "description": "Alternatives the reviewer considered.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "applied_principles": {
+          "description": "Principles or policies that informed the decision.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rationale": {
+          "description": "The reviewer's rationale for their decision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rationale"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/artifact.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A local filesystem change artifact.",
+  "properties": {
+    "amendment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AmendmentRecord"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Amendment record if this artifact was amended after initial creation (v0.3.4)."
+    },
+    "change_type": {
+      "$ref": "#/$defs/ChangeType"
+    },
+    "comments": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommentThread"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Comment thread for this artifact (v0.3.0 — Review Sessions).\nComments from ReviewSession are merged here during draft finalization."
+    },
+    "dependencies": {
+      "description": "Dependencies: other artifacts this one requires or is required by.",
+      "items": {
+        "$ref": "#/$defs/ChangeDependency"
+      },
+      "type": "array"
+    },
+    "diff_ref": {
+      "type": "string"
+    },
+    "disposition": {
+      "$ref": "#/$defs/ArtifactDisposition",
+      "default": "pending",
+      "description": "Per-artifact review disposition (defaults to Pending)."
+    },
+    "explanation_tiers": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExplanationTiers"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Three-tier explanation (summary, explanation, tags) from sidecar YAML (v0.2.3)."
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Semantic kind of the artifact (v0.14.15). When present, the renderer\nuses kind-specific display logic (e.g. image artifacts suppress the\nbinary diff and show a human-readable frame/resolution summary)."
+    },
+    "rationale": {
+      "description": "Why this change was made (from agent's change_summary.json).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "resource_uri": {
+      "type": "string"
+    },
+    "tests_run": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "resource_uri",
+    "change_type",
+    "diff_ref"
+  ],
+  "title": "Artifact",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

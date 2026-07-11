@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// tied to Unreal Engine or any other specific connector.
 ///
 /// [`Artifact`]: crate::draft_package::Artifact
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArtifactKind {
     /// A raster image artifact (PNG, EXR, JPEG, …).

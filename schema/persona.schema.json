@@ -1,0 +1,105 @@
+{
+  "$defs": {
+    "PersonaCapabilities": {
+      "description": "Capabilities section of a persona config.",
+      "properties": {
+        "allowed_tools": {
+          "default": [],
+          "description": "Tool names the agent may use. Empty = no restriction.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "forbidden_tools": {
+          "default": [],
+          "description": "Tool names the agent may NOT use.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "PersonaInner": {
+      "description": "Inner [persona] table in the TOML file.",
+      "properties": {
+        "agent": {
+          "description": "Persona-level agent binding (v0.17.0.12.13 — `Switch` action tiers).\n\nWhen set, this is the second-highest-priority tier in the CLI's agent\nresolution order (only the `--agent` CLI flag outranks it): any goal\nrun with `--persona <name>` picks up this agent unless the flag\noverrides it. A literal `\"auto\"` value hands the choice to the\nsupervisor's agent recommendation instead of a fixed agent ID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "constitution": {
+          "default": null,
+          "description": "Path to an optional constitution file to extend.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "PersonaStyle": {
+      "description": "Style/output preferences for a persona.",
+      "properties": {
+        "max_response_length": {
+          "default": "",
+          "description": "Suggested max response length (e.g., \"2000 words\").",
+          "type": "string"
+        },
+        "output_format": {
+          "default": "",
+          "description": "Preferred output format (e.g., \"markdown\", \"json\", \"plain\").",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/persona.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Full persona config loaded from `.ta/personas/<name>.toml`.",
+  "properties": {
+    "capabilities": {
+      "$ref": "#/$defs/PersonaCapabilities",
+      "default": {
+        "allowed_tools": [],
+        "forbidden_tools": []
+      }
+    },
+    "persona": {
+      "$ref": "#/$defs/PersonaInner"
+    },
+    "style": {
+      "$ref": "#/$defs/PersonaStyle",
+      "default": {
+        "max_response_length": "",
+        "output_format": ""
+      }
+    }
+  },
+  "required": [
+    "persona"
+  ],
+  "title": "PersonaConfig",
+  "type": "object",
+  "x-ta-schema-version": 1
+}
