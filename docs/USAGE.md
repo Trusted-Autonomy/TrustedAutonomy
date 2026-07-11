@@ -33,12 +33,16 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Set up your project](#set-up-your-project)
    - [Start a development session](#start-a-development-session)
    - [Your first goal](#your-first-goal)
-3. [Core Concepts](#core-concepts)
+3. [CLI Verb Reference](#cli-verb-reference)
+   - [The 10 verbs](#the-10-verbs)
+   - [Default vs. full help](#default-vs-full-help)
+   - [Old → new lookup table](#old--new-lookup-table)
+4. [Core Concepts](#core-concepts)
    - [The Staging Model](#the-staging-model)
    - [Goals](#goals)
    - [Drafts](#drafts)
    - [Agents](#agents)
-4. [Common Workflows](#common-workflows)
+5. [Common Workflows](#common-workflows)
    - [Single Task](#single-task)
    - [Follow-Up Iterations](#follow-up-iterations)
    - [Macro Goals (multi-draft sessions)](#macro-goals-multi-draft-sessions)
@@ -48,7 +52,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Review Sessions](#review-sessions)
    - [Correcting a Draft](#correcting-a-draft)
    - [Draft Lifecycle Hygiene](#draft-lifecycle-hygiene)
-5. [Configuration](#configuration)
+6. [Configuration](#configuration)
    - [Workflow Config](#workflow-config-taworkflowtoml)
    - [Agent Configuration](#agent-configuration)
    - [Alignment Profiles](#alignment-profiles)
@@ -56,7 +60,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Configurable Summary Exemption](#configurable-summary-exemption)
    - [Plan Schema](#plan-schema-taplan-schemayaml)
    - [Channel Setup](#channel-setup)
-6. [Advanced Features](#advanced-features)
+7. [Advanced Features](#advanced-features)
    - [Selective Approval](#selective-approval)
    - [Behavioral Drift Detection](#behavioral-drift-detection)
    - [Conflict Detection](#conflict-detection)
@@ -94,9 +98,9 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Workflow Engine](#workflow-engine)
    - [Choosing Your Orchestration Stack](#choosing-your-orchestration-stack)
    - [Community Knowledge Hub](#community-knowledge-hub)
-7. [Roadmap](#roadmap)
-8. [Troubleshooting](#troubleshooting)
-9. [Getting Help](#getting-help)
+8. [Roadmap](#roadmap)
+9. [Troubleshooting](#troubleshooting)
+10. [Getting Help](#getting-help)
 
 ---
 
@@ -949,6 +953,118 @@ ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
 **Auto-tail**: When streaming agent output, the shell follows new lines automatically (`tail -f` style). If you scroll up to read earlier output, auto-tail is paused. Scroll back to the bottom (mouse wheel, `PageDown`, or `Cmd+Down`) to resume — the viewport will immediately begin following new output again. `Ctrl+L` clears the output and also resumes auto-tail.
 
 **Stream reconnect**: If the connection to the daemon drops mid-stream (e.g. daemon restart, network interruption), the shell automatically reconnects — up to 5 retries with exponential backoff (1s, 2s, 4s, 8s, 16s). A non-blocking notice is shown in the output pane during reconnect. The daemon tracks a monotonic sequence number per goal stream (`id:` field in SSE), so reconnects resume from the last received event with no duplicate or lost lines. If all retries fail, an actionable message is shown and the tail session ends cleanly.
+
+---
+
+## CLI Verb Reference
+
+TA's CLI has two surfaces that always execute identical code — the new form
+never re-implements a legacy command, it forwards to the exact same
+`Commands` variant (`apps/ta-cli/src/commands/verb.rs`):
+
+- **The 10-verb surface** (primary, recommended): `ta <verb> <noun> [id] [flags]`
+- **The legacy noun-first surface** (still works, unchanged): `ta <noun> <action> [id] [flags]`
+
+### The 10 verbs
+
+| Verb | Does | Replaces |
+|---|---|---|
+| `create` | Provision a new resource | `new`/`init`/`add`/`install` |
+| `list` | Show all resources of a kind | 15+ independent `list` implementations |
+| `show` | Single-item detail | `view`/`status`/`inspect` |
+| `update` | Modify a resource | `set`/`assign`/`reload` |
+| `remove` | Delete a resource | `delete`/`remove`/`revoke`/`uninstall` |
+| `approve` / `deny` | Decision-gate outcomes | same shape as `draft approve`/`deny`, generalized |
+| `apply` | Fire the Commit stage | TA's defining action — materializes an approved draft |
+| `check` | Correctness/validation | `validate`/`verify`/`audit` |
+| `sync` | Reconcile with remote/registry | `gc`/`prune`/`migrate` |
+
+`run` (launch an agent goal) and `status` (the no-argument dashboard) are
+already verb-shaped and unchanged.
+
+### Default vs. full help
+
+`ta --help` shows a curated ~15-command everyday surface: the 10 verbs above,
+plus `run`, `status`, `shell`, `onboard`, and `doctor`. Every legacy
+noun-first command (`ta goal ...`, `ta plugin ...`, `ta webhook ...`, etc.)
+and advanced/one-time command (`ta gc`, `ta upgrade`, `ta serve`, ...) keeps
+working exactly as before — it's just not listed in the default `--help`
+output, so a new user isn't confronted with the full ~60-command surface on
+day one.
+
+```bash
+ta --help              # curated: the 10 verbs + run/status/shell/onboard/doctor
+ta --help --all        # full surface: every legacy/advanced command, unhidden
+ta plugin --help       # drill into a legacy noun directly — always works,
+                        # hidden or not
+ta create --help       # drill into a verb to see its full noun list + examples
+```
+
+Automation (workflow definitions, the Advisor's tool-calling, `ta-brain`
+routing) always sees and can invoke the full command surface — `--help`
+curation only affects what a human reading `ta --help` sees first per
+`docs/design/ta-cli-verb-reference.md` §4.
+
+### Old → new lookup table
+
+Every noun-area below has a working legacy form (left) and, where mapped, an
+equivalent verb+noun form (right) that executes identical code. A noun with
+no verb+noun form yet in a given column means that legacy action isn't
+mapped — it keeps working via the legacy form only. Nouns marked with (*)
+were completed in v0.17.0.12.22; the rest shipped in v0.17.0.12.16.
+
+| Noun area | Legacy top-level | Verb+noun equivalents |
+|---|---|---|
+| Goal | `ta goal ...` | `list goal`, `show goal <id>`, `remove goal <id>`, `sync goal` |
+| Draft | `ta draft ...` | `list draft`, `show draft <id>`, `remove draft <id>`, `approve draft <id>`, `deny draft <id>`, `apply draft <id>`, `sync draft` |
+| Plan phase | `ta plan ...` | `list plan-phase`, `show plan-phase <id>`, `create plan-phase <id>`, `check plan-phase <id>`, `sync plan-phase` |
+| Team | `ta team ...` | `list team`, `update team <role> <agent>` |
+| Persona | `ta persona ...` | `list persona`, `create persona <name>`, `show persona <name>`, `update persona <name>` |
+| Workflow | `ta workflow ...` | `list workflow`, `show workflow <name>`, `create workflow <name>`, `update workflow <name>`, `remove workflow <name>`, `check workflow <name>`, `sync workflow` |
+| Plugin | `ta plugin ...` | `create plugin <name>`, `list plugin`, `show plugin <name>`, `remove plugin <name>`, `check plugin <name>`, `sync plugin` |
+| Template | `ta template ...` | `create template <name>`, `list template`, `remove template <name>` |
+| Session | `ta session ...` | `list session`, `show session <id>`, `remove session <id>` |
+| Credential | `ta credentials ...` | `create credential <name>`, `list credential`, `remove credential <name>` |
+| Event | `ta events ...` | `show event`, `sync event` |
+| Token | `ta token ...` | `create token`, `list token`, `sync token` |
+| Office | `ta office ...` | `create office`, `show office`, `remove office`, `sync office` |
+| Daemon | `ta daemon ...` | `create daemon`, `show daemon`, `remove daemon`, `check daemon`, `sync daemon` |
+| Connector | `ta connector ...` | `create connector <name>`, `list connector`, `show connector <name>`, `remove connector <name>`, `sync connector <name>` |
+| Community resource | `ta community ...` | `list community-resource`, `show community-resource <id>`, `sync community-resource` |
+| Context | `ta context ...` | `create context <key>`, `list context`, `show context <key>`, `remove context <key>`, `check context` |
+| Agent | `ta agent ...` | `create agent <name>`, `list agent`, `show agent <name>`, `check agent <name>`, `remove agent <name>`, `sync agent <name>` |
+| Runbook (*) | `ta runbook ...` | `list runbook`, `show runbook <name>`, `apply runbook <name>` |
+| Operations (*) | `ta operations ...` | `list operations` |
+| Audit (*) | `ta audit ...` | `list audit`, `show audit <goal-id>`, `check audit` |
+| Setup (*) | `ta setup ...` | `create setup`, `show setup`, `update setup <topic>`, `sync setup` |
+| Project (*) | `ta init ...` | `create project` |
+| Scaffold (*) | `ta new ...` | `create scaffold` |
+| Advisor (*) | `ta advisor ...` | `apply advisor "<message>"` |
+| Style (*) | `ta style ...` | `create style`, `show style`, `update style`, `remove style`, `check style`, `sync style <source>` |
+| Constitution (*) | `ta constitution ...` | `create constitution`, `show constitution`, `update constitution`, `check constitution` |
+| Memory (*) | `ta memory ...` | `create memory <key> <value>`, `list memory`, `show memory`, `check memory`, `sync memory` |
+| Adapter (*) | `ta adapter ...` | `create adapter <name>`, `list adapter`, `check adapter <type>`, `update adapter <plugin>` |
+| Release (*) | `ta release ...` | `apply release <version>`, `show release`, `create release`, `update release <key> <value>`, `check release <version>`, `sync release <tag>` |
+| Trigger / Intake (*) | `ta intake ...` | `list trigger`, `apply trigger <type>`, `show trigger` |
+| Stats (*) | `ta stats ...` | `list stats`, `show stats`, `sync stats` |
+| Meridian (*) | `ta meridian ...` | `create meridian`, `list meridian`, `check meridian` |
+| Tools (*) | `ta tools ...` | `list tools`, `create tools <name>` |
+| Manifest (*) | `ta manifest ...` | `create manifest`, `check manifest`, `show manifest [link]` |
+| Link (*) | `ta link ...` | `create link <target>`, `list link`, `check link`, `sync link [name]`, `remove link <name>` |
+| Policy (*) | `ta policy ...` | `check policy <draft-id>`, `show policy` |
+| Config (*) | `ta config ...` | `show config` |
+| Analysis (*) | `ta analysis ...` | `apply analysis` |
+| Compression (*) | `ta compression ...` | `show compression`, `create compression`, `remove compression` |
+| Webhook (*) | `ta webhook ...` | `check webhook <provider> <event>` |
+| PR | `ta pr ...` | none — `pr` is a deprecated, hidden alias of `draft`; use the `draft` noun above instead |
+
+That's all 42 noun-areas from `docs/design/ta-cli-verb-reference.md` §2
+accounted for: 18 fully mapped in v0.17.0.12.16, 23 more mapped in
+v0.17.0.12.22, and `pr` intentionally left unmapped (already superseded by
+`draft`). A handful of legacy actions per noun-area still have no verb+noun
+equivalent (e.g. `ta pr fix`, `ta constitution review`) — these keep working
+via their legacy form only; `ta <verb> <noun>` returns a clear error naming
+the supported verbs for that noun when you try an unmapped combination.
 
 ---
 

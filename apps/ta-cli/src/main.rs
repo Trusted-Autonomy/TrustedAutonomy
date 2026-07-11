@@ -14,12 +14,18 @@ pub mod framework_registry;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use ta_mcp_gateway::GatewayConfig;
 
 /// Trusted Autonomy CLI — review and approve agent changes.
 ///
 /// Run `ta` with no arguments to show the project status dashboard.
+///
+/// `ta --help` shows the curated everyday-workflow surface (v0.17.0.12.22):
+/// the 10 verbs (create/list/show/update/remove/approve/deny/apply/check/sync),
+/// plus run/status/shell/onboard/doctor. Run `ta --help --all` to see the
+/// full legacy/advanced command surface, or `ta <legacy-noun> --help` to
+/// drill into one directly (e.g. `ta plugin --help`).
 #[derive(Parser)]
 #[command(
     name = "ta",
@@ -371,21 +377,25 @@ enum Commands {
         priority: Option<String>,
     },
     /// Review and manage draft packages.
+    #[command(hide = true)]
     Draft {
         #[command(subcommand)]
         command: commands::draft::DraftCommands,
     },
     /// Manage goal runs.
+    #[command(hide = true)]
     Goal {
         #[command(subcommand)]
         command: commands::goal::GoalCommands,
     },
     /// View and track the project development plan.
+    #[command(hide = true)]
     Plan {
         #[command(subcommand)]
         command: commands::plan::PlanCommands,
     },
     /// Manage agent personas for role-based behavior.
+    #[command(hide = true)]
     Persona {
         #[command(subcommand)]
         command: commands::persona::PersonaCommands,
@@ -419,6 +429,7 @@ enum Commands {
     /// Runbooks automate common recovery procedures: disk pressure cleanup,
     /// zombie goal recovery, stale draft cleanup, and more.
     /// Built-in runbooks ship with TA; project-local runbooks live in .ta/runbooks/.
+    #[command(hide = true)]
     Runbook {
         #[command(subcommand)]
         command: commands::runbook::RunbookCommands,
@@ -427,11 +438,13 @@ enum Commands {
     ///
     /// The daemon watchdog continuously monitors goal health, disk space,
     /// and plugin status. Corrective action proposals are logged here.
+    #[command(hide = true)]
     Operations {
         #[command(subcommand)]
         command: commands::operations::OperationsCommands,
     },
     /// Manage the TA daemon lifecycle (start, stop, restart, status, log).
+    #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         command: commands::daemon::DaemonCommands,
@@ -440,6 +453,7 @@ enum Commands {
     ///
     /// Subcommands:
     ///   ta gc governed-paths  — remove unreferenced SHA blobs from managed paths
+    #[command(hide = true)]
     Gc {
         /// Show what would be cleaned without making changes.
         #[arg(long)]
@@ -532,6 +546,7 @@ enum Commands {
     ///   ta upgrade --dry-run    # show what would be applied without changing anything
     ///   ta upgrade --force      # re-run all steps regardless of version
     ///   ta upgrade --acknowledge ".ta/review/"  # suppress a warning for intentional omission
+    #[command(hide = true)]
     Upgrade(commands::upgrade::UpgradeArgs),
 
     // ── ONBOARDING ──────────────────────────────────────────────────────────
@@ -600,32 +615,38 @@ enum Commands {
         command: commands::audit::AuditCommands,
     },
     /// Manage interactive sessions.
+    #[command(hide = true)]
     Session {
         #[command(subcommand)]
         command: commands::session::SessionCommands,
     },
     /// Manage persistent context memory across agents and sessions.
+    #[command(hide = true)]
     Context {
         #[command(subcommand)]
         command: commands::context::ContextCommands,
     },
     /// Manage stored credentials for external services.
+    #[command(hide = true)]
     Credentials {
         #[command(subcommand)]
         command: commands::credentials::CredentialsCommands,
     },
     /// Stream and inspect lifecycle events.
+    #[command(hide = true)]
     Events {
         #[command(subcommand)]
         command: commands::events::EventsCommands,
     },
     /// Manage approval tokens for non-interactive workflows.
+    #[command(hide = true)]
     Token {
         #[command(subcommand)]
         command: commands::token::TokenCommands,
     },
     /// Interactive developer loop — orchestrate plan execution, goal launches,
     /// draft review, and releases from one persistent session.
+    #[command(hide = true)]
     Dev {
         /// Agent system to use for orchestration (defaults to dev-loop config).
         #[arg(long)]
@@ -635,6 +656,7 @@ enum Commands {
         unrestricted: bool,
     },
     /// Interactive setup wizard for TA configuration.
+    #[command(hide = true)]
     Setup {
         #[command(subcommand)]
         command: commands::setup::SetupCommands,
@@ -646,8 +668,10 @@ enum Commands {
     /// agent system, VCS, notifications, first project, and summary.
     ///
     /// Run this once after installation to get started.
+    #[command(hide = true)]
     Install,
     /// Initialize a new TA-managed project from a template.
+    #[command(hide = true)]
     Init {
         #[command(subcommand)]
         command: commands::init::InitCommands,
@@ -656,6 +680,7 @@ enum Commands {
     ///
     /// Starts an interactive session with a planner agent that asks about your
     /// project, generates a scaffold, and produces a PLAN.md with versioned phases.
+    #[command(hide = true)]
     New {
         #[command(subcommand)]
         command: commands::new::NewCommands,
@@ -669,6 +694,7 @@ enum Commands {
     ///   ta advisor ask "implement remaining v0.15"
     ///   ta advisor ask "apply" --security suggest
     ///   ta advisor ask "what changed?" --tab plan --no-input
+    #[command(hide = true)]
     Advisor {
         #[command(subcommand)]
         command: commands::advisor::AdvisorCommands,
@@ -683,6 +709,7 @@ enum Commands {
     /// Examples:
     ///   ta advise "please focus on the auth module"
     ///   ta advise --goal abc123 "add more test coverage"
+    #[command(hide = true)]
     Advise {
         /// The note/instruction to send to the agent.
         message: String,
@@ -691,6 +718,7 @@ enum Commands {
         goal: Option<String>,
     },
     /// Author, validate, and manage agent configurations.
+    #[command(hide = true)]
     Agent {
         #[command(subcommand)]
         command: commands::agent::AgentCommands,
@@ -710,6 +738,7 @@ enum Commands {
     ///   ta style show                         # print current style
     ///   ta style edit                         # open in $EDITOR
     ///   ta style clear                        # remove style file
+    #[command(hide = true)]
     Style {
         #[command(subcommand)]
         command: commands::style::StyleCommands,
@@ -723,6 +752,7 @@ enum Commands {
     ///   ta team list
     ///   ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
     ///   ta team assign implementer claude-opus-4-8
+    #[command(hide = true)]
     Team {
         #[command(subcommand)]
         command: commands::team::TeamCommands,
@@ -731,6 +761,7 @@ enum Commands {
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
     /// from PLAN.md and CLAUDE.md. The output is a TA draft for review.
+    #[command(hide = true)]
     Constitution {
         #[command(subcommand)]
         command: commands::constitution::ConstitutionCommands,
@@ -739,26 +770,31 @@ enum Commands {
     ///
     /// `ta memory backend` shows the active backend, entry count, and storage size.
     /// `ta memory list` prints stored entries (alias for `ta context list`).
+    #[command(hide = true)]
     Memory {
         #[command(subcommand)]
         command: commands::memory::MemoryCommands,
     },
     /// Manage agent adapter integrations.
+    #[command(hide = true)]
     Adapter {
         #[command(subcommand)]
         command: commands::adapter::AdapterCommands,
     },
     /// Run the configurable release pipeline.
+    #[command(hide = true)]
     Release {
         #[command(subcommand)]
         command: commands::release::ReleaseCommands,
     },
     /// Multi-project office daemon management.
+    #[command(hide = true)]
     Office {
         #[command(subcommand)]
         command: commands::office::OfficeCommands,
     },
     /// Manage channel plugins (list, install, validate).
+    #[command(hide = true)]
     Plugin {
         #[command(subcommand)]
         command: commands::plugin::PluginCommands,
@@ -775,6 +811,7 @@ enum Commands {
     ///   ta intake queue
     ///   ta intake coordinate
     ///   ta intake routing --limit 10
+    #[command(hide = true)]
     Intake {
         #[command(subcommand)]
         command: commands::intake::IntakeCommands,
@@ -789,6 +826,7 @@ enum Commands {
     ///   ta template install blender-addon
     ///   ta template install github:myorg/my-template
     ///   ta template install ./my-local-template
+    #[command(hide = true)]
     Template {
         #[command(subcommand)]
         command: commands::template::TemplateCommands,
@@ -797,6 +835,7 @@ enum Commands {
     ///
     /// Finds the most recently approved draft, applies it, stages and commits
     /// changes with git, pushes to the remote, and optionally opens a GitHub PR.
+    #[command(hide = true)]
     Publish {
         /// Commit message (defaults to the draft title).
         #[arg(long, short)]
@@ -806,6 +845,7 @@ enum Commands {
         yes: bool,
     },
     /// Manage multi-stage workflows with pluggable engines.
+    #[command(hide = true)]
     Workflow {
         #[command(subcommand)]
         command: commands::workflow::WorkflowCommands,
@@ -816,6 +856,7 @@ enum Commands {
     /// `ta stats velocity-detail` shows a per-goal breakdown table.
     /// `ta stats export` exports full history as JSON or CSV.
     /// `ta stats migrate` promotes local history to the committed shared file.
+    #[command(hide = true)]
     Stats {
         #[command(subcommand)]
         command: commands::stats::StatsCommands,
@@ -837,6 +878,7 @@ enum Commands {
     ///   ta meridian suggest  — surface KPI alignment gaps with suggestions
     ///
     /// Install Meridian: cargo install meridian
+    #[command(hide = true)]
     Meridian {
         #[command(subcommand)]
         command: commands::meridian::MeridianCommands,
@@ -854,6 +896,7 @@ enum Commands {
     ///   ta tools list
     ///   ta tools install meridian
     ///   ta tools install claude-flow
+    #[command(hide = true)]
     Tools {
         #[command(subcommand)]
         command: commands::tools::ToolsCommands,
@@ -866,6 +909,7 @@ enum Commands {
     /// `ta community get <id>` fetches and displays a specific document.
     ///
     /// Configure resources in `.ta/community-resources.toml`.
+    #[command(hide = true)]
     Community {
         #[command(subcommand)]
         command: commands::community::CommunityCommands,
@@ -881,6 +925,7 @@ enum Commands {
     ///   ta manifest validate
     ///   ta manifest show
     ///   ta manifest show cinepipe-train
+    #[command(hide = true)]
     Manifest {
         #[command(subcommand)]
         command: commands::manifest::ManifestCommands,
@@ -897,27 +942,32 @@ enum Commands {
     ///   ta link status
     ///   ta link refresh
     ///   ta link remove cinepipe-train
+    #[command(hide = true)]
     Link {
         #[command(subcommand)]
         command: commands::link::LinkCommands,
     },
     /// Manage policy configuration and auto-approval.
+    #[command(hide = true)]
     Policy {
         #[command(subcommand)]
         command: commands::policy::PolicyCommands,
     },
     /// Inspect and validate project configuration (channels, routing).
+    #[command(hide = true)]
     Config {
         #[command(subcommand)]
         command: commands::config::ConfigCommands,
     },
     /// Start the MCP server on stdio.
+    #[command(hide = true)]
     Serve,
     /// Build the project using the configured build adapter.
     ///
     /// Auto-detects the build system (Cargo, npm, Make) or uses the adapter
     /// configured in `[build]` in `.ta/workflow.toml`. Emits `build_completed`
     /// or `build_failed` events.
+    #[command(hide = true)]
     Build {
         /// Also run the test suite after building.
         #[arg(long)]
@@ -944,6 +994,7 @@ enum Commands {
     ///
     /// Runs the [verify] commands from .ta/workflow.toml in the staging
     /// directory. Useful for manual verification without running `ta run`.
+    #[command(hide = true)]
     Verify {
         /// Goal ID (or prefix) whose staging directory to verify.
         /// Defaults to the most recent active goal.
@@ -958,11 +1009,13 @@ enum Commands {
     ///   ta analysis run
     ///   ta analysis run --lang python
     ///   ta analysis run --fix
+    #[command(hide = true)]
     Analysis {
         #[command(subcommand)]
         command: commands::analysis::AnalysisCommands,
     },
     /// View the interactive conversation history for a goal.
+    #[command(hide = true)]
     Conversation {
         /// Goal run ID (or prefix).
         goal_id: String,
@@ -979,6 +1032,7 @@ enum Commands {
     ///   ta connector install unreal --backend flopperam
     ///   ta connector list
     ///   ta connector status unreal
+    #[command(hide = true)]
     Connector {
         #[command(subcommand)]
         command: commands::connector::ConnectorCommands,
@@ -997,6 +1051,7 @@ enum Commands {
     ///   ta compression status
     ///   ta compression enable
     ///   ta compression disable
+    #[command(hide = true)]
     Compression {
         #[command(subcommand)]
         command: commands::compression::CompressionCommands,
@@ -1011,6 +1066,7 @@ enum Commands {
     /// Examples:
     ///   ta webhook test github pull_request.closed --branch main
     ///   ta webhook test vcs changelist_submitted --change 12345
+    #[command(hide = true)]
     Webhook {
         #[command(subcommand)]
         command: commands::webhook::WebhookCommands,
@@ -1043,6 +1099,39 @@ enum Commands {
         /// Agent ID (required for show/accept, optional for status).
         agent: Option<String>,
     },
+}
+
+/// Parse CLI args, honoring `--all` as an ad-hoc flag that unhides the full
+/// legacy/advanced command surface in `--help` output (v0.17.0.12.22).
+///
+/// `--all` is intentionally *not* a formal `Cli`-level `#[arg(global = true)]`:
+/// several subcommands (`ta gc --all`, `ta audit drift --all`) already
+/// define their own `--all` flag with unrelated meaning, and a global arg
+/// sharing that id would collide with those at `clap::Command` build time.
+/// Instead this scans the raw argv for the literal `--all` token purely to
+/// decide whether to unhide `Command` nodes before the real parse —
+/// `.hide()` only affects help rendering, never argument matching, so
+/// reusing the (possibly unhidden) `Command` for the actual parse is always
+/// safe, regardless of whether this invocation was a help request.
+fn parse_cli_with_help_curation() -> Cli {
+    let show_all = std::env::args().any(|a| a == "--all");
+    let mut cmd = Cli::command();
+    if show_all {
+        unhide_all_subcommands(&mut cmd);
+    }
+    let matches = cmd.get_matches_from(std::env::args_os());
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
+/// Recursively clear the `hide` flag on every subcommand so `ta --help --all`
+/// shows the full legacy/advanced surface, not just the curated set
+/// (v0.17.0.12.22 item 2).
+fn unhide_all_subcommands(cmd: &mut clap::Command) {
+    for sub in cmd.get_subcommands_mut() {
+        let taken = std::mem::replace(sub, clap::Command::new("__ta_tmp__"));
+        *sub = taken.hide(false);
+        unhide_all_subcommands(sub);
+    }
 }
 
 /// Build the long version string: "0.1.0-alpha (abc1234 2026-02-11)"
@@ -1146,7 +1235,7 @@ fn main() -> anyhow::Result<()> {
 
 fn run() -> anyhow::Result<()> {
     let startup_begin = std::time::Instant::now();
-    let cli = Cli::parse();
+    let cli = parse_cli_with_help_curation();
     let t_parse = startup_begin.elapsed();
 
     // Handle --accept-terms flag (non-interactive acceptance).
@@ -2008,5 +2097,201 @@ mod verb_dispatch_tests {
     fn unknown_noun_via_new_surface_is_a_clean_error_not_a_panic() {
         let err = commands::verb::resolve("list", "spaceship", None, &[]).unwrap_err();
         assert!(err.to_string().contains("Unknown noun"));
+    }
+
+    /// v0.17.0.12.22: every newly-mapped noun-area's verb+noun form must
+    /// resolve to a legacy argv that parses cleanly through the *same*
+    /// `Cli`/`Commands` definitions as the legacy form itself — proving the
+    /// new surface and the legacy surface execute identical code for all
+    /// 23 of the remaining noun-areas, not just the 18 shipped in 12.16.
+    #[test]
+    fn all_v0_17_0_12_22_nouns_resolve_and_parse_cleanly() {
+        let cases: &[(&str, &str, Option<&str>, &[&str])] = &[
+            ("list", "runbook", None, &[]),
+            ("show", "runbook", Some("disk-pressure"), &[]),
+            ("apply", "runbook", Some("disk-pressure"), &["--dry-run"]),
+            ("list", "operations", None, &[]),
+            ("list", "audit", None, &[]),
+            ("show", "audit", Some("abc123"), &[]),
+            ("check", "audit", None, &[]),
+            ("create", "setup", None, &[]),
+            ("show", "setup", None, &[]),
+            ("update", "setup", Some("policy"), &[]),
+            ("sync", "setup", None, &[]),
+            ("create", "project", None, &[]),
+            ("create", "scaffold", None, &[]),
+            ("apply", "advisor", Some("implement remaining v0.15"), &[]),
+            ("create", "style", None, &[]),
+            ("show", "style", None, &[]),
+            ("update", "style", None, &[]),
+            ("remove", "style", None, &[]),
+            ("check", "style", None, &[]),
+            ("sync", "style", None, &["https://example.com/style.md"]),
+            ("create", "constitution", None, &[]),
+            ("show", "constitution", None, &[]),
+            ("update", "constitution", None, &[]),
+            ("check", "constitution", None, &[]),
+            ("create", "memory", Some("arch:auth"), &["Use JWT RS256"]),
+            ("list", "memory", None, &[]),
+            ("show", "memory", None, &[]),
+            ("check", "memory", None, &[]),
+            ("sync", "memory", None, &[]),
+            ("create", "adapter", Some("claude-code"), &[]),
+            ("list", "adapter", None, &[]),
+            ("check", "adapter", Some("messaging"), &[]),
+            ("update", "adapter", Some("messaging/gmail"), &[]),
+            ("apply", "release", Some("0.17.0-alpha"), &[]),
+            ("show", "release", None, &[]),
+            ("create", "release", None, &[]),
+            (
+                "update",
+                "release",
+                Some("press_release_template"),
+                &["./template.md"],
+            ),
+            ("check", "release", Some("0.17.0-alpha"), &[]),
+            ("sync", "release", None, &["public-alpha-v0.17.0.12.22"]),
+            ("list", "intake", None, &[]),
+            ("apply", "trigger", Some("schedule"), &[]),
+            ("show", "trigger", None, &[]),
+            ("list", "stats", None, &[]),
+            ("show", "stats", None, &[]),
+            ("sync", "stats", None, &[]),
+            ("create", "meridian", None, &[]),
+            ("list", "meridian", None, &[]),
+            ("check", "meridian", None, &[]),
+            ("list", "tools", None, &[]),
+            ("create", "tools", Some("meridian"), &[]),
+            ("create", "manifest", None, &[]),
+            ("check", "manifest", None, &[]),
+            ("show", "manifest", None, &[]),
+            ("create", "link", Some("github:myorg/pragma"), &[]),
+            ("list", "link", None, &[]),
+            ("check", "link", None, &[]),
+            ("sync", "link", None, &[]),
+            ("remove", "link", Some("cinepipe-train"), &[]),
+            ("check", "policy", Some("draft-id-123"), &[]),
+            ("show", "policy", None, &[]),
+            ("show", "config", None, &[]),
+            ("apply", "analysis", None, &[]),
+            ("show", "compression", None, &[]),
+            ("create", "compression", None, &[]),
+            ("remove", "compression", None, &[]),
+            ("check", "webhook", Some("github"), &["pull_request.closed"]),
+        ];
+
+        for (verb, noun, id, extra) in cases {
+            let extra_owned: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+            let argv = commands::verb::resolve(verb, noun, *id, &extra_owned)
+                .unwrap_or_else(|e| panic!("resolve(\"{verb}\", \"{noun}\", ...) failed: {e}"));
+            // Must parse through the exact same Cli/Commands definitions as
+            // a direct legacy invocation — no second copy of any behavior.
+            let _ = parse_argv(argv.clone());
+        }
+    }
+
+    /// v0.17.0.12.22 item 2: the default `--help` view must exclude every
+    /// legacy noun-first / advanced-only top-level command.
+    #[test]
+    fn curated_help_hides_legacy_and_advanced_commands_by_default() {
+        let cmd = Cli::command();
+        let legacy_and_advanced = [
+            "goal",
+            "draft",
+            "plan",
+            "persona",
+            "runbook",
+            "operations",
+            "daemon",
+            "gc",
+            "pr",
+            "audit",
+            "session",
+            "context",
+            "credentials",
+            "events",
+            "token",
+            "dev",
+            "setup",
+            "install",
+            "init",
+            "new",
+            "advisor",
+            "advise",
+            "agent",
+            "style",
+            "team",
+            "constitution",
+            "memory",
+            "adapter",
+            "release",
+            "office",
+            "plugin",
+            "intake",
+            "template",
+            "publish",
+            "workflow",
+            "stats",
+            "meridian",
+            "tools",
+            "community",
+            "manifest",
+            "link",
+            "policy",
+            "config",
+            "serve",
+            "build",
+            "verify",
+            "analysis",
+            "conversation",
+            "connector",
+            "compression",
+            "webhook",
+            "upgrade",
+        ];
+        for name in legacy_and_advanced {
+            let sub = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("missing subcommand `{name}`"));
+            assert!(
+                sub.is_hide_set(),
+                "expected `{name}` to be hidden from default --help"
+            );
+        }
+    }
+
+    /// v0.17.0.12.22 item 2: the curated ~15-command surface (10 verbs plus
+    /// run/status/shell/onboard/doctor) must stay visible by default.
+    #[test]
+    fn curated_help_keeps_core_surface_visible_by_default() {
+        let cmd = Cli::command();
+        let curated = [
+            "create", "list", "show", "update", "remove", "approve", "deny", "apply", "check",
+            "sync", "status", "run", "shell", "doctor", "onboard",
+        ];
+        for name in curated {
+            let sub = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("missing subcommand `{name}`"));
+            assert!(
+                !sub.is_hide_set(),
+                "expected `{name}` to remain visible in default --help"
+            );
+        }
+    }
+
+    /// v0.17.0.12.22 item 2: `ta --help --all` must show everything —
+    /// `unhide_all_subcommands` clears every top-level `hide` flag.
+    #[test]
+    fn unhide_all_subcommands_clears_every_top_level_hide_flag() {
+        let mut cmd = Cli::command();
+        unhide_all_subcommands(&mut cmd);
+        for sub in cmd.get_subcommands() {
+            assert!(
+                !sub.is_hide_set(),
+                "`{}` should be visible after unhide_all_subcommands",
+                sub.get_name()
+            );
+        }
     }
 }

@@ -206,6 +206,175 @@ const NOUN_TABLE: &[NounEntry] = &[
             ("sync", "migrate"),
         ],
     },
+    // ── Remaining 23 noun-areas (v0.17.0.12.22), per
+    // docs/design/ta-cli-verb-reference.md §2. `pr` is intentionally not
+    // added here — it's already `#[command(hide = true)]` in main.rs as a
+    // deprecated alias of `draft` (see that doc's "already hidden" bucket),
+    // so it isn't a fresh noun-area to map onto the verb surface.
+    NounEntry {
+        keys: &["runbook", "runbooks"],
+        legacy: "runbook",
+        verbs: &[("list", "list"), ("show", "show"), ("apply", "run")],
+    },
+    NounEntry {
+        keys: &["operations", "operation"],
+        legacy: "operations",
+        verbs: &[("list", "log")],
+    },
+    NounEntry {
+        keys: &["audit"],
+        legacy: "audit",
+        verbs: &[("list", "tail"), ("show", "show"), ("check", "verify")],
+    },
+    NounEntry {
+        keys: &["setup"],
+        legacy: "setup",
+        verbs: &[
+            ("create", "wizard"),
+            ("show", "show"),
+            ("update", "refine"),
+            ("sync", "resolve"),
+        ],
+    },
+    NounEntry {
+        keys: &["project"],
+        legacy: "init",
+        verbs: &[("create", "run")],
+    },
+    NounEntry {
+        keys: &["scaffold"],
+        legacy: "new",
+        verbs: &[("create", "run")],
+    },
+    NounEntry {
+        keys: &["advisor"],
+        legacy: "advisor",
+        verbs: &[("apply", "ask")],
+    },
+    NounEntry {
+        keys: &["style"],
+        legacy: "style",
+        verbs: &[
+            ("create", "init"),
+            ("show", "show"),
+            ("update", "edit"),
+            ("remove", "clear"),
+            ("check", "discover"),
+            ("sync", "import"),
+        ],
+    },
+    NounEntry {
+        keys: &["constitution"],
+        legacy: "constitution",
+        verbs: &[
+            ("create", "init"),
+            ("show", "show"),
+            ("update", "amend"),
+            ("check", "validate"),
+        ],
+    },
+    NounEntry {
+        keys: &["memory"],
+        legacy: "memory",
+        verbs: &[
+            ("create", "store"),
+            ("list", "list"),
+            ("show", "backend"),
+            ("check", "doctor"),
+            ("sync", "sync"),
+        ],
+    },
+    NounEntry {
+        keys: &["adapter", "adapters"],
+        legacy: "adapter",
+        verbs: &[
+            ("create", "install"),
+            ("list", "list"),
+            ("check", "health"),
+            ("update", "setup"),
+        ],
+    },
+    NounEntry {
+        keys: &["release"],
+        legacy: "release",
+        verbs: &[
+            ("apply", "run"),
+            ("show", "show"),
+            ("create", "init"),
+            ("update", "config"),
+            ("check", "validate"),
+            ("sync", "dispatch"),
+        ],
+    },
+    NounEntry {
+        keys: &["intake", "trigger", "triggers"],
+        legacy: "intake",
+        verbs: &[("list", "list"), ("apply", "fire"), ("show", "routing")],
+    },
+    NounEntry {
+        keys: &["stats"],
+        legacy: "stats",
+        verbs: &[
+            ("list", "velocity"),
+            ("show", "velocity-detail"),
+            ("sync", "migrate"),
+        ],
+    },
+    NounEntry {
+        keys: &["meridian"],
+        legacy: "meridian",
+        verbs: &[("create", "init"), ("list", "help"), ("check", "analyze")],
+    },
+    NounEntry {
+        keys: &["tools", "tool"],
+        legacy: "tools",
+        verbs: &[("list", "list"), ("create", "install")],
+    },
+    NounEntry {
+        keys: &["manifest"],
+        legacy: "manifest",
+        verbs: &[("create", "init"), ("check", "validate"), ("show", "show")],
+    },
+    NounEntry {
+        keys: &["link", "links"],
+        legacy: "link",
+        verbs: &[
+            ("create", "add"),
+            ("list", "list"),
+            ("check", "status"),
+            ("sync", "refresh"),
+            ("remove", "remove"),
+        ],
+    },
+    NounEntry {
+        keys: &["policy", "policies"],
+        legacy: "policy",
+        verbs: &[("check", "check"), ("show", "show")],
+    },
+    NounEntry {
+        keys: &["config"],
+        legacy: "config",
+        verbs: &[("show", "channels")],
+    },
+    NounEntry {
+        keys: &["analysis"],
+        legacy: "analysis",
+        verbs: &[("apply", "run")],
+    },
+    NounEntry {
+        keys: &["compression"],
+        legacy: "compression",
+        verbs: &[
+            ("show", "status"),
+            ("create", "enable"),
+            ("remove", "disable"),
+        ],
+    },
+    NounEntry {
+        keys: &["webhook", "webhooks"],
+        legacy: "webhook",
+        verbs: &[("check", "test")],
+    },
 ];
 
 /// The full list of nouns and per-noun supported verbs, for `--help`-style
@@ -439,6 +608,78 @@ mod tests {
             "status"
         );
         assert_eq!(action_word_from_debug(&FakeCommands::List), "list");
+    }
+
+    #[test]
+    fn v0_17_0_12_22_nouns_resolve_with_two_positionals_via_extra() {
+        // memory store and release config both take two required legacy
+        // positionals (key+value / key+value) — `id` supplies the first,
+        // `extra`'s leading element supplies the second (v0.17.0.12.22).
+        assert_eq!(
+            resolve(
+                "create",
+                "memory",
+                Some("arch:auth"),
+                &["Use JWT RS256".to_string()]
+            )
+            .unwrap(),
+            vec!["ta", "memory", "store", "arch:auth", "Use JWT RS256"]
+        );
+        assert_eq!(
+            resolve(
+                "update",
+                "release",
+                Some("press_release_template"),
+                &["./template.md".to_string()]
+            )
+            .unwrap(),
+            vec![
+                "ta",
+                "release",
+                "config",
+                "press_release_template",
+                "./template.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn v0_17_0_12_22_sync_verb_has_no_id_slot_so_extra_supplies_the_positional() {
+        // The `sync` verb's top-level `Commands::Sync` has no `id` field —
+        // any legacy positional (e.g. `style import <source>`) must come
+        // through `extra`, not `id`.
+        assert_eq!(
+            resolve(
+                "sync",
+                "style",
+                None,
+                &["https://example.com/style.md".to_string()]
+            )
+            .unwrap(),
+            vec!["ta", "style", "import", "https://example.com/style.md"]
+        );
+    }
+
+    #[test]
+    fn v0_17_0_12_22_project_and_scaffold_nouns_disambiguate_init_and_new() {
+        // `init` and `new` both bootstrap a project via different legacy
+        // top-levels; distinct noun keys avoid `NOUN_TABLE` key collisions.
+        assert_eq!(
+            resolve("create", "project", None, &[]).unwrap(),
+            vec!["ta", "init", "run"]
+        );
+        assert_eq!(
+            resolve("create", "scaffold", None, &[]).unwrap(),
+            vec!["ta", "new", "run"]
+        );
+    }
+
+    #[test]
+    fn v0_17_0_12_22_pr_is_intentionally_not_in_noun_table() {
+        // `pr` is a hidden, deprecated alias of `draft` (main.rs
+        // `#[command(hide = true)]`) — not a fresh noun-area to map.
+        let err = resolve("list", "pr", None, &[]).unwrap_err();
+        assert!(err.to_string().contains("Unknown noun"));
     }
 
     #[test]
