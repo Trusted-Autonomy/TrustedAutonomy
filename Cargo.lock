@@ -3155,6 +3155,7 @@ dependencies = [
  "schemars_derive",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -3599,6 +3600,7 @@ name = "ta-brain"
 version = "0.17.0-alpha.12.24"
 dependencies = [
  "chrono",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3633,6 +3635,7 @@ dependencies = [
  "glob",
  "regex",
  "reqwest 0.12.28",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3870,6 +3873,7 @@ dependencies = [
  "ta-changeset",
  "ta-connector-email",
  "ta-connector-slack",
+ "ta-data-spec",
  "ta-events",
  "ta-extension",
  "ta-goal",
@@ -3891,6 +3895,18 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "ta-data-spec"
+version = "0.17.0-alpha.12.24"
+dependencies = [
+ "schemars",
+ "serde_json",
+ "ta-brain",
+ "ta-changeset",
+ "ta-goal",
+ "ta-intake",
 ]
 
 [[package]]
@@ -3992,6 +4008,7 @@ version = "0.17.0-alpha.12.24"
 dependencies = [
  "anyhow",
  "chrono",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",
@@ -4034,6 +4051,7 @@ name = "ta-intake"
 version = "0.17.0-alpha.12.24"
 dependencies = [
  "chrono",
+ "schemars",
  "serde",
  "serde_json",
  "ta-submit",
@@ -4196,6 +4214,7 @@ dependencies = [
  "chrono",
  "libc",
  "notify",
+ "schemars",
  "serde",
  "serde_json",
  "ta-changeset",

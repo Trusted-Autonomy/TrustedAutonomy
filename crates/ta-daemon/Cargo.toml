@@ -47,6 +47,7 @@ ta-output-schema = { path = "../ta-output-schema", version = "0.17.0-alpha.12.24
 ta-extension = { path = "../ta-extension", version = "0.17.0-alpha.12.24" }
 ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.24" }
 ta-advisor = { path = "../ta-advisor", version = "0.17.0-alpha.12.24" }
+ta-data-spec = { path = "../ta-data-spec", version = "0.17.0-alpha.12.24" }
 which = "7"
 libc = { workspace = true }
 async-trait = "0.1"
