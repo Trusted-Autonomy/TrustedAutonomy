@@ -84,6 +84,7 @@ result-*
 
 # Runtime / machine-specific files
 .ta/*.log
+.ta/*.log.*
 .ta/*.lock      # includes apply.lock (written by ta draft apply, ephemeral per-machine)
 .ta/*.pid
 .ta/*-crash-state.json
@@ -109,6 +110,8 @@ result-*
 .ta/action-log.jsonl
 .ta/autonomous-loop-state.json
 .ta/logs/
+.ta/routing-decisions.jsonl
+.ta/telemetry.jsonl
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml
@@ -162,6 +165,7 @@ result-*
 .ta/taignore
 .ta/ide-excludes.json
 .ta/*.log
+.ta/*.log.*
 .ta/*.pid
 .ta/*.lock
 

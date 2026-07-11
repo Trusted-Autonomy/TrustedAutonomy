@@ -10,6 +10,7 @@ pub mod event;
 pub mod fs;
 pub mod goal;
 pub mod human;
+pub mod human_verify;
 pub mod plan;
 pub mod unity;
 pub mod unreal;

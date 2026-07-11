@@ -9467,19 +9467,19 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.17 — Studio IA Redesign
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12, v0.17.0.12.13, v0.17.0.12.14, v0.17.0.12.15, v0.17.0.12.16
 
 **Goal**: Collapse Studio's 15 nav tabs into the ~4 real destinations identified in `docs/design/ta-concepts-and-architecture.md` §6 (Attention, Activity, Configuration, Advisor). Sequenced last — building new UI against a still-fragmented backend recreates the sprawl.
 
 **Items**:
-1. [ ] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
-2. [ ] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
-3. [ ] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
-4. [ ] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
-5. [ ] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
-6. [ ] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
-7. [ ] Verification: manual browser walkthrough, not just unit tests — this is UI.
+1. [x] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
+2. [x] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
+3. [x] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
+4. [x] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
+5. [x] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
+6. [x] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
+7. [x] Verification: manual browser walkthrough, not just unit tests — this is UI.
 
 #### Version: `0.17.0-alpha.12.17`
 
@@ -9550,22 +9550,22 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.22 — CLI Surface Completion: Full Verb+Noun Coverage + Curated Help
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.16
 
 **Goal**: 12.16 intentionally shipped partial (18 of 42 noun-areas mapped onto the 10-verb set, per `docs/design/ta-cli-verb-reference.md`) with the rest still legacy-only. Finish the mapping, and give the CLI a genuinely simple default surface — today only 7 of 61 commands are hidden from `--help` (installer-internal, not a curated "common ops" set), so a new user sees the entire flat command list.
 
 **Items**:
-1. [ ] Map the remaining 24 noun-areas (`advisor`, `memory`, `adapter`, `release`, `intake`, `config`, `policy`, etc.) onto the 10-verb set via `commands::verb::NOUN_TABLE`, matching 12.16's alias + deprecation-notice pattern exactly.
-2. [ ] Curate a default `--help` view showing only the common-operation verb+noun pairs (the ~15-20 combos covering the everyday workflow); full/legacy/advanced commands surface via `ta --help --all` or `ta <verb> --help` drill-down.
-3. [ ] USAGE.md: complete the old→new lookup table to 42/42; document the simple-vs-`--all` help split.
-4. [ ] Tests: every newly-mapped noun-area's alias produces identical behavior through its verb+noun form; default `--help` excludes legacy/advanced-only commands; `--all` shows everything.
+1. [x] Map the remaining 24 noun-areas (`advisor`, `memory`, `adapter`, `release`, `intake`, `config`, `policy`, etc.) onto the 10-verb set via `commands::verb::NOUN_TABLE`, matching 12.16's alias + deprecation-notice pattern exactly.
+2. [x] Curate a default `--help` view showing only the common-operation verb+noun pairs (the ~15-20 combos covering the everyday workflow); full/legacy/advanced commands surface via `ta --help --all` or `ta <verb> --help` drill-down.
+3. [x] USAGE.md: complete the old→new lookup table to 42/42; document the simple-vs-`--all` help split.
+4. [x] Tests: every newly-mapped noun-area's alias produces identical behavior through its verb+noun form; default `--help` excludes legacy/advanced-only commands; `--all` shows everything.
 
 #### Version: `0.17.0-alpha.12.22`
 
 ---
 ### v0.17.0.12.23 — Advisor-Driven Goal Creation: Natural-Language Intent + Clarification
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.19 (`ta-intake`), v0.17.0.12.20 (`ta-brain`)
 
 **Goal**: Two intent-handling systems exist today and don't talk to each other — `ta-workflow::intent::resolve_intent` (confidence-gated matching against known workflow *templates*, with real clarifying questions, but only reachable from `ta workflow` commands) and `ta-brain::classify`/`route` (resolves team/persona/security/priority, but requires an already-structured title/objective — it never parses raw free text itself). Neither is exposed as "hand the Advisor a sentence and get a routed goal." Unify them so a general user can do exactly that, with a real clarification question asked when confidence is low — reusing the existing `ta_ask_human`-backed headless-agent mechanism already built for draft-review conversations (`ta-session::advisor_agent::spawn_advisor_agent`) rather than building a new conversational loop from scratch.
@@ -9582,7 +9582,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.24 — Windows CI Toolchain Parity
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: none (independent, low-effort; discovered 2026-07-10 while fixing PR #537)
 
 **Goal**: `windows-build` in `ci.yml` uses `dtolnay/rust-toolchain@stable`, which re-resolves live on every run against whatever Rust actually calls "stable" *today* (observed 1.97 on 2026-07-10). `lint-and-test` (ubuntu/macos) builds via Nix's `fromRustupToolchainFile ./rust-toolchain.toml`, which reads the same file's `channel = "stable"` but resolves it through `flake.lock`'s time-frozen nixpkgs/rust-overlay snapshot (observed 1.94 locally) — Nix has no native Windows support, so Windows never went through this path. The two "stable"s silently diverged by three-plus point releases over time, not by design. This let 5 real clippy lints in `shell_tui.rs`/`draft.rs`/`follow_up.rs` go uncaught on two of three platforms, and produces "clean everywhere except Windows" CI signals that look like flakiness but are actually a genuine toolchain-version gap.
@@ -9590,27 +9590,63 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 Recommendation: converge forward onto an explicit pinned version rather than pin Windows backward to match Nix's stale snapshot — pinning backward just inverts which platform drifts next time nixpkgs updates. `flake.nix` already uses `oxalica/rust-overlay`, which supports pinning `rust-toolchain.toml`'s `channel` to an exact version string (not just `"stable"`/`"beta"`/`"nightly"`) — so a single explicit version in that one file can drive both Nix (already reads it) and native `rustup` on every GitHub-hosted runner (ubuntu/macos/windows all ship rustup preinstalled and auto-install/select whatever `rust-toolchain.toml` pins on first `cargo`/`rustc` invocation, no action needed). This removes the `dtolnay/rust-toolchain@stable` step's independent floating resolution entirely, converging all three platforms on the one file that's already this project's single source of truth for the toolchain.
 
 **Items**:
-1. [ ] Pin `rust-toolchain.toml`'s `channel` to an explicit version (the current real stable, e.g. `1.97.x` — confirm exact patch via `rustc --version` on a fresh runner) instead of the literal word `"stable"`.
-2. [ ] Confirm `flake.lock`'s `rust-overlay`/`nixpkgs` inputs are recent enough to offer that version via `nix flake update`; bump if not.
-3. [ ] Remove (or repurpose) the `dtolnay/rust-toolchain@stable` step in `ci.yml`'s `windows-build` job — rely on the runner's preinstalled `rustup` auto-detecting `rust-toolchain.toml`, matching how `lint-and-test`'s Nix shell already resolves the same file.
-4. [ ] Full clean `build`/`clippy`/`fmt`/`test` run on all three CI platforms at the newly-pinned version; fix any lints the version bump newly surfaces before merging.
-5. [ ] CLAUDE.md: document the shared pinned version and the rule that no CI platform may resolve its own Rust toolchain independently of `rust-toolchain.toml` again.
+1. [x] Pin `rust-toolchain.toml`'s `channel` to an explicit version (the current real stable, e.g. `1.97.x` — confirm exact patch via `rustc --version` on a fresh runner) instead of the literal word `"stable"`.
+2. [x] Confirm `flake.lock`'s `rust-overlay`/`nixpkgs` inputs are recent enough to offer that version via `nix flake update`; bump if not.
+3. [x] Remove (or repurpose) the `dtolnay/rust-toolchain@stable` step in `ci.yml`'s `windows-build` job — rely on the runner's preinstalled `rustup` auto-detecting `rust-toolchain.toml`, matching how `lint-and-test`'s Nix shell already resolves the same file.
+4. [x] Full clean `build`/`clippy`/`fmt`/`test` run on all three CI platforms at the newly-pinned version; fix any lints the version bump newly surfaces before merging.
+5. [x] CLAUDE.md: document the shared pinned version and the rule that no CI platform may resolve its own Rust toolchain independently of `rust-toolchain.toml` again.
 
 #### Version: `0.17.0-alpha.12.24`
 
 ---
-### v0.17.0.12.25 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
-<!-- status: pending -->
-**Depends on**: v0.17.0.12.11 through v0.17.0.12.24 (all of it, including the post-12.21 additions above — this is the final, doc-only phase for the whole overhaul)
+### v0.17.0.12.26 — `ta_human_verify`: Two-Stage Confidence-Gated Verification (replaces `ta_ask_human`)
+<!-- status: done -->
+**Depends on**: v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain` workload classification)
 
-**Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.24 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
+**Goal**: `ta_ask_human` (`crates/ta-mcp-gateway/src/tools/human.rs`) always blocks and waits for a real human, for every question, regardless of how routine or high-stakes it is — there is no gating today. Per the user's design (2026-07-10): reframe it as `ta_human_verify`, which first asks a **human-opinion model** (an LLM prompted to answer the question the way a human reviewer would) and an independent **validator** (a second, separate pass that critiques the opinion's reasoning rather than trusting its self-reported confidence), scores the pair through the existing generic `ta_decision::gate::decide()` (already built in 12.15 — `DecisionInput{verdict, risk_score, confidence}` → `Commit/Reject/Rework/Escalate`, workload-agnostic by design), and only falls through to a real blocking human ask when the gate says `Escalate`. When the gate says `Commit`, auto-confirm using the opinion model's answer, but **document** the full opinion + validator reasoning + confidence in an audit trail rather than silently discarding it — never a black box. Per-workload policy (keyed on `ta-brain::RoutingDecision::workload_type`/`security_tier`) controls whether the synthetic pre-check is attempted at all (e.g., a `security`-classified workload always escalates straight to a human, skipping the synthetic stage entirely).
 
 **Items**:
-1. [ ] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, the natural-language advisor entry point from 12.23, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
+1. [x] New `crates/ta-mcp-gateway/src/tools/human_verify.rs`: `ta_human_verify` MCP tool. Keep `ta_ask_human` registered as a deprecated alias forwarding to it unchanged (matching 12.16's alias + one-time deprecation-notice pattern) — do not break existing agent prompts/docs that already reference the old tool name.
+2. [x] Opinion-model pass: reuse the existing headless-agent-with-tools mechanism (`ta-session::advisor_agent::spawn_advisor_agent`'s pattern, not a new invocation path) prompted with the question + context, producing an answer + explicit reasoning + self-reported confidence.
+3. [x] Validator pass: a second, independent headless-agent call — explicitly prompted to critique the opinion's reasoning against the original question (not to re-answer it), producing a `ta_decision::gate::DecisionInput` (`Verdict`, `risk_score`, `confidence`). Must not share a prompt/context window with the opinion pass — independence is the point.
+4. [x] Per-workload `DecisionThresholds` config in `.ta/workflow.toml` (`[human_verify.<workload_type>]`), read via `ta-brain`'s existing `workload_type`/`security_tier` classification; default thresholds apply when a workload has no override. `security_tier != "auto"` always skips straight to Escalate (no synthetic stage).
+5. [x] `Commit` path: auto-answer, write `{question, context, opinion, validator_verdict, decision, timestamp}` to a new `.ta/human-verify-audit.jsonl` (gitignored, per-run operational log, same category as `routing-decisions.jsonl`). `Escalate`/`Reject`/`Rework` path: fall through to the existing real-human blocking flow unchanged, but pass the opinion+validator reasoning through as additional context so the human sees what the synthetic pipeline already found ambiguous.
+6. [x] Tests: high-confidence/low-risk synthetic pair auto-confirms with no blocking and a correctly-shaped audit entry; low-confidence or high-risk pair falls through to the real human-ask path unchanged; a `security_tier` workload always escalates even with a high-confidence synthetic pair; alias `ta_ask_human` behaves identically to direct `ta_human_verify` calls.
+7. [x] USAGE.md: document the two-stage pipeline, the per-workload threshold config, and where to find the audit trail.
+
+#### Version: `0.17.0-alpha.12.26`
+
+---
+### v0.17.0.12.27 — Red-Team Autoreward: Adversarial Validation of Auto-Confirmed Verifications
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.26 (`ta_human_verify` + its audit trail)
+
+**Goal**: Per the user's explicit request (2026-07-10): 12.26's synthetic opinion+validator pipeline can still be systematically wrong in ways the validator itself won't catch (the validator checks reasoning soundness, not whether the pipeline is exploitable or biased). Add a red-team pass that actively tries to prove auto-confirmed decisions wrong, and feed confirmed misses back as a calibration signal — an "autoreward" loop, implemented as TA's existing Observable & Actionable primitives (audit logs, threshold config, few-shot context) rather than literal model fine-tuning, which TA's headless-CLI-agent architecture doesn't support directly.
+
+**Items**:
+1. [ ] `ta verify audit [--sample N] [--workload <type>]` (or scheduled via a `ta-intake` trigger, per 12.19's data-defined trigger pattern): samples `Commit`-decision entries from `.ta/human-verify-audit.jsonl` not yet red-team-reviewed.
+2. [ ] Red-team agent: a headless pass distinctly framed from the validator — not "is this reasoning sound" but "assume this is wrong; find the failure the opinion+validator pair missed" (adversarial framing, explicit in the prompt). Produces a verdict (confirmed-correct / confirmed-miss) + explanation.
+3. [ ] Confirmed misses: append to `.ta/verify-failures.jsonl` (committed, not gitignored — this is a durable calibration dataset, not a per-run operational log) with the original question/opinion/validator output/red-team explanation.
+4. [ ] Feedback loop, both mechanisms (no literal RL/fine-tuning): (a) include a rolling sample of confirmed misses for the relevant `workload_type` as few-shot context in future opinion/validator prompts for that workload; (b) auto-propose (not silently apply) a `DecisionThresholds` tightening for any `workload_type` where misses cluster above a configurable rate, surfaced to a human for approval rather than applied automatically — thresholds are a trust boundary, changing them silently would defeat the point.
+5. [ ] Metrics surfaced via existing observability commands (`ta stats` or equivalent): auto-confirm rate, red-team-catch rate, and false-auto-confirm rate, per `workload_type`, over time.
+6. [ ] Tests: a seeded confirmed-miss correctly appears in future opinion-pass few-shot context for its workload; threshold-tightening proposal fires only above the configured miss-rate and never applies without human approval; metrics aggregate correctly across a mixed sample of hits/misses.
+7. [ ] USAGE.md: document the red-team loop, `verify-failures.jsonl`'s role as a durable dataset (not a log to prune), and how to review/approve a threshold-tightening proposal.
+
+#### Version: `0.17.0-alpha.12.27`
+
+---
+### v0.17.0.12.28 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.11 through v0.17.0.12.27 (all of it, including the post-12.21 additions above — this is the final, doc-only phase for the whole overhaul)
+
+**Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.27 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
+
+**Items**:
+1. [ ] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, the natural-language advisor entry point from 12.23, the `ta_human_verify` two-stage verification pipeline from 12.26/12.27, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
 2. [ ] Write a new `docs/architecture/` doc for the user themselves (maintainer-level, not plain-language) — the "how it is set up" reference: the 3-tier model as actually built, the `ta-intake`/`ta-brain`/back-office library-crate boundaries, the data-format specs and how they gate Studio/community contributions, and why the codebase stays a single monorepo rather than split repos. This formalizes `docs/design/ta-concepts-and-architecture.md`'s working notes into a stable reference — the design doc can stay as historical record of how the decisions were reached; this new doc is the current-state reference.
 3. [ ] Cross-link both new/refreshed docs with `ta-action-reference.md`, the data-format spec from v0.17.0.12.21, and the CLI verb reference/user-personas docs completed by v0.17.0.12.22.
 
-#### Version: `0.17.0-alpha.12.25`
+#### Version: `0.17.0-alpha.12.28`
 
 ---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
