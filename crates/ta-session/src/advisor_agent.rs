@@ -333,8 +333,11 @@ pub fn write_advisor_context(config: &AdvisorConfig) -> std::io::Result<PathBuf>
 /// Spawn an advisor agent for the given session item.
 ///
 /// Launches `ta run --headless` as a subprocess with:
-/// - `TA_ADVISOR_DRAFT_ID=<id>` environment variable
-/// - `TA_ADVISOR_CONTEXT_FILE=<path>` pointing to the context markdown
+/// - `--objective-file <path>` pointing at the context markdown (the real
+///   delivery mechanism -- read directly into the spawned agent's objective)
+/// - `TA_ADVISOR_DRAFT_ID=<id>` / `TA_ADVISOR_CONTEXT_FILE=<path>` /
+///   `TA_ADVISOR_SECURITY`/`TA_ADVISOR_SESSION_ID`/`TA_ADVISOR_ITEM_ID`
+///   environment variables, for any future consumer that reads them directly
 /// - `--persona advisor` (or the configured persona)
 ///
 /// Returns the advisor goal run ID extracted from stdout.
@@ -351,12 +354,20 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
         &config.workspace_root.to_string_lossy(),
         "run",
         &goal_title,
+        "--objective-file",
+        &context_path.to_string_lossy(),
         "--headless",
         "--no-version-check",
         "--persona",
         persona,
     ]);
     cmd.env("TA_ADVISOR_DRAFT_ID", config.draft_id.to_string());
+    // Also set the env var for any future consumer that reads it directly --
+    // --objective-file above is the real, working delivery mechanism.
+    // Previously this env var was the *only* attempt to deliver context and
+    // nothing in the codebase reads it, so the advisor agent never actually
+    // saw `context_path`'s content (found 2026-07-11 while building
+    // v0.17.0.12.26's ta_human_verify, which mirrored this same gap).
     cmd.env("TA_ADVISOR_CONTEXT_FILE", &context_path);
     cmd.env("TA_ADVISOR_SECURITY", config.security.to_string());
     cmd.env("TA_ADVISOR_SESSION_ID", config.session_id.to_string());
