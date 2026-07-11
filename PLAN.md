@@ -9550,16 +9550,16 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.22 — CLI Surface Completion: Full Verb+Noun Coverage + Curated Help
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.16
 
 **Goal**: 12.16 intentionally shipped partial (18 of 42 noun-areas mapped onto the 10-verb set, per `docs/design/ta-cli-verb-reference.md`) with the rest still legacy-only. Finish the mapping, and give the CLI a genuinely simple default surface — today only 7 of 61 commands are hidden from `--help` (installer-internal, not a curated "common ops" set), so a new user sees the entire flat command list.
 
 **Items**:
-1. [ ] Map the remaining 24 noun-areas (`advisor`, `memory`, `adapter`, `release`, `intake`, `config`, `policy`, etc.) onto the 10-verb set via `commands::verb::NOUN_TABLE`, matching 12.16's alias + deprecation-notice pattern exactly.
-2. [ ] Curate a default `--help` view showing only the common-operation verb+noun pairs (the ~15-20 combos covering the everyday workflow); full/legacy/advanced commands surface via `ta --help --all` or `ta <verb> --help` drill-down.
-3. [ ] USAGE.md: complete the old→new lookup table to 42/42; document the simple-vs-`--all` help split.
-4. [ ] Tests: every newly-mapped noun-area's alias produces identical behavior through its verb+noun form; default `--help` excludes legacy/advanced-only commands; `--all` shows everything.
+1. [x] Map the remaining 24 noun-areas (`advisor`, `memory`, `adapter`, `release`, `intake`, `config`, `policy`, etc.) onto the 10-verb set via `commands::verb::NOUN_TABLE`, matching 12.16's alias + deprecation-notice pattern exactly.
+2. [x] Curate a default `--help` view showing only the common-operation verb+noun pairs (the ~15-20 combos covering the everyday workflow); full/legacy/advanced commands surface via `ta --help --all` or `ta <verb> --help` drill-down.
+3. [x] USAGE.md: complete the old→new lookup table to 42/42; document the simple-vs-`--all` help split.
+4. [x] Tests: every newly-mapped noun-area's alias produces identical behavior through its verb+noun form; default `--help` excludes legacy/advanced-only commands; `--all` shows everything.
 
 #### Version: `0.17.0-alpha.12.22`
 
