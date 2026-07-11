@@ -22,6 +22,7 @@ serde_yaml = { workspace = true }
 tokio = { workspace = true }
 regex = { workspace = true }
 which = { workspace = true }
+toml = { workspace = true }
 
 # Internal crates
 ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.24" }
@@ -38,6 +39,8 @@ ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.24" }
 ta-workflow = { path = "../ta-workflow", version = "0.17.0-alpha.12.24" }
 ta-actions = { path = "../ta-actions", version = "0.17.0-alpha.12.24" }
 ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.24" }
+ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.24" }
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.24" }
 
 
 [dev-dependencies]
