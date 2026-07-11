@@ -9600,7 +9600,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.26 — `ta_human_verify`: Two-Stage Confidence-Gated Verification (replaces `ta_ask_human`)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain` workload classification)
 
 **Goal**: `ta_ask_human` (`crates/ta-mcp-gateway/src/tools/human.rs`) always blocks and waits for a real human, for every question, regardless of how routine or high-stakes it is — there is no gating today. Per the user's design (2026-07-10): reframe it as `ta_human_verify`, which first asks a **human-opinion model** (an LLM prompted to answer the question the way a human reviewer would) and an independent **validator** (a second, separate pass that critiques the opinion's reasoning rather than trusting its self-reported confidence), scores the pair through the existing generic `ta_decision::gate::decide()` (already built in 12.15 — `DecisionInput{verdict, risk_score, confidence}` → `Commit/Reject/Rework/Escalate`, workload-agnostic by design), and only falls through to a real blocking human ask when the gate says `Escalate`. When the gate says `Commit`, auto-confirm using the opinion model's answer, but **document** the full opinion + validator reasoning + confidence in an audit trail rather than silently discarding it — never a black box. Per-workload policy (keyed on `ta-brain::RoutingDecision::workload_type`/`security_tier`) controls whether the synthetic pre-check is attempted at all (e.g., a `security`-classified workload always escalates straight to a human, skipping the synthetic stage entirely).
