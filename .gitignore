@@ -109,9 +109,9 @@ result-*
 .ta/heartbeats/
 .ta/action-log.jsonl
 .ta/autonomous-loop-state.json
-.ta/telemetry.jsonl
 .ta/logs/
 .ta/routing-decisions.jsonl
+.ta/telemetry.jsonl
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml

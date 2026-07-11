@@ -1,11 +1,13 @@
-// api/dashboard_advisor.rs — Dashboard Advisor dialog (v0.17.0.12.6 item 4).
+// api/dashboard_advisor.rs — Dashboard/Attention Advisor dialog (v0.17.0.12.6 item 4).
 //
-// A distinct, lightweight conversation surface embedded on the Studio
-// dashboard (below the 8 Project Health stat boxes), separate from the
-// existing full-tab Advisor chat (`GET/POST /api/advisor/history`, backed by
-// `.ta/advisor-history.json`). Persisted as JSONL at
-// `.ta/advisor-history.jsonl` per plan item 4, one line per turn, so the log
-// can be tailed/appended without rewriting the whole file.
+// A lightweight conversation surface embedded on the Studio
+// Attention/Dashboard destination. Prior to v0.17.0.12.17 this was persisted
+// separately from the full-tab Advisor chat (`.ta/advisor-history.json` vs
+// `.ta/advisor-history.jsonl`) — two independently-persisted histories for
+// what a user experiences as one Advisor. They're now one conversation, one
+// store: `crate::api::advisor`'s unified `.ta/advisor-history.jsonl`.
+// `DialogEntry` here is this surface's view over that shared store — see
+// `crate::api::advisor::HistoryEntry` for the on-disk shape.
 //
 // Classification is delegated to the new `ta-advisor` crate (items 13-16):
 //   - `queue_goal`  → confirmation card (title/phase/estimated duration)
@@ -24,14 +26,15 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::api::advisor::compute_live_context;
+use crate::api::advisor::{
+    append_history_entries, compute_live_context, load_history, HistoryEntry,
+};
 use crate::api::AppState;
 use ta_advisor::{
     build_confirmation_card, classify_advisor_intent, next_clarify_step, AdvisorIntent,
     ClarifyOutcome, ClarifyState, ConfirmationCard,
 };
-
-const MAX_DIALOG_ENTRIES: usize = 400;
+use ta_session::AdvisorOption;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogEntry {
@@ -86,54 +89,51 @@ impl DialogEntry {
     }
 }
 
-fn dialog_path(state: &AppState) -> std::path::PathBuf {
-    state.project_root.join(".ta").join("advisor-history.jsonl")
+impl From<DialogEntry> for HistoryEntry {
+    fn from(d: DialogEntry) -> Self {
+        HistoryEntry {
+            role: d.role,
+            text: d.text,
+            timestamp: d.timestamp,
+            intent: d.intent,
+            confirmation_card: d.confirmation_card,
+            options: d.options.map(|opts| {
+                opts.into_iter()
+                    .enumerate()
+                    .map(|(i, label)| AdvisorOption {
+                        number: (i + 1) as u32,
+                        label,
+                        action_type: "text".to_string(),
+                        command: None,
+                    })
+                    .collect()
+            }),
+        }
+    }
+}
+
+impl From<HistoryEntry> for DialogEntry {
+    fn from(h: HistoryEntry) -> Self {
+        DialogEntry {
+            role: h.role,
+            text: h.text,
+            timestamp: h.timestamp,
+            intent: h.intent,
+            confirmation_card: h.confirmation_card,
+            options: h
+                .options
+                .map(|opts| opts.into_iter().map(|o| o.label).collect()),
+        }
+    }
 }
 
 fn load_entries(state: &AppState) -> Vec<DialogEntry> {
-    let path = dialog_path(state);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<DialogEntry>(l).ok())
-        .collect()
+    load_history(state).into_iter().map(Into::into).collect()
 }
 
 fn append_entries(state: &AppState, entries: &[DialogEntry]) -> std::io::Result<()> {
-    use std::io::Write;
-    let path = dialog_path(state);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Rewrite-with-trim if we're at the cap, otherwise append in place —
-    // avoids an unbounded file while keeping the common case a cheap append.
-    let mut existing = load_entries(state);
-    existing.extend(entries.iter().cloned());
-    if existing.len() > MAX_DIALOG_ENTRIES {
-        existing = existing[existing.len() - MAX_DIALOG_ENTRIES..].to_vec();
-        let mut file = std::fs::File::create(&path)?;
-        for entry in &existing {
-            let line = serde_json::to_string(entry)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            writeln!(file, "{}", line)?;
-        }
-        return Ok(());
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    for entry in entries {
-        let line = serde_json::to_string(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        writeln!(file, "{}", line)?;
-    }
-    Ok(())
+    let converted: Vec<HistoryEntry> = entries.iter().cloned().map(Into::into).collect();
+    append_history_entries(state, &converted).map(|_| ())
 }
 
 /// How many consecutive "ambiguous" advisor turns trail the history — used to
@@ -249,7 +249,7 @@ pub async fn post_dialog(
 
     let entries_to_save = vec![DialogEntry::user(message), advisor_entry.clone()];
     if let Err(e) = append_entries(&state, &entries_to_save) {
-        tracing::warn!(path = ?dialog_path(&state), err = %e, "Failed to persist advisor dialog");
+        tracing::warn!(path = ?crate::api::advisor::advisor_history_path(&state), err = %e, "Failed to persist advisor dialog");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to persist dialog: {}", e)})),
