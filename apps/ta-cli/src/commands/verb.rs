@@ -323,7 +323,7 @@ const NOUN_TABLE: &[NounEntry] = &[
     NounEntry {
         keys: &["meridian"],
         legacy: "meridian",
-        verbs: &[("create", "init"), ("list", "help"), ("check", "analyze")],
+        verbs: &[("create", "init"), ("list", "tools"), ("check", "analyze")],
     },
     NounEntry {
         keys: &["tools", "tool"],

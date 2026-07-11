@@ -610,6 +610,7 @@ enum Commands {
         command: commands::pr::PrCommands,
     },
     /// Inspect the audit trail.
+    #[command(hide = true)]
     Audit {
         #[command(subcommand)]
         command: commands::audit::AuditCommands,
@@ -873,7 +874,7 @@ enum Commands {
     ///
     /// Subcommands:
     ///   ta meridian analyze  — run KPI analysis against velocity data
-    ///   ta meridian help     — list tools exposed by meridian serve (MCP)
+    ///   ta meridian tools    — list tools exposed by meridian serve (MCP)
     ///   ta meridian init     — create meridian.toml with starter KPI definitions
     ///   ta meridian suggest  — surface KPI alignment gaps with suggestions
     ///
@@ -1955,6 +1956,20 @@ mod verb_dispatch_tests {
             .expect("parse thread panicked")
     }
 
+    /// Build the full `clap::Command` metadata tree the same way the real
+    /// binary does, on the same dedicated large-stack thread as `parse_argv`.
+    /// `CommandFactory::command()` recursively builds `Arg` definitions for
+    /// every field of every `Commands` variant — the same large-enum stack
+    /// cost as parsing, just via a different clap entry point.
+    fn build_command() -> clap::Command {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(Cli::command)
+            .expect("spawn command-build thread")
+            .join()
+            .expect("command-build thread panicked")
+    }
+
     #[test]
     fn parses_all_ten_verb_shapes() {
         assert!(matches!(
@@ -2194,7 +2209,7 @@ mod verb_dispatch_tests {
     /// legacy noun-first / advanced-only top-level command.
     #[test]
     fn curated_help_hides_legacy_and_advanced_commands_by_default() {
-        let cmd = Cli::command();
+        let cmd = build_command();
         let legacy_and_advanced = [
             "goal",
             "draft",
@@ -2264,7 +2279,7 @@ mod verb_dispatch_tests {
     /// run/status/shell/onboard/doctor) must stay visible by default.
     #[test]
     fn curated_help_keeps_core_surface_visible_by_default() {
-        let cmd = Cli::command();
+        let cmd = build_command();
         let curated = [
             "create", "list", "show", "update", "remove", "approve", "deny", "apply", "check",
             "sync", "status", "run", "shell", "doctor", "onboard",
@@ -2284,7 +2299,7 @@ mod verb_dispatch_tests {
     /// `unhide_all_subcommands` clears every top-level `hide` flag.
     #[test]
     fn unhide_all_subcommands_clears_every_top_level_hide_flag() {
-        let mut cmd = Cli::command();
+        let mut cmd = build_command();
         unhide_all_subcommands(&mut cmd);
         for sub in cmd.get_subcommands() {
             assert!(

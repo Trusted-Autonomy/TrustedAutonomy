@@ -12926,7 +12926,7 @@ TA checks in order: `TA_MERIDIAN_BINARY` env var → `daemon.toml [meridian].bin
 ### Discovering available tools
 
 ```bash
-ta meridian help
+ta meridian tools
 ```
 
 Starts a short-lived `meridian serve` session, queries the MCP `tools/list` endpoint, and prints every tool name and description. Use this to see exactly which analytics are available as native tool calls inside a running goal — useful after upgrading Meridian to discover new capabilities.
