@@ -582,28 +582,25 @@ fn goal_to_candidate(
         | GoalRunState::AwaitingInput { .. } => ("in progress".to_string(), None, vec![]),
         GoalRunState::PrReady | GoalRunState::UnderReview => {
             // Check if draft was denied.
-            if let Some(d) = draft {
-                match &d.status {
-                    DraftStatus::Denied { reason, .. } => (
-                        format!("draft denied: {}", truncate(reason, 40)),
-                        Some(reason.clone()),
-                        d.verification_warnings.clone(),
-                    ),
-                    _ => {
-                        // Draft pending or under review — check for verify warnings.
-                        if !d.verification_warnings.is_empty() {
-                            (
-                                format!("verify warnings ({})", d.verification_warnings.len()),
-                                None,
-                                d.verification_warnings.clone(),
-                            )
-                        } else {
-                            return None; // Not actionable — draft is pending/approved.
-                        }
+            let d = draft?; // No draft yet.
+            match &d.status {
+                DraftStatus::Denied { reason, .. } => (
+                    format!("draft denied: {}", truncate(reason, 40)),
+                    Some(reason.clone()),
+                    d.verification_warnings.clone(),
+                ),
+                _ => {
+                    // Draft pending or under review — check for verify warnings.
+                    if !d.verification_warnings.is_empty() {
+                        (
+                            format!("verify warnings ({})", d.verification_warnings.len()),
+                            None,
+                            d.verification_warnings.clone(),
+                        )
+                    } else {
+                        return None; // Not actionable — draft is pending/approved.
                     }
                 }
-            } else {
-                return None; // No draft yet.
             }
         }
         GoalRunState::Configured => ("configured (not started)".to_string(), None, vec![]),
