@@ -131,6 +131,12 @@ result-*
 .hive-mind/
 .mcp.json
 
+# Demo recordings
+*.cast
+
+# Local-only work queue (machine-specific, not shared via git)
+memory/work_queue.md
+
 # Trusted Autonomy — local runtime state (do not commit)
 .ta/daemon.toml
 .ta/daemon.local.toml
@@ -165,12 +171,5 @@ result-*
 .ta/taignore
 .ta/ide-excludes.json
 .ta/*.log
-.ta/*.log.*
 .ta/*.pid
 .ta/*.lock
-
-# Demo recordings
-*.cast
-
-# Local-only work queue (machine-specific, not shared via git)
-memory/work_queue.md
