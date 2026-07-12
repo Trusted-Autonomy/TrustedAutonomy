@@ -97,8 +97,9 @@ jobs:
           tar xzf "$ASSET" -C nightly-extract
           chmod +x nightly-extract/ta
 
-          # `ta --version` prints "<version> (<short-sha> <date>)" — take the first field.
-          ASSET_VER=$(./nightly-extract/ta --version | awk '{print $1}')
+          # `ta --version` prints "ta <version> (<short-sha> <date>)" — the
+          # binary name is field 1, the version is field 2.
+          ASSET_VER=$(./nightly-extract/ta --version | awk '{print $2}')
           echo "Nightly asset version: $ASSET_VER"
 
           if [ "$ASSET_VER" != "$CARGO_VER" ]; then
