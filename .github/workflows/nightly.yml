@@ -18,12 +18,17 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: ta
-  # Renamed from "nightly" (2026-07-08): that tag got permanently locked by
-  # GitHub's Immutable Releases feature (GA 2025-10-28) -- once a release
-  # under a tag is published immutable, the tag name is blocked from reuse
-  # forever (422 "tag_name was used by an immutable release"), even after
-  # deleting the release and the tag. Do not reuse the old "nightly" tag name.
-  NIGHTLY_TAG: nightly-latest
+  # Renamed from "nightly" (2026-07-08), then "nightly-latest" (2026-07-13):
+  # BOTH got permanently locked by GitHub's Immutable Releases feature, now
+  # GA for all repos as of 2025-10-28 -- publishing (un-drafting) a release
+  # makes it immutable unconditionally, so any single stable tag that gets
+  # its assets clobbered nightly will eventually hit this wall again. This
+  # rename is a temporary reprieve, not a real fix -- see PLAN.md /
+  # docs/design (or ask in the team channel) for the tracked follow-up to
+  # redesign this around per-run dated tags + a separately-mutable "latest
+  # nightly" pointer, which is immutable-releases-compatible by design.
+  # Do not reuse "nightly" or "nightly-latest".
+  NIGHTLY_TAG: nightly-build
   NIGHTLY_HISTORY_LIMIT: 60
 
 jobs:

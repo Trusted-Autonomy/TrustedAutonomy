@@ -20,10 +20,11 @@ permissions:
   contents: read
 
 env:
-  # Must match NIGHTLY_TAG in .github/workflows/nightly.yml. Renamed from
-  # "nightly" (2026-07-08) after that tag got permanently locked by GitHub's
-  # Immutable Releases feature -- see nightly.yml for the full incident note.
-  NIGHTLY_TAG: nightly-latest
+  # Must match NIGHTLY_TAG in .github/workflows/nightly.yml. Renamed twice
+  # now ("nightly" -> "nightly-latest" -> "nightly-build") after each prior
+  # tag got permanently locked by GitHub's Immutable Releases feature -- see
+  # nightly.yml for the full incident note and the tracked follow-up.
+  NIGHTLY_TAG: nightly-build
 
 jobs:
   validate:
