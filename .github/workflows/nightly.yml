@@ -18,17 +18,17 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: ta
-  # Renamed from "nightly" (2026-07-08), then "nightly-latest" (2026-07-13):
-  # BOTH got permanently locked by GitHub's Immutable Releases feature, now
-  # GA for all repos as of 2025-10-28 -- publishing (un-drafting) a release
-  # makes it immutable unconditionally, so any single stable tag that gets
-  # its assets clobbered nightly will eventually hit this wall again. This
-  # rename is a temporary reprieve, not a real fix -- see PLAN.md /
-  # docs/design (or ask in the team channel) for the tracked follow-up to
-  # redesign this around per-run dated tags + a separately-mutable "latest
-  # nightly" pointer, which is immutable-releases-compatible by design.
-  # Do not reuse "nightly" or "nightly-latest".
-  NIGHTLY_TAG: nightly-build
+  # Per-run dated tags (nightly-YYYYMMDD-<shortsha>), never reused --
+  # immutable-releases-compatible by design. History: a single stable tag
+  # ("nightly", then "nightly-latest", then "nightly-build") got permanently
+  # locked by GitHub's Immutable Releases feature (GA for all repos since
+  # 2025-10-28: publishing/un-drafting a release makes it immutable
+  # unconditionally -- confirmed via GitHub's docs and community discussions,
+  # not a toggleable-away-the-symptom fix since the toggle itself is a real
+  # supply-chain protection, not something to disable). Never marked --latest
+  # (that slot must stay pointed at real stable releases); browse nightlies
+  # via the GitHub-native releases search instead of a fixed tag/URL — see
+  # README.md / docs/USAGE.md.
   NIGHTLY_HISTORY_LIMIT: 60
 
 jobs:
@@ -40,6 +40,7 @@ jobs:
       head_sha: ${{ steps.check.outputs.head_sha }}
       head_sha_short: ${{ steps.check.outputs.head_sha_short }}
       trigger_type: ${{ steps.check.outputs.trigger_type }}
+      nightly_tag: ${{ steps.check.outputs.nightly_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -54,6 +55,7 @@ jobs:
           HEAD_SHA_SHORT=$(git rev-parse --short HEAD)
           echo "head_sha=${HEAD_SHA}" >> $GITHUB_OUTPUT
           echo "head_sha_short=${HEAD_SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "nightly_tag=nightly-$(date -u +%Y%m%d)-${HEAD_SHA_SHORT}" >> $GITHUB_OUTPUT
 
           # Determine trigger type for history table
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -69,11 +71,15 @@ jobs:
             exit 0
           fi
 
-          # Download last-sha.txt from the existing nightly release (if any).
-          # On first ever run (no nightly release yet), proceed unconditionally.
+          # Find the most recent nightly-* release (dated tags, never reused --
+          # there is no single "the nightly release" to look up by fixed name
+          # anymore) and check its last-sha.txt asset against HEAD.
+          LATEST_NIGHTLY_TAG=$(gh release list --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.createdAt) | last | .tagName' 2>/dev/null || true)
+
           LAST_SHA=""
-          if gh release view "$NIGHTLY_TAG" --json assets 2>/dev/null | grep -q 'last-sha.txt'; then
-            LAST_SHA=$(gh release download "$NIGHTLY_TAG" --pattern "last-sha.txt" --output - 2>/dev/null | tr -d '[:space:]') || true
+          if [ -n "$LATEST_NIGHTLY_TAG" ]; then
+            LAST_SHA=$(gh release download "$LATEST_NIGHTLY_TAG" --pattern "last-sha.txt" --output - 2>/dev/null | tr -d '[:space:]') || true
           fi
 
           if [ -z "$LAST_SHA" ]; then
@@ -341,6 +347,7 @@ jobs:
           HEAD_SHA: ${{ needs.check-for-changes.outputs.head_sha }}
           HEAD_SHA_SHORT: ${{ needs.check-for-changes.outputs.head_sha_short }}
           TRIGGER_TYPE: ${{ needs.check-for-changes.outputs.trigger_type }}
+          NIGHTLY_TAG: ${{ needs.check-for-changes.outputs.nightly_tag }}
           REPO: ${{ github.repository }}
         run: |
           BUILD_DATE=$(date -u +"%Y-%m-%d")
@@ -349,36 +356,27 @@ jobs:
           # Asset URL base for this nightly release
           ASSET_BASE="https://github.com/${REPO}/releases/download/${NIGHTLY_TAG}"
 
-          # New row for the history table
-          NEW_ROW="| ${BUILD_DATE} | [${HEAD_SHA_SHORT}](https://github.com/${REPO}/commit/${HEAD_SHA}) | ${TRIGGER_TYPE} | [Linux x86](${ASSET_BASE}/ta-nightly-x86_64-unknown-linux-musl.tar.gz) [Linux ARM](${ASSET_BASE}/ta-nightly-aarch64-unknown-linux-musl.tar.gz) [macOS Intel](${ASSET_BASE}/ta-nightly-x86_64-apple-darwin.tar.gz) [macOS ARM](${ASSET_BASE}/ta-nightly-aarch64-apple-darwin.tar.gz) [Windows MSI](${ASSET_BASE}/ta-nightly-x86_64-pc-windows-msvc.msi) [Windows zip](${ASSET_BASE}/ta-nightly-x86_64-pc-windows-msvc.zip) |"
-
-          # Fetch existing release body to extract and update the history table.
-          # On first run, start fresh.
-          EXISTING_BODY=""
-          if gh release view "$NIGHTLY_TAG" --json body 2>/dev/null | grep -q '"body"'; then
-            EXISTING_BODY=$(gh release view "$NIGHTLY_TAG" --json body --jq '.body')
-          fi
-
-          # Extract existing history rows (lines starting with "| 20") from the body.
-          HISTORY_ROWS=""
-          if [ -n "$EXISTING_BODY" ]; then
-            HISTORY_ROWS=$(echo "$EXISTING_BODY" | grep -E '^\| 20[0-9]{2}-' || true)
-          fi
-
-          # Prepend the new row, keep up to NIGHTLY_HISTORY_LIMIT rows.
-          ALL_ROWS="${NEW_ROW}"
-          if [ -n "$HISTORY_ROWS" ]; then
-            ALL_ROWS="$(printf '%s\n%s' "${NEW_ROW}" "${HISTORY_ROWS}")"
-          fi
-          # Trim to limit
-          ALL_ROWS=$(echo "$ALL_ROWS" | head -n "${NIGHTLY_HISTORY_LIMIT}")
-
           # Determine what's new since the last stable (non-prerelease) release.
           LAST_STABLE_TAG=$(gh release list --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
           WHATS_NEW=""
           if [ -n "${LAST_STABLE_TAG}" ]; then
             WHATS_NEW=$(git log "${LAST_STABLE_TAG}..HEAD" --oneline --no-merges 2>/dev/null | head -30 || true)
           fi
+
+          # Recent nightly history, built directly from real past releases --
+          # each dated-tag release is a permanent object now (never reused/
+          # edited), so there's no need to hand-maintain a growing table
+          # inside one body string across runs the way the old single-tag
+          # design did. The release being created *this* run doesn't exist
+          # yet when this step runs, so prepend it manually.
+          THIS_ROW="| ${BUILD_DATE} | [${NIGHTLY_TAG}](https://github.com/${REPO}/releases/tag/${NIGHTLY_TAG}) |"
+          PAST_ROWS=$(gh release list --limit 200 --json tagName,createdAt \
+            --jq --arg repo "${REPO}" '
+              [.[] | select(.tagName | startswith("nightly-"))]
+              | sort_by(.createdAt) | reverse | .[0:14]
+              | .[] | "| \(.createdAt[0:10]) | [\(.tagName)](https://github.com/\($repo)/releases/tag/\(.tagName)) |"
+            ' 2>/dev/null || true)
+          HISTORY_ROWS="$(printf '%s\n%s' "${THIS_ROW}" "${PAST_ROWS}")"
 
           # Build the full release body (avoid heredoc — unindented content breaks YAML block scalars)
           {
@@ -387,7 +385,10 @@ jobs:
             printf '**Built**: %s (%s)\n' "${BUILD_TIMESTAMP}" "${TRIGGER_TYPE}"
             printf '**Branch**: main\n\n'
             printf '> This is an automated nightly pre-release built from the latest commit on `main`.\n'
-            printf '> For stable releases, see the [latest release](https://github.com/%s/releases/latest).\n\n' "${REPO}"
+            printf '> Each night gets its own permanent release (tags are never reused, so this\n'
+            printf '> page will always be here) -- browse all nightlies on the\n'
+            printf '> [nightly releases page](https://github.com/%s/releases?q=nightly&expanded=true),\n' "${REPO}"
+            printf '> or see the [latest stable release](https://github.com/%s/releases/latest) instead.\n\n' "${REPO}"
             printf '### Download\n\n'
             printf '| Platform | Archive | Installer |\n'
             printf '|----------|---------|------------|\n'
@@ -405,10 +406,10 @@ jobs:
               printf '```\n\n'
             fi
             printf '%s\n\n' '---'
-            printf '## Nightly History {#nightly-history}\n\n'
-            printf '| Date | Commit | Trigger | Downloads |\n'
-            printf '|------|--------|---------|------------|\n'
-            printf '%s\n' "${ALL_ROWS}"
+            printf '## Recent Nightly Builds {#nightly-history}\n\n'
+            printf '| Date | Release |\n'
+            printf '|------|--------|\n'
+            printf '%s\n' "${HISTORY_ROWS}"
           } > nightly-body.md
 
           echo "body_file=nightly-body.md" >> $GITHUB_OUTPUT
@@ -438,74 +439,64 @@ jobs:
           fi
           echo "All ${#REQUIRED[@]} required nightly artifacts present."
 
-      - name: Create or update nightly GitHub release
+      - name: Create nightly GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA_SHORT: ${{ needs.check-for-changes.outputs.head_sha_short }}
-          BUILD_DATE: ${{ env.BUILD_DATE }}
+          NIGHTLY_TAG: ${{ needs.check-for-changes.outputs.nightly_tag }}
         run: |
           BUILD_DATE=$(date -u +"%Y-%m-%d")
           RELEASE_TITLE="Nightly ${BUILD_DATE} (${HEAD_SHA_SHORT})"
 
-          # GitHub's "Immutable releases" restriction blocks replacing assets on a
-          # *published* release, but not on a draft one. The nightly release needs
-          # its assets clobbered on every run, so we do a draft -> upload -> publish
-          # dance: if a published nightly release exists from a previous run, flip
-          # it back to draft first so assets can be replaced, upload the new
-          # assets, then un-draft at the end.
+          # Every run creates a brand-new release under a never-reused dated
+          # tag (nightly-YYYYMMDD-<shortsha>) -- nothing is ever edited or
+          # re-uploaded to an existing release, so GitHub's Immutable Releases
+          # feature (unconditional GA for all repos since 2025-10-28: any
+          # published release becomes immutable, confirmed not a toggleable
+          # per-repo setting worth disabling since it's a real supply-chain
+          # protection) simply never applies. No draft/undraft dance needed --
+          # `gh release create` with assets attached publishes immediately.
           #
-          # Root cause of the nightly release staying stuck as draft forever: this
-          # workflow previously only ever called `--draft` and never un-set it —
-          # there was no publish step at all, not an auth/ID/ordering bug. A draft
-          # release is invisible to anonymous/public viewers (the badge and the
-          # `releases/tag/$NIGHTLY_TAG` link both 404 for non-collaborators), so it
-          # must be un-drafted after each successful run.
-          if [ "$(gh release view "$NIGHTLY_TAG" --json isDraft --jq '.isDraft' 2>/dev/null)" = "false" ]; then
-            echo "Existing $NIGHTLY_TAG release is published — reverting to draft so assets can be replaced..."
-            if ! gh release edit "$NIGHTLY_TAG" --draft; then
-              echo ""
-              echo "ERROR: could not revert '$NIGHTLY_TAG' back to draft. If this is a"
-              echo "'tag_name was used by an immutable release' error, the tag is"
-              echo "permanently locked by GitHub's Immutable Releases feature -- delete"
-              echo "and recreate is NOT a valid recovery (the lock survives tag deletion)."
-              echo "Fix: pick a new NIGHTLY_TAG value in .github/workflows/nightly.yml"
-              echo "and .github/workflows/nightly-validate.yml, and update README.md +"
-              echo "docs/USAGE.md's badge/download URLs to match."
-              exit 1
-            fi
-          fi
-
-          if gh release view "$NIGHTLY_TAG" 2>/dev/null; then
-            echo "Updating existing $NIGHTLY_TAG release..."
-            gh release edit "$NIGHTLY_TAG" \
-              --title "$RELEASE_TITLE" \
-              --notes-file nightly-body.md \
-              --prerelease \
-              --draft
-            # Replace all assets (clobber existing ones)
-            gh release upload "$NIGHTLY_TAG" artifacts/* --clobber
-          else
-            echo "Creating first $NIGHTLY_TAG release..."
-            gh release create "$NIGHTLY_TAG" \
-              --title "$RELEASE_TITLE" \
-              --notes-file nightly-body.md \
-              --prerelease \
-              --draft
-            gh release upload "$NIGHTLY_TAG" artifacts/* --clobber
-          fi
-
-          # Publish (un-draft) now that all assets are uploaded — this is the step
-          # that was missing before, leaving nightly permanently draft.
-          echo "Publishing $NIGHTLY_TAG release (un-drafting)..."
-          if ! gh release edit "$NIGHTLY_TAG" --draft=false; then
-            echo ""
-            echo "ERROR: could not publish '$NIGHTLY_TAG'. See the guidance above if this"
-            echo "is an immutable-release tag lock."
-            exit 1
-          fi
+          # --latest=false is deliberate: nightlies must never claim the
+          # repo's single "latest release" slot, which needs to stay pointed
+          # at the actual latest stable release for `/releases/latest` and
+          # `/releases/latest/download/...` to work correctly for users who
+          # want stable, not nightly, builds.
+          echo "Creating nightly release ${NIGHTLY_TAG}..."
+          gh release create "$NIGHTLY_TAG" \
+            --title "$RELEASE_TITLE" \
+            --notes-file nightly-body.md \
+            --prerelease \
+            --latest=false \
+            artifacts/*
 
           echo ""
           echo "Nightly release published:"
           echo "  Title: ${RELEASE_TITLE}"
           echo "  SHA: ${{ needs.check-for-changes.outputs.head_sha }}"
           echo "  URL: https://github.com/${{ github.repository }}/releases/tag/${NIGHTLY_TAG}"
+
+      - name: Clean up old nightly releases (retention)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Dated tags accumulate one new release per run forever unless
+          # pruned. Deletion (unlike editing/re-uploading assets) still works
+          # fine on immutable releases -- only in-place mutation is blocked --
+          # so this keeps working regardless of the immutable-releases toggle.
+          OLD_TAGS=$(gh release list --limit 500 --json tagName,createdAt \
+            --jq --argjson limit "${NIGHTLY_HISTORY_LIMIT}" '
+              [.[] | select(.tagName | startswith("nightly-"))]
+              | sort_by(.createdAt) | reverse | .[$limit:] | .[].tagName
+            ' 2>/dev/null || true)
+
+          if [ -n "$OLD_TAGS" ]; then
+            echo "Deleting nightly releases beyond the retention limit (${NIGHTLY_HISTORY_LIMIT}):"
+            echo "$OLD_TAGS" | while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
+              echo "  - $tag"
+              gh release delete "$tag" --yes --cleanup-tag || echo "    (failed to delete $tag, continuing)"
+            done
+          else
+            echo "No old nightly releases to clean up (retention limit: ${NIGHTLY_HISTORY_LIMIT})."
+          fi
