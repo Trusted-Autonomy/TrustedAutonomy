@@ -19,12 +19,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Must match NIGHTLY_TAG in .github/workflows/nightly.yml. Renamed from
-  # "nightly" (2026-07-08) after that tag got permanently locked by GitHub's
-  # Immutable Releases feature -- see nightly.yml for the full incident note.
-  NIGHTLY_TAG: nightly-latest
-
 jobs:
   validate:
     name: Validate badges + nightly release
@@ -37,6 +31,26 @@ jobs:
           # Pin to the exact commit nightly.yml built, in case main advanced
           # between nightly running and this validation running.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve the newest nightly release
+        # nightly.yml (2026-07-13 redesign) creates a brand-new, never-reused
+        # dated release every run (nightly-YYYYMMDD-<shortsha>) instead of
+        # clobbering one stable tag -- immutable-releases-compatible by
+        # design, since nothing is ever re-edited. There is no fixed tag name
+        # to check anymore; find whichever nightly-* release is newest.
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release list --repo "${{ github.repository }}" --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.createdAt) | last | .tagName' 2>/dev/null || true)
+          if [ -z "$TAG" ]; then
+            echo "ERROR: no nightly-* release found via the GitHub API."
+            echo "  Run manually: gh release list --repo ${{ github.repository }}"
+            exit 1
+          fi
+          echo "Newest nightly release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Validate stable release badge renders
         run: |
@@ -66,6 +80,7 @@ jobs:
       - name: Validate nightly release is published (not draft)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NIGHTLY_TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           IS_DRAFT=$(gh api "repos/${{ github.repository }}/releases/tags/${NIGHTLY_TAG}" --jq '.draft' 2>/dev/null || echo "unknown")
           if [ "$IS_DRAFT" = "unknown" ]; then
@@ -75,10 +90,10 @@ jobs:
           fi
           if [ "$IS_DRAFT" = "true" ]; then
             echo "ERROR: $NIGHTLY_TAG release is still a draft — it is invisible to anonymous/public"
-            echo "  viewers (the badge and releases/tag/${NIGHTLY_TAG} link both 404 for them)."
-            echo "  Fix: check the 'Create or update nightly GitHub release' step in"
-            echo "  .github/workflows/nightly.yml — it must end with"
-            echo "  'gh release edit \$NIGHTLY_TAG --draft=false' after uploading assets."
+            echo "  viewers (releases/tag/${NIGHTLY_TAG} 404s for them). Each nightly.yml run"
+            echo "  creates a fresh release directly via 'gh release create ... artifacts/*',"
+            echo "  which publishes immediately -- this should not be reachable; check the"
+            echo "  'Create nightly GitHub release' step in nightly.yml for a regression."
             exit 1
           fi
           echo "OK: $NIGHTLY_TAG release is published (draft=false)."
@@ -86,6 +101,7 @@ jobs:
       - name: Validate nightly asset version matches workspace version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NIGHTLY_TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "Workspace version (Cargo.toml, source of truth): $CARGO_VER"
