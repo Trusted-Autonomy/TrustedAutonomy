@@ -32,16 +32,47 @@ use ta_brain::{prioritize, RoutingDecision};
 use ta_intake::TriggerEvent;
 use ta_session::workflow_session::AdvisorSecurity;
 
+use crate::classify::AMBIGUOUS_CONFIDENCE_THRESHOLD;
+
+/// What the coordinator recommends doing with one queued event.
+///
+/// Replaces the earlier binary `auto_dispatch_eligible: bool` split
+/// (v0.17.0.12.20) with a third outcome (v0.17.0.12.23): a routing decision
+/// this low-confidence isn't safe to either fire automatically *or* silently
+/// queue for later human review — it should ask a real clarifying question
+/// now, the same `ta_ask_human`-backed mechanism `ta-advisor::pipeline` uses
+/// for the free-text goal-creation entry point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecommendationOutcome {
+    /// `decision.security_tier == AdvisorSecurity::Auto` at sufficient
+    /// workload-classification confidence — the coordinator may dispatch
+    /// this one without further human review.
+    AutoEligible,
+    /// Confidently classified, but not at `Auto` security — needs a human
+    /// to review and promote via `ta intake fire`.
+    NeedsReview,
+    /// Workload-classification confidence is below
+    /// `AMBIGUOUS_CONFIDENCE_THRESHOLD` — too low to trust either an
+    /// autonomous dispatch or a silent "needs review" queue entry; the
+    /// caller should fire a clarifying question before doing anything else.
+    NeedsClarification,
+}
+
 /// One queued event, routed and ranked.
 #[derive(Debug, Clone)]
 pub struct CoordinatorRecommendation {
     pub event: TriggerEvent,
     pub decision: RoutingDecision,
-    /// `true` when `decision.security_tier == AdvisorSecurity::Auto` — the
-    /// coordinator may dispatch this one without further human review, the
-    /// same meaning `AdvisorSecurity::Auto` already carries for the
-    /// Advisor's other capabilities.
-    pub auto_dispatch_eligible: bool,
+    pub outcome: RecommendationOutcome,
+}
+
+impl CoordinatorRecommendation {
+    /// `true` when `outcome == RecommendationOutcome::AutoEligible` — kept
+    /// as a convenience accessor for callers that only care about the
+    /// auto-dispatch bit, mirroring the field this replaces.
+    pub fn auto_dispatch_eligible(&self) -> bool {
+        self.outcome == RecommendationOutcome::AutoEligible
+    }
 }
 
 /// A priority-ordered set of recommendations for `.ta/intake-queue.jsonl`'s
@@ -56,34 +87,50 @@ impl CoordinationReport {
     pub fn auto_eligible(&self) -> impl Iterator<Item = &CoordinatorRecommendation> {
         self.recommendations
             .iter()
-            .filter(|r| r.auto_dispatch_eligible)
+            .filter(|r| r.outcome == RecommendationOutcome::AutoEligible)
     }
 
     pub fn needs_review(&self) -> impl Iterator<Item = &CoordinatorRecommendation> {
         self.recommendations
             .iter()
-            .filter(|r| !r.auto_dispatch_eligible)
+            .filter(|r| r.outcome == RecommendationOutcome::NeedsReview)
+    }
+
+    pub fn needs_clarification(&self) -> impl Iterator<Item = &CoordinatorRecommendation> {
+        self.recommendations
+            .iter()
+            .filter(|r| r.outcome == RecommendationOutcome::NeedsClarification)
     }
 }
 
 /// Build a coordination report from the current `.ta/intake-queue.jsonl`
 /// contents, read-only (Observable, no side effects — see module docs for
-/// why dispatch is a separate, caller-owned step).
+/// why dispatch/clarification are separate, caller-owned steps).
 pub fn build_report(project_root: &Path) -> CoordinationReport {
     let events = ta_intake::read_queue(project_root);
     let routed = prioritize(&events, project_root);
     let recommendations = routed
         .into_iter()
         .map(|(event, decision)| {
-            let auto_dispatch_eligible = decision.security_tier == AdvisorSecurity::Auto;
+            let outcome = classify_outcome(&decision);
             CoordinatorRecommendation {
                 event,
                 decision,
-                auto_dispatch_eligible,
+                outcome,
             }
         })
         .collect();
     CoordinationReport { recommendations }
+}
+
+fn classify_outcome(decision: &RoutingDecision) -> RecommendationOutcome {
+    if decision.workload_confidence < AMBIGUOUS_CONFIDENCE_THRESHOLD {
+        RecommendationOutcome::NeedsClarification
+    } else if decision.security_tier == AdvisorSecurity::Auto {
+        RecommendationOutcome::AutoEligible
+    } else {
+        RecommendationOutcome::NeedsReview
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +182,37 @@ mod tests {
         // classification both clear the auto-eligibility confidence gate.
         assert_eq!(report.auto_eligible().count(), 2);
         assert_eq!(report.needs_review().count(), 0);
+        assert_eq!(report.needs_clarification().count(), 0);
+        assert!(report
+            .recommendations
+            .iter()
+            .all(|r| r.outcome == RecommendationOutcome::AutoEligible));
+        assert!(report
+            .recommendations
+            .iter()
+            .all(|r| r.auto_dispatch_eligible()));
+    }
+
+    /// v0.17.0.12.23: a low-confidence event must not be silently folded
+    /// into `needs_review` — it needs its own `needs_clarification` outcome
+    /// so the caller knows to ask a real question rather than just queueing
+    /// it for a human to eventually notice.
+    #[test]
+    fn low_confidence_event_needs_clarification() {
+        let tmp = tempfile::tempdir().unwrap();
+        // "xyzzy plugh" classifies as "other" at 0.3 confidence — below the
+        // 0.65 threshold — regardless of default security tier.
+        write_queued_event(tmp.path(), "xyzzy plugh");
+
+        let report = build_report(tmp.path());
+        assert_eq!(report.recommendations.len(), 1);
+        assert_eq!(
+            report.recommendations[0].outcome,
+            RecommendationOutcome::NeedsClarification
+        );
+        assert_eq!(report.needs_clarification().count(), 1);
+        assert_eq!(report.auto_eligible().count(), 0);
+        assert_eq!(report.needs_review().count(), 0);
+        assert!(!report.recommendations[0].auto_dispatch_eligible());
     }
 }

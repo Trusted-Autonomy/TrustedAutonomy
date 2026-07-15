@@ -59,6 +59,13 @@
       },
       "type": "array"
     },
+    "resolved_workflow_template": {
+      "description": "Workflow template `ta-workflow::intent::resolve_intent` matched\nagainst the request text at or above its own confidence threshold,\nwhen no `workflow_name_or_path` was given explicitly (v0.17.0.12.23).\nFolds workflow-template matching into `route()` as one signal among\nseveral, rather than a second, parallel intent system a caller would\nneed to consult separately.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "security_tier": {
       "$ref": "#/$defs/AdvisorSecurity",
       "description": "Resolved security tier — reuses the existing `AdvisorSecurity`\ntri-state (read_only/suggest/auto) rather than a new trust-level\nconcept, per `docs/design/ta-concepts-and-architecture.md` §3."

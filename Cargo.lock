@@ -3607,6 +3607,7 @@ dependencies = [
  "ta-goal",
  "ta-intake",
  "ta-session",
+ "ta-workflow",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",

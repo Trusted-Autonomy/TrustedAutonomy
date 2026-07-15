@@ -31,6 +31,14 @@ pub struct RoutingDecision {
     /// Confidence in `workload_type` when it was inferred (1.0 when
     /// explicit). Gates the `security_tier = "auto"` tier — see `route()`.
     pub workload_confidence: f32,
+    /// Workflow template `ta-workflow::intent::resolve_intent` matched
+    /// against the request text at or above its own confidence threshold,
+    /// when no `workflow_name_or_path` was given explicitly (v0.17.0.12.23).
+    /// Folds workflow-template matching into `route()` as one signal among
+    /// several, rather than a second, parallel intent system a caller would
+    /// need to consult separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_workflow_template: Option<String>,
     /// One line per resolution step, most-specific-tier-first, e.g.
     /// `"agent: tier=persona value=claude-opus-4-8"`. Always populated,
     /// always surfaced to a human (Observable & Actionable).

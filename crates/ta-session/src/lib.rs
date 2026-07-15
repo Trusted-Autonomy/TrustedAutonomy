@@ -7,6 +7,7 @@ pub mod advisor_session;
 pub mod agent_action;
 pub mod error;
 pub mod intent;
+pub mod intent_agent;
 pub mod manager;
 pub mod phase_summary;
 pub mod plan;
@@ -33,6 +34,10 @@ pub use agent_action::{
 };
 pub use error::SessionError;
 pub use intent::{classify_intent, Intent, IntentResult};
+pub use intent_agent::{
+    build_intent_context, poll_intent_answer, spawn_intent_agent, write_intent_context,
+    IntentAgentConfig, IntentAgentOutcome,
+};
 pub use manager::SessionManager;
 pub use phase_summary::{build_phase_summary, PhaseRecord, PhaseSummary};
 pub use plan::{PlanDocument, PlanItem};
