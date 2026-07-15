@@ -9657,6 +9657,26 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 #### Version: `0.17.0-alpha.12.28`
 
 ---
+### v0.17.0.12.29 — Studio Regression Fixes: Dashboard Re-render, Plan Load Caching, Attention/Health Reconciliation
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.17 (Studio IA Redesign) — these are regressions/gaps against that phase's own stated goal, found during live usage on 2026-07-14, not new scope.
+
+**Goal**: Three bugs found by the user actually using Studio day-to-day, each traced to a specific file/line during investigation (2026-07-14). All three are regressions or unfinished work against 12.17's own stated goal ("one canonical Attention Queue," "event-driven not timer-driven refresh"), not new feature requests:
+
+1. **Dashboard/Advisor widget flicker.** The Dashboard's SSE handler (`crates/ta-daemon/assets/index.html:1462-1483`) calls `loadDashboard()` on any of 11 event types, which does a full `innerHTML` replace of the *entire* panel (`renderDashboard()`) — including the embedded Advisor widget — on every event, even when that event has nothing to do with the Advisor. During an active goal, events fire often, so the whole panel (Advisor widget included) tears down and rebuilds repeatedly, reading as the widget's text/size/configuration briefly changing then reverting. 12.9 explicitly planned "only re-render fields that changed" but the code does a full rebuild regardless — this item finishes that unfinished promise rather than re-litigating it.
+2. **Plan tab load latency.** `GET /api/plan/phases` (`crates/ta-daemon/src/api/plan.rs:339-397`) re-reads and fully re-parses the entire PLAN.md file (10,000+ lines) from disk on every call, recompiling 4 regexes from scratch each time (not `LazyLock`/memoized), plus an uncached full directory scan + per-file JSON parse of everything in `.ta/goals/`. This endpoint isn't only hit on tab-click — the Dashboard also calls it on every SSE event (same handler as item 1), so the expensive reparse runs constantly in the background, not just when a human opens the Plan tab. It is already lazy per-tab on the frontend (does not block Studio startup) — the fix is caching, not an architecture change.
+3. **Attention/health-signal contradiction.** The Attention queue's empty-state check (`loadAttentionQueue`/`renderAttentionQueue`, `index.html:1731-1782`) only considers pending questions, `PendingReview` drafts, and active goals — it excludes `Approved`-but-unapplied drafts entirely, so it can say "nothing needs your attention" while a completely separate health-check system (`crates/ta-daemon/src/api/health_signals.rs:452`, `check_stale_drafts`) is simultaneously showing a banner for a draft approved-but-unapplied 3+ days. Two independently-computed "does this need me" signals that were never reconciled into the single queue 12.17 was supposed to deliver.
+
+**Items**:
+1. [ ] Dashboard: make the SSE-triggered refresh diff incoming data against currently-rendered state and patch only the changed DOM subtree(s), rather than a full `innerHTML` replace of the whole panel — the Advisor widget specifically should only re-render when its own underlying data (context/dialog) actually changed, not on unrelated goal/draft events.
+2. [ ] `/api/plan/phases`: add a `PlanCache` on `AppState` mirroring the existing `StatusCache`/`SignalsCache` pattern (`crates/ta-daemon/src/api/mod.rs`), keyed on PLAN.md's mtime (or a short TTL matching `StatusCache`'s 5s) — invalidate on write, not on every read. Hoist `parse_plan_phases()`'s 4 `Regex::new` calls (`plan.rs:60-67`) to `LazyLock` statics. Cache the `.ta/goals/*.json` directory scan the same way (used by `active_phase_states`/`active_phase_draft_ids`).
+3. [ ] Attention queue: fold `Approved`-but-unapplied drafts and `/health/signals` results into `loadAttentionQueue`'s own data set and empty-state check, so the same underlying counts drive both the queue list and the "nothing needs attention" message — they must never be able to disagree again.
+4. [ ] Tests: a dashboard re-render test asserting an unrelated SSE event does not replace the Advisor widget's DOM node; a plan-phases cache test asserting a second call within the TTL/mtime window does not re-read PLAN.md from disk; an attention-queue test asserting a stale `Approved` draft or an active health signal both (a) appears in the queue and (b) suppresses the "nothing needs attention" empty state.
+5. [ ] Manual browser verification (matching 12.17's own verification standard) — this is UI/perf, not just unit-testable logic.
+
+#### Version: `0.17.0-alpha.12.29`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
