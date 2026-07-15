@@ -9565,18 +9565,18 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.23 — Advisor-Driven Goal Creation: Natural-Language Intent + Clarification
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.19 (`ta-intake`), v0.17.0.12.20 (`ta-brain`)
 
 **Goal**: Two intent-handling systems exist today and don't talk to each other — `ta-workflow::intent::resolve_intent` (confidence-gated matching against known workflow *templates*, with real clarifying questions, but only reachable from `ta workflow` commands) and `ta-brain::classify`/`route` (resolves team/persona/security/priority, but requires an already-structured title/objective — it never parses raw free text itself). Neither is exposed as "hand the Advisor a sentence and get a routed goal." Unify them so a general user can do exactly that, with a real clarification question asked when confidence is low — reusing the existing `ta_ask_human`-backed headless-agent mechanism already built for draft-review conversations (`ta-session::advisor_agent::spawn_advisor_agent`) rather than building a new conversational loop from scratch.
 
 **Items**:
-1. [ ] Extend the free-text entry point to parse a raw prompt into title/objective/hints via the existing advisor-agent headless-conversation mechanism (not a new NLU component), then feed the result into `ta_brain::route()` exactly as it consumes structured requests today.
-2. [ ] Replace `ta-advisor::coordinator`'s binary `auto_eligible`/`needs_review` split with a third outcome, `needs_clarification`, that fires an actual `ta_ask_human` question (not just a flag for later human review) when routing confidence is low.
-3. [ ] New entry point (CLI verb+noun from 12.22, and/or MCP tool) that runs this pipeline end-to-end: high confidence creates the routed goal directly; low confidence asks one clarifying question first, then re-routes with the answer.
-4. [ ] Fold `ta-workflow::intent::resolve_intent`'s workflow-template matching in as one signal `ta-brain::route()` consults, rather than a second, parallel intent system.
-5. [ ] Tests: high-confidence prompt routes and creates a goal with zero clarification; low-confidence prompt triggers exactly one clarifying question and re-routes correctly after the answer.
-6. [ ] USAGE.md: document the "just tell TA what you want" entry point alongside the explicit CLI verb+noun surface from 12.16/12.22.
+1. [x] Extend the free-text entry point to parse a raw prompt into title/objective/hints via the existing advisor-agent headless-conversation mechanism (not a new NLU component), then feed the result into `ta_brain::route()` exactly as it consumes structured requests today.
+2. [x] Replace `ta-advisor::coordinator`'s binary `auto_eligible`/`needs_review` split with a third outcome, `needs_clarification`, that fires an actual `ta_ask_human` question (not just a flag for later human review) when routing confidence is low.
+3. [x] New entry point (CLI verb+noun from 12.22, and/or MCP tool) that runs this pipeline end-to-end: high confidence creates the routed goal directly; low confidence asks one clarifying question first, then re-routes with the answer.
+4. [x] Fold `ta-workflow::intent::resolve_intent`'s workflow-template matching in as one signal `ta-brain::route()` consults, rather than a second, parallel intent system.
+5. [x] Tests: high-confidence prompt routes and creates a goal with zero clarification; low-confidence prompt triggers exactly one clarifying question and re-routes correctly after the answer.
+6. [x] USAGE.md: document the "just tell TA what you want" entry point alongside the explicit CLI verb+noun surface from 12.16/12.22.
 
 #### Version: `0.17.0-alpha.12.23`
 

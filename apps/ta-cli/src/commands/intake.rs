@@ -389,8 +389,12 @@ fn execute_routed_goal(
 ///
 /// Without `--dispatch`: read-only, prints recommendations + rationale only.
 /// With `--dispatch`: dispatches (creates a goal for, then dequeues) every
-/// recommendation whose resolved `security_tier` is `Auto`; everything else
-/// is left in the queue for a human to review/promote via `ta intake fire`.
+/// `AutoEligible` recommendation. `NeedsClarification` recommendations
+/// (v0.17.0.12.23) get exactly one clarifying question first — via the same
+/// `ta_ask_human`-backed headless-agent mechanism `ta advisor create` uses —
+/// then are dispatched if the re-routed decision clears `Auto`, or left in
+/// the queue otherwise. `NeedsReview` recommendations are always left in the
+/// queue for a human to review/promote via `ta intake fire`.
 fn coordinate(project_root: &Path, dispatch: bool) -> anyhow::Result<()> {
     let report = ta_advisor::build_report(project_root);
     if report.recommendations.is_empty() {
@@ -408,33 +412,120 @@ fn coordinate(project_root: &Path, dispatch: bool) -> anyhow::Result<()> {
     for rec in &report.recommendations {
         print_routing_decision(&rec.decision);
         println!(
-            "  event: \"{}\" (auto_dispatch_eligible={})",
-            rec.event.suggested_goal_title, rec.auto_dispatch_eligible
+            "  event: \"{}\" (outcome={:?})",
+            rec.event.suggested_goal_title, rec.outcome
         );
     }
 
     if !dispatch {
         println!(
-            "\n(read-only — pass --dispatch to create goals for auto_dispatch_eligible=true \
-             recommendations; everything else needs `ta intake fire` or manual promotion)"
+            "\n(read-only — pass --dispatch to create goals for auto-eligible recommendations; \
+             needs-clarification recommendations get one clarifying question first; \
+             everything else needs `ta intake fire` or manual promotion)"
         );
         return Ok(());
     }
 
     let mut remaining = Vec::new();
     for rec in report.recommendations {
-        if rec.auto_dispatch_eligible {
-            execute_routed_goal(&rec.event, &rec.decision)?;
-        } else {
-            println!(
-                "  left in queue: \"{}\" (security_tier={} — needs human review)",
-                rec.event.suggested_goal_title, rec.decision.security_tier
-            );
-            remaining.push(rec.event);
+        match rec.outcome {
+            ta_advisor::RecommendationOutcome::AutoEligible => {
+                execute_routed_goal(&rec.event, &rec.decision)?;
+            }
+            ta_advisor::RecommendationOutcome::NeedsReview => {
+                println!(
+                    "  left in queue: \"{}\" (security_tier={} — needs human review)",
+                    rec.event.suggested_goal_title, rec.decision.security_tier
+                );
+                remaining.push(rec.event);
+            }
+            ta_advisor::RecommendationOutcome::NeedsClarification => {
+                match clarify_and_reroute(project_root, &rec.event, &rec.decision) {
+                    Some((clarified_event, clarified_decision)) => {
+                        if clarified_decision.security_tier
+                            == ta_session::workflow_session::AdvisorSecurity::Auto
+                        {
+                            execute_routed_goal(&clarified_event, &clarified_decision)?;
+                        } else {
+                            println!(
+                                "  left in queue after clarification: \"{}\" (security_tier={} \
+                                 — needs human review)",
+                                clarified_event.suggested_goal_title,
+                                clarified_decision.security_tier
+                            );
+                            remaining.push(clarified_event);
+                        }
+                    }
+                    None => {
+                        println!(
+                            "  left in queue: \"{}\" (no clarification answer — needs human review)",
+                            rec.event.suggested_goal_title
+                        );
+                        remaining.push(rec.event);
+                    }
+                }
+            }
         }
     }
     ta_intake::write_queue(project_root, &remaining)?;
     Ok(())
+}
+
+/// Ask exactly one clarifying question for a low-confidence queued event,
+/// via the same headless-agent mechanism `ta advisor create` uses, and
+/// re-route with the answer folded into the event's suggested title.
+///
+/// Returns `None` (leave the original event queued, unmodified) when the
+/// clarification agent fails to spawn or times out — Observable & Actionable
+/// callers print why before falling back.
+fn clarify_and_reroute(
+    project_root: &Path,
+    event: &TriggerEvent,
+    decision: &ta_brain::RoutingDecision,
+) -> Option<(TriggerEvent, ta_brain::RoutingDecision)> {
+    let ta_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ta"));
+    let question = ta_advisor::clarifying_question(decision);
+    println!(
+        "  clarifying: \"{}\" — {}",
+        event.suggested_goal_title, question
+    );
+
+    let intent_config = ta_session::IntentAgentConfig::new(
+        project_root.to_path_buf(),
+        event.suggested_goal_title.clone(),
+        question,
+    );
+    if let Err(e) = ta_session::spawn_intent_agent(&intent_config, &ta_bin) {
+        eprintln!("  Failed to spawn clarification agent: {}", e);
+        return None;
+    }
+
+    let answer = match ta_session::poll_intent_answer(
+        project_root,
+        intent_config.item_id,
+        intent_config.timeout,
+        std::time::Duration::from_secs(1),
+    ) {
+        ta_session::IntentAgentOutcome::Answered(answer) => answer,
+        ta_session::IntentAgentOutcome::TimedOut => {
+            eprintln!(
+                "  Clarifying question timed out after {}s.",
+                intent_config.timeout.as_secs()
+            );
+            return None;
+        }
+    };
+
+    let mut clarified_event = event.clone();
+    clarified_event.suggested_goal_title =
+        format!("{} {}", event.suggested_goal_title, answer.trim());
+    let re_decision = ta_brain::route(
+        &ta_brain::RoutingInput::Trigger(ta_brain::TriggerRoutingInput::from_event(
+            clarified_event.clone(),
+        )),
+        project_root,
+    );
+    Some((clarified_event, re_decision))
 }
 
 fn show_queue(project_root: &Path) -> anyhow::Result<()> {

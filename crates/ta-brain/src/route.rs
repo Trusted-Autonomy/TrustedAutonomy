@@ -214,6 +214,8 @@ pub fn route(input: &RoutingInput, workspace_root: &Path) -> RoutingDecision {
         &mut rationale,
     );
     let priority = resolve_priority(&ctx, &workload, &workflow_toml, &mut rationale);
+    let resolved_workflow_template =
+        resolve_workflow_template(&ctx, workspace_root, &mut rationale);
 
     RoutingDecision {
         team,
@@ -223,7 +225,48 @@ pub fn route(input: &RoutingInput, workspace_root: &Path) -> RoutingDecision {
         priority,
         workload_type: workload.workload_type,
         workload_confidence: workload.confidence,
+        resolved_workflow_template,
         rationale,
+    }
+}
+
+// ── Workflow-template signal (folds in ta-workflow::intent, v0.17.0.12.23) ─
+
+/// Consult `ta-workflow::intent::resolve_intent`'s template-matching as one
+/// signal `route()` reports, rather than a second, parallel intent system a
+/// caller would need to run separately. Only attempted when the caller
+/// didn't already name a workflow explicitly — an explicit
+/// `workflow_name_or_path` needs no matching.
+fn resolve_workflow_template(
+    ctx: &Context,
+    workspace_root: &Path,
+    rationale: &mut Vec<String>,
+) -> Option<String> {
+    if ctx.workflow_name_or_path.is_some() {
+        rationale.push("workflow_template: tier=explicit skipped=true".to_string());
+        return None;
+    }
+
+    let templates = ta_workflow::TemplateLibrary::new(workspace_root).list();
+    let plan_ctx = ta_workflow::PlanContext::load(workspace_root);
+
+    match ta_workflow::resolve_intent(&ctx.classification_text, &templates, &plan_ctx) {
+        ta_workflow::ResolutionResult::Resolved(candidate)
+            if candidate.score >= ta_workflow::CONFIDENCE_THRESHOLD =>
+        {
+            rationale.push(format!(
+                "workflow_template: tier=intent-match value={} score={:.2}",
+                candidate.template_name, candidate.score
+            ));
+            Some(candidate.template_name)
+        }
+        _ => {
+            rationale.push(
+                "workflow_template: tier=intent-match value=<none> (below confidence threshold)"
+                    .to_string(),
+            );
+            None
+        }
     }
 }
 
@@ -827,6 +870,44 @@ mod tests {
         let decision = route(&explicit("Update the README docs"), tmp.path());
         assert_eq!(decision.workload_type, "docs");
         assert_eq!(decision.priority, Priority::Low);
+    }
+
+    // ── workflow-template signal (v0.17.0.12.23) ────────────────────────
+
+    #[test]
+    fn workflow_template_matched_for_high_confidence_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        // "implement remaining v0.15" scores 1.0 against the builtin
+        // "plan-build-phases" template (verb + multi-phase scope + version ref).
+        let decision = route(&explicit("implement remaining v0.15"), tmp.path());
+        assert_eq!(
+            decision.resolved_workflow_template,
+            Some("plan-build-phases".to_string())
+        );
+        assert!(decision
+            .rationale
+            .iter()
+            .any(|l| l.contains("workflow_template") && l.contains("plan-build-phases")));
+    }
+
+    #[test]
+    fn workflow_template_none_for_low_confidence_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let decision = route(&explicit("Add a new dashboard widget"), tmp.path());
+        assert_eq!(decision.resolved_workflow_template, None);
+    }
+
+    #[test]
+    fn workflow_template_skipped_when_workflow_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut req = ExplicitGoalRequest::new("implement remaining v0.15");
+        req.workflow_name_or_path = Some("some-other-workflow".to_string());
+        let decision = route(&RoutingInput::ExplicitGoal(req), tmp.path());
+        assert_eq!(decision.resolved_workflow_template, None);
+        assert!(decision
+            .rationale
+            .iter()
+            .any(|l| l.contains("workflow_template: tier=explicit skipped=true")));
     }
 
     // ── explicit vs. triggered equivalence ──────────────────────────────
