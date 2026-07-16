@@ -15,7 +15,7 @@
 //
 // Subcommands:
 //   ta meridian analyze  → meridian analyze --source ta --path <project_root>
-//   ta meridian help     → list tools exposed by `meridian serve` (MCP)
+//   ta meridian tools    → list tools exposed by `meridian serve` (MCP)
 //   ta meridian init     → meridian init
 //   ta meridian suggest  → meridian suggest --source ta --path <project_root>
 
@@ -47,8 +47,8 @@ pub enum MeridianCommands {
     /// tool calls inside a running goal.
     ///
     /// Example:
-    ///   ta meridian help
-    Help,
+    ///   ta meridian tools
+    Tools,
 
     /// Initialize a Meridian configuration in the current project.
     ///
@@ -169,7 +169,7 @@ fn find_meridian_binary(workspace_root: &Path) -> Result<String> {
 
 pub fn execute(command: &MeridianCommands, config: &GatewayConfig) -> Result<()> {
     match command {
-        MeridianCommands::Help => {
+        MeridianCommands::Tools => {
             let meridian = find_meridian_binary(&config.workspace_root)?;
             list_meridian_tools(&meridian)
         }
@@ -188,7 +188,7 @@ pub fn execute(command: &MeridianCommands, config: &GatewayConfig) -> Result<()>
                     &["suggest", "--source", "ta", "--path"],
                     project_root,
                 ),
-                MeridianCommands::Help => unreachable!(),
+                MeridianCommands::Tools => unreachable!(),
             }
         }
     }
@@ -519,7 +519,7 @@ mod tests {
     fn meridian_commands_all_variants_exist() {
         // Ensures the enum compiles with all four variants.
         let _analyze = MeridianCommands::Analyze;
-        let _help = MeridianCommands::Help;
+        let _tools = MeridianCommands::Tools;
         let _init = MeridianCommands::Init;
         let _suggest = MeridianCommands::Suggest;
     }

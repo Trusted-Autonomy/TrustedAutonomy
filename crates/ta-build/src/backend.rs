@@ -1,6 +1,6 @@
-//! Core BuildAdapter trait and result types.
+//! Core BuildBackend trait and result types.
 //!
-//! The `BuildAdapter` trait abstracts over project build systems (cargo, npm,
+//! The `BuildBackend` trait abstracts over project build systems (cargo, npm,
 //! make, etc.). Each adapter knows how to build and test a project, returning
 //! structured results that flow through TA's event system.
 
@@ -80,7 +80,7 @@ impl BuildResult {
 ///
 /// Implementations wrap specific build tools (cargo, npm, make, etc.)
 /// and provide a uniform interface for building and testing projects.
-pub trait BuildAdapter: Send + Sync {
+pub trait BuildBackend: Send + Sync {
     /// Build the project.
     ///
     /// For Cargo: `cargo build --workspace`

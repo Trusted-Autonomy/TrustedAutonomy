@@ -83,6 +83,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Channel Registry](#channel-registry)
    - [Multi-Channel Routing](#multi-channel-routing)
    - [Channel Plugins](#channel-plugins)
+   - [Authoring a Plugin](#authoring-a-plugin)
    - [Inspecting Channel Configuration](#inspecting-channel-configuration)
    - [API Mediation](#api-mediation)
    - [Project Setup](#project-setup)
@@ -247,6 +248,7 @@ You are a financial analyst. Your outputs are always structured:
 executive summary, key metrics, risks, and recommended actions.
 Never speculate without data.
 """
+agent = "claude-opus-4-8"   # optional — persona-level agent binding, see below
 
 [capabilities]
 allowed_tools   = ["read", "bash"]   # empty = no restriction
@@ -269,7 +271,8 @@ ta persona new financial-analyst
 ta persona new financial-analyst \
   --description "Analyzes financial data" \
   --system-prompt "You are a financial analyst..." \
-  --forbidden-tools write
+  --forbidden-tools write \
+  --agent claude-opus-4-8
 ```
 
 **From Studio:** Open the **Personas** tab, fill in the form, and click **Save Persona**.
@@ -288,6 +291,17 @@ ta run "Analyze Q3 financials" --persona financial-analyst
 ```
 
 The persona's system prompt and tool restrictions are appended to CLAUDE.md in the staging workspace, after the plan context injection.
+
+### Persona-Level Agent Binding
+
+A persona can also pin which agent it runs on, so `--persona <name>` alone is enough to select both the identity and the runtime:
+
+```bash
+ta persona set-agent financial-analyst claude-opus-4-8
+ta persona set-agent financial-analyst auto   # hand the choice to the supervisor
+```
+
+This is the second-highest tier in the full agent resolution order — see [Full agent and model switching](#full-agent-and-model-switching-workload-workflow-and-persona-tiers) for the complete hierarchy and `"auto"` behavior.
 
 ---
 
@@ -1685,18 +1699,41 @@ Set per-project defaults in `.ta/daemon.toml`:
 
 ```toml
 [agent]
-default_framework = "qwen-coder"   # used by ta run unless overridden
-qa_framework      = "claude-code"  # used by automated QA workflow roles
+default       = "qwen-coder"       # baseline default agent — used by ta run unless overridden
+qa_framework  = "claude-code"      # used by automated QA workflow roles
 ```
 
-#### Framework selection order
+`default` is the baseline default-agent setting: a single, data-defined config value with no built-in list of valid names — any installed agent/framework name works. The legacy `default_framework` key is still honored if `default` is left unset, so existing `.ta/daemon.toml` files keep working unchanged.
 
-`ta run` resolves the agent in priority order (highest wins):
+#### Full agent and model switching (workload, workflow, and persona tiers)
+
+`ta run` resolves the effective agent through a full tier hierarchy, evaluated most-specific-first (highest wins):
 
 1. `--agent <name>` flag (explicit per-run override)
-2. `agent_framework` field in the workflow YAML (when `--workflow <file>` points to a YAML file)
-3. `[agent].default_framework` in `.ta/daemon.toml`
-4. Built-in default: `claude-code`
+2. **Persona-level binding**: the `agent` field in `.ta/personas/<name>.toml`, applied when `--persona <name>` is passed. Set it with:
+   ```bash
+   ta persona new financial-analyst --agent claude-opus-4-8
+   ta persona set-agent financial-analyst claude-opus-4-8   # or update an existing persona
+   ```
+3. **Workflow-level binding**:
+   - `agent_framework` field in the workflow YAML (when `--workflow <file>` points to a YAML file), or
+   - `[agent].default` in `.ta/workflow.toml`:
+     ```toml
+     [agent]
+     default = "codex"
+     ```
+4. **Workload-type-level default**: `[workload_agents].<type>` in `.ta/workflow.toml`, matched against the `--workload <type>` flag on `ta run`:
+   ```toml
+   [workload_agents]
+   bugfix = "claude-opus-4-8"
+   docs   = "claude-sonnet-4-6"
+   ```
+   ```bash
+   ta run "Fix the null-pointer crash" --workload bugfix
+   ```
+   Workload classification is manual/opt-in until v0.17.0.12.20's `ta-brain` routing layer ships automatic classification.
+5. `[agent].default` in `.ta/daemon.toml` (falls back to the legacy `[agent].default_framework` if `default` is unset)
+6. Built-in default: `claude-code`
 
 To inspect what `ta run` will use without actually running a goal:
 
@@ -1707,6 +1744,30 @@ ta daemon config
 Output includes the effective agent, the config file being used, and which source provided the value. `ta dev` applies the same resolution order.
 
 You can also add YAML agent configs (see [Agent Configuration](#agent-configuration)).
+
+#### `agent = "auto"` — supervisor auto-pick
+
+Any tier above (persona, workflow, workload-type, or daemon baseline) accepts the literal value `"auto"` instead of a fixed agent ID:
+
+```bash
+ta team assign reviewer auto --security auto
+ta persona set-agent financial-analyst auto
+```
+
+```toml
+# .ta/workflow.toml
+[agent]
+default = "auto"
+```
+
+When resolution reaches a tier set to `"auto"`, it stops there — it does **not** fall through to lower tiers — and hands the choice to the supervisor's recommendation instead of a fixed value. The v1 heuristic (no historical per-agent telemetry yet — that lands in v0.17.0.12.15) prefers the alphabetically-first entry in `.ta/daemon.toml`'s `[agent].trusted_binaries` allowlist, falling back to the legacy `default_framework`, then the hardcoded `claude-code` default.
+
+Per the Observable & Actionable constitution principle, `"auto"` is never a black box: every recommendation is logged and appended to `.ta/agent-recommendations.jsonl` with its rationale. View the history with:
+
+```bash
+ta agent recommendations
+ta agent recommendations --limit 10
+```
 
 ---
 
@@ -2450,7 +2511,11 @@ When `--phase` is specified, TA marks the phase `in_progress` in the **source** 
 Phase status flow:
 - `pending` → `in_progress` when the goal starts (`ta run --phase <id>`)
 - `in_progress` → `done` when the draft is applied (`ta draft apply`)
-- `in_progress` → `pending` if the draft is denied (`ta draft deny`) or the goal is deleted (`ta goal delete`)
+- `in_progress` → `pending` if the draft is denied/closed (`ta draft deny` / `ta draft close`) or the goal is deleted (`ta goal delete`)
+
+A phase already marked `done` is never reset back to `pending` by any of the above — this
+guards against stale or duplicate goal bookkeeping (e.g. deleting a leftover goal record
+for work that already merged) accidentally reopening completed plan phases.
 
 Plan commands:
 
@@ -2636,6 +2701,17 @@ ta plan build --autonomous --team .ta/team.toml
 ```
 
 If `--team` is passed but the file has no `reviewer` role, a warning is emitted and the loop falls back to the default advisor agent.
+
+Team roles are data-defined, not a fixed list — `implementer`, `reviewer`, `qa`, `architect`, and `release_manager` are recognized names, but any custom role (e.g. `security-team`) works identically and round-trips through `.ta/team.toml` unchanged. Manage roles directly with `ta team`:
+
+```bash
+ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
+ta team assign security-team claude-opus-4-8   # custom role — no core change needed
+ta team assign reviewer auto --security auto    # hand agent choice to the supervisor
+ta team list
+```
+
+`agent_id` is validated: it must be the literal `auto` (case-insensitive) or a non-empty identifier (letters, digits, `-`, `_`, `.`, `:`) — empty values and anything containing whitespace are rejected with an actionable error.
 
 Use `--no-auto-merge` to require a human to merge each PR after CI passes instead of letting the loop call `gh pr merge` automatically:
 
@@ -3021,6 +3097,28 @@ ta draft amend <draft-id> src/main.rs --file corrected_main.rs
 ta draft amend <draft-id> config.toml --drop
 ta draft amend <draft-id> src/lib.rs --file fixed.rs --reason "Fixed typo in function name"
 ```
+
+**Adding a missing artifact (`amend --add`)** -- sometimes an agent's decision log or
+change description claims a file was touched (e.g. it's listed under `[deps: ...]` on
+another artifact) but that file never became its own tracked artifact in the draft. Point
+`--file` at a URI that isn't in the draft yet and it's inserted as a new artifact instead
+of erroring:
+
+```bash
+# CLAUDE.md was described as changed but never became an artifact — add it directly.
+ta draft amend <draft-id> CLAUDE.md --file /path/to/corrected/CLAUDE.md \
+  --reason "Recovering an artifact the agent described but never tracked"
+```
+
+The new artifact starts `pending` review like any other. `ta draft amend` on a URI that
+*is* already in the draft still replaces its content as before — nothing changes for
+existing artifacts.
+
+TA also runs a pre-approval consistency check automatically: if any artifact's own
+dependency list references a file that isn't itself a tracked artifact, the supervisor's
+`PASS` verdict is downgraded to `WARN` with a "described but not tracked: `<path>`"
+finding, rather than silently passing a draft whose description and artifact list
+disagree.
 
 **Scoped agent fix** -- for logic changes that need agent help:
 
@@ -4098,6 +4196,56 @@ agents:
         enabled: true
         conditions:
           max_files: 3        # tighter than project default
+```
+
+### Decision Gate Auto-Approval Thresholds
+
+Separate from the condition-based policy above, `ta draft apply` also runs every `PendingReview` draft through a shared **Decision gate** whenever a supervisor review is present. This is what decides whether "apply implies approval" (`[draft] approval_required = false`, the default single-author flow) is actually safe for *this* draft, based on the supervisor's verdict, its confidence, and the draft's risk score — not just a blanket yes.
+
+Configure the thresholds in `.ta/workflow.toml`:
+
+```toml
+[draft.auto_approval]
+min_confidence = 0.7      # below this, escalate to a human instead of auto-approving
+max_risk_score = 40       # above this (but below escalate_risk_score), rework instead of commit
+escalate_risk_score = 75  # at or above this, always escalate regardless of verdict
+```
+
+How it routes:
+- Supervisor verdict `block` → always **Reject** (never overridden by confidence or risk).
+- Risk score at or above `escalate_risk_score` → always **Escalate** to a human.
+- Verdict `warn` → **Rework** if confidence is sufficient, otherwise **Escalate**.
+- Verdict `pass` → **Commit** (auto-approve) unless risk is elevated (**Rework**) or confidence is too low (**Escalate**).
+
+Only **Commit** proceeds without a human. If the gate withholds approval, `ta draft apply` errors with the gate's reasoning and points you at `ta draft approve <id>`:
+
+```
+Draft "..." cannot be auto-approved on apply: the Decision gate returned Escalate
+(supervisor verdict Warn, confidence 0.45, risk score 20).
+
+Run `ta draft approve <id>` after review, then re-run `ta draft apply <id>`.
+(Adjust `[draft.auto_approval]` thresholds in workflow.toml to change this.)
+```
+
+The same gate also governs `advisor_security = "auto"`: an advisor may only fire `ta draft apply` without explicit human confirmation when its reported intent confidence is at least 80%. Below that, the advisor is told to ask the human directly.
+
+### Per-Action Telemetry
+
+Every Decision-gate evaluation is recorded to `.ta/telemetry.jsonl` — one JSON line per action, with cost, tokens, duration, confidence, risk score, and the resulting decision. View it per-goal with:
+
+```bash
+ta audit telemetry <goal-id>
+```
+
+```
+Per-action telemetry for goal 9f2c4b1a-...:
+
+  [Decision] draft apply gate — recorded 2026-07-06T18:04:21Z
+    decision:   Commit
+    confidence: 0.95
+    risk_score: 10
+
+1 action(s) total.
 ```
 
 ---
@@ -9600,6 +9748,90 @@ min_daemon_version = "0.10.16"
 
 If the running daemon is older than the declared minimum, `ta plugin check` warns about the incompatibility.
 
+#### Authoring a Plugin
+
+TA's extensibility model has four categories (see `docs/design/ta-concepts-and-architecture.md` §2.2). Pick the right one before writing code:
+
+| Category | Shape | Use when |
+|---|---|---|
+| **Plugin** | External process, call/response, `plugin.toml` manifest, `.ta/plugins/<kind>/<name>/` discovery | The integration is optional, should be swappable without a TA release, and a community member should be able to author one — VCS, messaging, social, agent runtimes, optional tools, database adapters, release adapters |
+| **Channel/Listener** | External, long-running, supervised, `channel.toml` manifest, `.ta/plugins/channels/<name>/` discovery | The integration needs to maintain a persistent session (Discord, Slack, Email, Teams) rather than answer discrete calls — see [Channel Plugins](#channel-plugins) above |
+| **Backend** | In-process Rust trait, core-only | It's first-party, needs zero IPC overhead, or has no reason to be community-extensible (connectors, output renderers) |
+| **Resource list** | Declarative registry (TOML), no executable contract | There's nothing to execute, just configuration or a pointer to a Plugin/Backend (`.ta/community-resources.toml`, `.ta/db-adapters.toml`) |
+
+This section covers the **Plugin** category, unified onto one shared transport/manifest/discovery crate (`ta-plugin`) as of v0.17.0.12.14.
+
+**Kinds shipped today:**
+
+| Kind | Discovery dir | Example manifest `command` |
+|---|---|---|
+| `vcs` | `.ta/plugins/vcs/<name>/` | `ta-submit-perforce` |
+| `messaging` | `.ta/plugins/messaging/<name>/` | `ta-messaging-gmail` |
+| `social` | `.ta/plugins/social/<name>/` | `ta-social-linkedin` |
+| `agent` | `.ta/plugins/agent/<name>/` | `ta-agent-ollama` |
+| `tool` | `.ta/plugins/tool/<name>/` | (community-defined; see `plugins/tool/*/plugin.toml` for examples) |
+| `db` | `.ta/plugins/db/<name>/` | (community-defined DB proxy adapter) |
+| `release` | `.ta/plugins/release/<name>/` | (community-defined release adapter) |
+
+**Discovery order:** project-local (`.ta/plugins/<kind>/<name>/plugin.toml`) is checked first, then user-global (`~/.config/ta/plugins/<kind>/<name>/plugin.toml`).
+
+**Manifest schema (`plugin.toml`):**
+
+```toml
+name = "my-plugin"
+version = "0.1.0"
+type = "vcs"                 # the plugin kind — must match the discovery directory
+command = "my-plugin-binary" # executable to spawn (relative to the manifest's directory, or on PATH)
+args = []                    # extra args appended on every invocation
+capabilities = ["commit", "push"]
+description = "One-line description"
+timeout_secs = 30            # per-call timeout; defaults vary by kind (VCS: 30s, messaging/social: 60s)
+
+[staging_env]                # static env vars merged into the agent's spawn env (VCS only)
+MY_VAR = "value"
+```
+
+**Wire protocol:** newline-delimited JSON, one request line in, one response line out. New plugin kinds (`tool`, `db`, `release`) use the canonical envelope:
+
+```
+TA → plugin: {"method":"<name>","params":{...}}\n
+plugin → TA: {"ok":true,"result":{...}}\n
+         or  {"ok":false,"error":"..."}\n
+```
+
+If you're authoring a **new** VCS/messaging/social/agent-runtime plugin, use each family's existing request/response shape (documented in `docs/PLUGIN-AUTHORING.md` and `docs/plugin-traits.md`) — those wire formats did not change when the transport was unified. Only the underlying spawn/framing/timeout/manifest/discovery code is now shared across all seven kinds; each kind's protocol is otherwise untouched.
+
+**Minimal example — a `tool`-kind community plugin** (`.ta/plugins/tool/widget-cli/plugin.toml`):
+
+```toml
+name = "widget-cli"
+type = "tool"
+command = ""                 # declarative-only; nothing to spawn for `tool` kind
+description = "Community widget CLI"
+
+[tool]
+label = "Widget CLI"
+detect_command = "widget --version"
+install_hint = "cargo install widget-cli"
+
+[tool.install]
+kind = "cargo"
+package = "widget-cli"
+```
+
+Run `ta tools list` / `ta tools install widget-cli` — no TA core PR required.
+
+**Minimal example — a `db`/`release`-kind external plugin** (call/response, canonical envelope):
+
+```toml
+name = "my-db-adapter"
+type = "db"
+command = "my-db-adapter-binary"
+timeout_secs = 30
+```
+
+The binary reads one JSON line (`{"method":"classify_query","params":{"query":"..."}}`), and writes one JSON line back (`{"ok":true,"result":{"class":"read"}}`).
+
 #### Channel Access Control
 
 Restrict who can interact with channels using access control lists in `.ta/daemon.toml`:
@@ -14085,15 +14317,23 @@ ta doctor
 
 ### `daemon.log` Rotation
 
-`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. `ta doctor --fix` detects when it has grown past a configurable size threshold and rotates it:
+`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. The daemon rotates it automatically, so there's normally nothing to do: it checks the log's size once on startup and again on a periodic interval, no manual step required.
 
-```bash
-ta doctor --fix
+```toml
+# .ta/daemon.toml
+[log_rotation]
+max_size_mb = 500          # rotate when daemon.log reaches this size (default: 500; 0 disables)
+retention_count = 3        # keep this many rotated generations, daemon.log.1 .. daemon.log.N (default: 3)
+check_interval_secs = 300  # periodic size-check cadence in seconds (default: 300 = 5 min)
 ```
 
-- Threshold defaults to 500 MB — configurable via `[gc] daemon_log_max_mb` in `.ta/workflow.toml` (set to `0` to disable the check).
-- The current log is moved to `.ta/daemon.log.1` (only one prior generation is kept — a second rotation overwrites it), and a fresh `daemon.log` is started with a marker line recording the rotation timestamp and the size that was rotated out.
-- Runs as one of the standard `ta doctor --fix` prompts, alongside stale PID cleanup and other maintenance fixes; pass `--yes` to apply automatically without prompting.
+- Rotation uses copy-truncate rather than rename: the current content is copied out to `daemon.log.1` (older generations shift to `.2`, `.3`, ... up to `retention_count`, and anything beyond that is pruned) and the live `daemon.log` is truncated to zero length **in place**. This matters because the daemon's stdout/stderr are OS-redirected into `daemon.log` at process-spawn time — a plain rename doesn't move that redirect, so a naive rotation while the daemon is running silently stopped working until the next restart. Copy-truncate keeps the same file open and valid, so logging continues uninterrupted across a rotation.
+- A marker line records the rotation timestamp and the size that was rotated out.
+- `ta doctor --fix` still offers manual/forced rotation (e.g. to reclaim space immediately without waiting for the next periodic check) using the same copy-truncate logic and the `retention_count` from `.ta/daemon.toml`:
+
+  ```bash
+  ta doctor --fix
+  ```
 
 ### Auto-Recovery on Daemon Startup
 
@@ -15090,6 +15330,206 @@ Active Prompt-Optimizer Plugin  (built-in headroom default)
 ### Windows installer
 
 The Windows `.msi` installer includes an optional "Enable context compression (headroom)" checkbox that runs `pip install headroom-ai[all]` during setup. The checkbox is checked by default.
+
+---
+
+## Trigger Layer (`ta-intake`)
+
+Every goal has historically started from an explicit call — `ta run` or the MCP `ta_goal_start` tool. The trigger layer adds a first-class way for goal creation to be *fed* instead: a clock tick, an inbound email, or (in the future) a webhook can fire a goal without a human typing `ta run`.
+
+Trigger types are **data, not code** — the same pattern already used for personas and plugins. Each type is one TOML file at `.ta/triggers/<type>.toml`; a community member can add a new trigger type by writing a config (and, for a genuinely new kind of source, a small Rust `TriggerSource` implementation), without touching `ta-intake` itself.
+
+### Configuring a trigger
+
+```toml
+# .ta/triggers/schedule.toml
+type = "schedule"
+enabled = true
+dispatch = "direct"
+description = "Fires a goal on a recurring interval."
+
+[settings]
+interval_secs = 3600
+goal_title = "Nightly health check"
+```
+
+```toml
+# .ta/triggers/inbound-email.toml
+type = "inbound-email"
+enabled = true
+dispatch = "queue"
+description = "Polls the configured messaging plugin for new inbound emails."
+
+[settings]
+provider = "gmail"            # matches a discovered messaging plugin's name
+account = "intake@example.com"
+max_messages_per_poll = 25
+```
+
+Fields common to every trigger type:
+
+| Field | Meaning |
+|---|---|
+| `type` | Trigger type identifier — must match the config filename (`<type>.toml`). |
+| `enabled` | Whether `ta intake fire` will act on this trigger (default `true`). |
+| `dispatch` | `"direct"` or `"queue"` — see below. |
+| `description` | Free-text, shown by `ta intake list`. |
+| `[settings]` | Trigger-type-specific keys (interpreted by that type's `TriggerSource`, not by `ta-intake` itself). |
+
+### The 2 shipped trigger types
+
+- **`schedule`** — fires once at least `settings.interval_secs` has elapsed since the last fire (a plain recurring interval; not a full cron-expression parser). `settings.goal_title` sets the created goal's title.
+- **`inbound-email`** — polls the messaging plugin named by `settings.provider` (the same plugin discovery `ta workflow run email-manager` uses) for messages since the last watermark, and normalizes each into one event. `settings.account` and `settings.max_messages_per_poll` are optional.
+
+Both are real, working implementations — not stubs — in `crates/ta-intake` (`schedule.rs`, `email.rs`), each with unit tests covering firing behavior.
+
+### `dispatch`: direct goal vs. queue — a data-defined choice
+
+Whether a fired event should turn into a goal *right away*, or be appended to a queue for later batch/regular processing, is configured per trigger type, not hardcoded in Rust. The two shipped defaults illustrate both:
+
+- `schedule` → `dispatch = "direct"`: one event per interval tick maps naturally onto "create one goal now".
+- `inbound-email` → `dispatch = "queue"`: mirrors the existing `ta workflow run email-manager` batch-fetch-then-process model.
+
+A community-authored trigger type can pick either value regardless of its type — `ta-intake` never special-cases the two built-ins.
+
+### Firing a trigger
+
+```bash
+# See what's configured.
+ta intake list
+
+# Poll a trigger once. Direct-dispatch events create a goal immediately
+# (via `ta run --headless`, the same mechanism email-manager uses for reply
+# goals); queued events are appended to .ta/intake-queue.jsonl.
+ta intake fire schedule
+ta intake fire inbound-email
+
+# Preview without side effects (no goal, no queue write, no watermark advance).
+ta intake fire schedule --dry-run
+
+# See what's waiting in the queue.
+ta intake queue
+```
+
+Each trigger type tracks its own watermark (last-fired timestamp) at `.ta/triggers/.state/<type>.watermark`, so repeated `ta intake fire` calls only act on genuinely new events.
+
+`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, see below) is the primary consumer: every fired event is routed through `ta_brain::route()` before a goal is created, deriving team/persona/agent/security-tier/priority from the same normalized event.
+
+---
+
+## Routing Brain (`ta-brain`)
+
+Every goal request — whether an explicit `ta run` invocation or a fired trigger event (`ta-intake`, above) — is resolved through one shared function: `ta_brain::route()`. It answers five questions the same way regardless of how the request arrived:
+
+- **team** — which team role (`.ta/team.toml`) owns this work
+- **persona** — which persona (`.ta/personas/<name>.toml`), if any
+- **agent** — which agent/model framework runs it
+- **security_tier** — how autonomously it can proceed (`read_only` / `suggest` / `auto`)
+- **priority** — how urgent it is relative to other pending requests (`low` / `normal` / `high` / `urgent`)
+
+Each is resolved through the same shape of tiered lookup already used for `agent` since the `Switch` action landed (most-specific override wins):
+
+1. An explicit flag (`--team`, `--persona`, `--agent`, `--security`, `--priority` on `ta run`)
+2. A per-workload-type binding in `.ta/workflow.toml`
+3. A workflow-level default (`.ta/team.toml`'s per-role binding for `security`/`persona`; `.ta/workflow.toml`'s `[team]`/`[security]`/`[priority]` defaults otherwise)
+4. A built-in heuristic or fallback
+
+### Workload classification
+
+Before resolving the tiers above, `ta-brain` classifies the request's **workload type** — `bugfix`, `docs`, `feature`, `refactor`, `test`, `release`, `security`, `chore`, or `other` — from the goal title (and, for triggers, the event payload), unless `--workload` (or a trigger's `settings.workload`) gives it explicitly. This is the same `--workload` flag introduced for the agent tier; it now also drives team/persona/security/priority resolution.
+
+Workload classification is a simple, auditable keyword heuristic (not a model) — every classification includes a confidence score, and low-confidence classifications are treated conservatively: **`security_tier = "auto"` is automatically downgraded to `"suggest"`** whenever workload-classification confidence is below 65%, so an uncertain guess never hands full autonomy to the advisor. The downgrade (and its reason) is always included in the routing decision's rationale.
+
+### Config surface
+
+`.ta/workflow.toml` gains three new top-level defaults and one new per-workload-type table, all additive — the existing `[agent]`/`[workload_agents]` tables from the `Switch` action are untouched:
+
+```toml
+[team]
+default = "implementer"
+
+[security]
+default = "suggest"
+
+[priority]
+default = "normal"
+
+# Per-workload-type overrides — sibling to [workload_agents], one table
+# per classified (or explicit) workload type.
+[workload_types.bugfix]
+team = "implementer"
+persona = "careful-reviewer"
+security = "suggest"
+priority = "high"
+
+[workload_types.security]
+team = "reviewer"
+security = "read_only"
+priority = "urgent"
+```
+
+A triggered event can supply the same hints via its `.ta/triggers/<type>.toml`'s `[settings]` table (`team`, `persona`, `security`, `priority`, `workload`) — read the same untyped way other per-type settings already are, so a community trigger type needs no `ta-brain` code change to participate.
+
+### `ta run` flags
+
+```bash
+ta run "Fix the login bug" --team implementer --security suggest --priority high
+```
+
+`--team`, `--security`, and `--priority` are new alongside the existing `--agent`, `--persona`, and `--workload`. Every `ta run` invocation logs its full routing decision (team/persona/agent/security/priority/workload + rationale) to `.ta/routing-decisions.jsonl` and prints a `[routing]` summary line — view the history with:
+
+```bash
+ta intake routing --limit 10
+```
+
+### Team coordinator
+
+The "team coordinator" — something that watches pending/queued work and recommends who should handle it next — is a **capability of the existing Advisor**, not a new persistent role (see `PLAN.md`'s v0.17.0.12.20 entry for the full rationale: it reuses the Advisor's existing `AdvisorSecurity` trust tri-state rather than inventing a second one).
+
+```bash
+# Read-only: priority-ordered recommendations for everything in
+# .ta/intake-queue.jsonl, with full rationale.
+ta intake coordinate
+
+# Also act: dispatch (create a goal for, then dequeue) every recommendation
+# whose resolved security_tier is "auto"; recommendations with low workload-
+# classification confidence get one clarifying question first (see below);
+# everything else stays queued for `ta intake fire` or manual review.
+ta intake coordinate --dispatch
+```
+
+Each recommendation carries one of three outcomes, not just an auto/review binary:
+
+- **auto-eligible** — confidently classified and resolved to `security_tier = "auto"`; dispatched immediately with `--dispatch`.
+- **needs review** — confidently classified, but not at `auto` security; stays queued for a human.
+- **needs clarification** — workload-classification confidence is too low to trust either an autonomous dispatch or a silent "review later" — see below.
+
+### Advisor-Driven Goal Creation: "just tell TA what you want"
+
+Rather than filling in `--team`/`--persona`/`--agent`/`--security`/`--priority` yourself, hand the advisor a plain sentence and let `ta-brain::route()` resolve everything:
+
+```bash
+ta advisor create "also clean up the flaky login test"
+```
+
+This is the single natural-language front door for goal creation — it routes the raw prompt through the exact same `route()` function every other entry point uses (explicit `ta run` flags, triggered events), so a free-text request and a fully-flagged one are never resolved by two different systems:
+
+- **High confidence** (workload-classification confidence ≥ 65%): the goal is routed immediately — zero clarification. At `security_tier = "auto"` it's fired directly; at `suggest` you're shown the exact `ta run ...` command and asked to confirm; at `read_only` the command is printed (and copied to your clipboard on macOS) for you to run yourself.
+- **Low confidence**: the advisor asks exactly **one** clarifying question — reusing the same `ta_ask_human`-backed headless-agent mechanism already built for draft-review conversations, not a new conversational loop — folds your answer into the objective, and re-routes once. It never asks a second question; if the re-routed decision is still low-confidence, you'll see why in the `[routing]` rationale.
+
+```bash
+# Force a security tier regardless of what route() would otherwise resolve —
+# same "explicit beats everything" semantics as `ta run --security`.
+ta advisor create "fix the auth bypass" --security auto
+
+# Non-interactive: skip the clarifying question and any run confirmation,
+# and emit the full routing result (including any clarification) as JSON.
+ta advisor create "improve onboarding" --no-input --json
+```
+
+`ta advisor create` also folds in workflow-template matching: if your prompt closely matches a known workflow template (e.g. "implement remaining v0.15" matching the built-in `plan-build-phases` template), the `[routing]` output names the matched template — one signal `route()` consults, not a second, separate template-matching step you'd need to run yourself.
+
+The team coordinator (`ta intake coordinate --dispatch`, above) uses the identical clarifying-question mechanism for `needs_clarification` trigger-queue events — one clarification pattern for both the interactive and the automated entry points.
 
 ---
 

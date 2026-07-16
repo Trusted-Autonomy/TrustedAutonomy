@@ -958,6 +958,60 @@ pub struct DraftReviewConfig {
     /// ```
     #[serde(default)]
     pub approval_required: bool,
+
+    /// Thresholds the shared Decision gate uses when `approval_required = false`
+    /// and a supervisor review is present, to decide whether `ta draft apply`
+    /// may still auto-approve a `PendingReview` draft (v0.17.0.12.15).
+    ///
+    /// ```toml
+    /// [draft.auto_approval]
+    /// min_confidence = 0.7      # below this, escalate to a human instead of auto-approving
+    /// max_risk_score = 40       # above this (but below escalate_risk_score), rework instead
+    /// escalate_risk_score = 75  # at or above this, always escalate regardless of verdict
+    /// ```
+    #[serde(default)]
+    pub auto_approval: AutoApprovalConfig,
+}
+
+/// Configurable thresholds for the shared Decision gate (`ta-decision::decide`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AutoApprovalConfig {
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: f64,
+    #[serde(default = "default_max_risk_score")]
+    pub max_risk_score: u32,
+    #[serde(default = "default_escalate_risk_score")]
+    pub escalate_risk_score: u32,
+}
+
+fn default_min_confidence() -> f64 {
+    0.7
+}
+fn default_max_risk_score() -> u32 {
+    40
+}
+fn default_escalate_risk_score() -> u32 {
+    75
+}
+
+impl Default for AutoApprovalConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence: default_min_confidence(),
+            max_risk_score: default_max_risk_score(),
+            escalate_risk_score: default_escalate_risk_score(),
+        }
+    }
+}
+
+impl From<AutoApprovalConfig> for ta_decision::DecisionThresholds {
+    fn from(cfg: AutoApprovalConfig) -> Self {
+        ta_decision::DecisionThresholds {
+            min_confidence: cfg.min_confidence,
+            max_risk_score: cfg.max_risk_score,
+            escalate_risk_score: cfg.escalate_risk_score,
+        }
+    }
 }
 
 /// Context injection mode for CLAUDE.md (v0.14.3.2).

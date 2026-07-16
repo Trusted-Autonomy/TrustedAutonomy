@@ -153,7 +153,7 @@ pub fn start_goal_extending_parent(
     Ok(goal)
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum GoalCommands {
     /// Start a new goal run with an overlay workspace.
     Start {
@@ -318,7 +318,7 @@ pub enum GoalCommands {
 }
 
 /// Access constitution subcommands (v0.4.3).
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ConstitutionCommands {
     /// View the access constitution for a goal.
     View {
@@ -1647,21 +1647,31 @@ fn delete_goal(
             }
 
             // v0.15.13.5: Reset plan phase from in_progress → pending on delete/cancel.
+            // v0.17.0.12.11: only print the "reset" message when a reset actually
+            // happened — a phase already `done` (e.g. stale bookkeeping for a goal
+            // whose work already merged) is explicitly never reset, and must not be
+            // reported as if it were.
             if let Some(ref phase_id) = g.plan_phase {
                 let note = format!(
                     "phase reset to pending — goal cancelled ({})",
                     reason.unwrap_or("user deleted goal")
                 );
-                if let Err(e) =
-                    super::plan::reset_phase_if_in_progress(&config.workspace_root, phase_id, &note)
-                {
-                    tracing::warn!(
-                        phase = %phase_id,
-                        error = %e,
-                        "Failed to reset plan phase on goal delete"
-                    );
-                } else {
-                    println!("Plan: phase {} reset to pending (goal cancelled)", phase_id);
+                match super::plan::reset_phase_if_in_progress(
+                    &config.workspace_root,
+                    phase_id,
+                    &note,
+                ) {
+                    Ok(true) => {
+                        println!("Plan: phase {} reset to pending (goal cancelled)", phase_id);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            phase = %phase_id,
+                            error = %e,
+                            "Failed to reset plan phase on goal delete"
+                        );
+                    }
                 }
             }
 
@@ -4244,6 +4254,48 @@ mod tests {
             !plan_after.contains("<!-- status: in_progress -->"),
             "in_progress marker should be gone: {}",
             plan_after
+        );
+    }
+
+    // ── v0.17.0.12.11: delete never resets an already-done plan phase ──────
+
+    #[test]
+    fn delete_goal_does_not_reset_done_phase() {
+        // Stale/duplicate bookkeeping for a goal whose phase already completed and
+        // merged must not revert PLAN.md — the phase's `done` marker must survive
+        // `ta goal delete` untouched.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let plan_content =
+            "### v0.99.3 — Delete done-phase test\n<!-- status: done -->\n\n- [x] item\n";
+        std::fs::write(project.path().join("PLAN.md"), plan_content).unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        start_goal(
+            &config,
+            &store,
+            "Delete done-phase test",
+            Some(project.path()),
+            "test",
+            "test-agent",
+            Some("v0.99.3"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        let goal_id = goals[0].goal_run_id.to_string();
+
+        delete_goal(&store, &config, &goal_id, None).unwrap();
+
+        let plan_after = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert_eq!(
+            plan_after, plan_content,
+            "a done phase must be left completely untouched by goal delete"
         );
     }
 

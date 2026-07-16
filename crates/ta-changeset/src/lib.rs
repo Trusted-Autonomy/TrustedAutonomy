@@ -25,7 +25,7 @@ pub mod interaction;
 pub mod interactive_session_store;
 pub mod milestone_draft;
 pub mod multi_channel;
-pub mod output_adapters;
+pub mod output_renderers;
 pub mod plan_merge;
 pub mod plugin;
 pub mod plugin_resolver;
@@ -72,7 +72,7 @@ pub use interaction::{
 };
 pub use interactive_session_store::InteractiveSessionStore;
 pub use multi_channel::{MultiChannelStrategy, MultiReviewChannel};
-pub use output_adapters::{DetailLevel, OutputAdapter, OutputFormat, RenderContext};
+pub use output_renderers::{DetailLevel, OutputFormat, OutputRenderer, RenderContext};
 pub use review_channel::{build_channel, ReviewChannel, ReviewChannelConfig, ReviewChannelError};
 pub use review_session::{
     ArtifactReview, Comment, CommentThread, DispositionCounts, ReviewReasoning, ReviewSession,
@@ -87,7 +87,8 @@ pub use sources::{
     CachedItem, ExternalSource, LockEntry, Lockfile, PackageManifest, SourceCache, SourceError,
 };
 pub use supervisor::{
-    DependencyGraph, SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,
+    apply_artifact_consistency_gate, untracked_dependency_targets, DependencyGraph,
+    SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,
 };
 pub use supervisor_review::{
     build_supervisor_prompt, fallback_supervisor_review, invoke_supervisor_agent,

@@ -333,8 +333,11 @@ pub fn write_advisor_context(config: &AdvisorConfig) -> std::io::Result<PathBuf>
 /// Spawn an advisor agent for the given session item.
 ///
 /// Launches `ta run --headless` as a subprocess with:
-/// - `TA_ADVISOR_DRAFT_ID=<id>` environment variable
-/// - `TA_ADVISOR_CONTEXT_FILE=<path>` pointing to the context markdown
+/// - `--objective-file <path>` pointing at the context markdown (the real
+///   delivery mechanism -- read directly into the spawned agent's objective)
+/// - `TA_ADVISOR_DRAFT_ID=<id>` / `TA_ADVISOR_CONTEXT_FILE=<path>` /
+///   `TA_ADVISOR_SECURITY`/`TA_ADVISOR_SESSION_ID`/`TA_ADVISOR_ITEM_ID`
+///   environment variables, for any future consumer that reads them directly
 /// - `--persona advisor` (or the configured persona)
 ///
 /// Returns the advisor goal run ID extracted from stdout.
@@ -351,12 +354,20 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
         &config.workspace_root.to_string_lossy(),
         "run",
         &goal_title,
+        "--objective-file",
+        &context_path.to_string_lossy(),
         "--headless",
         "--no-version-check",
         "--persona",
         persona,
     ]);
     cmd.env("TA_ADVISOR_DRAFT_ID", config.draft_id.to_string());
+    // Also set the env var for any future consumer that reads it directly --
+    // --objective-file above is the real, working delivery mechanism.
+    // Previously this env var was the *only* attempt to deliver context and
+    // nothing in the codebase reads it, so the advisor agent never actually
+    // saw `context_path`'s content (found 2026-07-11 while building
+    // v0.17.0.12.26's ta_human_verify, which mirrored this same gap).
     cmd.env("TA_ADVISOR_CONTEXT_FILE", &context_path);
     cmd.env("TA_ADVISOR_SECURITY", config.security.to_string());
     cmd.env("TA_ADVISOR_SESSION_ID", config.session_id.to_string());
@@ -563,20 +574,60 @@ fn try_watch_draft(
     Ok((watcher, rx))
 }
 
+/// Minimum intent confidence (0-100) required for `advisor_security = "auto"` to
+/// fire `ta draft apply` without explicit human approval. Matches the contract
+/// advertised to the advisor in `build_advisor_context` ("At ≥80% intent
+/// confidence, you may fire `ta run` directly").
+const AUTO_APPLY_MIN_CONFIDENCE_PCT: u8 = 80;
+
 /// Constitution guard: verify that auto-apply is permitted by the project constitution.
 ///
 /// Blocks `ta draft apply` unless either:
-/// 1. `advisor_security = "auto"` is configured (explicit opt-in), or
-/// 2. The human sent an explicit approval message.
+/// 1. The human sent an explicit approval message, or
+/// 2. `advisor_security = "auto"` is configured AND the shared Decision gate
+///    (`ta-decision::decide`) judges `confidence_pct` sufficient — `Auto` is no
+///    longer an unconditional bypass (v0.17.0.12.15). Missing confidence is
+///    treated as 0% (withhold), not as an implicit pass.
 pub fn check_advisor_auto_approve(
     security: &AdvisorSecurity,
     human_approved_explicitly: bool,
+    confidence_pct: Option<u8>,
 ) -> Result<(), String> {
     if human_approved_explicitly {
         return Ok(());
     }
     match security {
-        AdvisorSecurity::Auto => Ok(()),
+        AdvisorSecurity::Auto => {
+            let confidence = f64::from(confidence_pct.unwrap_or(0)) / 100.0;
+            let thresholds = ta_decision::DecisionThresholds {
+                min_confidence: f64::from(AUTO_APPLY_MIN_CONFIDENCE_PCT) / 100.0,
+                // This guard only judges intent confidence — draft risk is
+                // already enforced separately at the `ta draft apply` gate
+                // (v0.17.0.12.15 item 1) — so risk never overrides here.
+                max_risk_score: 100,
+                escalate_risk_score: u32::MAX,
+            };
+            let decision = ta_decision::decide(
+                &ta_decision::DecisionInput {
+                    verdict: ta_decision::Verdict::Pass,
+                    risk_score: 0,
+                    confidence,
+                },
+                &thresholds,
+            );
+            if decision.is_auto_approvable() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Constitution guard: auto-apply withheld. advisor_security = \"auto\" \
+                     requires \u{2265}{}% intent confidence to fire without explicit human \
+                     approval; this action reported {:.0}%. Ask the human to confirm \
+                     explicitly, or have the advisor re-assess confidence before retrying.",
+                    AUTO_APPLY_MIN_CONFIDENCE_PCT,
+                    confidence * 100.0
+                ))
+            }
+        }
         AdvisorSecurity::ReadOnly | AdvisorSecurity::Suggest => {
             Err("Constitution guard: auto-apply blocked. \
              The advisor may not call 'ta draft apply' without explicit human approval \
@@ -648,20 +699,42 @@ mod tests {
 
     #[test]
     fn constitution_guard_allows_explicit_approval() {
-        assert!(check_advisor_auto_approve(&AdvisorSecurity::ReadOnly, true).is_ok());
-        assert!(check_advisor_auto_approve(&AdvisorSecurity::Suggest, true).is_ok());
+        assert!(check_advisor_auto_approve(&AdvisorSecurity::ReadOnly, true, None).is_ok());
+        assert!(check_advisor_auto_approve(&AdvisorSecurity::Suggest, true, None).is_ok());
     }
 
     #[test]
     fn constitution_guard_blocks_without_approval_in_read_only() {
-        let result = check_advisor_auto_approve(&AdvisorSecurity::ReadOnly, false);
+        let result = check_advisor_auto_approve(&AdvisorSecurity::ReadOnly, false, Some(100));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Constitution guard"));
     }
 
     #[test]
-    fn constitution_guard_allows_auto_security_without_explicit() {
-        assert!(check_advisor_auto_approve(&AdvisorSecurity::Auto, false).is_ok());
+    fn constitution_guard_allows_auto_security_with_sufficient_confidence() {
+        assert!(check_advisor_auto_approve(&AdvisorSecurity::Auto, false, Some(80)).is_ok());
+        assert!(check_advisor_auto_approve(&AdvisorSecurity::Auto, false, Some(95)).is_ok());
+    }
+
+    /// v0.17.0.12.15: `Auto` must no longer be an unconditional bypass — below
+    /// the 80% intent-confidence contract, it must withhold approval.
+    #[test]
+    fn constitution_guard_withholds_auto_security_with_low_confidence() {
+        let result = check_advisor_auto_approve(&AdvisorSecurity::Auto, false, Some(50));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("80"));
+    }
+
+    #[test]
+    fn constitution_guard_withholds_auto_security_with_missing_confidence() {
+        // No confidence reported — must not be treated as an implicit pass.
+        let result = check_advisor_auto_approve(&AdvisorSecurity::Auto, false, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn constitution_guard_explicit_approval_overrides_low_confidence() {
+        assert!(check_advisor_auto_approve(&AdvisorSecurity::Auto, true, Some(0)).is_ok());
     }
 
     #[test]

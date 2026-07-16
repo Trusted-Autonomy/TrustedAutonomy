@@ -23,6 +23,9 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Gradle (plugins/jetbrains-ta build cache)
+.gradle/
+
 # Nix
 result
 result-*
@@ -81,6 +84,7 @@ result-*
 
 # Runtime / machine-specific files
 .ta/*.log
+.ta/*.log.*
 .ta/*.lock      # includes apply.lock (written by ta draft apply, ephemeral per-machine)
 .ta/*.pid
 .ta/*-crash-state.json
@@ -106,6 +110,8 @@ result-*
 .ta/action-log.jsonl
 .ta/autonomous-loop-state.json
 .ta/logs/
+.ta/routing-decisions.jsonl
+.ta/telemetry.jsonl
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml
@@ -124,6 +130,12 @@ result-*
 .swarm/
 .hive-mind/
 .mcp.json
+
+# Demo recordings
+*.cast
+
+# Local-only work queue (machine-specific, not shared via git)
+memory/work_queue.md
 
 # Trusted Autonomy — local runtime state (do not commit)
 .ta/daemon.toml
@@ -161,9 +173,3 @@ result-*
 .ta/*.log
 .ta/*.pid
 .ta/*.lock
-
-# Demo recordings
-*.cast
-
-# Local-only work queue (machine-specific, not shared via git)
-memory/work_queue.md

@@ -74,7 +74,7 @@ fn signal_connector_restart(project_root: &std::path::Path, name: &str) -> std::
 
 const RESTART_SIGNAL_POLL_SECS: u64 = 5;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ConnectorCommands {
     /// Install a connector's backend MCP server.
     ///

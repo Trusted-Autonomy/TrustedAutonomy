@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use crate::adapter::{BuildAdapter, BuildError, BuildResult, Result};
+use crate::backend::{BuildBackend, BuildError, BuildResult, Result};
 
 /// Build adapter for Rust projects using Cargo.
 pub struct CargoAdapter {
@@ -68,7 +68,7 @@ impl CargoAdapter {
     }
 }
 
-impl BuildAdapter for CargoAdapter {
+impl BuildBackend for CargoAdapter {
     fn build(&self) -> Result<BuildResult> {
         let cmd = self
             .build_command

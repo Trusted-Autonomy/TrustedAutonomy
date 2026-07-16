@@ -4,7 +4,7 @@
 > Every command, subsystem, and integration must adhere to these rules.
 > Pre-release reviews validate conformance against this document.
 
-**Last updated**: v0.17.0.12.10-alpha (added §1.6 Data-Defined Extensibility)
+**Last updated**: v0.17.0.12.13-alpha (added §1.8 Workflow-First: Prefer Workflow Over Code)
 **Status**: Living document — update when behavior changes.
 
 ---
@@ -41,6 +41,15 @@ A silent catch-all (`_ => None`, `_ => unreachable!()`, or equivalent) that drop
 Before introducing a new protocol, trait, or enum for a category of pluggable/extensible behavior (an integration point, a plugin kind, a communication pattern), the implementer MUST check `docs/design/ta-concepts-and-architecture.md`'s concept catalog for an existing abstraction that already covers the need, and either extend/reuse it or justify in the PR/draft description why a new one is required.
 
 **Why this rule exists**: VCS, messaging, social, and agent-runtime plugins were each built as four fully independent Rust type definitions for the same "external process, call/response" idea, with no shared base trait or crate between them — despite VCS plugins already existing when the other three were written. This rule exists to stop a fifth independent reimplementation of the same pattern.
+
+### 1.8 Workflow-First: Prefer Workflow Over Code
+Before implementing a new capability as compiled Rust code (a new CLI command, a new internal function, a new crate), the implementer MUST first ask whether it can be expressed as a **workflow** — an agent-orchestration composition (parallel/pipeline agent calls, a consensus template, a multi-persona review script) using TA's existing agent-runtime and consensus infrastructure — instead of new code.
+
+Workflow is strongly preferred because it is data/script-defined (composable, community-shareable, inspectable, changeable without a Rust recompile) rather than compiled and closed.
+
+When code is chosen over workflow, the implementer MUST justify why, in the PR or draft description. **"Performance" is not by itself an acceptable justification** — if performance is the stated reason, the implementer must first measure the actual workflow-based approach's latency/cost and identify the specific bottleneck, rather than assume a workflow would be too slow. A verified, named bottleneck (e.g., "each agent invocation costs 30s+ of model latency, and this path runs on every keystroke") is a valid justification; an unverified assumption is not.
+
+**Why this rule exists**: raised 2026-07-06 as a durable operating principle after observing that a genuinely code-first instinct (build a new CLI command, a new Rust struct) is the default even when an orchestration script would do the same job more flexibly and without a recompile — e.g., "red team review" of a completed goal/draft is fundamentally a multi-agent adversarial-review composition, not a new subsystem, and should be built as a reusable workflow module rather than new Rust code. See `docs/design/ta-concepts-and-architecture.md` §14 for the worked example and the audit of which already-planned v0.17.0.12.x phases are genuinely code (core platform mechanics the workflows run on top of) vs. which should be reconsidered as workflows.
 
 ---
 

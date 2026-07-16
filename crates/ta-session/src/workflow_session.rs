@@ -12,7 +12,7 @@ use crate::error::SessionError;
 use crate::plan::{PlanDocument, PlanItem};
 
 /// Security level for the advisor agent: controls what actions it may take autonomously.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdvisorSecurity {
     /// Advisor can only answer questions and present diffs — never starts a goal or

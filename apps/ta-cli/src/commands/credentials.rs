@@ -7,7 +7,7 @@ use clap::Subcommand;
 use ta_credentials::{CredentialVault, CredentialsConfig, FileVault};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum CredentialsCommands {
     /// Add a credential to the vault.
     Add {

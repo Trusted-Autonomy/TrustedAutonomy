@@ -218,6 +218,66 @@ impl DependencyGraph {
     }
 }
 
+/// Find dependency targets that artifacts describe (via `[deps: ...]` /
+/// `change_summary.json`'s `depends_on`/`depended_by`) but that never became a
+/// tracked artifact in the same draft.
+///
+/// Root-caused 2026-07-03: an agent's decision-log/change-description text can
+/// claim a file was edited (e.g. `plan.rs`'s entry lists `CLAUDE.md` under
+/// `[deps: ...]`) without `CLAUDE.md` ever becoming its own `Artifact` in the
+/// draft package. No existing check caught this before a supervisor `PASS`.
+///
+/// Returns the missing target URIs, in first-seen order, deduplicated.
+pub fn untracked_dependency_targets(artifacts: &[Artifact]) -> Vec<String> {
+    let tracked: std::collections::HashSet<&str> =
+        artifacts.iter().map(|a| a.resource_uri.as_str()).collect();
+
+    let mut missing = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for artifact in artifacts {
+        for dep in &artifact.dependencies {
+            if !tracked.contains(dep.target_uri.as_str()) && seen.insert(dep.target_uri.clone()) {
+                missing.push(dep.target_uri.clone());
+            }
+        }
+    }
+    missing
+}
+
+/// Pre-PASS artifact/description consistency gate.
+///
+/// A draft's supervisor review must never return verdict `Pass` when an artifact's
+/// own description references a file that isn't itself tracked as an artifact —
+/// that disagreement between description and tracked-artifact-list is exactly the
+/// root cause class from the 2026-07-03 incident (see `untracked_dependency_targets`).
+/// When found, downgrades `Pass` to `Warn` and appends an explicit
+/// "described but not tracked: <path>" finding per missing file, rather than
+/// silently passing. Reviews already at `Warn`/`Block` are left untouched — they
+/// are not "silently passing".
+///
+/// Returns `true` if the verdict was downgraded.
+pub fn apply_artifact_consistency_gate(
+    review: &mut crate::supervisor_review::SupervisorReview,
+    artifacts: &[Artifact],
+) -> bool {
+    if review.verdict != crate::supervisor_review::SupervisorVerdict::Pass {
+        return false;
+    }
+
+    let missing = untracked_dependency_targets(artifacts);
+    if missing.is_empty() {
+        return false;
+    }
+
+    review.verdict = crate::supervisor_review::SupervisorVerdict::Warn;
+    for target in &missing {
+        review
+            .findings
+            .push(format!("described but not tracked: {}", target));
+    }
+    true
+}
+
 /// Result of plan validation — checking if completed work matches plan expectations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanValidationResult {
@@ -806,5 +866,93 @@ mod tests {
         let result = validate_against_plan(&[a1, a2], "v0.3.1", "Plan Lifecycle");
         assert!(result.is_well_described());
         assert!(result.notes.is_empty());
+    }
+
+    // ── v0.17.0.12.11 Pre-PASS artifact/description consistency check ──
+
+    #[test]
+    fn untracked_dependency_targets_flags_missing_artifact() {
+        // plan.rs's entry claims a dependency on CLAUDE.md, but CLAUDE.md never
+        // became its own tracked artifact in the draft — the exact root-cause
+        // scenario from the 2026-07-03 incident.
+        let artifacts = vec![make_artifact(
+            "fs://workspace/apps/ta-cli/src/commands/plan.rs",
+            ArtifactDisposition::Pending,
+            vec![("fs://workspace/CLAUDE.md", DependencyKind::DependsOn)],
+        )];
+
+        let missing = untracked_dependency_targets(&artifacts);
+        assert_eq!(missing, vec!["fs://workspace/CLAUDE.md".to_string()]);
+    }
+
+    #[test]
+    fn untracked_dependency_targets_empty_when_all_tracked() {
+        let artifacts = vec![
+            make_artifact(
+                "fs://workspace/a.rs",
+                ArtifactDisposition::Pending,
+                vec![("fs://workspace/b.rs", DependencyKind::DependsOn)],
+            ),
+            make_artifact("fs://workspace/b.rs", ArtifactDisposition::Pending, vec![]),
+        ];
+
+        assert!(untracked_dependency_targets(&artifacts).is_empty());
+    }
+
+    #[test]
+    fn apply_artifact_consistency_gate_downgrades_pass_to_warn() {
+        let artifacts = vec![make_artifact(
+            "fs://workspace/plan.rs",
+            ArtifactDisposition::Pending,
+            vec![("fs://workspace/CLAUDE.md", DependencyKind::DependsOn)],
+        )];
+        let mut review = crate::supervisor_review::SupervisorReview {
+            verdict: crate::supervisor_review::SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![],
+            summary: "Looks good".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.95,
+        };
+
+        let downgraded = apply_artifact_consistency_gate(&mut review, &artifacts);
+
+        assert!(downgraded);
+        assert_eq!(
+            review.verdict,
+            crate::supervisor_review::SupervisorVerdict::Warn
+        );
+        assert!(review
+            .findings
+            .iter()
+            .any(|f| f.contains("described but not tracked") && f.contains("CLAUDE.md")));
+    }
+
+    #[test]
+    fn apply_artifact_consistency_gate_leaves_consistent_pass_untouched() {
+        let artifacts = vec![make_artifact(
+            "fs://workspace/a.rs",
+            ArtifactDisposition::Pending,
+            vec![],
+        )];
+        let mut review = crate::supervisor_review::SupervisorReview {
+            verdict: crate::supervisor_review::SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![],
+            summary: "Looks good".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.95,
+        };
+
+        let downgraded = apply_artifact_consistency_gate(&mut review, &artifacts);
+
+        assert!(!downgraded);
+        assert_eq!(
+            review.verdict,
+            crate::supervisor_review::SupervisorVerdict::Pass
+        );
+        assert!(review.findings.is_empty());
     }
 }

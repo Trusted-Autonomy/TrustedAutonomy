@@ -140,7 +140,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut config = TeamConfig::default();
         config.members.push(TeamMember {
-            role: TeamRole::Reviewer,
+            role: TeamRole::reviewer(),
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::Auto,
             persona: Some("strict-reviewer".to_string()),
@@ -149,7 +149,7 @@ mod tests {
 
         let loaded = TeamConfig::load(tmp.path()).unwrap();
         assert_eq!(loaded.members.len(), 1);
-        assert_eq!(loaded.members[0].role, TeamRole::Reviewer);
+        assert_eq!(loaded.members[0].role, TeamRole::reviewer());
         assert_eq!(loaded.members[0].agent_id, "claude-sonnet-4-6");
         assert_eq!(loaded.members[0].security, AdvisorSecurity::Auto);
         assert_eq!(
@@ -163,13 +163,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut config = TeamConfig::default();
         config.members.push(TeamMember {
-            role: TeamRole::Implementer,
+            role: TeamRole::implementer(),
             agent_id: "claude-opus-4-8".to_string(),
             security: AdvisorSecurity::ReadOnly,
             persona: None,
         });
         config.members.push(TeamMember {
-            role: TeamRole::Reviewer,
+            role: TeamRole::reviewer(),
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::Auto,
             persona: Some("strict".to_string()),
@@ -181,10 +181,56 @@ mod tests {
     }
 
     #[test]
+    fn team_toml_custom_role_round_trip() {
+        // Data-defined roles (TA-CONSTITUTION.md §1.6): a custom role name not
+        // among the well-known constants must round-trip through team.toml
+        // identically, anticipating §8's community-review workflow.
+        let tmp = TempDir::new().unwrap();
+        let mut config = TeamConfig::default();
+        config.members.push(TeamMember {
+            role: TeamRole::new("security-team"),
+            agent_id: "claude-opus-4-8".to_string(),
+            security: AdvisorSecurity::ReadOnly,
+            persona: None,
+        });
+        config.save(tmp.path()).unwrap();
+
+        let loaded = TeamConfig::load(tmp.path()).unwrap();
+        assert_eq!(loaded.members.len(), 1);
+        assert_eq!(loaded.members[0].role, TeamRole::new("security-team"));
+        assert_eq!(loaded.members[0].role.as_str(), "security-team");
+    }
+
+    #[test]
+    fn team_toml_well_known_roles_parse_as_plain_strings() {
+        // Regression guard: existing team.toml fixtures using well-known role
+        // names as plain strings (e.g. `role = "reviewer"`) must keep parsing
+        // identically after TeamRole became a data-defined newtype.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ta")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ta").join("team.toml"),
+            r#"
+[[members]]
+role = "reviewer"
+agent_id = "claude-sonnet-4-6"
+security = "auto"
+persona = "strict-reviewer"
+"#,
+        )
+        .unwrap();
+
+        let loaded = TeamConfig::load(tmp.path()).unwrap();
+        assert_eq!(loaded.members.len(), 1);
+        assert_eq!(loaded.members[0].role, TeamRole::reviewer());
+        assert_eq!(loaded.members[0].role.as_str(), "reviewer");
+    }
+
+    #[test]
     fn team_assign_new_role() {
         let mut config = TeamConfig::default();
         config.assign(
-            TeamRole::Implementer,
+            TeamRole::implementer(),
             "claude-opus".to_string(),
             AdvisorSecurity::ReadOnly,
             None,
@@ -197,14 +243,14 @@ mod tests {
     fn team_assign_upserts_existing_role() {
         let mut config = TeamConfig::default();
         config.assign(
-            TeamRole::Implementer,
+            TeamRole::implementer(),
             "claude-opus".to_string(),
             AdvisorSecurity::ReadOnly,
             None,
         );
         // Assign again — should update, not duplicate.
         config.assign(
-            TeamRole::Implementer,
+            TeamRole::implementer(),
             "claude-sonnet".to_string(),
             AdvisorSecurity::Auto,
             Some("fast".to_string()),
@@ -218,12 +264,12 @@ mod tests {
     #[test]
     fn team_find_by_role() {
         let mut config = TeamConfig::default();
-        config.members.push(make_member(TeamRole::Reviewer));
-        config.members.push(make_member(TeamRole::QA));
+        config.members.push(make_member(TeamRole::reviewer()));
+        config.members.push(make_member(TeamRole::qa()));
 
-        assert!(config.find_by_role(&TeamRole::Reviewer).is_some());
-        assert!(config.find_by_role(&TeamRole::QA).is_some());
-        assert!(config.find_by_role(&TeamRole::Architect).is_none());
+        assert!(config.find_by_role(&TeamRole::reviewer()).is_some());
+        assert!(config.find_by_role(&TeamRole::qa()).is_some());
+        assert!(config.find_by_role(&TeamRole::architect()).is_none());
     }
 
     #[test]

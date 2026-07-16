@@ -14,12 +14,18 @@ pub mod framework_registry;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use ta_mcp_gateway::GatewayConfig;
 
 /// Trusted Autonomy CLI — review and approve agent changes.
 ///
 /// Run `ta` with no arguments to show the project status dashboard.
+///
+/// `ta --help` shows the curated everyday-workflow surface (v0.17.0.12.22):
+/// the 10 verbs (create/list/show/update/remove/approve/deny/apply/check/sync),
+/// plus run/status/shell/onboard/doctor. Run `ta --help --all` to see the
+/// full legacy/advanced command surface, or `ta <legacy-noun> --help` to
+/// drill into one directly (e.g. `ta plugin --help`).
 #[derive(Parser)]
 #[command(
     name = "ta",
@@ -50,7 +56,7 @@ struct Cli {
 }
 
 /// Subcommands for `ta gc` that target specific subsystems.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GcSubcommand {
     /// Remove unreferenced SHA blobs from the managed-paths store (v0.17.0).
     ///
@@ -72,8 +78,134 @@ enum GcSubcommand {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
+    // ── VERB-SET CONSOLIDATION (v0.17.0.12.16) ────────────────────────────────
+    //
+    // Primary CLI surface per docs/design/ta-concepts-and-architecture.md §5/§11:
+    // ten orthogonal verbs, nouns as positional subjects
+    // (`ta <verb> <noun> [id] [flags]`). `run` (below) and `draft`'s
+    // `apply`/`approve`/`deny` already fit this shape and need no change.
+    // See `apps/ta-cli/src/commands/verb.rs` for the noun/verb mapping table.
+    /// Create a resource (provisioning) — replaces New/Init/Add/Install.
+    ///
+    /// Examples:
+    ///   ta create persona reviewer
+    ///   ta create plugin ./plugins/my-plugin
+    ///   ta create agent my-framework
+    ///
+    /// Run `ta create --help` to see the full noun list, or docs/USAGE.md's
+    /// CLI Verb Reference for the old→new lookup table.
+    Create {
+        /// Resource kind (e.g. "goal", "persona", "plugin", "agent").
+        noun: String,
+        /// Resource ID/name, if applicable.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// List resources of a given kind — replaces the 15+ independent List implementations.
+    ///
+    /// Examples: `ta list goal`, `ta list draft`, `ta list plugin`
+    List {
+        /// Resource kind (e.g. "goal", "draft", "session").
+        noun: String,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Show single-item detail — replaces View/Status/Inspect naming inconsistency.
+    ///
+    /// Examples: `ta show goal <id>`, `ta show draft <id>`, `ta show agent <name>`
+    Show {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Update a resource — replaces Set/Assign/MoveItem/AddItem/Reload.
+    ///
+    /// Examples: `ta update team implementer claude-opus-4-8`, `ta update persona reviewer --agent auto`
+    Update {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Remove a resource — replaces Delete/Remove/Revoke/Uninstall.
+    ///
+    /// Examples: `ta remove goal <id>`, `ta remove plugin <name>`
+    ///
+    /// `ta remove goal` fixed the phase-reset-even-when-done bug (found
+    /// 2026-07-03) as part of this unification: a `done` plan phase is never
+    /// reset to `pending` on goal removal, only an `in_progress` one is.
+    Remove {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Approve a draft (or other Decision-gated resource) for the next graph stage.
+    ///
+    /// Already fits the verb+noun shape via `ta draft approve` — this is the
+    /// top-level spelling. Example: `ta approve draft <id>`
+    Approve {
+        /// Resource kind (currently only "draft").
+        noun: String,
+        /// Resource ID.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Deny a draft (or other Decision-gated resource) with a reason.
+    ///
+    /// Example: `ta deny draft <id> --reason "..."`
+    Deny {
+        /// Resource kind (currently only "draft").
+        noun: String,
+        /// Resource ID.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Fire the Commit stage for a resource — TA's defining action.
+    ///
+    /// Already fits the verb+noun shape via `ta draft apply` — this is the
+    /// top-level spelling. Example: `ta apply draft <id>`
+    Apply {
+        /// Resource kind (currently only "draft").
+        noun: String,
+        /// Resource ID.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Correctness check — replaces Validate/Verify/Check/Audit naming inconsistency.
+    ///
+    /// Examples: `ta check plan-phase v0.15.0`, `ta check agent claude-code`
+    Check {
+        /// Resource kind.
+        noun: String,
+        /// Resource ID/name, if applicable.
+        id: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+
     // ── DASHBOARD ───────────────────────────────────────────────────────────
     /// Project-wide status dashboard: active agents, pending drafts, next phase.
     ///
@@ -97,8 +229,15 @@ enum Commands {
         /// filled in automatically.
         title: Option<String>,
         /// Agent system to use (claude-code, codex, etc.).
-        /// When omitted, resolves from: workflow YAML agent_framework →
-        /// [agent].default_framework in daemon.toml → "claude-code".
+        ///
+        /// When omitted, resolves through the full `Switch` action tier
+        /// hierarchy (v0.17.0.12.13): persona-level `agent` binding →
+        /// workflow YAML `agent_framework` → [agent].default in
+        /// .ta/workflow.toml → [workload_agents].<--workload> in
+        /// .ta/workflow.toml → [agent].default in daemon.toml (falls back to
+        /// legacy [agent].default_framework) → "claude-code". A literal
+        /// "auto" at any tier hands the choice to the supervisor's
+        /// recommendation (logged to .ta/agent-recommendations.jsonl).
         #[arg(long)]
         agent: Option<String>,
         /// Source directory to overlay (defaults to project root).
@@ -211,23 +350,52 @@ enum Commands {
         ///   cargo test 2>&1 | ta run "fix failing tests" --context -
         #[arg(long, value_name = "PATH")]
         context: Option<PathBuf>,
+        /// Workload type for the workload-type-level agent tier (v0.17.0.12.13).
+        ///
+        /// Looked up in .ta/workflow.toml's [workload_agents] table (e.g.
+        /// `bugfix = "claude-opus-4-8"`). When omitted, `ta-brain` (v0.17.0.12.20)
+        /// classifies the workload type automatically from the goal title.
+        #[arg(long)]
+        workload: Option<String>,
+        /// Team role that owns this goal (v0.17.0.12.20 routing brain).
+        ///
+        /// Resolves through `ta-brain`'s routing tiers when omitted: this flag →
+        /// `.ta/workflow.toml`'s `[workload_types.<type>].team` → `[team].default`
+        /// → a built-in workload-type heuristic → `"implementer"`.
+        #[arg(long)]
+        team: Option<String>,
+        /// Security tier for this goal: read_only, suggest, or auto
+        /// (v0.17.0.12.20 routing brain, reuses the advisor's `AdvisorSecurity`
+        /// tri-state). `"auto"` is downgraded to `"suggest"` when workload
+        /// classification confidence is too low to trust with full autonomy.
+        #[arg(long)]
+        security: Option<String>,
+        /// Priority relative to other pending requests: low, normal, high, or
+        /// urgent (v0.17.0.12.20 routing brain). When omitted, resolves from
+        /// `.ta/workflow.toml` config or is detected from the goal title.
+        #[arg(long)]
+        priority: Option<String>,
     },
     /// Review and manage draft packages.
+    #[command(hide = true)]
     Draft {
         #[command(subcommand)]
         command: commands::draft::DraftCommands,
     },
     /// Manage goal runs.
+    #[command(hide = true)]
     Goal {
         #[command(subcommand)]
         command: commands::goal::GoalCommands,
     },
     /// View and track the project development plan.
+    #[command(hide = true)]
     Plan {
         #[command(subcommand)]
         command: commands::plan::PlanCommands,
     },
     /// Manage agent personas for role-based behavior.
+    #[command(hide = true)]
     Persona {
         #[command(subcommand)]
         command: commands::persona::PersonaCommands,
@@ -261,6 +429,7 @@ enum Commands {
     /// Runbooks automate common recovery procedures: disk pressure cleanup,
     /// zombie goal recovery, stale draft cleanup, and more.
     /// Built-in runbooks ship with TA; project-local runbooks live in .ta/runbooks/.
+    #[command(hide = true)]
     Runbook {
         #[command(subcommand)]
         command: commands::runbook::RunbookCommands,
@@ -269,11 +438,13 @@ enum Commands {
     ///
     /// The daemon watchdog continuously monitors goal health, disk space,
     /// and plugin status. Corrective action proposals are logged here.
+    #[command(hide = true)]
     Operations {
         #[command(subcommand)]
         command: commands::operations::OperationsCommands,
     },
     /// Manage the TA daemon lifecycle (start, stop, restart, status, log).
+    #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         command: commands::daemon::DaemonCommands,
@@ -282,6 +453,7 @@ enum Commands {
     ///
     /// Subcommands:
     ///   ta gc governed-paths  — remove unreferenced SHA blobs from managed paths
+    #[command(hide = true)]
     Gc {
         /// Show what would be cleaned without making changes.
         #[arg(long)]
@@ -374,6 +546,7 @@ enum Commands {
     ///   ta upgrade --dry-run    # show what would be applied without changing anything
     ///   ta upgrade --force      # re-run all steps regardless of version
     ///   ta upgrade --acknowledge ".ta/review/"  # suppress a warning for intentional omission
+    #[command(hide = true)]
     Upgrade(commands::upgrade::UpgradeArgs),
 
     // ── ONBOARDING ──────────────────────────────────────────────────────────
@@ -437,37 +610,44 @@ enum Commands {
         command: commands::pr::PrCommands,
     },
     /// Inspect the audit trail.
+    #[command(hide = true)]
     Audit {
         #[command(subcommand)]
         command: commands::audit::AuditCommands,
     },
     /// Manage interactive sessions.
+    #[command(hide = true)]
     Session {
         #[command(subcommand)]
         command: commands::session::SessionCommands,
     },
     /// Manage persistent context memory across agents and sessions.
+    #[command(hide = true)]
     Context {
         #[command(subcommand)]
         command: commands::context::ContextCommands,
     },
     /// Manage stored credentials for external services.
+    #[command(hide = true)]
     Credentials {
         #[command(subcommand)]
         command: commands::credentials::CredentialsCommands,
     },
     /// Stream and inspect lifecycle events.
+    #[command(hide = true)]
     Events {
         #[command(subcommand)]
         command: commands::events::EventsCommands,
     },
     /// Manage approval tokens for non-interactive workflows.
+    #[command(hide = true)]
     Token {
         #[command(subcommand)]
         command: commands::token::TokenCommands,
     },
     /// Interactive developer loop — orchestrate plan execution, goal launches,
     /// draft review, and releases from one persistent session.
+    #[command(hide = true)]
     Dev {
         /// Agent system to use for orchestration (defaults to dev-loop config).
         #[arg(long)]
@@ -477,6 +657,7 @@ enum Commands {
         unrestricted: bool,
     },
     /// Interactive setup wizard for TA configuration.
+    #[command(hide = true)]
     Setup {
         #[command(subcommand)]
         command: commands::setup::SetupCommands,
@@ -488,8 +669,10 @@ enum Commands {
     /// agent system, VCS, notifications, first project, and summary.
     ///
     /// Run this once after installation to get started.
+    #[command(hide = true)]
     Install,
     /// Initialize a new TA-managed project from a template.
+    #[command(hide = true)]
     Init {
         #[command(subcommand)]
         command: commands::init::InitCommands,
@@ -498,6 +681,7 @@ enum Commands {
     ///
     /// Starts an interactive session with a planner agent that asks about your
     /// project, generates a scaffold, and produces a PLAN.md with versioned phases.
+    #[command(hide = true)]
     New {
         #[command(subcommand)]
         command: commands::new::NewCommands,
@@ -511,6 +695,7 @@ enum Commands {
     ///   ta advisor ask "implement remaining v0.15"
     ///   ta advisor ask "apply" --security suggest
     ///   ta advisor ask "what changed?" --tab plan --no-input
+    #[command(hide = true)]
     Advisor {
         #[command(subcommand)]
         command: commands::advisor::AdvisorCommands,
@@ -525,6 +710,7 @@ enum Commands {
     /// Examples:
     ///   ta advise "please focus on the auth module"
     ///   ta advise --goal abc123 "add more test coverage"
+    #[command(hide = true)]
     Advise {
         /// The note/instruction to send to the agent.
         message: String,
@@ -533,6 +719,7 @@ enum Commands {
         goal: Option<String>,
     },
     /// Author, validate, and manage agent configurations.
+    #[command(hide = true)]
     Agent {
         #[command(subcommand)]
         command: commands::agent::AgentCommands,
@@ -552,6 +739,7 @@ enum Commands {
     ///   ta style show                         # print current style
     ///   ta style edit                         # open in $EDITOR
     ///   ta style clear                        # remove style file
+    #[command(hide = true)]
     Style {
         #[command(subcommand)]
         command: commands::style::StyleCommands,
@@ -565,6 +753,7 @@ enum Commands {
     ///   ta team list
     ///   ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
     ///   ta team assign implementer claude-opus-4-8
+    #[command(hide = true)]
     Team {
         #[command(subcommand)]
         command: commands::team::TeamCommands,
@@ -573,6 +762,7 @@ enum Commands {
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
     /// from PLAN.md and CLAUDE.md. The output is a TA draft for review.
+    #[command(hide = true)]
     Constitution {
         #[command(subcommand)]
         command: commands::constitution::ConstitutionCommands,
@@ -581,29 +771,51 @@ enum Commands {
     ///
     /// `ta memory backend` shows the active backend, entry count, and storage size.
     /// `ta memory list` prints stored entries (alias for `ta context list`).
+    #[command(hide = true)]
     Memory {
         #[command(subcommand)]
         command: commands::memory::MemoryCommands,
     },
     /// Manage agent adapter integrations.
+    #[command(hide = true)]
     Adapter {
         #[command(subcommand)]
         command: commands::adapter::AdapterCommands,
     },
     /// Run the configurable release pipeline.
+    #[command(hide = true)]
     Release {
         #[command(subcommand)]
         command: commands::release::ReleaseCommands,
     },
     /// Multi-project office daemon management.
+    #[command(hide = true)]
     Office {
         #[command(subcommand)]
         command: commands::office::OfficeCommands,
     },
     /// Manage channel plugins (list, install, validate).
+    #[command(hide = true)]
     Plugin {
         #[command(subcommand)]
         command: commands::plugin::PluginCommands,
+    },
+    /// Trigger layer (v0.17.0.12.19): data-defined trigger types that feed goal creation.
+    ///
+    /// Per-type trigger configs live at `.ta/triggers/<type>.toml`, the same
+    /// data-defined pattern used for plugins and personas.
+    ///
+    /// Examples:
+    ///   ta intake list
+    ///   ta intake fire schedule
+    ///   ta intake fire inbound-email --dry-run
+    ///   ta intake queue
+    ///   ta intake coordinate
+    ///   ta intake routing --limit 10
+    #[command(hide = true)]
+    Intake {
+        #[command(subcommand)]
+        command: commands::intake::IntakeCommands,
     },
     /// Manage creative project templates (install, list, remove, publish, search).
     ///
@@ -615,6 +827,7 @@ enum Commands {
     ///   ta template install blender-addon
     ///   ta template install github:myorg/my-template
     ///   ta template install ./my-local-template
+    #[command(hide = true)]
     Template {
         #[command(subcommand)]
         command: commands::template::TemplateCommands,
@@ -623,6 +836,7 @@ enum Commands {
     ///
     /// Finds the most recently approved draft, applies it, stages and commits
     /// changes with git, pushes to the remote, and optionally opens a GitHub PR.
+    #[command(hide = true)]
     Publish {
         /// Commit message (defaults to the draft title).
         #[arg(long, short)]
@@ -632,6 +846,7 @@ enum Commands {
         yes: bool,
     },
     /// Manage multi-stage workflows with pluggable engines.
+    #[command(hide = true)]
     Workflow {
         #[command(subcommand)]
         command: commands::workflow::WorkflowCommands,
@@ -642,6 +857,7 @@ enum Commands {
     /// `ta stats velocity-detail` shows a per-goal breakdown table.
     /// `ta stats export` exports full history as JSON or CSV.
     /// `ta stats migrate` promotes local history to the committed shared file.
+    #[command(hide = true)]
     Stats {
         #[command(subcommand)]
         command: commands::stats::StatsCommands,
@@ -658,11 +874,12 @@ enum Commands {
     ///
     /// Subcommands:
     ///   ta meridian analyze  — run KPI analysis against velocity data
-    ///   ta meridian help     — list tools exposed by meridian serve (MCP)
+    ///   ta meridian tools    — list tools exposed by meridian serve (MCP)
     ///   ta meridian init     — create meridian.toml with starter KPI definitions
     ///   ta meridian suggest  — surface KPI alignment gaps with suggestions
     ///
     /// Install Meridian: cargo install meridian
+    #[command(hide = true)]
     Meridian {
         #[command(subcommand)]
         command: commands::meridian::MeridianCommands,
@@ -680,6 +897,7 @@ enum Commands {
     ///   ta tools list
     ///   ta tools install meridian
     ///   ta tools install claude-flow
+    #[command(hide = true)]
     Tools {
         #[command(subcommand)]
         command: commands::tools::ToolsCommands,
@@ -692,6 +910,7 @@ enum Commands {
     /// `ta community get <id>` fetches and displays a specific document.
     ///
     /// Configure resources in `.ta/community-resources.toml`.
+    #[command(hide = true)]
     Community {
         #[command(subcommand)]
         command: commands::community::CommunityCommands,
@@ -707,6 +926,7 @@ enum Commands {
     ///   ta manifest validate
     ///   ta manifest show
     ///   ta manifest show cinepipe-train
+    #[command(hide = true)]
     Manifest {
         #[command(subcommand)]
         command: commands::manifest::ManifestCommands,
@@ -723,42 +943,59 @@ enum Commands {
     ///   ta link status
     ///   ta link refresh
     ///   ta link remove cinepipe-train
+    #[command(hide = true)]
     Link {
         #[command(subcommand)]
         command: commands::link::LinkCommands,
     },
     /// Manage policy configuration and auto-approval.
+    #[command(hide = true)]
     Policy {
         #[command(subcommand)]
         command: commands::policy::PolicyCommands,
     },
     /// Inspect and validate project configuration (channels, routing).
+    #[command(hide = true)]
     Config {
         #[command(subcommand)]
         command: commands::config::ConfigCommands,
     },
     /// Start the MCP server on stdio.
+    #[command(hide = true)]
     Serve,
     /// Build the project using the configured build adapter.
     ///
     /// Auto-detects the build system (Cargo, npm, Make) or uses the adapter
     /// configured in `[build]` in `.ta/workflow.toml`. Emits `build_completed`
     /// or `build_failed` events.
+    #[command(hide = true)]
     Build {
         /// Also run the test suite after building.
         #[arg(long)]
         test: bool,
     },
-    /// Sync the local workspace with upstream changes.
+    /// Sync the local workspace with upstream changes, or reconcile a resource
+    /// with its remote/registry — replaces Gc/Prune/Migrate/reconcile-with-remote.
     ///
-    /// Calls the configured VCS adapter's sync operation (e.g., git fetch + merge/rebase).
-    /// Emits `sync_completed` or `sync_conflict` events. Configure sync behavior
-    /// in `[source.sync]` in `.ta/workflow.toml`.
-    Sync,
+    /// With no noun: calls the configured VCS adapter's sync operation (e.g., git
+    /// fetch + merge/rebase). Emits `sync_completed` or `sync_conflict` events.
+    /// Configure sync behavior in `[source.sync]` in `.ta/workflow.toml`.
+    ///
+    /// With a noun: reconciles that resource, e.g. `ta sync goal` (garbage-collect
+    /// zombie goals), `ta sync agent` (migrate a framework), `ta sync community`
+    /// (refresh cached resources).
+    Sync {
+        /// Resource kind to sync. Omit for the default VCS workspace sync.
+        noun: Option<String>,
+        /// Remaining flags, forwarded to the underlying command unchanged.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
     /// Run pre-draft verification checks against a staging workspace.
     ///
     /// Runs the [verify] commands from .ta/workflow.toml in the staging
     /// directory. Useful for manual verification without running `ta run`.
+    #[command(hide = true)]
     Verify {
         /// Goal ID (or prefix) whose staging directory to verify.
         /// Defaults to the most recent active goal.
@@ -773,11 +1010,13 @@ enum Commands {
     ///   ta analysis run
     ///   ta analysis run --lang python
     ///   ta analysis run --fix
+    #[command(hide = true)]
     Analysis {
         #[command(subcommand)]
         command: commands::analysis::AnalysisCommands,
     },
     /// View the interactive conversation history for a goal.
+    #[command(hide = true)]
     Conversation {
         /// Goal run ID (or prefix).
         goal_id: String,
@@ -794,6 +1033,7 @@ enum Commands {
     ///   ta connector install unreal --backend flopperam
     ///   ta connector list
     ///   ta connector status unreal
+    #[command(hide = true)]
     Connector {
         #[command(subcommand)]
         command: commands::connector::ConnectorCommands,
@@ -812,6 +1052,7 @@ enum Commands {
     ///   ta compression status
     ///   ta compression enable
     ///   ta compression disable
+    #[command(hide = true)]
     Compression {
         #[command(subcommand)]
         command: commands::compression::CompressionCommands,
@@ -826,6 +1067,7 @@ enum Commands {
     /// Examples:
     ///   ta webhook test github pull_request.closed --branch main
     ///   ta webhook test vcs changelist_submitted --change 12345
+    #[command(hide = true)]
     Webhook {
         #[command(subcommand)]
         command: commands::webhook::WebhookCommands,
@@ -858,6 +1100,39 @@ enum Commands {
         /// Agent ID (required for show/accept, optional for status).
         agent: Option<String>,
     },
+}
+
+/// Parse CLI args, honoring `--all` as an ad-hoc flag that unhides the full
+/// legacy/advanced command surface in `--help` output (v0.17.0.12.22).
+///
+/// `--all` is intentionally *not* a formal `Cli`-level `#[arg(global = true)]`:
+/// several subcommands (`ta gc --all`, `ta audit drift --all`) already
+/// define their own `--all` flag with unrelated meaning, and a global arg
+/// sharing that id would collide with those at `clap::Command` build time.
+/// Instead this scans the raw argv for the literal `--all` token purely to
+/// decide whether to unhide `Command` nodes before the real parse —
+/// `.hide()` only affects help rendering, never argument matching, so
+/// reusing the (possibly unhidden) `Command` for the actual parse is always
+/// safe, regardless of whether this invocation was a help request.
+fn parse_cli_with_help_curation() -> Cli {
+    let show_all = std::env::args().any(|a| a == "--all");
+    let mut cmd = Cli::command();
+    if show_all {
+        unhide_all_subcommands(&mut cmd);
+    }
+    let matches = cmd.get_matches_from(std::env::args_os());
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
+/// Recursively clear the `hide` flag on every subcommand so `ta --help --all`
+/// shows the full legacy/advanced surface, not just the curated set
+/// (v0.17.0.12.22 item 2).
+fn unhide_all_subcommands(cmd: &mut clap::Command) {
+    for sub in cmd.get_subcommands_mut() {
+        let taken = std::mem::replace(sub, clap::Command::new("__ta_tmp__"));
+        *sub = taken.hide(false);
+        unhide_all_subcommands(sub);
+    }
 }
 
 /// Build the long version string: "0.1.0-alpha (abc1234 2026-02-11)"
@@ -934,9 +1209,34 @@ fn try_resolve_phase(candidate: &str, project_root: &std::path::Path) -> Option<
     Some((title, phase.id.clone()))
 }
 
+/// Windows' default main-thread stack (1MB) is far smaller than
+/// Linux/macOS's (8MB default). Debug builds' uninlined stack frames for
+/// clap's generated subcommand dispatch can exceed that 1MB limit on
+/// Windows even though the same code path is fine elsewhere — confirmed by
+/// `scripts/diagnose-windows-stack-overflow.ps1` (PR #537): the crash is
+/// 100% deterministic at the default stack and 100% clean at 64MB, with no
+/// signs of unbounded/infinite recursion. Running the real work on a
+/// spawned thread with an explicit larger stack fixes it for every
+/// invocation of the binary, not just the two tests that first exposed it.
 fn main() -> anyhow::Result<()> {
+    match std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn ta worker thread")
+        .join()
+    {
+        Ok(result) => result,
+        Err(_) => {
+            // The worker thread's own panic hook already printed the
+            // panic message/backtrace; just propagate a nonzero exit.
+            std::process::exit(101);
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let startup_begin = std::time::Instant::now();
-    let cli = Cli::parse();
+    let cli = parse_cli_with_help_curation();
     let t_parse = startup_begin.elapsed();
 
     // Handle --accept-terms flag (non-interactive acceptance).
@@ -1053,12 +1353,169 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    dispatch_raw(command, &config, &project_root, cli.no_version_check, true)
+}
+
+/// Build the one-line, non-fatal deprecation notice for a legacy noun-first
+/// invocation, pointing at the new verb+noun equivalent when one is mapped
+/// (v0.17.0.12.16). A pure function (no I/O) so the exact wording is
+/// unit-testable; `print_deprecation_notice` is the thin I/O wrapper.
+fn deprecation_notice_text<T: std::fmt::Debug>(legacy_top: &str, cmd: &T) -> String {
+    let action = commands::verb::action_word_from_debug(cmd);
+    match commands::verb::new_form_for(legacy_top, &action) {
+        Some(new_form) => format!(
+            "[deprecated-cli] `ta {legacy_top} {action}` \u{2192} use `{new_form}` instead (same behavior). See docs/USAGE.md's CLI Verb Reference."
+        ),
+        None => format!(
+            "[deprecated-cli] `ta {legacy_top}` subcommands are being consolidated into the 10-verb CLI (create/list/show/update/remove/run/approve/deny/apply/check/sync, v0.17.0.12.16). This action isn't mapped to a new verb yet and continues to work unchanged. See docs/USAGE.md."
+        ),
+    }
+}
+
+/// Print a one-line, non-fatal deprecation notice for a legacy noun-first
+/// invocation. Never blocks execution — the legacy form keeps working.
+/// Called exactly once per process, only for a directly-typed legacy
+/// invocation (`dispatch_raw`'s `warn_legacy = true` path) — a verb+noun
+/// invocation that internally forwards to the same legacy `Commands` variant
+/// (`run_verb_noun`) always passes `warn_legacy = false`, so the notice never
+/// double-prints and never prints for the new primary surface.
+fn print_deprecation_notice<T: std::fmt::Debug>(legacy_top: &str, cmd: &T) {
+    eprintln!("{}", deprecation_notice_text(legacy_top, cmd));
+}
+
+/// Resolve a `ta <verb> <noun> [id] [extra...]` invocation to its legacy
+/// equivalent and dispatch it through the exact same code path as a direct
+/// legacy invocation (`dispatch_raw` with `warn_legacy = false`) — the new
+/// verb+noun surface and the legacy noun-first surface always execute
+/// identical code, never two copies of the same behavior.
+fn run_verb_noun(
+    verb: &str,
+    noun: &str,
+    id: Option<&str>,
+    extra: &[String],
+    config: &GatewayConfig,
+    project_root: &std::path::Path,
+    no_version_check: bool,
+) -> anyhow::Result<()> {
+    let argv = commands::verb::resolve(verb, noun, id, extra)?;
+    let parsed = Cli::try_parse_from(&argv)?;
+    let resolved = parsed.command.ok_or_else(|| {
+        anyhow::anyhow!(
+            "internal error: `ta {verb} {noun}` resolved to an argv with no command (this is a bug in commands::verb::resolve, please report it)"
+        )
+    })?;
+    dispatch_raw(&resolved, config, project_root, no_version_check, false)
+}
+
+/// The full command dispatch table. Shared by direct CLI invocation
+/// (`main`, `warn_legacy = true`) and by verb+noun forwarding
+/// (`run_verb_noun`, `warn_legacy = false`) so both surfaces run byte-identical
+/// code for every command (v0.17.0.12.16).
+fn dispatch_raw(
+    command: &Commands,
+    config: &GatewayConfig,
+    project_root: &std::path::Path,
+    no_version_check: bool,
+    warn_legacy: bool,
+) -> anyhow::Result<()> {
     match command {
-        Commands::Status { deep } => commands::status::execute(&config, *deep),
-        Commands::Goal { command } => commands::goal::execute(command, &config),
-        Commands::Draft { command } => commands::draft::execute(command, &config),
-        Commands::Pr { command } => commands::pr::execute(command, &config),
-        Commands::Audit { command } => commands::audit::execute(command, &config),
+        Commands::Status { deep } => commands::status::execute(config, *deep),
+        Commands::Goal { command } => {
+            if warn_legacy {
+                print_deprecation_notice("goal", command);
+            }
+            commands::goal::execute(command, config)
+        }
+        Commands::Draft { command } => {
+            if warn_legacy {
+                print_deprecation_notice("draft", command);
+            }
+            commands::draft::execute(command, config)
+        }
+        Commands::Pr { command } => commands::pr::execute(command, config),
+        Commands::Audit { command } => commands::audit::execute(command, config),
+        // ── Verb-set consolidation (v0.17.0.12.16) — primary CLI surface ──
+        Commands::Create { noun, id, extra } => run_verb_noun(
+            "create",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::List { noun, extra } => run_verb_noun(
+            "list",
+            noun,
+            None,
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Show { noun, id, extra } => run_verb_noun(
+            "show",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Update { noun, id, extra } => run_verb_noun(
+            "update",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Remove { noun, id, extra } => run_verb_noun(
+            "remove",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Approve { noun, id, extra } => run_verb_noun(
+            "approve",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Deny { noun, id, extra } => run_verb_noun(
+            "deny",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Apply { noun, id, extra } => run_verb_noun(
+            "apply",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
+        Commands::Check { noun, id, extra } => run_verb_noun(
+            "check",
+            noun,
+            id.as_deref(),
+            extra,
+            config,
+            project_root,
+            no_version_check,
+        ),
         Commands::Run {
             title,
             agent,
@@ -1085,6 +1542,10 @@ fn main() -> anyhow::Result<()> {
             integrate,
             skip_onboard_check,
             context,
+            workload,
+            team,
+            security,
+            priority,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -1092,13 +1553,38 @@ fn main() -> anyhow::Result<()> {
             // Phase-aware title resolution: if the positional title looks like
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
             // look it up in PLAN.md and use the phase title + set --phase.
-            let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
+            let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, project_root);
 
-            // Agent runtime resolution (v0.17.0.8): --agent → workflow YAML → daemon.toml → "claude-code".
-            let resolved_agent = commands::run::resolve_effective_agent(
+            // Agent runtime resolution (v0.17.0.12.13): --agent → persona
+            // binding → workflow YAML/workflow.toml → workload type →
+            // daemon.toml → "claude-code" ("auto" at any tier hands off to
+            // the supervisor's recommendation).
+            let resolved_agent = commands::run::resolve_effective_agent_full(
                 agent.as_deref(),
                 workflow.as_deref(),
-                &project_root,
+                persona.as_deref(),
+                workload.as_deref(),
+                resolved_title.as_deref(),
+                project_root,
+            );
+
+            // Routing brain (v0.17.0.12.20): resolve team/persona/security_tier/
+            // priority through `ta_brain::route()` — the same function the
+            // ta-intake-driven listener calls for triggered goals, so the
+            // explicit and triggered paths never duplicate routing logic.
+            // `resolved_agent` is passed through as the explicit tier so this
+            // call reuses (not recomputes) the agent decision above.
+            commands::run::route_and_log(
+                resolved_title.as_deref().unwrap_or(""),
+                objective,
+                &resolved_agent,
+                persona.as_deref(),
+                team.as_deref(),
+                security.as_deref(),
+                priority.as_deref(),
+                workflow.as_deref(),
+                workload.as_deref(),
+                project_root,
             );
 
             // serial-phases: dispatch to execute_serial_phases when --phases is provided.
@@ -1107,7 +1593,7 @@ fn main() -> anyhow::Result<()> {
                     if !phase_list.is_empty() {
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
                         return commands::run::execute_serial_phases(
-                            &config,
+                            config,
                             run_title,
                             &resolved_agent,
                             objective,
@@ -1123,7 +1609,7 @@ fn main() -> anyhow::Result<()> {
             if !sub_goals.is_empty() {
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
                 return commands::run::execute_swarm(
-                    &config,
+                    config,
                     run_title,
                     &resolved_agent,
                     objective,
@@ -1136,7 +1622,7 @@ fn main() -> anyhow::Result<()> {
 
             // Default: single-agent execution.
             commands::run::execute(
-                &config,
+                config,
                 resolved_title.as_deref(),
                 &resolved_agent,
                 source.as_deref(),
@@ -1159,38 +1645,83 @@ fn main() -> anyhow::Result<()> {
                 context.as_deref(),
             )
         }
-        Commands::Events { command } => commands::events::execute(command, &config),
-        Commands::Token { command } => commands::token::execute(command, &config),
+        Commands::Events { command } => {
+            if warn_legacy {
+                print_deprecation_notice("events", command);
+            }
+            commands::events::execute(command, config)
+        }
+        Commands::Token { command } => {
+            if warn_legacy {
+                print_deprecation_notice("token", command);
+            }
+            commands::token::execute(command, config)
+        }
         Commands::Dev {
             agent,
             unrestricted,
         } => commands::dev::execute(
-            &config,
-            &project_root,
+            config,
+            project_root,
             agent.as_deref(),
             *unrestricted,
-            cli.no_version_check,
+            no_version_check,
         ),
-        Commands::Session { command } => commands::session::execute(command, &config),
-        Commands::Plan { command } => commands::plan::execute(command, &config),
-        Commands::Persona { command } => commands::persona::execute(command, &config),
-        Commands::Context { command } => commands::context::execute(command, &config),
-        Commands::Credentials { command } => commands::credentials::execute(command, &config),
-        Commands::Advisor { command } => commands::advisor::execute(command, &config),
-        Commands::Advise { message, goal } => {
-            commands::advisor::advise(&config, message, goal.as_deref())
+        Commands::Session { command } => {
+            if warn_legacy {
+                print_deprecation_notice("session", command);
+            }
+            commands::session::execute(command, config)
         }
-        Commands::Agent { command } => commands::agent::execute(command, &config),
+        Commands::Plan { command } => {
+            if warn_legacy {
+                print_deprecation_notice("plan", command);
+            }
+            commands::plan::execute(command, config)
+        }
+        Commands::Persona { command } => {
+            if warn_legacy {
+                print_deprecation_notice("persona", command);
+            }
+            commands::persona::execute(command, config)
+        }
+        Commands::Context { command } => {
+            if warn_legacy {
+                print_deprecation_notice("context", command);
+            }
+            commands::context::execute(command, config)
+        }
+        Commands::Credentials { command } => {
+            if warn_legacy {
+                print_deprecation_notice("credentials", command);
+            }
+            commands::credentials::execute(command, config)
+        }
+        Commands::Advisor { command } => commands::advisor::execute(command, config),
+        Commands::Advise { message, goal } => {
+            commands::advisor::advise(config, message, goal.as_deref())
+        }
+        Commands::Agent { command } => {
+            if warn_legacy {
+                print_deprecation_notice("agent", command);
+            }
+            commands::agent::execute(command, config)
+        }
         Commands::Style { command } => commands::style::execute(command),
-        Commands::Team { command } => commands::team::execute(command, &config),
-        Commands::Constitution { command } => commands::constitution::execute(command, &config),
-        Commands::Memory { command } => commands::memory::execute(command, &config),
-        Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
-        Commands::Install => commands::install::execute(&project_root),
-        Commands::Setup { command } => commands::setup::execute(command, &config),
-        Commands::Init { command } => commands::init::execute(command, &config),
-        Commands::New { command } => commands::new::execute(command, &config),
-        Commands::Release { command } => commands::release::execute(command, &config),
+        Commands::Team { command } => {
+            if warn_legacy {
+                print_deprecation_notice("team", command);
+            }
+            commands::team::execute(command, config)
+        }
+        Commands::Constitution { command } => commands::constitution::execute(command, config),
+        Commands::Memory { command } => commands::memory::execute(command, config),
+        Commands::Adapter { command } => commands::adapter::execute(command, project_root),
+        Commands::Install => commands::install::execute(project_root),
+        Commands::Setup { command } => commands::setup::execute(command, config),
+        Commands::Init { command } => commands::init::execute(command, config),
+        Commands::New { command } => commands::new::execute(command, config),
+        Commands::Release { command } => commands::release::execute(command, config),
         Commands::Shell {
             init,
             tui,
@@ -1206,36 +1737,65 @@ fn main() -> anyhow::Result<()> {
 
             if use_tui {
                 commands::shell::execute(
-                    &project_root,
+                    project_root,
                     attach.as_deref(),
                     url.as_deref(),
                     *init,
                     *classic,
-                    cli.no_version_check,
+                    no_version_check,
                 )
             } else if *init {
-                commands::shell::init_config(&project_root)
+                commands::shell::init_config(project_root)
             } else {
-                commands::shell::open_web_shell(&project_root, url.as_deref())
+                commands::shell::open_web_shell(project_root, url.as_deref())
             }
         }
-        Commands::Daemon { command } => commands::daemon::execute(command, &project_root),
-        Commands::Office { command } => commands::office::execute(command, &project_root),
+        Commands::Daemon { command } => {
+            if warn_legacy {
+                print_deprecation_notice("daemon", command);
+            }
+            commands::daemon::execute(command, project_root)
+        }
+        Commands::Office { command } => {
+            if warn_legacy {
+                print_deprecation_notice("office", command);
+            }
+            commands::office::execute(command, project_root)
+        }
         Commands::Plugin { command } => {
-            commands::plugin::run_plugin(&project_root, command)?;
+            if warn_legacy {
+                print_deprecation_notice("plugin", command);
+            }
+            commands::plugin::run_plugin(project_root, command)?;
             Ok(())
         }
-        Commands::Template { command } => commands::template::execute(command, &config),
-        Commands::Publish { message, yes } => {
-            commands::publish::execute(&project_root, message.as_deref(), *yes)
+        Commands::Intake { command } => commands::intake::run_intake(project_root, command),
+        Commands::Template { command } => {
+            if warn_legacy {
+                print_deprecation_notice("template", command);
+            }
+            commands::template::execute(command, config)
         }
-        Commands::Workflow { command } => commands::workflow::execute(command, &config),
-        Commands::Stats { command } => commands::stats::execute(command, &config),
-        Commands::Community { command } => commands::community::execute(command, &config),
-        Commands::Manifest { command } => commands::manifest::execute(command, &config),
-        Commands::Link { command } => commands::link::execute(command, &config),
-        Commands::Policy { command } => commands::policy::execute(command, &config),
-        Commands::Config { command } => commands::config::execute(command, &config),
+        Commands::Publish { message, yes } => {
+            commands::publish::execute(project_root, message.as_deref(), *yes)
+        }
+        Commands::Workflow { command } => {
+            if warn_legacy {
+                print_deprecation_notice("workflow", command);
+            }
+            commands::workflow::execute(command, config)
+        }
+        Commands::Stats { command } => commands::stats::execute(command, config),
+        Commands::Community { command } => {
+            if warn_legacy {
+                print_deprecation_notice("community", command);
+            }
+            commands::community::execute(command, config)
+        }
+        Commands::Manifest { command } => commands::manifest::execute(command, config),
+        Commands::Link { command } => commands::link::execute(command, config),
+        Commands::Policy { command } => commands::policy::execute(command, config),
+        Commands::Config { command } => commands::config::execute(command, config),
         Commands::Gc {
             dry_run,
             threshold_days,
@@ -1252,9 +1812,9 @@ fn main() -> anyhow::Result<()> {
             Some(GcSubcommand::GovernedPaths {
                 retain_days,
                 dry_run: gp_dry_run,
-            }) => commands::gc::execute_governed_paths(&config, *retain_days, *gp_dry_run),
+            }) => commands::gc::execute_governed_paths(config, *retain_days, *gp_dry_run),
             None => commands::gc::execute(
-                &config,
+                config,
                 *dry_run,
                 *threshold_days,
                 *all,
@@ -1267,24 +1827,40 @@ fn main() -> anyhow::Result<()> {
                 *delete_stale,
             ),
         },
-        Commands::Operations { command } => commands::operations::execute(command, &config),
-        Commands::Runbook { command } => commands::runbook::execute(command, &config),
-        Commands::Connector { command } => commands::connector::execute(command, &config),
-        Commands::Compression { command } => commands::compression::execute(command, &config),
-        Commands::Webhook { command } => commands::webhook::execute(command, &config),
-        Commands::Meridian { command } => commands::meridian::execute(command, &config),
+        Commands::Operations { command } => commands::operations::execute(command, config),
+        Commands::Runbook { command } => commands::runbook::execute(command, config),
+        Commands::Connector { command } => {
+            if warn_legacy {
+                print_deprecation_notice("connector", command);
+            }
+            commands::connector::execute(command, config)
+        }
+        Commands::Compression { command } => commands::compression::execute(command, config),
+        Commands::Webhook { command } => commands::webhook::execute(command, config),
+        Commands::Meridian { command } => commands::meridian::execute(command, config),
         Commands::Tools { command } => commands::tools::execute(command),
         Commands::Serve => {
             // First-run gate: warn if provider is not yet configured.
             // TA_SKIP_ONBOARD_CHECK=1 bypasses in CI.
             let skip = std::env::var("TA_SKIP_ONBOARD_CHECK").is_ok_and(|v| v == "1");
             commands::onboard::check_provider_configured(skip)?;
-            commands::serve::execute(&project_root)
+            commands::serve::execute(project_root)
         }
-        Commands::Build { test } => commands::build::execute(&config, *test),
-        Commands::Sync => commands::sync::execute(&config),
-        Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
-        Commands::Analysis { command } => commands::analysis::execute(command, &config),
+        Commands::Build { test } => commands::build::execute(config, *test),
+        Commands::Sync { noun, extra } => match noun {
+            Some(n) => run_verb_noun(
+                "sync",
+                n,
+                None,
+                extra,
+                config,
+                project_root,
+                no_version_check,
+            ),
+            None => commands::sync::execute(config),
+        },
+        Commands::Verify { goal_id } => commands::verify::execute(config, goal_id.as_deref()),
+        Commands::Analysis { command } => commands::analysis::execute(command, config),
         Commands::Doctor {
             json,
             fix_denied,
@@ -1295,11 +1871,11 @@ fn main() -> anyhow::Result<()> {
             [sub, comp, ..] if sub == "fix" && comp == "projfs" => {
                 commands::doctor::execute_fix_projfs()
             }
-            _ => commands::doctor::execute(&config, *json, *fix_denied, *fix, *yes),
+            _ => commands::doctor::execute(config, *json, *fix_denied, *fix, *yes),
         },
-        Commands::Upgrade(args) => commands::upgrade::execute(&config, args),
+        Commands::Upgrade(args) => commands::upgrade::execute(config, args),
         Commands::Conversation { goal_id, json } => {
-            commands::conversation::execute(&config, goal_id, *json)
+            commands::conversation::execute(config, goal_id, *json)
         }
         Commands::Onboard {
             web,
@@ -1324,7 +1900,7 @@ fn main() -> anyhow::Result<()> {
             api_key.as_deref(),
             agent.as_deref(),
             planning_framework.as_deref(),
-            &project_root,
+            project_root,
         ),
         // Already handled above.
         Commands::AcceptTerms { .. }
@@ -1344,5 +1920,393 @@ fn requires_terms_acceptance(cmd: &Commands) -> bool {
         Commands::Init { .. } | Commands::Run { .. } => true,
         Commands::Goal { command } => commands::goal::is_start_command(command),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod verb_dispatch_tests {
+    use super::*;
+
+    /// Parse a `ta ...` argv into `Commands` the same way the real binary does.
+    ///
+    /// Runs on a dedicated large-stack thread: `Commands` is a large enum
+    /// (the `Run` variant alone has ~25 fields, `#[allow(clippy::large_enum_variant)]`
+    /// above), and clap's derive-generated parser builds it on the stack —
+    /// large enough to overflow the default ~2MB test-thread stack.
+    fn parse(args: &[&str]) -> Commands {
+        let owned: Vec<String> = std::iter::once("ta".to_string())
+            .chain(args.iter().map(|s| s.to_string()))
+            .collect();
+        parse_argv(owned)
+    }
+
+    /// Same as `parse`, but takes an already-built argv (e.g. from
+    /// `commands::verb::resolve`) instead of individual args.
+    fn parse_argv(argv: Vec<String>) -> Commands {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                Cli::try_parse_from(&argv)
+                    .unwrap_or_else(|e| panic!("failed to parse {argv:?}: {e}"))
+                    .command
+                    .unwrap_or_else(|| panic!("no command parsed from {argv:?}"))
+            })
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
+    }
+
+    /// Build the full `clap::Command` metadata tree the same way the real
+    /// binary does, on the same dedicated large-stack thread as `parse_argv`.
+    /// `CommandFactory::command()` recursively builds `Arg` definitions for
+    /// every field of every `Commands` variant — the same large-enum stack
+    /// cost as parsing, just via a different clap entry point.
+    fn build_command() -> clap::Command {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(Cli::command)
+            .expect("spawn command-build thread")
+            .join()
+            .expect("command-build thread panicked")
+    }
+
+    #[test]
+    fn parses_all_ten_verb_shapes() {
+        assert!(matches!(
+            parse(&["create", "persona", "reviewer"]),
+            Commands::Create { noun, id: Some(id), .. } if noun == "persona" && id == "reviewer"
+        ));
+        assert!(matches!(
+            parse(&["list", "goal"]),
+            Commands::List { noun, .. } if noun == "goal"
+        ));
+        assert!(matches!(
+            parse(&["show", "goal", "abc123"]),
+            Commands::Show { noun, id: Some(id), .. } if noun == "goal" && id == "abc123"
+        ));
+        assert!(matches!(
+            parse(&["update", "team", "implementer", "claude-opus-4-8"]),
+            Commands::Update { noun, id: Some(id), .. } if noun == "team" && id == "implementer"
+        ));
+        assert!(matches!(
+            parse(&["remove", "goal", "abc123"]),
+            Commands::Remove { noun, id: Some(id), .. } if noun == "goal" && id == "abc123"
+        ));
+        assert!(matches!(
+            parse(&["approve", "draft", "d1"]),
+            Commands::Approve { noun, id: Some(id), .. } if noun == "draft" && id == "d1"
+        ));
+        assert!(matches!(
+            parse(&["deny", "draft", "d1", "--reason", "no"]),
+            Commands::Deny { noun, id: Some(id), .. } if noun == "draft" && id == "d1"
+        ));
+        assert!(matches!(
+            parse(&["apply", "draft", "d1"]),
+            Commands::Apply { noun, id: Some(id), .. } if noun == "draft" && id == "d1"
+        ));
+        assert!(matches!(
+            parse(&["check", "plan-phase", "v0.15.0"]),
+            Commands::Check { noun, id: Some(id), .. } if noun == "plan-phase" && id == "v0.15.0"
+        ));
+        assert!(matches!(
+            parse(&["sync", "goal"]),
+            Commands::Sync { noun: Some(n), .. } if n == "goal"
+        ));
+        // `ta sync` with no noun still parses (bare VCS sync, unchanged).
+        assert!(matches!(
+            parse(&["sync"]),
+            Commands::Sync { noun: None, .. }
+        ));
+    }
+
+    #[test]
+    fn extra_flags_pass_through_the_trailing_var_arg() {
+        match parse(&["remove", "goal", "abc123", "--reason", "stale work"]) {
+            Commands::Remove { noun, id, extra } => {
+                assert_eq!(noun, "goal");
+                assert_eq!(id.as_deref(), Some("abc123"));
+                assert_eq!(extra, vec!["--reason", "stale work"]);
+            }
+            other => panic!("expected Commands::Remove, got {other:?}"),
+        }
+    }
+
+    /// End-to-end proof that the new verb+noun surface and the legacy
+    /// noun-first surface resolve to the *exact same* `Commands` value —
+    /// not just equivalent-looking ones. `ta remove goal <id>` must
+    /// round-trip through `commands::verb::resolve` + `Cli::try_parse_from`
+    /// to literally `Commands::Goal { command: GoalCommands::Delete { .. } }`,
+    /// the same variant `ta goal delete <id>` produces directly. Both are
+    /// then dispatched by the same `dispatch_raw`, so behavior is identical
+    /// by construction, including the goal-delete phase-reset-even-when-done
+    /// fix (v0.17.0.12.16 item 3) — there is only one `delete_goal` code path.
+    #[test]
+    fn remove_goal_resolves_to_the_same_command_as_legacy_goal_delete() {
+        let legacy = parse(&["goal", "delete", "abc123", "--reason", "no longer needed"]);
+        let argv = commands::verb::resolve(
+            "remove",
+            "goal",
+            Some("abc123"),
+            &["--reason".to_string(), "no longer needed".to_string()],
+        )
+        .unwrap();
+        let via_verb = parse_argv(argv);
+
+        match (&legacy, &via_verb) {
+            (
+                Commands::Goal {
+                    command:
+                        commands::goal::GoalCommands::Delete {
+                            id: id1,
+                            reason: r1,
+                        },
+                },
+                Commands::Goal {
+                    command:
+                        commands::goal::GoalCommands::Delete {
+                            id: id2,
+                            reason: r2,
+                        },
+                },
+            ) => {
+                assert_eq!(id1, id2);
+                assert_eq!(r1, r2);
+            }
+            other => panic!("expected both to resolve to Goal::Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draft_apply_top_level_resolves_to_same_command_as_draft_apply() {
+        let legacy = parse(&["draft", "apply", "d1"]);
+        let argv = commands::verb::resolve("apply", "draft", Some("d1"), &[]).unwrap();
+        let via_verb = parse_argv(argv);
+        assert!(matches!(legacy, Commands::Draft { .. }));
+        assert!(matches!(via_verb, Commands::Draft { .. }));
+    }
+
+    #[test]
+    fn deprecation_notice_names_the_new_form_when_mapped() {
+        let cmd = commands::goal::GoalCommands::Delete {
+            id: "abc123".to_string(),
+            reason: None,
+        };
+        let text = deprecation_notice_text("goal", &cmd);
+        assert!(text.contains("ta goal delete"));
+        assert!(text.contains("ta remove goal"));
+        assert!(text.starts_with("[deprecated-cli]"));
+    }
+
+    #[test]
+    fn deprecation_notice_is_generic_for_unmapped_actions() {
+        let cmd = commands::goal::GoalCommands::Input {
+            id: "abc123".to_string(),
+            text: "hello".to_string(),
+        };
+        let text = deprecation_notice_text("goal", &cmd);
+        assert!(text.starts_with("[deprecated-cli]"));
+        assert!(text.contains("isn't mapped to a new verb yet"));
+    }
+
+    #[test]
+    fn unknown_noun_via_new_surface_is_a_clean_error_not_a_panic() {
+        let err = commands::verb::resolve("list", "spaceship", None, &[]).unwrap_err();
+        assert!(err.to_string().contains("Unknown noun"));
+    }
+
+    /// v0.17.0.12.22: every newly-mapped noun-area's verb+noun form must
+    /// resolve to a legacy argv that parses cleanly through the *same*
+    /// `Cli`/`Commands` definitions as the legacy form itself — proving the
+    /// new surface and the legacy surface execute identical code for all
+    /// 23 of the remaining noun-areas, not just the 18 shipped in 12.16.
+    #[test]
+    fn all_v0_17_0_12_22_nouns_resolve_and_parse_cleanly() {
+        let cases: &[(&str, &str, Option<&str>, &[&str])] = &[
+            ("list", "runbook", None, &[]),
+            ("show", "runbook", Some("disk-pressure"), &[]),
+            ("apply", "runbook", Some("disk-pressure"), &["--dry-run"]),
+            ("list", "operations", None, &[]),
+            ("list", "audit", None, &[]),
+            ("show", "audit", Some("abc123"), &[]),
+            ("check", "audit", None, &[]),
+            ("create", "setup", None, &[]),
+            ("show", "setup", None, &[]),
+            ("update", "setup", Some("policy"), &[]),
+            ("sync", "setup", None, &[]),
+            ("create", "project", None, &[]),
+            ("create", "scaffold", None, &[]),
+            ("apply", "advisor", Some("implement remaining v0.15"), &[]),
+            ("create", "style", None, &[]),
+            ("show", "style", None, &[]),
+            ("update", "style", None, &[]),
+            ("remove", "style", None, &[]),
+            ("check", "style", None, &[]),
+            ("sync", "style", None, &["https://example.com/style.md"]),
+            ("create", "constitution", None, &[]),
+            ("show", "constitution", None, &[]),
+            ("update", "constitution", None, &[]),
+            ("check", "constitution", None, &[]),
+            ("create", "memory", Some("arch:auth"), &["Use JWT RS256"]),
+            ("list", "memory", None, &[]),
+            ("show", "memory", None, &[]),
+            ("check", "memory", None, &[]),
+            ("sync", "memory", None, &[]),
+            ("create", "adapter", Some("claude-code"), &[]),
+            ("list", "adapter", None, &[]),
+            ("check", "adapter", Some("messaging"), &[]),
+            ("update", "adapter", Some("messaging/gmail"), &[]),
+            ("apply", "release", Some("0.17.0-alpha"), &[]),
+            ("show", "release", None, &[]),
+            ("create", "release", None, &[]),
+            (
+                "update",
+                "release",
+                Some("press_release_template"),
+                &["./template.md"],
+            ),
+            ("check", "release", Some("0.17.0-alpha"), &[]),
+            ("sync", "release", None, &["public-alpha-v0.17.0.12.22"]),
+            ("list", "intake", None, &[]),
+            ("apply", "trigger", Some("schedule"), &[]),
+            ("show", "trigger", None, &[]),
+            ("list", "stats", None, &[]),
+            ("show", "stats", None, &[]),
+            ("sync", "stats", None, &[]),
+            ("create", "meridian", None, &[]),
+            ("list", "meridian", None, &[]),
+            ("check", "meridian", None, &[]),
+            ("list", "tools", None, &[]),
+            ("create", "tools", Some("meridian"), &[]),
+            ("create", "manifest", None, &[]),
+            ("check", "manifest", None, &[]),
+            ("show", "manifest", None, &[]),
+            ("create", "link", Some("github:myorg/pragma"), &[]),
+            ("list", "link", None, &[]),
+            ("check", "link", None, &[]),
+            ("sync", "link", None, &[]),
+            ("remove", "link", Some("cinepipe-train"), &[]),
+            ("check", "policy", Some("draft-id-123"), &[]),
+            ("show", "policy", None, &[]),
+            ("show", "config", None, &[]),
+            ("apply", "analysis", None, &[]),
+            ("show", "compression", None, &[]),
+            ("create", "compression", None, &[]),
+            ("remove", "compression", None, &[]),
+            ("check", "webhook", Some("github"), &["pull_request.closed"]),
+        ];
+
+        for (verb, noun, id, extra) in cases {
+            let extra_owned: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+            let argv = commands::verb::resolve(verb, noun, *id, &extra_owned)
+                .unwrap_or_else(|e| panic!("resolve(\"{verb}\", \"{noun}\", ...) failed: {e}"));
+            // Must parse through the exact same Cli/Commands definitions as
+            // a direct legacy invocation — no second copy of any behavior.
+            let _ = parse_argv(argv.clone());
+        }
+    }
+
+    /// v0.17.0.12.22 item 2: the default `--help` view must exclude every
+    /// legacy noun-first / advanced-only top-level command.
+    #[test]
+    fn curated_help_hides_legacy_and_advanced_commands_by_default() {
+        let cmd = build_command();
+        let legacy_and_advanced = [
+            "goal",
+            "draft",
+            "plan",
+            "persona",
+            "runbook",
+            "operations",
+            "daemon",
+            "gc",
+            "pr",
+            "audit",
+            "session",
+            "context",
+            "credentials",
+            "events",
+            "token",
+            "dev",
+            "setup",
+            "install",
+            "init",
+            "new",
+            "advisor",
+            "advise",
+            "agent",
+            "style",
+            "team",
+            "constitution",
+            "memory",
+            "adapter",
+            "release",
+            "office",
+            "plugin",
+            "intake",
+            "template",
+            "publish",
+            "workflow",
+            "stats",
+            "meridian",
+            "tools",
+            "community",
+            "manifest",
+            "link",
+            "policy",
+            "config",
+            "serve",
+            "build",
+            "verify",
+            "analysis",
+            "conversation",
+            "connector",
+            "compression",
+            "webhook",
+            "upgrade",
+        ];
+        for name in legacy_and_advanced {
+            let sub = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("missing subcommand `{name}`"));
+            assert!(
+                sub.is_hide_set(),
+                "expected `{name}` to be hidden from default --help"
+            );
+        }
+    }
+
+    /// v0.17.0.12.22 item 2: the curated ~15-command surface (10 verbs plus
+    /// run/status/shell/onboard/doctor) must stay visible by default.
+    #[test]
+    fn curated_help_keeps_core_surface_visible_by_default() {
+        let cmd = build_command();
+        let curated = [
+            "create", "list", "show", "update", "remove", "approve", "deny", "apply", "check",
+            "sync", "status", "run", "shell", "doctor", "onboard",
+        ];
+        for name in curated {
+            let sub = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("missing subcommand `{name}`"));
+            assert!(
+                !sub.is_hide_set(),
+                "expected `{name}` to remain visible in default --help"
+            );
+        }
+    }
+
+    /// v0.17.0.12.22 item 2: `ta --help --all` must show everything —
+    /// `unhide_all_subcommands` clears every top-level `hide` flag.
+    #[test]
+    fn unhide_all_subcommands_clears_every_top_level_hide_flag() {
+        let mut cmd = build_command();
+        unhide_all_subcommands(&mut cmd);
+        for sub in cmd.get_subcommands() {
+            assert!(
+                !sub.is_hide_set(),
+                "`{}` should be visible after unhide_all_subcommands",
+                sub.get_name()
+            );
+        }
     }
 }

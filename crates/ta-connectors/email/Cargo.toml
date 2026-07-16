@@ -15,7 +15,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 async-trait = "0.1"
-ta-events = { path = "../../ta-events", version = "0.17.0-alpha.12.9" }
+ta-events = { path = "../../ta-events", version = "0.17.0-alpha.12.24" }
 
 [dev-dependencies]
 tokio = { workspace = true }

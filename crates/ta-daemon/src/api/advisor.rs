@@ -522,9 +522,19 @@ fn resolve_inject_goal(
     }
 }
 
-// ── History API (v0.16.1.3) ──────────────────────────────────────────────────
+// ── History API (v0.16.1.3, unified store v0.17.0.12.17 item 2) ──────────────
+//
+// Studio previously persisted two independent Advisor conversations: the
+// full-tab Advisor chat at `.ta/advisor-history.json` (a JSON array, this
+// module) and the Attention/Dashboard mini-dialog at
+// `.ta/advisor-history.jsonl` (one line per turn, `dashboard_advisor.rs`).
+// Both are now one conversation, one file: `.ta/advisor-history.jsonl`.
+// `HistoryEntry` is the on-disk/wire shape for both surfaces; the dashboard
+// dialog's `DialogEntry` (intent/confirmation_card/options-as-labels) is a
+// view over the same entries — see `dashboard_advisor.rs`.
 
-/// A single persisted conversation entry.
+/// A single persisted conversation entry, shared by the full-tab Advisor and
+/// the Attention/Dashboard mini-dialog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub role: String,
@@ -532,6 +542,12 @@ pub struct HistoryEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<AdvisorOption>>,
     pub timestamp: String,
+    /// Dashboard-dialog classification (`queue_goal`/`info_request`/`draft_action`/`ambiguous`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// Dashboard-dialog goal confirmation card, when `intent` is `queue_goal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_card: Option<ta_advisor::ConfirmationCard>,
 }
 
 /// Response from `GET /api/advisor/history`.
@@ -547,29 +563,93 @@ pub struct AppendHistoryRequest {
     pub entries: Vec<HistoryEntry>,
 }
 
-fn advisor_history_path(state: &AppState) -> std::path::PathBuf {
+const MAX_HISTORY_ENTRIES: usize = 400;
+
+pub(crate) fn advisor_history_path(state: &AppState) -> std::path::PathBuf {
+    state.project_root.join(".ta").join("advisor-history.jsonl")
+}
+
+/// Legacy pre-merge location of the full-tab Advisor's JSON-array history.
+fn legacy_json_history_path(state: &AppState) -> std::path::PathBuf {
     state.project_root.join(".ta").join("advisor-history.json")
 }
 
-fn load_history(state: &AppState) -> Vec<HistoryEntry> {
-    let path = advisor_history_path(state);
-    if !path.exists() {
-        return Vec::new();
+/// One-time migration: if the legacy `.ta/advisor-history.json` array exists
+/// and hasn't been folded into the unified jsonl store yet, merge its entries
+/// in (sorted by timestamp) and rename the legacy file to `.bak` so this only
+/// ever runs once.
+fn migrate_legacy_json_history_if_present(state: &AppState) {
+    let legacy_path = legacy_json_history_path(state);
+    let Ok(content) = std::fs::read_to_string(&legacy_path) else {
+        return;
+    };
+    let Ok(legacy_entries) = serde_json::from_str::<Vec<HistoryEntry>>(&content) else {
+        // Not parseable as the expected shape — leave it alone rather than lose data.
+        return;
+    };
+
+    let mut merged = load_entries_raw(state);
+    merged.extend(legacy_entries);
+    merged.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    if let Err(e) = write_entries(state, &merged) {
+        tracing::warn!(path = ?advisor_history_path(state), err = %e, "Failed to merge legacy advisor-history.json into unified store");
+        return;
     }
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<HistoryEntry>>(&s).ok())
-        .unwrap_or_default()
+
+    if let Err(e) = std::fs::rename(&legacy_path, legacy_path.with_extension("json.bak")) {
+        tracing::warn!(path = ?legacy_path, err = %e, "Merged legacy advisor-history.json but failed to rename it aside");
+    }
 }
 
-fn save_history(state: &AppState, entries: &[HistoryEntry]) -> std::io::Result<()> {
+/// Read the unified jsonl store as-is, without migration. Used internally by
+/// the migration step itself to avoid recursion.
+fn load_entries_raw(state: &AppState) -> Vec<HistoryEntry> {
+    let path = advisor_history_path(state);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<HistoryEntry>(l).ok())
+        .collect()
+}
+
+fn write_entries(state: &AppState, entries: &[HistoryEntry]) -> std::io::Result<()> {
+    use std::io::Write;
     let path = advisor_history_path(state);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(entries)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json)
+    let mut file = std::fs::File::create(&path)?;
+    for entry in entries {
+        let line = serde_json::to_string(entry)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        writeln!(file, "{}", line)?;
+    }
+    Ok(())
+}
+
+/// Load the full merged conversation, migrating the legacy JSON-array store
+/// in on first read.
+pub(crate) fn load_history(state: &AppState) -> Vec<HistoryEntry> {
+    migrate_legacy_json_history_if_present(state);
+    load_entries_raw(state)
+}
+
+/// Append entries to the unified store, trimming to `MAX_HISTORY_ENTRIES`.
+pub(crate) fn append_history_entries(
+    state: &AppState,
+    new_entries: &[HistoryEntry],
+) -> std::io::Result<usize> {
+    let mut existing = load_history(state);
+    existing.extend(new_entries.iter().cloned());
+    if existing.len() > MAX_HISTORY_ENTRIES {
+        existing = existing[existing.len() - MAX_HISTORY_ENTRIES..].to_vec();
+    }
+    write_entries(state, &existing)?;
+    Ok(existing.len())
 }
 
 /// `GET /api/advisor/history` — Return the last 100 persisted conversation entries.
@@ -585,7 +665,7 @@ pub async fn get_history(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
 /// `POST /api/advisor/history` — Append new entries to the persistent history.
 ///
-/// The store is trimmed to 200 entries to cap disk usage.
+/// The store is trimmed to `MAX_HISTORY_ENTRIES` entries to cap disk usage.
 pub async fn append_history(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AppendHistoryRequest>,
@@ -598,23 +678,17 @@ pub async fn append_history(
             .into_response();
     }
 
-    let mut existing = load_history(&state);
-    existing.extend(body.entries);
-    // Trim to 200 entries.
-    if existing.len() > 200 {
-        existing = existing[existing.len() - 200..].to_vec();
+    match append_history_entries(&state, &body.entries) {
+        Ok(saved) => Json(json!({"saved": saved})).into_response(),
+        Err(e) => {
+            tracing::warn!(path = ?advisor_history_path(&state), err = %e, "Failed to persist advisor history");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to persist history: {}", e)})),
+            )
+                .into_response()
+        }
     }
-
-    if let Err(e) = save_history(&state, &existing) {
-        tracing::warn!(path = ?advisor_history_path(&state), err = %e, "Failed to persist advisor history");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to persist history: {}", e)})),
-        )
-            .into_response();
-    }
-
-    Json(json!({"saved": existing.len()})).into_response()
 }
 
 // ── Suggestions API (v0.16.1.3) ──────────────────────────────────────────────
@@ -983,5 +1057,119 @@ mod tests {
             "got: {:?}",
             labels
         );
+    }
+
+    // ── Unified Advisor history store (v0.17.0.12.17 item 2) ─────────────────
+
+    fn test_state_with_dir() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(
+            std::path::PathBuf::from(dir.path()),
+            crate::config::DaemonConfig::default(),
+        ));
+        (state, dir)
+    }
+
+    fn history_entry(role: &str, text: &str, ts: &str) -> HistoryEntry {
+        HistoryEntry {
+            role: role.to_string(),
+            text: text.to_string(),
+            options: None,
+            timestamp: ts.to_string(),
+            intent: None,
+            confirmation_card: None,
+        }
+    }
+
+    #[test]
+    fn append_and_load_history_round_trips_via_unified_jsonl_store() {
+        let (state, _dir) = test_state_with_dir();
+        append_history_entries(
+            &state,
+            &[history_entry("user", "hi", "2026-01-01T00:00:00Z")],
+        )
+        .unwrap();
+        append_history_entries(
+            &state,
+            &[history_entry("advisor", "hello", "2026-01-01T00:00:01Z")],
+        )
+        .unwrap();
+
+        let loaded = load_history(&state);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].text, "hi");
+        assert_eq!(loaded[1].text, "hello");
+        assert!(advisor_history_path(&state)
+            .to_string_lossy()
+            .ends_with("advisor-history.jsonl"));
+    }
+
+    #[test]
+    fn legacy_json_history_is_migrated_into_unified_jsonl_store() {
+        let (state, _dir) = test_state_with_dir();
+        std::fs::create_dir_all(state.project_root.join(".ta")).unwrap();
+        let legacy = vec![history_entry(
+            "user",
+            "legacy message",
+            "2025-06-01T00:00:00Z",
+        )];
+        std::fs::write(
+            legacy_json_history_path(&state),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        // A fresh dialog-style entry lands in the same unified store.
+        append_history_entries(
+            &state,
+            &[history_entry("user", "new message", "2026-01-01T00:00:00Z")],
+        )
+        .unwrap();
+
+        let loaded = load_history(&state);
+        let texts: Vec<&str> = loaded.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, vec!["legacy message", "new message"]);
+
+        // The legacy file is renamed aside so migration only ever runs once.
+        assert!(!legacy_json_history_path(&state).exists());
+        assert!(legacy_json_history_path(&state)
+            .with_extension("json.bak")
+            .exists());
+    }
+
+    #[test]
+    fn dashboard_dialog_entries_round_trip_through_unified_store() {
+        use crate::api::dashboard_advisor::DialogEntry;
+
+        let (state, _dir) = test_state_with_dir();
+        let dialog_entry = DialogEntry {
+            role: "advisor".to_string(),
+            text: "pick one".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            intent: Some("ambiguous".to_string()),
+            confirmation_card: None,
+            options: Some(vec!["a".to_string(), "b".to_string()]),
+        };
+        let converted: HistoryEntry = dialog_entry.clone().into();
+        append_history_entries(&state, &[converted]).unwrap();
+
+        // The full-tab Advisor's own history read sees the same entry.
+        let loaded = load_history(&state);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].intent.as_deref(), Some("ambiguous"));
+        assert_eq!(
+            loaded[0]
+                .options
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // And converting back to DialogEntry preserves the string-options shape.
+        let round_tripped: DialogEntry = loaded[0].clone().into();
+        assert_eq!(round_tripped.options, Some(vec!["a".into(), "b".into()]));
     }
 }

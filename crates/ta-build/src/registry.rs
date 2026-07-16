@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::adapter::BuildAdapter;
+use crate::backend::BuildBackend;
 use crate::cargo::CargoAdapter;
 use crate::npm::NpmAdapter;
 use crate::script::ScriptAdapter;
@@ -41,7 +41,7 @@ impl Default for BuildAdapterConfig {
 ///
 /// Detection order: Cargo -> npm -> Make (script) -> None.
 /// First match wins.
-pub fn detect_build_adapter(project_root: &Path) -> Option<Box<dyn BuildAdapter>> {
+pub fn detect_build_adapter(project_root: &Path) -> Option<Box<dyn BuildBackend>> {
     if CargoAdapter::detect(project_root) {
         tracing::info!(adapter = "cargo", "Auto-detected Cargo project");
         return Some(Box::new(CargoAdapter::new(project_root)));
@@ -70,7 +70,7 @@ pub fn detect_build_adapter(project_root: &Path) -> Option<Box<dyn BuildAdapter>
 pub fn select_build_adapter(
     project_root: &Path,
     config: &BuildAdapterConfig,
-) -> Option<Box<dyn BuildAdapter>> {
+) -> Option<Box<dyn BuildBackend>> {
     match config.adapter.as_str() {
         "cargo" => {
             tracing::info!(adapter = "cargo", "Using configured Cargo adapter");

@@ -6,7 +6,7 @@ use ta_mcp_gateway::GatewayConfig;
 use ta_policy::auto_approve::{self, DraftInfo};
 use uuid::Uuid;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum PolicyCommands {
     /// Dry-run auto-approval evaluation for a draft.
     Check {

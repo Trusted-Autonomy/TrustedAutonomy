@@ -29,8 +29,8 @@ auto_review = true       # Open a PR after push
 
 [submit.git]
 branch_prefix = "feature/"  # Branch naming: feature/<goal-slug>
-target_branch = "main"   # PR target branch
+target_branch = "main"
 merge_strategy = "squash" # squash, merge, or rebase
 remote = "origin"        # Git remote name
 pr_template = ".ta/pr-template.md"  # PR body template with {summary}, {why}, etc.
-auto_merge = true        # Enable GitHub auto-merge (merges when CI passes)
+auto_merge = true        # Enable GitHub auto-merge (merges when CI passes) -- merges phase PRs into the integration branch above, NOT into main

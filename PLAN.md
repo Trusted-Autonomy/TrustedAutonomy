@@ -9365,202 +9365,316 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.11 — Draft Artifact Consistency: `amend --add` + Pre-PASS Description Check
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.10
 
 **Goal**: Root-caused 2026-07-03 finishing v0.17.0.12.10 (PR #529): an agent's decision-log/change-description text can claim a file was edited without that file ever becoming a tracked artifact in the draft package. This happened twice on the same draft — the original agent's `plan.rs` change entry listed `CLAUDE.md` under `[deps: ...]`, and a dedicated follow-up goal whose sole objective was "fix CLAUDE.md's version line" *also* completed successfully without adding CLAUDE.md to the artifact set. Both times the draft still reached supervisor verdict `PASS`. No existing tool could recover from this after the fact: editing the live staging directory does nothing (`ta draft apply` reads the frozen draft package, not staging files), and `ta draft amend --file` requires the artifact to already exist (`Error: Artifact not found in draft`). The only working fix was manually completing the goal's own feature-branch commit and opening the PR by hand, bypassing TA entirely for that step.
 
 **Items**:
-1. [ ] **`ta draft amend --add`**: extend `ta draft amend` (`apps/ta-cli/src/commands/draft.rs`) so `--file <path>` works when `<artifact-uri>` does NOT already exist in the draft — insert it as a new artifact (`Add` disposition) instead of erroring. Keep the existing replace-on-exists behavior unchanged for URIs that already have an entry.
-2. [ ] **Pre-PASS artifact/description consistency check**: before a draft's supervisor review can return verdict `PASS`, scan the AI-generated change-description text of every artifact for `[deps: ...]`-style file-path mentions and cross-check each mentioned path against the draft's own artifact list. If a mentioned file isn't tracked as its own artifact, downgrade the verdict (e.g. to `WARN` with an explicit "described but not tracked: <path>" note) rather than silently passing — this is the actual root cause class: the description and the tracked-artifact list were allowed to disagree with no gate catching it.
-3. [ ] **`ta goal delete` / `ta goal recover`: don't reset an already-`done` phase**: found while cleaning up today's stale goal bookkeeping — `ta goal delete <id>` unconditionally prints/executes "Plan: phase vX reset to pending (goal cancelled)" even when the phase is `done` in PLAN.md and the goal being deleted is stale bookkeeping for already-merged work (confirmed harmless in practice today only because the reset appears to touch an in-memory daemon claim, not PLAN.md's actual file content — but this should be an explicit, defended invariant, not an accident of implementation). Add a guard: if the phase's current PLAN.md status is `done`, `ta goal delete`/`recover` should skip the reset (or require an explicit `--force-reset-phase` flag) and just clean up the goal/staging records.
-4. [ ] Unit tests: `amend --add` on a genuinely-missing URI succeeds and the artifact appears in a subsequent `ta draft view`; pre-PASS check catches a deliberately-inconsistent fixture (description mentions a file, artifact list omits it) and downgrades the verdict; `ta goal delete` on a goal whose phase is already `done` leaves the phase marker untouched.
-5. [ ] USAGE.md: document `amend --add` alongside the existing `amend --file`/`--drop` docs.
+1. [x] **`ta draft amend --add`**: extend `ta draft amend` (`apps/ta-cli/src/commands/draft.rs`) so `--file <path>` works when `<artifact-uri>` does NOT already exist in the draft — insert it as a new artifact (`Add` disposition) instead of erroring. Keep the existing replace-on-exists behavior unchanged for URIs that already have an entry.
+2. [x] **Pre-PASS artifact/description consistency check**: before a draft's supervisor review can return verdict `PASS`, scan the AI-generated change-description text of every artifact for `[deps: ...]`-style file-path mentions and cross-check each mentioned path against the draft's own artifact list. If a mentioned file isn't tracked as its own artifact, downgrade the verdict (e.g. to `WARN` with an explicit "described but not tracked: <path>" note) rather than silently passing — this is the actual root cause class: the description and the tracked-artifact list were allowed to disagree with no gate catching it.
+3. [x] **`ta goal delete` / `ta goal recover`: don't reset an already-`done` phase**: found while cleaning up today's stale goal bookkeeping — `ta goal delete <id>` unconditionally prints/executes "Plan: phase vX reset to pending (goal cancelled)" even when the phase is `done` in PLAN.md and the goal being deleted is stale bookkeeping for already-merged work (confirmed harmless in practice today only because the reset appears to touch an in-memory daemon claim, not PLAN.md's actual file content — but this should be an explicit, defended invariant, not an accident of implementation). Add a guard: if the phase's current PLAN.md status is `done`, `ta goal delete`/`recover` should skip the reset (or require an explicit `--force-reset-phase` flag) and just clean up the goal/staging records.
+4. [x] Unit tests: `amend --add` on a genuinely-missing URI succeeds and the artifact appears in a subsequent `ta draft view`; pre-PASS check catches a deliberately-inconsistent fixture (description mentions a file, artifact list omits it) and downgrades the verdict; `ta goal delete` on a goal whose phase is already `done` leaves the phase marker untouched.
+5. [x] USAGE.md: document `amend --add` alongside the existing `amend --file`/`--drop` docs.
 
 #### Version: `0.17.0-alpha.12.11`
 
 ---
 ### v0.17.0.12.12 — Data-Defined Roles + Baseline Default-Agent Config
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.11
 
 **Goal**: Convert `TeamRole` from a closed Rust enum to a data-defined role type (per `TA-CONSTITUTION.md` §1.6, confirmed low-risk: 52 usages across 6 files, no exhaustive-match sprawl), rename the "Adapter" naming collision found in the architecture review, and add the minimum viable slice of the `Switch` action from `docs/design/ta-action-reference.md`: a baseline default-agent configuration setting. Full per-workload/workflow/persona-tier switching and supervisor auto-pick are explicitly deferred to v0.17.0.12.13 — this phase does not carry an open "remaining" list of its own.
 
 **Items**:
-1. [ ] **`TeamRole` enum → data-defined role type**: replace the closed enum (`Implementer, Reviewer, QA, Architect, ReleaseManager, Human(String)`) in `crates/ta-session/src/agent_action.rs` with an open representation (e.g. a newtype around `String`), preserving the 6 well-known names as constants so existing `team.toml` files parse identically. Update the fixed string→enum parser at `apps/ta-cli/src/commands/team.rs:112-118` (the actual hardcoding chokepoint) to accept any role name instead of erroring on unrecognized ones. Update all 52 usages across the 6 identified files.
-2. [ ] **Fix the "Adapter" naming collision**: rename `BuildAdapter` and the output-format renderers (in-process, core-only, correctly closed — `ta-changeset/src/output_adapters/`) to something that isn't "Adapter" (e.g. `BuildBackend`, `OutputRenderer`), reserving "Adapter" for the intended-community-contributable meaning (`SourceAdapter`, `ReleaseAdapter`). Rename only — no behavior change.
-3. [ ] **Baseline default-agent config**: add `[agent] default = "..."` to `daemon.toml`, data-defined, loaded once at daemon start. Resolution order: explicit `--agent` CLI flag (unchanged, highest precedence) → new `default` config setting → today's hardcoded `"claude-code"` fallback only if neither is set.
-4. [ ] Tests: `TeamRole` round-trips a custom/arbitrary role name (e.g. `"security-team"`, anticipating §8's community-review workflow) through `team.toml` parse/serialize; default-agent resolution order covers all three cases (flag > config > fallback); existing `team.toml` fixtures parse identically post-change (regression guard).
-5. [ ] USAGE.md: document the new `[agent] default` setting and its resolution order.
+1. [x] **`TeamRole` enum → data-defined role type**: replace the closed enum (`Implementer, Reviewer, QA, Architect, ReleaseManager, Human(String)`) in `crates/ta-session/src/agent_action.rs` with an open representation (e.g. a newtype around `String`), preserving the 6 well-known names as constants so existing `team.toml` files parse identically. Update the fixed string→enum parser at `apps/ta-cli/src/commands/team.rs:112-118` (the actual hardcoding chokepoint) to accept any role name instead of erroring on unrecognized ones. Update all 52 usages across the 6 identified files.
+2. [x] **Fix the "Adapter" naming collision**: rename `BuildAdapter` and the output-format renderers (in-process, core-only, correctly closed — `ta-changeset/src/output_adapters/`) to something that isn't "Adapter" (e.g. `BuildBackend`, `OutputRenderer`), reserving "Adapter" for the intended-community-contributable meaning (`SourceAdapter`, `ReleaseAdapter`). Rename only — no behavior change.
+3. [x] **Baseline default-agent config**: add `[agent] default = "..."` to `daemon.toml`, data-defined, loaded once at daemon start. Resolution order: explicit `--agent` CLI flag (unchanged, highest precedence) → new `default` config setting → today's hardcoded `"claude-code"` fallback only if neither is set.
+4. [x] Tests: `TeamRole` round-trips a custom/arbitrary role name (e.g. `"security-team"`, anticipating §8's community-review workflow) through `team.toml` parse/serialize; default-agent resolution order covers all three cases (flag > config > fallback); existing `team.toml` fixtures parse identically post-change (regression guard).
+5. [x] USAGE.md: document the new `[agent] default` setting and its resolution order.
 
 #### Version: `0.17.0-alpha.12.12`
 
 ---
 ### v0.17.0.12.13 — Full Agent/Model Switching (Workload/Workflow/Persona Tiers + Supervisor Auto-Pick)
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Complete the `Switch` action (`docs/design/ta-action-reference.md`) on top of v0.17.0.12.12's baseline: agent/model selection configurable per workload, per workflow, or per persona, with an explicit `"auto"` declaration that hands the choice to the supervisor, and CLI args overriding every tier — matching the user's 2026-07-04 spec exactly.
 
 **Items**:
-1. [ ] Extend the resolution order from v0.17.0.12.12 with tiers evaluated most-specific-first: `--agent` CLI flag → persona-level `agent` binding (`.ta/personas/<name>.toml`) → workflow-level `agent` binding (`workflow.toml`, ties into the §3 mapping-tree work) → workload-type-level default → v0.17.0.12.12's baseline `default_agent` → hardcoded fallback.
-2. [ ] **`agent = "auto"`** at any tier: when resolved, the supervisor recommends an agent for this specific goal/workload using whatever signals are available (goal content, persona requirements, historical per-agent performance once v0.17.0.12.15's telemetry exists) rather than a fixed config value.
-3. [ ] Update `ta team assign` and persona/workflow config commands to accept and validate `"auto"` alongside real agent IDs.
-4. [ ] Tests: resolution order across all tiers including `"auto"`; the supervisor's recommendation (which agent, why) is logged and visible to a human, per the Observable & Actionable constitution principle — "auto" must never be a black box.
-5. [ ] USAGE.md: document the full tier hierarchy and `"auto"`.
+1. [x] Extend the resolution order from v0.17.0.12.12 with tiers evaluated most-specific-first: `--agent` CLI flag → persona-level `agent` binding (`.ta/personas/<name>.toml`) → workflow-level `agent` binding (`workflow.toml`, ties into the §3 mapping-tree work) → workload-type-level default → v0.17.0.12.12's baseline `default_agent` → hardcoded fallback.
+2. [x] **`agent = "auto"`** at any tier: when resolved, the supervisor recommends an agent for this specific goal/workload using whatever signals are available (goal content, persona requirements, historical per-agent performance once v0.17.0.12.15's telemetry exists) rather than a fixed config value.
+3. [x] Update `ta team assign` and persona/workflow config commands to accept and validate `"auto"` alongside real agent IDs.
+4. [x] Tests: resolution order across all tiers including `"auto"`; the supervisor's recommendation (which agent, why) is logged and visible to a human, per the Observable & Actionable constitution principle — "auto" must never be a black box.
+5. [x] USAGE.md: document the full tier hierarchy and `"auto"`.
 
 #### Version: `0.17.0-alpha.12.13`
 
 ---
 ### v0.17.0.12.14 — Plugin/Adapter/Connector Unification (4 Categories)
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Implement the 4-category extensibility model from `docs/design/ta-concepts-and-architecture.md` §2.2 — Plugin (external, call/response, community-contributable), Channel/Listener (external, long-running, supervised), Backend (in-process, core-only), Resource list (declarative registry) — replacing the 12 independently-evolved patterns found in the architecture review.
 
 **Items**:
-1. [ ] Extract one shared JSON-over-stdio protocol crate/trait from the currently-independent VCS/messaging/social/agent-runtime plugin implementations, matching VCS's existing `method: String` dispatch shape (most mature). Migrate all four onto it without changing external plugin-facing behavior.
-2. [ ] Define one shared `plugin.toml` manifest schema and `.ta/plugins/<kind>/<name>/` discovery convention used by every Plugin-category integration.
-3. [ ] Migrate `EXTERNAL_TOOLS` (hardcoded array, `apps/ta-cli/src/commands/tools.rs`) onto the Plugin category — a community member can add a new tool without a TA core PR.
-4. [ ] Migrate `DbProxyPlugin` onto the Plugin category per the 2026-07-03 DB proxy redesign (SQL/NoSQL facets, `.ta/db-adapters.toml` registry).
-5. [ ] Implement `ReleaseAdapter` (currently only planned in PLAN.md v0.17.2/17.3, never built) directly onto the Plugin category from the start.
-6. [ ] Tests: a synthetic community-authored plugin fixture is discovered and invoked identically for at least two different Plugin-category integrations via the shared protocol — proving the unification shares code, not just documentation.
-7. [ ] USAGE.md: one "Authoring a Plugin" guide replacing the currently-scattered per-family docs.
+1. [x] Extract one shared JSON-over-stdio protocol crate/trait from the currently-independent VCS/messaging/social/agent-runtime plugin implementations, matching VCS's existing `method: String` dispatch shape (most mature). Migrate all four onto it without changing external plugin-facing behavior.
+2. [x] Define one shared `plugin.toml` manifest schema and `.ta/plugins/<kind>/<name>/` discovery convention used by every Plugin-category integration.
+3. [x] Migrate `EXTERNAL_TOOLS` (hardcoded array, `apps/ta-cli/src/commands/tools.rs`) onto the Plugin category — a community member can add a new tool without a TA core PR.
+4. [x] Migrate `DbProxyPlugin` onto the Plugin category per the 2026-07-03 DB proxy redesign (SQL/NoSQL facets, `.ta/db-adapters.toml` registry).
+5. [x] Implement `ReleaseAdapter` (currently only planned in PLAN.md v0.17.2/17.3, never built) directly onto the Plugin category from the start.
+6. [x] Tests: a synthetic community-authored plugin fixture is discovered and invoked identically for at least two different Plugin-category integrations via the shared protocol — proving the unification shares code, not just documentation.
+7. [x] USAGE.md: one "Authoring a Plugin" guide replacing the currently-scattered per-family docs.
 
 #### Version: `0.17.0-alpha.12.14`
 
 ---
 ### v0.17.0.12.15 — The Write/Review/Decision/Commit/Reject Graph + Auto-Approval + Per-Action Telemetry
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Implement `docs/design/ta-action-reference.md`'s core graph — extract the generic Write → Review → Decision → Commit/Reject shape from its three independent instantiations (`DraftStatus`, `social_supervisor_check`, email's `supervisor_check`) into one reusable model, add real confidence/risk-threshold auto-approval, fix the hardcoded `APPROVAL_REQUIRED_VERBS` array, and add per-action telemetry (`Meter`, confirmed product requirement 2026-07-04).
 
 **Items**:
-1. [ ] Define the generic `Decision` gate (lifted from `social_supervisor_check()`, the most complete existing example) taking `{verdict, risk_score, confidence}` and a threshold config, returning `{Commit, Reject, Rework, Escalate}`. Reuse this one function from `DraftStatus`'s apply path, social's publish gate, and email's send gate.
-2. [ ] Add a real, computed `confidence` field to `SupervisorReview` (currently absent) and make `DraftPackage.risk_score` actually computed (currently hardcoded to `0` at every real call site).
-3. [ ] Generalize `APPROVAL_REQUIRED_VERBS` (`crates/ta-policy/src/engine.rs:83`, currently `&["apply", "commit", "send", "post"]`) so any application implementing the Commit contract is automatically approval-required.
-4. [ ] Wire `AdvisorSecurity::Auto` to consult the Decision gate's threshold instead of being an unconditional bypass.
-5. [ ] Add `publish()` to the social adapter contract, gated by the same Decision function — completing Social's Commit implementation (publish IS Commit for that endpoint, per the 2026-07-04 correction).
-6. [ ] Build the DB proxy's missing Review/Decision gate (currently absent entirely) using the same generic function.
-7. [ ] Per-action telemetry (`Meter`): record cost, tokens, duration, confidence, and risk per Write/Review/Decision/Commit action, queryable per-goal — build alongside items 1-2, same code path.
-8. [ ] Tests: the shared Decision gate produces identical results from every call site given equivalent inputs; telemetry round-trips and is queryable by goal ID; `AdvisorSecurity::Auto` correctly withholds approval when the gate would Reject/Escalate.
-9. [ ] USAGE.md: document the auto-approval threshold config and where to view per-action telemetry.
+1. [x] Define the generic `Decision` gate (lifted from `social_supervisor_check()`, the most complete existing example) taking `{verdict, risk_score, confidence}` and a threshold config, returning `{Commit, Reject, Rework, Escalate}`. Reuse this one function from `DraftStatus`'s apply path, social's publish gate, and email's send gate.
+2. [x] Add a real, computed `confidence` field to `SupervisorReview` (currently absent) and make `DraftPackage.risk_score` actually computed (currently hardcoded to `0` at every real call site).
+3. [x] Generalize `APPROVAL_REQUIRED_VERBS` (`crates/ta-policy/src/engine.rs:83`, currently `&["apply", "commit", "send", "post"]`) so any application implementing the Commit contract is automatically approval-required.
+4. [x] Wire `AdvisorSecurity::Auto` to consult the Decision gate's threshold instead of being an unconditional bypass.
+5. [x] Add `publish()` to the social adapter contract, gated by the same Decision function — completing Social's Commit implementation (publish IS Commit for that endpoint, per the 2026-07-04 correction).
+6. [x] Build the DB proxy's missing Review/Decision gate (currently absent entirely) using the same generic function.
+7. [x] Per-action telemetry (`Meter`): record cost, tokens, duration, confidence, and risk per Write/Review/Decision/Commit action, queryable per-goal — build alongside items 1-2, same code path.
+8. [x] Tests: the shared Decision gate produces identical results from every call site given equivalent inputs; telemetry round-trips and is queryable by goal ID; `AdvisorSecurity::Auto` correctly withholds approval when the gate would Reject/Escalate.
+9. [x] USAGE.md: document the auto-approval threshold config and where to view per-action telemetry.
 
 #### Version: `0.17.0-alpha.12.15`
 
 ---
 ### v0.17.0.12.16 — CLI Verb-Set Consolidation
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.14, v0.17.0.12.15
 
 **Goal**: Collapse the ~250-action CLI surface onto the 10-verb set from `docs/design/ta-concepts-and-architecture.md` §5/§11 (create/list/show/update/remove/run/approve/deny/apply/check/sync), shipped with a deprecation/alias window, not a hard cutover.
 
 **Items**:
-1. [ ] Implement the 10 top-level verbs as the primary CLI surface, nouns as positional subjects (`ta list goal`, `ta show draft <id>`).
-2. [ ] Every existing subcommand becomes an alias forwarding to the new verb+noun form, printing a one-line deprecation notice (not an error).
-3. [ ] Fix the `ta goal delete` phase-reset-even-when-done bug (found 2026-07-03) as part of unifying delete/remove onto `remove` — don't carry it forward.
-4. [ ] USAGE.md: full rewrite of the command reference around the new verb structure, with an old→new lookup table.
-5. [ ] Tests: every old subcommand invocation produces identical behavior through its alias; the deprecation notice appears exactly once per invocation.
+1. [x] Implement the 10 top-level verbs as the primary CLI surface, nouns as positional subjects (`ta list goal`, `ta show draft <id>`).
+2. [x] Every existing subcommand becomes an alias forwarding to the new verb+noun form, printing a one-line deprecation notice (not an error).
+3. [x] Fix the `ta goal delete` phase-reset-even-when-done bug (found 2026-07-03) as part of unifying delete/remove onto `remove` — don't carry it forward.
+4. [x] USAGE.md: full rewrite of the command reference around the new verb structure, with an old→new lookup table.
+5. [x] Tests: every old subcommand invocation produces identical behavior through its alias; the deprecation notice appears exactly once per invocation.
 
 #### Version: `0.17.0-alpha.12.16`
 
 ---
 ### v0.17.0.12.17 — Studio IA Redesign
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12, v0.17.0.12.13, v0.17.0.12.14, v0.17.0.12.15, v0.17.0.12.16
 
 **Goal**: Collapse Studio's 15 nav tabs into the ~4 real destinations identified in `docs/design/ta-concepts-and-architecture.md` §6 (Attention, Activity, Configuration, Advisor). Sequenced last — building new UI against a still-fragmented backend recreates the sprawl.
 
 **Items**:
-1. [ ] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
-2. [ ] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
-3. [ ] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
-4. [ ] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
-5. [ ] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
-6. [ ] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
-7. [ ] Verification: manual browser walkthrough, not just unit tests — this is UI.
+1. [x] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
+2. [x] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
+3. [x] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
+4. [x] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
+5. [x] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
+6. [x] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
+7. [x] Verification: manual browser walkthrough, not just unit tests — this is UI.
 
 #### Version: `0.17.0-alpha.12.17`
 
 ---
 ### v0.17.0.12.18 — Daemon Log Rotation Reliability Fix
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: none (independent, low-effort)
 
 **Goal**: `daemon.log` has been repeatedly flagged at 5.2GB (threshold 500MB) by multiple `ta run` launches this session, requiring a manual `ta doctor --fix` each time. Make rotation automatic instead of a manual, easy-to-forget step — a small, concrete reliability win independent of the rest of the overhaul (per `docs/design/ta-concepts-and-architecture.md` §13.1).
 
 **Items**:
-1. [ ] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
-2. [ ] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
-3. [ ] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
-4. [ ] USAGE.md: document the rotation config.
+1. [x] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
+2. [x] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
+3. [x] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
+4. [x] USAGE.md: document the rotation config.
 
 #### Version: `0.17.0-alpha.12.18`
 
 ---
 ### v0.17.0.12.19 — Trigger Layer (`ta-intake`): Data-Defined Trigger Types
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12 (data-defined-entity pattern established)
 
 **Goal**: Build tier 1 of the 3-tier model (`docs/design/ta-concepts-and-architecture.md` §13/§13.1) — a first-class trigger abstraction so goal creation can be fed by more than an explicit `ta run`/MCP call. Per-type trigger configs are data, not code, so the community can create/improve them the same way personas and (per v0.17.0.12.14) plugins are data-defined.
 
 **Items**:
-1. [ ] New library crate `ta-intake`, no CLI/daemon-specific glue: defines a `TriggerEvent` type (normalized payload + source metadata) and a `TriggerSource` trait producing them. Owns only "an event of type X arrived, here's its normalized payload" — nothing about what to do with it (that's v0.17.0.12.20's job).
-2. [ ] Per-type trigger configs as data: `.ta/triggers/<type>.toml`, discovery convention mirroring `plugin.toml` (v0.17.0.12.14). Ship 2 real, working trigger types end-to-end: schedule (cron-like) and inbound-email (reusing the existing email connector's fetch capability), each producing a `TriggerEvent` that results in a real goal being created.
-3. [ ] Explicit design decision, documented in-code: whether a fired trigger creates a goal directly, or queues data for later batch/regular processing — per the user's framing, this choice is data (part of the per-type config), not a hardcoded behavior.
-4. [ ] Tests: each of the 2 shipped trigger types fires and produces a correctly-formed `TriggerEvent`; a custom/community-authored trigger-type config round-trips through parse/discovery without code changes.
-5. [ ] USAGE.md: document `.ta/triggers/<type>.toml` and the 2 shipped trigger types as a template for authoring more.
+1. [x] New library crate `ta-intake`, no CLI/daemon-specific glue: defines a `TriggerEvent` type (normalized payload + source metadata) and a `TriggerSource` trait producing them. Owns only "an event of type X arrived, here's its normalized payload" — nothing about what to do with it (that's v0.17.0.12.20's job).
+2. [x] Per-type trigger configs as data: `.ta/triggers/<type>.toml`, discovery convention mirroring `plugin.toml` (v0.17.0.12.14). Ship 2 real, working trigger types end-to-end: schedule (cron-like) and inbound-email (reusing the existing email connector's fetch capability), each producing a `TriggerEvent` that results in a real goal being created.
+3. [x] Explicit design decision, documented in-code: whether a fired trigger creates a goal directly, or queues data for later batch/regular processing — per the user's framing, this choice is data (part of the per-type config), not a hardcoded behavior.
+4. [x] Tests: each of the 2 shipped trigger types fires and produces a correctly-formed `TriggerEvent`; a custom/community-authored trigger-type config round-trips through parse/discovery without code changes.
+5. [x] USAGE.md: document `.ta/triggers/<type>.toml` and the 2 shipped trigger types as a template for authoring more.
 
 #### Version: `0.17.0-alpha.12.19`
 
 ---
 ### v0.17.0.12.20 — Routing Brain (`ta-brain`): Workload Classification + Privilege Derivation + Team Coordinator
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.13 (agent-switching tiers), v0.17.0.12.19 (`ta-intake`)
 
 **Goal**: Build tier 2 of the 3-tier model — extract the §3 mapping tree into one reusable library function, extending v0.17.0.12.13's agent-only `Switch` resolution into full workload classification, prioritization, and privilege derivation. Resolve the open §13 question: is the "team coordinator" a new persistent role, or a capability of the existing Advisor?
 
 **Items**:
-1. [ ] New library crate `ta-brain`, no CLI/daemon-specific glue: one pure function `route(input: RoutingInput) -> RoutingDecision` where `RoutingInput` is either an explicit goal request or a `ta-intake::TriggerEvent`, and `RoutingDecision = {team, persona, agent, security_tier, priority}`.
-2. [ ] Wire `ta run` (explicit path) and a new `ta-intake`-driven listener (triggered path) to both call this same function — no duplicated routing logic between the two entry points.
-3. [ ] Extend the agent-resolution tiers from v0.17.0.12.13 so `security_tier` and `priority` are derived the same way `agent` already is (including an `"auto"`-equivalent for security tier, gated by workload classification, not just role).
-4. [ ] Decide and implement the team-coordinator question: either (a) a new persistent, non-Write role that watches the incoming-request queue across concurrent goals and assigns/prioritizes via `ta-brain`, or (b) extend the existing Advisor with this capability. Document the decision and rationale in this phase's PLAN.md entry once made — don't leave it open.
-5. [ ] Tests: `route()` produces an identical `RoutingDecision` for equivalent explicit-vs-triggered inputs; priority ordering is correct when more than one request is pending; the team-coordinator path correctly surfaces its recommendation + rationale (Observable & Actionable).
-6. [ ] USAGE.md: document the routing/prioritization model and the team-coordinator role.
+1. [x] New library crate `ta-brain`, no CLI/daemon-specific glue: one pure function `route(input: RoutingInput) -> RoutingDecision` where `RoutingInput` is either an explicit goal request or a `ta-intake::TriggerEvent`, and `RoutingDecision = {team, persona, agent, security_tier, priority}`.
+2. [x] Wire `ta run` (explicit path) and a new `ta-intake`-driven listener (triggered path) to both call this same function — no duplicated routing logic between the two entry points.
+3. [x] Extend the agent-resolution tiers from v0.17.0.12.13 so `security_tier` and `priority` are derived the same way `agent` already is (including an `"auto"`-equivalent for security tier, gated by workload classification, not just role).
+4. [x] Decide and implement the team-coordinator question: either (a) a new persistent, non-Write role that watches the incoming-request queue across concurrent goals and assigns/prioritizes via `ta-brain`, or (b) extend the existing Advisor with this capability. Document the decision and rationale in this phase's PLAN.md entry once made — don't leave it open.
+5. [x] Tests: `route()` produces an identical `RoutingDecision` for equivalent explicit-vs-triggered inputs; priority ordering is correct when more than one request is pending; the team-coordinator path correctly surfaces its recommendation + rationale (Observable & Actionable).
+6. [x] USAGE.md: document the routing/prioritization model and the team-coordinator role.
 
 #### Version: `0.17.0-alpha.12.20`
 
 ---
 ### v0.17.0.12.21 — Data-Format Specs + Studio Boundary Enforcement
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.19, v0.17.0.12.20
 
 **Goal**: Publish the versioned data-format specs that are the real interface boundary between TA's core, Studio, and community-authored trigger-configs/plugins (per §13.1) — the mechanism that lets the system stay a monorepo without becoming tightly coupled.
 
 **Items**:
-1. [ ] Publish `schemars`-derived JSON Schema for `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, `Persona`. Version each schema explicitly.
-2. [ ] Publish a human-readable spec doc (`docs/design/ta-data-format-spec.md` or similar) referencing the generated schemas, in the same reference style as `ta-action-reference.md`.
-3. [ ] Audit Studio's existing API usage for any direct coupling to internal `ta-*` crate types rather than the versioned spec; fix any found.
-4. [ ] Add a documented rule (and a lint/CI check if feasible) flagging new Studio code that imports internal `ta-*` crate types directly instead of going through the HTTP/SSE API + spec.
-5. [ ] Tests: schema round-trip / backward-compatibility check (a schema change that breaks an existing serialized example fails CI).
-6. [ ] USAGE.md: document the spec location and the "Studio only talks to the versioned spec" rule for future contributors.
+1. [x] Publish `schemars`-derived JSON Schema for `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, `Persona`. Version each schema explicitly.
+2. [x] Publish a human-readable spec doc (`docs/design/ta-data-format-spec.md` or similar) referencing the generated schemas, in the same reference style as `ta-action-reference.md`.
+3. [x] Audit Studio's existing API usage for any direct coupling to internal `ta-*` crate types rather than the versioned spec; fix any found.
+4. [x] Add a documented rule (and a lint/CI check if feasible) flagging new Studio code that imports internal `ta-*` crate types directly instead of going through the HTTP/SSE API + spec.
+5. [x] Tests: schema round-trip / backward-compatibility check (a schema change that breaks an existing serialized example fails CI).
+6. [x] USAGE.md: document the spec location and the "Studio only talks to the versioned spec" rule for future contributors.
 
 #### Version: `0.17.0-alpha.12.21`
 
 ---
-### v0.17.0.12.22 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
-<!-- status: pending -->
-**Depends on**: v0.17.0.12.11 through v0.17.0.12.21 (all of it — this is the final, doc-only phase for the whole overhaul)
+### v0.17.0.12.22 — CLI Surface Completion: Full Verb+Noun Coverage + Curated Help
+<!-- status: done -->
+**Depends on**: v0.17.0.12.16
 
-**Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.21 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
+**Goal**: 12.16 intentionally shipped partial (18 of 42 noun-areas mapped onto the 10-verb set, per `docs/design/ta-cli-verb-reference.md`) with the rest still legacy-only. Finish the mapping, and give the CLI a genuinely simple default surface — today only 7 of 61 commands are hidden from `--help` (installer-internal, not a curated "common ops" set), so a new user sees the entire flat command list.
 
 **Items**:
-1. [ ] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
-2. [ ] Write a new `docs/architecture/` doc for the user themselves (maintainer-level, not plain-language) — the "how it is set up" reference: the 3-tier model as actually built, the `ta-intake`/`ta-brain`/back-office library-crate boundaries, the data-format specs and how they gate Studio/community contributions, and why the codebase stays a single monorepo rather than split repos. This formalizes `docs/design/ta-concepts-and-architecture.md`'s working notes into a stable reference — the design doc can stay as historical record of how the decisions were reached; this new doc is the current-state reference.
-3. [ ] Cross-link both new/refreshed docs with `ta-action-reference.md` and the data-format spec from v0.17.0.12.21.
+1. [x] Map the remaining 24 noun-areas (`advisor`, `memory`, `adapter`, `release`, `intake`, `config`, `policy`, etc.) onto the 10-verb set via `commands::verb::NOUN_TABLE`, matching 12.16's alias + deprecation-notice pattern exactly.
+2. [x] Curate a default `--help` view showing only the common-operation verb+noun pairs (the ~15-20 combos covering the everyday workflow); full/legacy/advanced commands surface via `ta --help --all` or `ta <verb> --help` drill-down.
+3. [x] USAGE.md: complete the old→new lookup table to 42/42; document the simple-vs-`--all` help split.
+4. [x] Tests: every newly-mapped noun-area's alias produces identical behavior through its verb+noun form; default `--help` excludes legacy/advanced-only commands; `--all` shows everything.
 
 #### Version: `0.17.0-alpha.12.22`
+
+---
+### v0.17.0.12.23 — Advisor-Driven Goal Creation: Natural-Language Intent + Clarification
+<!-- status: done -->
+**Depends on**: v0.17.0.12.19 (`ta-intake`), v0.17.0.12.20 (`ta-brain`)
+
+**Goal**: Two intent-handling systems exist today and don't talk to each other — `ta-workflow::intent::resolve_intent` (confidence-gated matching against known workflow *templates*, with real clarifying questions, but only reachable from `ta workflow` commands) and `ta-brain::classify`/`route` (resolves team/persona/security/priority, but requires an already-structured title/objective — it never parses raw free text itself). Neither is exposed as "hand the Advisor a sentence and get a routed goal." Unify them so a general user can do exactly that, with a real clarification question asked when confidence is low — reusing the existing `ta_ask_human`-backed headless-agent mechanism already built for draft-review conversations (`ta-session::advisor_agent::spawn_advisor_agent`) rather than building a new conversational loop from scratch.
+
+**Items**:
+1. [x] Extend the free-text entry point to parse a raw prompt into title/objective/hints via the existing advisor-agent headless-conversation mechanism (not a new NLU component), then feed the result into `ta_brain::route()` exactly as it consumes structured requests today.
+2. [x] Replace `ta-advisor::coordinator`'s binary `auto_eligible`/`needs_review` split with a third outcome, `needs_clarification`, that fires an actual `ta_ask_human` question (not just a flag for later human review) when routing confidence is low.
+3. [x] New entry point (CLI verb+noun from 12.22, and/or MCP tool) that runs this pipeline end-to-end: high confidence creates the routed goal directly; low confidence asks one clarifying question first, then re-routes with the answer.
+4. [x] Fold `ta-workflow::intent::resolve_intent`'s workflow-template matching in as one signal `ta-brain::route()` consults, rather than a second, parallel intent system.
+5. [x] Tests: high-confidence prompt routes and creates a goal with zero clarification; low-confidence prompt triggers exactly one clarifying question and re-routes correctly after the answer.
+6. [x] USAGE.md: document the "just tell TA what you want" entry point alongside the explicit CLI verb+noun surface from 12.16/12.22.
+
+#### Version: `0.17.0-alpha.12.23`
+
+---
+### v0.17.0.12.24 — Windows CI Toolchain Parity
+<!-- status: done -->
+**Depends on**: none (independent, low-effort; discovered 2026-07-10 while fixing PR #537)
+
+**Goal**: `windows-build` in `ci.yml` uses `dtolnay/rust-toolchain@stable`, which re-resolves live on every run against whatever Rust actually calls "stable" *today* (observed 1.97 on 2026-07-10). `lint-and-test` (ubuntu/macos) builds via Nix's `fromRustupToolchainFile ./rust-toolchain.toml`, which reads the same file's `channel = "stable"` but resolves it through `flake.lock`'s time-frozen nixpkgs/rust-overlay snapshot (observed 1.94 locally) — Nix has no native Windows support, so Windows never went through this path. The two "stable"s silently diverged by three-plus point releases over time, not by design. This let 5 real clippy lints in `shell_tui.rs`/`draft.rs`/`follow_up.rs` go uncaught on two of three platforms, and produces "clean everywhere except Windows" CI signals that look like flakiness but are actually a genuine toolchain-version gap.
+
+Recommendation: converge forward onto an explicit pinned version rather than pin Windows backward to match Nix's stale snapshot — pinning backward just inverts which platform drifts next time nixpkgs updates. `flake.nix` already uses `oxalica/rust-overlay`, which supports pinning `rust-toolchain.toml`'s `channel` to an exact version string (not just `"stable"`/`"beta"`/`"nightly"`) — so a single explicit version in that one file can drive both Nix (already reads it) and native `rustup` on every GitHub-hosted runner (ubuntu/macos/windows all ship rustup preinstalled and auto-install/select whatever `rust-toolchain.toml` pins on first `cargo`/`rustc` invocation, no action needed). This removes the `dtolnay/rust-toolchain@stable` step's independent floating resolution entirely, converging all three platforms on the one file that's already this project's single source of truth for the toolchain.
+
+**Items**:
+1. [x] Pin `rust-toolchain.toml`'s `channel` to an explicit version (the current real stable, e.g. `1.97.x` — confirm exact patch via `rustc --version` on a fresh runner) instead of the literal word `"stable"`.
+2. [x] Confirm `flake.lock`'s `rust-overlay`/`nixpkgs` inputs are recent enough to offer that version via `nix flake update`; bump if not.
+3. [x] Remove (or repurpose) the `dtolnay/rust-toolchain@stable` step in `ci.yml`'s `windows-build` job — rely on the runner's preinstalled `rustup` auto-detecting `rust-toolchain.toml`, matching how `lint-and-test`'s Nix shell already resolves the same file.
+4. [x] Full clean `build`/`clippy`/`fmt`/`test` run on all three CI platforms at the newly-pinned version; fix any lints the version bump newly surfaces before merging.
+5. [x] CLAUDE.md: document the shared pinned version and the rule that no CI platform may resolve its own Rust toolchain independently of `rust-toolchain.toml` again.
+
+#### Version: `0.17.0-alpha.12.24`
+
+---
+### v0.17.0.12.26 — `ta_human_verify`: Two-Stage Confidence-Gated Verification (replaces `ta_ask_human`)
+<!-- status: done -->
+**Depends on**: v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain` workload classification)
+
+**Goal**: `ta_ask_human` (`crates/ta-mcp-gateway/src/tools/human.rs`) always blocks and waits for a real human, for every question, regardless of how routine or high-stakes it is — there is no gating today. Per the user's design (2026-07-10): reframe it as `ta_human_verify`, which first asks a **human-opinion model** (an LLM prompted to answer the question the way a human reviewer would) and an independent **validator** (a second, separate pass that critiques the opinion's reasoning rather than trusting its self-reported confidence), scores the pair through the existing generic `ta_decision::gate::decide()` (already built in 12.15 — `DecisionInput{verdict, risk_score, confidence}` → `Commit/Reject/Rework/Escalate`, workload-agnostic by design), and only falls through to a real blocking human ask when the gate says `Escalate`. When the gate says `Commit`, auto-confirm using the opinion model's answer, but **document** the full opinion + validator reasoning + confidence in an audit trail rather than silently discarding it — never a black box. Per-workload policy (keyed on `ta-brain::RoutingDecision::workload_type`/`security_tier`) controls whether the synthetic pre-check is attempted at all (e.g., a `security`-classified workload always escalates straight to a human, skipping the synthetic stage entirely).
+
+**Items**:
+1. [x] New `crates/ta-mcp-gateway/src/tools/human_verify.rs`: `ta_human_verify` MCP tool. Keep `ta_ask_human` registered as a deprecated alias forwarding to it unchanged (matching 12.16's alias + one-time deprecation-notice pattern) — do not break existing agent prompts/docs that already reference the old tool name.
+2. [x] Opinion-model pass: reuse the existing headless-agent-with-tools mechanism (`ta-session::advisor_agent::spawn_advisor_agent`'s pattern, not a new invocation path) prompted with the question + context, producing an answer + explicit reasoning + self-reported confidence.
+3. [x] Validator pass: a second, independent headless-agent call — explicitly prompted to critique the opinion's reasoning against the original question (not to re-answer it), producing a `ta_decision::gate::DecisionInput` (`Verdict`, `risk_score`, `confidence`). Must not share a prompt/context window with the opinion pass — independence is the point.
+4. [x] Per-workload `DecisionThresholds` config in `.ta/workflow.toml` (`[human_verify.<workload_type>]`), read via `ta-brain`'s existing `workload_type`/`security_tier` classification; default thresholds apply when a workload has no override. `security_tier != "auto"` always skips straight to Escalate (no synthetic stage).
+5. [x] `Commit` path: auto-answer, write `{question, context, opinion, validator_verdict, decision, timestamp}` to a new `.ta/human-verify-audit.jsonl` (gitignored, per-run operational log, same category as `routing-decisions.jsonl`). `Escalate`/`Reject`/`Rework` path: fall through to the existing real-human blocking flow unchanged, but pass the opinion+validator reasoning through as additional context so the human sees what the synthetic pipeline already found ambiguous.
+6. [x] Tests: high-confidence/low-risk synthetic pair auto-confirms with no blocking and a correctly-shaped audit entry; low-confidence or high-risk pair falls through to the real human-ask path unchanged; a `security_tier` workload always escalates even with a high-confidence synthetic pair; alias `ta_ask_human` behaves identically to direct `ta_human_verify` calls.
+7. [x] USAGE.md: document the two-stage pipeline, the per-workload threshold config, and where to find the audit trail.
+
+#### Version: `0.17.0-alpha.12.26`
+
+---
+### v0.17.0.12.27 — Red-Team Autoreward: Adversarial Validation of Auto-Confirmed Verifications
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.26 (`ta_human_verify` + its audit trail)
+
+**What "autoreward" means here**: not model training — TA's headless-CLI-agent architecture has no fine-tuning step. It means closing the feedback loop *procedurally*, using primitives TA already has (audit logs, threshold config, few-shot prompt context): a wrong auto-confirm gets caught, recorded, and changes future behavior — instead of the identical mistake silently recurring.
+
+**The gap this closes**: 12.26's `ta_human_verify` auto-confirms a `Commit` decision when an "opinion" pass and a "validator" pass agree. But the validator only checks whether the opinion's *reasoning is internally sound* — it never asks whether the pipeline as a whole is exploitable, biased, or simply wrong in a way that still *reads* as a well-argued case. Per the user's explicit request (2026-07-10), that gap produces three concrete failure modes, each with its own fix below:
+
+| # | Failure mode | What actually goes wrong | How 12.27 fixes it |
+|---|---|---|---|
+| 1 | **Correlated blind spots** | Opinion and validator are both LLM passes. If they share a blind spot (e.g. both under-weight the same risk category), the validator's soundness-check passes cleanly — checking reasoning quality can't catch a mistake baked into the reasoning *style* both passes share. | Item 2: an explicitly adversarial red-team pass, framed as "assume this is wrong — find the failure the opinion+validator pair missed," never as a second soundness re-check. Different framing catches what same-framing can't. |
+| 2 | **Silent drift** | If a `workload_type`'s auto-confirm (`Commit`) rate climbs over time, nothing today tells you whether judgments genuinely got easier or the threshold quietly became too loose — there's no signal until a real incident happens downstream. | Items 3 and 5: per-`workload_type` auto-confirm / catch / false-confirm-rate metrics, tracked over time, make drift *visible* instead of invisible. |
+| 3 | **No feedback loop** | Even when a human later discovers a `Commit` decision was wrong, nothing today records it or changes future behavior — the same mistake pattern can recur indefinitely for that `workload_type`. | Item 4, two parts: (a) confirmed misses get folded into future opinion/validator prompts as few-shot context for that workload; (b) misses clustering above a configurable rate auto-*propose* (never silently apply) a threshold tightening, requiring human approval — thresholds are a trust boundary, so changing them without a human in the loop would defeat the point. |
+
+**Items**:
+1. [ ] `ta verify audit [--sample N] [--workload <type>]` (or scheduled via a `ta-intake` trigger, per 12.19's data-defined trigger pattern): samples `Commit`-decision entries from `.ta/human-verify-audit.jsonl` not yet red-team-reviewed.
+2. [ ] Red-team agent: a headless pass distinctly framed from the validator — not "is this reasoning sound" but "assume this is wrong; find the failure the opinion+validator pair missed" (adversarial framing, explicit in the prompt). Produces a verdict (confirmed-correct / confirmed-miss) + explanation.
+3. [ ] Confirmed misses: append to `.ta/verify-failures.jsonl` (committed, not gitignored — this is a durable calibration dataset, not a per-run operational log) with the original question/opinion/validator output/red-team explanation.
+4. [ ] Feedback loop, both mechanisms (no literal RL/fine-tuning): (a) include a rolling sample of confirmed misses for the relevant `workload_type` as few-shot context in future opinion/validator prompts for that workload; (b) auto-propose (not silently apply) a `DecisionThresholds` tightening for any `workload_type` where misses cluster above a configurable rate, surfaced to a human for approval rather than applied automatically — thresholds are a trust boundary, changing them silently would defeat the point.
+5. [ ] Metrics surfaced via existing observability commands (`ta stats` or equivalent): auto-confirm rate, red-team-catch rate, and false-auto-confirm rate, per `workload_type`, over time.
+6. [ ] Tests: a seeded confirmed-miss correctly appears in future opinion-pass few-shot context for its workload; threshold-tightening proposal fires only above the configured miss-rate and never applies without human approval; metrics aggregate correctly across a mixed sample of hits/misses.
+7. [ ] USAGE.md: document the red-team loop, `verify-failures.jsonl`'s role as a durable dataset (not a log to prune), and how to review/approve a threshold-tightening proposal.
+
+#### Version: `0.17.0-alpha.12.27`
+
+---
+### v0.17.0.12.28 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.11 through v0.17.0.12.27 (all of it, including the post-12.21 additions above — this is the final, doc-only phase for the whole overhaul)
+
+**Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.27 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
+
+**Items**:
+1. [ ] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, the natural-language advisor entry point from 12.23, the `ta_human_verify` two-stage verification pipeline from 12.26/12.27, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
+2. [ ] Write a new `docs/architecture/` doc for the user themselves (maintainer-level, not plain-language) — the "how it is set up" reference: the 3-tier model as actually built, the `ta-intake`/`ta-brain`/back-office library-crate boundaries, the data-format specs and how they gate Studio/community contributions, and why the codebase stays a single monorepo rather than split repos. This formalizes `docs/design/ta-concepts-and-architecture.md`'s working notes into a stable reference — the design doc can stay as historical record of how the decisions were reached; this new doc is the current-state reference.
+3. [ ] Cross-link both new/refreshed docs with `ta-action-reference.md`, the data-format spec from v0.17.0.12.21, and the CLI verb reference/user-personas docs completed by v0.17.0.12.22.
+
+#### Version: `0.17.0-alpha.12.28`
+
+---
+### v0.17.0.12.29 — Studio Regression Fixes: Dashboard Re-render, Plan Load Caching, Attention/Health Reconciliation
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.17 (Studio IA Redesign) — these are regressions/gaps against that phase's own stated goal, found during live usage on 2026-07-14, not new scope.
+
+**Goal**: Three bugs found by the user actually using Studio day-to-day, each traced to a specific file/line during investigation (2026-07-14). All three are regressions or unfinished work against 12.17's own stated goal ("one canonical Attention Queue," "event-driven not timer-driven refresh"), not new feature requests:
+
+1. **Dashboard/Advisor widget flicker.** The Dashboard's SSE handler (`crates/ta-daemon/assets/index.html:1462-1483`) calls `loadDashboard()` on any of 11 event types, which does a full `innerHTML` replace of the *entire* panel (`renderDashboard()`) — including the embedded Advisor widget — on every event, even when that event has nothing to do with the Advisor. During an active goal, events fire often, so the whole panel (Advisor widget included) tears down and rebuilds repeatedly, reading as the widget's text/size/configuration briefly changing then reverting. 12.9 explicitly planned "only re-render fields that changed" but the code does a full rebuild regardless — this item finishes that unfinished promise rather than re-litigating it.
+2. **Plan tab load latency.** `GET /api/plan/phases` (`crates/ta-daemon/src/api/plan.rs:339-397`) re-reads and fully re-parses the entire PLAN.md file (10,000+ lines) from disk on every call, recompiling 4 regexes from scratch each time (not `LazyLock`/memoized), plus an uncached full directory scan + per-file JSON parse of everything in `.ta/goals/`. This endpoint isn't only hit on tab-click — the Dashboard also calls it on every SSE event (same handler as item 1), so the expensive reparse runs constantly in the background, not just when a human opens the Plan tab. It is already lazy per-tab on the frontend (does not block Studio startup) — the fix is caching, not an architecture change.
+3. **Attention/health-signal contradiction.** The Attention queue's empty-state check (`loadAttentionQueue`/`renderAttentionQueue`, `index.html:1731-1782`) only considers pending questions, `PendingReview` drafts, and active goals — it excludes `Approved`-but-unapplied drafts entirely, so it can say "nothing needs your attention" while a completely separate health-check system (`crates/ta-daemon/src/api/health_signals.rs:452`, `check_stale_drafts`) is simultaneously showing a banner for a draft approved-but-unapplied 3+ days. Two independently-computed "does this need me" signals that were never reconciled into the single queue 12.17 was supposed to deliver.
+
+**Items**:
+1. [ ] Dashboard: make the SSE-triggered refresh diff incoming data against currently-rendered state and patch only the changed DOM subtree(s), rather than a full `innerHTML` replace of the whole panel — the Advisor widget specifically should only re-render when its own underlying data (context/dialog) actually changed, not on unrelated goal/draft events.
+2. [ ] `/api/plan/phases`: add a `PlanCache` on `AppState` mirroring the existing `StatusCache`/`SignalsCache` pattern (`crates/ta-daemon/src/api/mod.rs`), keyed on PLAN.md's mtime (or a short TTL matching `StatusCache`'s 5s) — invalidate on write, not on every read. Hoist `parse_plan_phases()`'s 4 `Regex::new` calls (`plan.rs:60-67`) to `LazyLock` statics. Cache the `.ta/goals/*.json` directory scan the same way (used by `active_phase_states`/`active_phase_draft_ids`).
+3. [ ] Attention queue: fold `Approved`-but-unapplied drafts and `/health/signals` results into `loadAttentionQueue`'s own data set and empty-state check, so the same underlying counts drive both the queue list and the "nothing needs attention" message — they must never be able to disagree again.
+4. [ ] Tests: a dashboard re-render test asserting an unrelated SSE event does not replace the Advisor widget's DOM node; a plan-phases cache test asserting a second call within the TTL/mtime window does not re-read PLAN.md from disk; an attention-queue test asserting a stale `Approved` draft or an active health signal both (a) appears in the queue and (b) suppresses the "nothing needs attention" empty state.
+5. [ ] Manual browser verification (matching 12.17's own verification standard) — this is UI/perf, not just unit-testable logic.
+
+#### Version: `0.17.0-alpha.12.29`
 
 ---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
@@ -9726,7 +9840,68 @@ Code releases use semver. Content releases don't. Decide:
 
 5. [ ] **USAGE.md**: Adapter sections for YouTube, Steam, Homebrew. Plugin adapter authoring guide.
 
+---
+### v0.17.5 — Autonomous Team Systems: Persistent Execution + Budget Guardrails + Pluggable Domain Adapters
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.15 (Decision gate), v0.17.0.12.20 (`ta-brain` routing/security), v0.17.0.12.26 (`ta_human_verify`)
 
+**Why this exists**: per the user's explicit vision (2026-07-15): by end-0.17, someone should be able to author a workflow declaring a team with custom roles (e.g. analyst/strategist/trader), hand that team a goal *and a budget*, let it run continuously rather than one-shot, and have workflow-defined rules + the supervisor + an optional red-team pass auto-approve domain actions (e.g. an actual stock purchase) within that budget — a "virtual office." Investigation this session (2026-07-14/15) confirmed the real primitives already exist (composable workflow YAML, data-defined `TeamRole`, a domain-agnostic `ta-decision::gate::decide()`, natural-language routing) but three concrete things are missing, not just unbuilt: (1) every goal — including scheduled `ta-intake` triggers — is one-shot, `Created → ... → Completed`, then done, with no mechanism for a team to keep running against an ongoing objective across decisions; (2) only an LLM-token budget exists (`ta-policy::BudgetConfig`) — zero concept of an arbitrary business-metric budget (dollars, trade count, anything domain-specific); (3) the generic external-domain-action hook (`StepAction::external_adapter()`) has zero production callers, and the one connector with a real publish path (social) has `risk_score` hardcoded to `0`. This phase closes those three gaps, and additionally unifies a fragmented auto-approval story found during the same investigation: `check_advisor_auto_approve()` (`ta-session::advisor_agent`) is fully built and unit-tested but has zero call sites in production — the real `ta draft apply` gate goes through a separate, disconnected mechanism (`ta_policy::auto_approve::should_auto_approve_draft()`) that never consults `security_tier` at all.
+
+---
+### v0.17.5.1 — Persistent Team Session Runtime
+<!-- status: pending -->
+**Depends on**: v0.17.5
+
+**Goal**: Give a team a persistent execution context that survives across multiple goal-runs, instead of every trigger firing a brand-new goal from zero. Precedent already exists inside `ta-daemon` for exactly this shape of problem — `connector_supervisor.rs` (fault-isolated, heartbeat-monitored, backoff/suspend-managed subprocess supervision) and `watchdog.rs` (a background tokio task for goal liveness) — so this extends that in-process supervision model to a new subject (a team session) rather than standing up a second daemon. A second daemon would either duplicate that supervision machinery or reach across a network boundary into the core daemon for every draft/approval/audit write, reintroducing the cross-process consistency problem TA's staged-review model exists to avoid.
+
+**Items**:
+1. [ ] New `ta-daemon` subsystem module (e.g. `team_session.rs` — deliberately not reusing the `office` name, which already means multi-project daemon config in `office.rs`) modeling a `TeamSession`: a workflow YAML + `team.toml` binding, persistent state at `.ta/team-sessions/<id>/state.json`, and a supervised loop that starts new goal-runs against the shared session state rather than from zero.
+2. [ ] Session state carries context forward between goal-runs within the same session (e.g. a completed "analyst" role's finding is available context for the next "trader" role's goal) — reuse `ta-session::advisor_agent`'s existing context-injection mechanism rather than building a new one.
+3. [ ] Lifecycle commands: `ta team-session start/pause/stop/status <name>`, mirroring the existing `ta connector` command shape.
+4. [ ] Crash recovery: reuse `connector_supervisor.rs`'s backoff/suspend pattern (1s→2s→4s...→60s cap, Suspended after 5 failures in 5 minutes) — a session that crash-loops stops retrying instead of looping forever.
+5. [ ] Tests: session state persists and is readable across two sequential goal-runs; a crash-looping session reaches Suspended and stops; `status` reflects real supervisor state.
+6. [ ] USAGE.md: how to start/monitor/stop a persistent team session.
+
+#### Version: `0.17.5-alpha.1`
+
+---
+### v0.17.5.2 — Workflow-Defined Budget Guardrails (Business-Metric Budgets)
+<!-- status: pending -->
+**Depends on**: v0.17.5.1, v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain::route()`)
+
+**Goal**: Add a second, distinct budget concept alongside the existing LLM-token budget (`ta-policy::BudgetConfig.max_tokens_per_goal`, which stays exactly as-is — that's resource-consumption tracking, not a business-rule guardrail). This one is an arbitrary-unit business metric a workflow declares (e.g. `metric = "usd", total = 1000.0, per_action_max_pct = 10.0`) against a stated objective (e.g. "generate income > 2x within 6 months after fees"). Hard limits are deterministic pre-gate checks — no confidence score ever overrides one. Soft limits feed the Decision gate as an escalation signal, the exact shape already proven by `route()`'s `AUTO_SECURITY_CONFIDENCE_THRESHOLD` (a low-confidence workload classification downgrades `security_tier = auto` to `suggest` today) — this reuses that same "confidence/proximity-to-limit downgrades autonomy" pattern rather than inventing a new one.
+
+**Items**:
+1. [ ] New `WorkflowBudget` config in workflow YAML: `{metric: string, total: f64, per_action_max_pct: Option<f64>, soft_threshold_pct: Option<f64>, objective: Option<string>}` — `metric` is an arbitrary label (`"usd"`, `"trade_count"`, anything), not hardcoded to dollars.
+2. [ ] Running ledger persisted in the team-session state (5.1) — an append-only per-action log (amount, running total, timestamp), same audit-log-JSONL pattern as `.ta/human-verify-audit.jsonl`.
+3. [ ] Hard-limit pre-gate: a new check consulted *before* `ta_human_verify`/`ta-decision::gate::decide()` even runs. Violating it (e.g. a trade exceeding the 10% per-action cap) rejects outright — never reaches the probabilistic verify/approve pipeline at all.
+4. [ ] Soft-limit check: crossing `soft_threshold_pct` of the total forces `Escalate` regardless of what the Decision gate's own verdict would otherwise be — mirrors `route()`'s existing auto→suggest downgrade.
+5. [ ] Observability: the per-session ledger surfaces both budgets (token spend from `BudgetConfig` and business-metric spend from `WorkflowBudget`) side by side — a session can be within its token budget and over its dollar budget, or vice versa; both must be independently visible.
+6. [ ] Tests: an action exceeding the hard per-action cap is rejected before any verify pass runs; crossing the soft threshold forces `Escalate` even with a high-confidence Decision input; the ledger correctly accumulates across multiple sequential actions in one session.
+7. [ ] USAGE.md: document both budget concepts side by side and when each applies.
+
+#### Version: `0.17.5-alpha.2`
+
+---
+### v0.17.5.3 — Pluggable Domain-Action Adapters (User-Authored Plugins, Not Just Built-In)
+<!-- status: pending -->
+**Depends on**: v0.17.5.2, `StepAction::external_adapter()` (existing hook, currently zero production callers), v0.17.4 item 3 (release adapter plugin protocol — reuse its transport, don't invent a second one)
+
+**Goal**: Today, adding a new domain action (e.g. "execute a stock trade via a brokerage API") requires a TA core code change — every existing connector (Slack/Discord/email/social) is built into `ta-daemon`'s own crates, and the one generic hook meant for this (`StepAction::external_adapter()`) has never been dispatched to in production. Make it genuinely user-authorable, reusing the exact same external-subprocess-plugin transport already proven twice in this codebase (`[[connectors.managed]]` in `connector_supervisor.rs`, and v0.17.4 item 3's release-adapter "JSON-over-stdio, same pattern as VCS plugins") rather than inventing a third plugin protocol.
+
+**Items**:
+1. [ ] Plugin manifest format (`.ta/adapters/<name>/manifest.toml`): declares the action verb(s) it handles (e.g. `"trade.execute"`), a risk-scoring subprocess hook that must return a real computed `risk_score` (not the hardcoded `0` the social adapter uses today), and its commit/publish subprocess entrypoint.
+2. [ ] Wire `StepAction::external_adapter()` to actually dispatch to a registered plugin's subprocess — its first real production caller.
+3. [ ] Approval-gate integration: a dispatched action's risk_score/verdict flows through the same `ta-decision::gate::decide()` used by code drafts and `ta_human_verify` — one uniform `Commit`/`Reject`/`Rework`/`Escalate` contract regardless of domain (per the existing "one uniform contract, policy decides caution" design principle), and consults `security_tier` directly to close the gap found this session where `check_advisor_auto_approve()` is unwired and the real draft-apply path never checks `security_tier` at all.
+4. [ ] Budget guardrail (5.2) consulted as part of the same dispatch path for any adapter action carrying a cost/quantity field.
+5. [ ] Reference implementation: a mock/paper-trading adapter (not a real brokerage integration — no live external API dependency in TA's own test suite) proving the full loop end-to-end: analyst/strategist/trader roles from a persistent session (5.1), a `"trade.execute"` action, hard/soft budget enforcement (5.2), and real non-zero risk scoring.
+6. [ ] Docs: `docs/community-adapter-plugin.md` — how to author a new domain adapter, modeled on the existing `docs/community-ide-plugin.md` pattern.
+7. [ ] Tests: a registered mock adapter's action round-trips through the full gate (approve and reject cases); an unregistered action verb is rejected with a clear "no adapter registered for this verb" error, not a silent no-op.
+8. [ ] USAGE.md: adapter authoring guide, linked from the new community-adapter-plugin.md doc.
+
+#### Version: `0.17.5-alpha.3`
+
+---
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

@@ -30,6 +30,12 @@
          white-space: nowrap; }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .subtabs { display: flex; gap: 0.4rem; margin: -1rem 0 1.25rem; flex-wrap: wrap; }
+  .subtab { padding: 0.3rem 0.75rem; cursor: pointer; color: var(--muted); font-size: 0.8rem;
+            font-weight: 500; border-radius: 999px; border: 1px solid var(--border);
+            transition: all 0.15s; white-space: nowrap; }
+  .subtab:hover { color: var(--text); border-color: var(--muted); }
+  .subtab.active { color: var(--accent); border-color: var(--accent); background: var(--surface); }
   .card { background: var(--surface); border: 1px solid var(--border);
           border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem;
           transition: border-color 0.15s; }
@@ -339,23 +345,22 @@
       <div id="link-modal-body"></div>
     </div>
   </div>
+  <!-- Studio IA (v0.17.0.12.17): the prior 15 flat tabs mapped one-to-one
+       onto backend structs, not onto what a user is actually trying to do.
+       Collapsed to the 4 real destinations from
+       docs/design/ta-concepts-and-architecture.md §6/§7: Attention (things
+       that need you now), Activity (everything going on — drill-in via the
+       sub-nav below), Configuration (who/what does the work), Advisor (the
+       conversational entry point). Legacy tab keys ('dashboard', 'drafts',
+       'health', ...) still work via switchTab()'s LEGACY_TAB_MAP so internal
+       callers didn't all need rewriting — see switchTab() below. -->
   <div class="tabs">
-    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
-    <div class="tab" data-tab="active" onclick="switchTab('active')" id="tab-active">Active</div>
-    <div class="tab" data-tab="plan" onclick="switchTab('plan')">Plan</div>
-    <div class="tab" data-tab="drafts" onclick="switchTab('drafts')">Review Drafts</div>
-    <div class="tab" data-tab="questions" onclick="switchTab('questions')" id="tab-questions">Agent Questions</div>
-    <div class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</div>
-    <div class="tab" data-tab="projects" onclick="switchTab('projects')" id="tab-projects">Projects</div>
-    <div class="tab" data-tab="workflows" onclick="switchTab('workflows')">Workflows</div>
-    <div class="tab" data-tab="release" onclick="switchTab('release')">Release</div>
-    <div class="tab" data-tab="agents" onclick="switchTab('agents')">Agents</div>
-    <div class="tab" data-tab="personas" onclick="switchTab('personas')">Personas</div>
+    <div class="tab active" data-tab="attention" onclick="switchTab('attention')" id="tab-attention">Attention</div>
+    <div class="tab" data-tab="activity" onclick="switchTab('activity')">Activity</div>
+    <div class="tab" data-tab="configuration" onclick="switchTab('configuration')">Configuration</div>
     <div class="tab" data-tab="advisor" onclick="switchTab('advisor')">Advisor</div>
-    <div class="tab" data-tab="stats" onclick="switchTab('stats')">Stats</div>
-    <div class="tab" data-tab="health" onclick="switchTab('health')" id="tab-health">Health</div>
-    <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
   </div>
+  <div class="subtabs" id="subnav" style="display:none"></div>
   <div id="app"><div class="loading">Loading...</div></div>
   <!-- Native dialog modal (v0.16.1.2) -->
   <dialog id="ta-dialog">
@@ -371,7 +376,11 @@
 </div>
 <script>
 const app = document.getElementById('app');
-let currentTab = 'dashboard';
+// currentTab holds a compound "destination:section" key for the two
+// multi-section destinations (e.g. "activity:plan") or a bare destination
+// key for the two single-view ones ("attention", "advisor") — see
+// switchTab() (v0.17.0.12.17).
+let currentTab = 'attention';
 let drafts = [];
 // Advisor state (v0.15.26)
 let advisorHistory = [];
@@ -522,14 +531,53 @@ function badgeClass(status) {
   return 'badge-draft';
 }
 
-// DraftStatus serializes from the detail endpoint as an internally-tagged object
-// e.g. {"status":"applied","applied_at":"..."} or the string "PendingReview" from list.
+// DraftStatus serializes two different ways depending on the endpoint: the
+// list endpoint Debug-formats it to a PascalCase string ("PendingReview"),
+// while the detail endpoint's Rust-side #[serde(tag = "status", rename_all =
+// "snake_case")] produces an internally-tagged object whose nested `status`
+// is real snake_case ("pending_review"). Both are normalized to the same
+// lowercase, no-separator key here (e.g. "pendingreview") so every caller —
+// isReviewable/isApproved checks, badgeClass(), humanizeStatus() — compares
+// against one consistent shape instead of each needing its own normalization
+// (a prior version of this function returned the object form verbatim,
+// un-normalized, which silently made isReviewable's 'pendingreview' check
+// never match a real draft loaded from the detail endpoint (v0.17.0.12.17
+// item 6 — the same raw-enum-leak class of bug, just affecting behavior
+// instead of just display text)).
 function draftStatus(d) {
   const raw = d && d.status;
   if (!raw) return 'unknown';
-  if (typeof raw === 'string') return raw.toLowerCase().replace(/_/g, '_');
-  if (typeof raw === 'object' && typeof raw.status === 'string') return raw.status;
-  return 'unknown';
+  const tag = typeof raw === 'string' ? raw
+    : (typeof raw === 'object' && typeof raw.status === 'string') ? raw.status
+    : null;
+  return tag ? tag.toLowerCase().replace(/_/g, '') : 'unknown';
+}
+
+// Plain-language labels for DraftStatus (v0.17.0.12.17 item 6): draftStatus()
+// above returns the raw lowercased enum tag (e.g. "pendingreview", with no
+// word boundary — a literal leak of the Rust enum variant name into the UI).
+// This maps every known tag to copy a reviewer would actually recognize.
+const STATUS_LABELS = {
+  draft: 'Proposed Change',
+  pendingreview: 'Pending Review',
+  underreview: 'Under Review',
+  approved: 'Approved',
+  denied: 'Denied',
+  applied: 'Applied',
+  superseded: 'Superseded',
+  closed: 'Closed',
+  unknown: 'Unknown',
+};
+function humanizeStatus(status) {
+  // draftStatus() returns two different raw shapes depending on the
+  // endpoint: the list endpoint's Debug-formatted string lowercases to
+  // "pendingreview" (no separator), while the detail endpoint's internally-
+  // tagged object gives the serde tag verbatim, "pending_review" (with
+  // underscore, already lowercase). Normalize away case AND underscores
+  // before the lookup so both land on the same STATUS_LABELS key — this is
+  // exactly the raw-enum-leak bug item 6 called out, just in its object form.
+  const key = (status || '').toLowerCase().replace(/_/g, '');
+  return STATUS_LABELS[key] || (status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Unknown');
 }
 
 // ── Modal dialogs (v0.16.1.2) ─────────────────────────────────
@@ -692,45 +740,122 @@ function morphAttributes(oldEl, newEl) {
   if ('checked' in newEl && oldEl.checked !== newEl.checked) oldEl.checked = newEl.checked;
 }
 
-// ── Tab navigation ─────────────────────────────────────────────
+// ── Tab navigation (v0.17.0.12.17: 4-destination IA) ─────────────
+// The prior 15 flat tabs mapped one struct to one tab (§6 of
+// docs/design/ta-concepts-and-architecture.md). Collapsed to 4 real
+// destinations: Attention (single view — merges what used to be Active,
+// Agent Questions, and the pending subset of Review Drafts, see
+// loadAttentionQueue()), Activity (multi-section — everything going on),
+// Configuration (multi-section — who/what does the work), Advisor
+// (single view, unchanged). LEGACY_TAB_MAP resolves the pre-redesign
+// per-concept tab keys so the many existing switchTab('dashboard')-style
+// call sites elsewhere in this file keep working unchanged.
+const ACTIVITY_SECTIONS = [
+  { key: 'overview', label: 'Overview', load: loadDashboard },
+  { key: 'plan', label: 'Plan', load: loadPlan },
+  { key: 'drafts', label: 'Proposed Changes', load: loadDrafts },
+  { key: 'workflows', label: 'Workflows', load: loadWorkflows },
+  { key: 'release', label: 'Release', load: loadRelease },
+  { key: 'memory', label: 'Memory', load: loadMemory },
+  { key: 'projects', label: 'Projects', load: loadProjects },
+  { key: 'stats', label: 'Stats', load: loadStatsTab },
+  { key: 'health', label: 'Health', load: loadHealthPage },
+];
+const CONFIGURATION_SECTIONS = [
+  { key: 'team', label: 'Team & Roles', load: loadTeamRoles },
+  { key: 'agents', label: 'Agents', load: loadAgents },
+  { key: 'personas', label: 'Personas', load: loadPersonas },
+  { key: 'settings', label: 'Settings', load: loadSettings },
+];
+const LEGACY_TAB_MAP = {
+  dashboard: 'activity:overview',
+  active: 'attention',
+  plan: 'activity:plan',
+  drafts: 'activity:drafts',
+  questions: 'attention',
+  memory: 'activity:memory',
+  projects: 'activity:projects',
+  workflows: 'activity:workflows',
+  release: 'activity:release',
+  agents: 'configuration:agents',
+  personas: 'configuration:personas',
+  advisor: 'advisor',
+  stats: 'activity:stats',
+  health: 'activity:health',
+  settings: 'configuration:settings',
+  attention: 'attention',
+  activity: 'activity:overview',
+  configuration: 'configuration:team',
+};
+
+// Reverse of LEGACY_TAB_MAP's section granularity: server-side AdvisorContext
+// matching (see ta-session's `AdvisorContext.tab`) still expects the old flat
+// keys (e.g. "workflows", "plan"), not the new compound "dest:section" form.
+function legacyTabKey(compound) {
+  const [dest, section] = compound.split(':');
+  if (dest === 'attention') return 'dashboard';
+  if (dest === 'activity') return section === 'overview' ? 'dashboard' : section;
+  if (dest === 'configuration') return section === 'team' ? 'agents' : section;
+  return dest;
+}
+
 function switchTab(tab) {
-  currentTab = tab;
+  const resolved = LEGACY_TAB_MAP[tab] || tab;
+  currentTab = resolved;
+  const [dest, section] = resolved.split(':');
+
   // Match by the explicit data-tab attribute rather than the tab's visible
-  // text — several tabs' labels don't match their tab key (e.g. "Review
-  // Drafts" -> 'drafts') or change at runtime (e.g. "Agent Questions (3)"
-  // once there are pending questions), which previously left the active-tab
-  // highlight stuck on the wrong tab.
+  // text — labels don't always match their tab key and can change at
+  // runtime (e.g. "Attention (3)" once something needs review), which
+  // previously left the active-tab highlight stuck on the wrong tab.
   document.querySelectorAll('.tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.tab === tab);
+    t.classList.toggle('active', t.dataset.tab === dest);
   });
-  if (tab === 'dashboard') { loadDashboard(); startDashRefresh(); }
-  else if (tab === 'active') loadActiveTab();
-  else if (tab === 'plan') loadPlan();
-  else if (tab === 'drafts') loadDrafts();
-  else if (tab === 'questions') loadQuestions();
-  else if (tab === 'memory') loadMemory();
-  else if (tab === 'projects') loadProjects();
-  else if (tab === 'workflows') loadWorkflows();
-  else if (tab === 'release') loadRelease();
-  else if (tab === 'agents') loadAgents();
-  else if (tab === 'personas') loadPersonas();
-  else if (tab === 'advisor') loadAdvisor();
-  else if (tab === 'stats') loadStatsTab();
-  else if (tab === 'health') loadHealthPage();
-  else if (tab === 'settings') loadSettings();
+  renderSubnav(dest, section);
+
+  if (dest === 'attention') loadAttentionQueue();
+  else if (dest === 'advisor') loadAdvisor();
+  else if (dest === 'activity') {
+    const found = ACTIVITY_SECTIONS.find(s => s.key === section) || ACTIVITY_SECTIONS[0];
+    found.load();
+    if (found.key === 'overview') startDashRefresh();
+  } else if (dest === 'configuration') {
+    const found = CONFIGURATION_SECTIONS.find(s => s.key === section) || CONFIGURATION_SECTIONS[0];
+    found.load();
+  }
+}
+
+// Renders the pill sub-nav for Activity/Configuration; hidden for the two
+// single-view destinations (Attention, Advisor).
+function renderSubnav(dest, section) {
+  const subnav = document.getElementById('subnav');
+  if (!subnav) return;
+  const sections = dest === 'activity' ? ACTIVITY_SECTIONS
+    : dest === 'configuration' ? CONFIGURATION_SECTIONS
+    : null;
+  if (!sections) {
+    subnav.style.display = 'none';
+    subnav.innerHTML = '';
+    return;
+  }
+  subnav.style.display = 'flex';
+  subnav.innerHTML = sections.map(s => `
+    <div class="subtab ${s.key === section ? 'active' : ''}" onclick="switchTab('${dest}:${s.key}')">${esc(s.label)}</div>
+  `).join('');
 }
 
 // Jump straight to a specific draft's detail view without going through
-// switchTab('drafts') first. switchTab('drafts') kicks off loadDrafts(),
-// which fetches and renders the full drafts *list* — if that fetch is
-// slower than the detail's own fetches (plausible with many drafts), it can
-// resolve after the detail view renders and silently replace it with the
-// list, making the "Why"/Supervisor Review sections look like they vanished.
+// switchTab('activity:drafts') first, which kicks off loadDrafts() — a
+// fetch of the full drafts *list* that, if slower than the detail's own
+// fetches (plausible with many drafts), can resolve after the detail view
+// renders and silently replace it with the list, making the "Why"/AI Safety
+// Review sections look like they vanished.
 function viewDraftDetail(id) {
-  currentTab = 'drafts';
+  currentTab = 'activity:drafts';
   document.querySelectorAll('.tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.tab === 'drafts');
+    t.classList.toggle('active', t.dataset.tab === 'activity');
   });
+  renderSubnav('activity', 'drafts');
   showDraftDetail(id);
 }
 
@@ -897,7 +1022,7 @@ async function applyLatestDraft() {
     if (pending.length === 0) { showAlert('No pending drafts to apply.'); return; }
     const latest = pending[0];
     const r = await fetch('/api/drafts/' + latest.package_id + '/apply', { method: 'POST' });
-    if (r.ok) { showAlert('Draft applied.'); loadDashboard(); }
+    if (r.ok) { showAlert('Proposed change applied.'); loadDashboard(); }
     else { showAlert('Apply failed: ' + r.status); }
   } catch(e) { showAlert('Network error: ' + e.message); }
 }
@@ -910,7 +1035,7 @@ async function denyLatestDraft() {
     if (pending.length === 0) { showAlert('No pending drafts to deny.'); return; }
     const latest = pending[0];
     const r = await fetch('/api/drafts/' + latest.package_id + '/deny', { method: 'POST' });
-    if (r.ok) { showAlert('Draft denied.'); loadDashboard(); }
+    if (r.ok) { showAlert('Proposed change denied.'); loadDashboard(); }
     else { showAlert('Deny failed: ' + r.status); }
   } catch(e) { showAlert('Network error: ' + e.message); }
 }
@@ -1078,7 +1203,7 @@ async function submitAdvisorTab() {
     if (ctxResp.ok) advisorContext = await ctxResp.json();
   } catch(_) {}
 
-  const context = { tab: currentTab, selection: null };
+  const context = { tab: legacyTabKey(currentTab), selection: null };
   try {
     const resp = await fetch('/api/advisor/message', {
       method: 'POST',
@@ -1168,7 +1293,7 @@ function clearAdvisorHistory() {
 // alignment scores.
 
 async function loadStatsTab() {
-  if (currentTab !== 'stats') return;
+  if (currentTab !== 'activity:stats') return;
   if (!app.firstChild || app.querySelector('.loading, .empty')) {
     app.innerHTML = '<div class="loading">Loading stats...</div>';
   }
@@ -1178,10 +1303,10 @@ async function loadStatsTab() {
     const data = await resp.json();
     // Bail if the user navigated away while this fetch was in flight —
     // otherwise a slow response can stomp whatever tab is now showing.
-    if (currentTab !== 'stats') return;
+    if (currentTab !== 'activity:stats') return;
     renderStatsTab(data);
   } catch (e) {
-    if (currentTab === 'stats') {
+    if (currentTab === 'activity:stats') {
       app.innerHTML = '<div class="empty">Failed to load stats. Is the daemon running?</div>';
     }
   }
@@ -1243,7 +1368,7 @@ async function loadDashboard() {
   // Only show the loading placeholder on the very first render — subsequent
   // 30s/SSE-triggered refreshes patch the existing content in place instead
   // of flashing back to a blank "Loading..." state (item 1).
-  if (currentTab !== 'dashboard') return;
+  if (currentTab !== 'activity:overview') return;
   if (!app.firstChild || app.querySelector('.loading, .empty')) {
     app.innerHTML = '<div class="loading">Loading dashboard...</div>';
   }
@@ -1288,21 +1413,15 @@ async function loadDashboard() {
     document.getElementById('subtitle').textContent =
       'Review Dashboard — updated ' + new Date().toLocaleTimeString();
 
-    // Highlight questions tab if there are pending questions.
-    const qTab = document.getElementById('tab-questions');
-    if (questions.length > 0) {
-      qTab.textContent = 'Agent Questions (' + questions.length + ')';
-      qTab.style.color = 'var(--yellow)';
-    } else {
-      qTab.textContent = 'Agent Questions';
-      qTab.style.color = '';
-    }
+    // Highlight the Attention tab (item 1: it now owns Agent Questions +
+    // Ready-to-Review, so its badge count reflects both).
+    updateAttentionBadge(questions.length, draftsData.filter(d => d.status === 'PendingReview').length);
 
     // A slow fetch above may have lost the race against the user clicking to
     // another tab — bail before touching #app so we don't stomp whatever
     // that tab has since rendered (root cause of tab switches getting stuck
     // showing Dashboard content for up to ~60s after load).
-    if (currentTab !== 'dashboard') return;
+    if (currentTab !== 'activity:overview') return;
 
     // Redirect to Projects tab if no active project is set (v0.14.18).
     if (status && status.active_project_path === null) {
@@ -1312,7 +1431,7 @@ async function loadDashboard() {
 
     renderDashboard(draftsData, questions, status, phases, velocity, advisorCtx, dialogEntries);
   } catch (e) {
-    if (currentTab === 'dashboard') {
+    if (currentTab === 'activity:overview') {
       app.innerHTML = '<div class="empty">Failed to load dashboard. Is the daemon running?</div>';
     }
   }
@@ -1325,7 +1444,7 @@ async function loadDashboard() {
 let _dashRefreshTimer = null;
 function startDashRefresh() {
   if (_dashRefreshTimer) clearInterval(_dashRefreshTimer);
-  _dashRefreshTimer = setInterval(() => { if (currentTab === 'dashboard') loadDashboard(); }, 90000);
+  _dashRefreshTimer = setInterval(() => { if (currentTab === 'activity:overview') loadDashboard(); }, 90000);
 }
 
 // Dashboard immediacy (v0.17.0.12.5 item 4, broadened in v0.17.0.12.9 item 2):
@@ -1347,7 +1466,7 @@ function startDashEventStream() {
   } catch (e) {
     return; // EventSource unsupported/unavailable — the fallback timer still covers us.
   }
-  const refreshIfOnDashboard = () => { if (currentTab === 'dashboard') loadDashboard(); };
+  const refreshIfOnDashboard = () => { if (currentTab === 'activity:overview') loadDashboard(); };
   for (const type of DASH_SSE_EVENT_TYPES) {
     _dashEventSource.addEventListener(type, refreshIfOnDashboard);
   }
@@ -1412,81 +1531,11 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
     html += '</div>';
   }
 
-  // ── Running Goals with expandable detail (v0.16.1.3) ──────────
-  if (runningAgents.length > 0) {
-    html += '<div class="dash-section">';
-    html += '<div class="dash-section-title">Running (' + runningAgents.length + ')</div>';
-    html += runningAgents.map(a => {
-      const elapsed = a.running_secs || 0;
-      const elapsedStr = elapsed < 60 ? elapsed + 's' : elapsed < 3600 ? Math.floor(elapsed/60) + 'm' : Math.floor(elapsed/3600) + 'h ' + Math.floor((elapsed%3600)/60) + 'm';
-      const phaseHtml = a.plan_phase ? `<span class="tag">${esc(a.plan_phase)}</span>` : '';
-      return `<div class="card" id="running-goal-${esc(a.goal_id)}">
-        <div class="card-header">
-          <span class="card-title">${esc(a.title)}</span>
-          <span class="badge badge-active">Running</span>
-        </div>
-        <div class="card-meta" style="display:flex;justify-content:space-between;align-items:center">
-          <span>Elapsed: ${esc(elapsedStr)} ${phaseHtml}</span>
-          <div style="display:flex;gap:0.5rem">
-            <button class="btn btn-ghost btn-sm" onclick="toggleGoalDetail('${esc(a.goal_id)}')">Details</button>
-            <button class="btn btn-ghost btn-sm" onclick="askAdvisorAboutGoal('${esc(a.goal_id)}','${esc(a.title)}')">Ask Advisor</button>
-          </div>
-        </div>
-        <div id="goal-detail-${esc(a.goal_id)}" class="goal-detail" style="display:none">
-          <div style="color:var(--muted);font-size:0.82rem">Loading log...</div>
-        </div>
-      </div>`;
-    }).join('');
-    html += '</div>';
-  }
-
-  // Active work (in-progress drafts).
-  if (active.length > 0) {
-    html += '<div class="dash-section">';
-    html += '<div class="dash-section-title">Active Work</div>';
-    html += active.slice(0, 3).map(d => `
-      <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
-        <div class="card-header">
-          <span class="card-title">${esc(d.title)}</span>
-          <span class="badge badge-active">In Progress</span>
-        </div>
-        <div class="card-meta">${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot; ${timeAgo(d.created_at)}</div>
-      </div>
-    `).join('');
-    html += '</div>';
-  }
-
-  // Ready to review.
-  if (pending.length > 0) {
-    html += '<div class="dash-section">';
-    html += '<div class="dash-section-title">Ready to Review (' + pending.length + ')</div>';
-    html += pending.slice(0, 5).map(d => `
-      <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
-        <div class="card-header">
-          <span class="card-title">${esc(d.title)}</span>
-          <span class="badge badge-pending">Needs Review</span>
-        </div>
-        <div class="card-meta">${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot; ${timeAgo(d.created_at)}</div>
-      </div>
-    `).join('');
-    html += '</div>';
-  }
-
-  // Agent questions.
-  if (questions.length > 0) {
-    html += '<div class="dash-section">';
-    html += '<div class="dash-section-title">Agent Has a Question (' + questions.length + ')</div>';
-    html += questions.slice(0, 3).map(q => `
-      <div class="card clickable" onclick="switchTab('questions')">
-        <div class="card-header">
-          <span class="card-title">${esc(q.prompt || 'Agent question')}</span>
-          <span class="badge badge-question">Waiting</span>
-        </div>
-        <div class="card-meta">${timeAgo(q.created_at || q.timestamp)}</div>
-      </div>
-    `).join('');
-    html += '</div>';
-  }
+  // Running goals, in-progress/ready-to-review drafts, and agent questions
+  // all now live solely in the Attention destination (item 1) — this
+  // Overview section previously duplicated all three as its own cards,
+  // fetching the same endpoints Attention already renders. See
+  // loadAttentionQueue() / renderAttentionQueue().
 
   // Summary stats.
   html += '<div class="stat-grid">';
@@ -1497,14 +1546,16 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   html += `<div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">Total Drafts</div></div>`;
   html += '</div>';
 
-  // ── Advisor dialog (v0.17.0.12.6 item 4) ──────────────────────
-  // Sits below the 8 Project Health stat boxes. Persisted per-project at
-  // .ta/advisor-history.jsonl (separate from the full-tab Advisor's own
-  // .ta/advisor-history.json chat).
+  // ── Advisor quick-dialog (v0.17.0.12.6 item 4) ─────────────────
+  // Sits below the Project Health stat boxes as a fast entry point for
+  // queueing work without leaving Overview. Shares the same unified
+  // .ta/advisor-history.jsonl conversation as the full Advisor destination
+  // (v0.17.0.12.17 item 2 — these were two independently-persisted
+  // histories before the merge).
   html += renderDashAdvisorDialog(dialogEntries || []);
 
   if (runningAgents.length === 0 && active.length === 0 && pending.length === 0 && questions.length === 0) {
-    html += '<div class="empty">Everything is up to date. Start a new goal from the <strong>Plan</strong> tab.</div>';
+    html += '<div class="empty">Everything is up to date. Start a new goal from the <strong>Plan</strong> section, or check <strong>Attention</strong>.</div>';
   }
 
   html += '<div style="margin-top:1rem;font-size:0.8rem;color:var(--muted);text-align:right">' +
@@ -1667,6 +1718,140 @@ function askAdvisorAboutGoal(goalId, title) {
   }, 200);
 }
 
+// ── Attention Queue (v0.17.0.12.17 item 1) ──────────────────────
+// One canonical, always-visible "needs you" list. Previously the same three
+// data sources (running goals, pending agent questions, drafts awaiting
+// review) were independently fetched and rendered in up to three places —
+// the Active tab, the Agent Questions tab, and the Dashboard's own copies of
+// both — per docs/design/ta-concepts-and-architecture.md §6. This is now the
+// single source; questions and drafts (which need a decision) sort above
+// running goals (informational — nothing to decide yet).
+let _attentionRefreshTimer = null;
+
+async function loadAttentionQueue() {
+  if (currentTab !== 'attention') return;
+  if (!app.firstChild || app.querySelector('.loading, .empty')) {
+    app.innerHTML = '<div class="loading">Loading...</div>';
+  }
+  try {
+    const [questionsResp, draftsResp, activeResp] = await Promise.allSettled([
+      fetch('/api/interactions/pending'),
+      fetch('/api/drafts'),
+      fetch('/api/active/goals'),
+    ]);
+    const questions = questionsResp.status === 'fulfilled' && questionsResp.value.ok
+      ? await questionsResp.value.json().catch(() => []) : [];
+    const allDrafts = draftsResp.status === 'fulfilled' && draftsResp.value.ok
+      ? await draftsResp.value.json().catch(() => []) : [];
+    const activeGoals = activeResp.status === 'fulfilled' && activeResp.value.ok
+      ? await activeResp.value.json().catch(() => []) : [];
+    const pendingDrafts = allDrafts.filter(d => d.status === 'PendingReview');
+
+    updateAttentionBadge(questions.length, pendingDrafts.length);
+
+    // A slow fetch above may have lost the race against the user navigating
+    // away — bail before touching #app (same guard pattern as loadDashboard).
+    if (currentTab !== 'attention') return;
+    renderAttentionQueue(questions, pendingDrafts, activeGoals);
+  } catch (e) {
+    if (currentTab === 'attention') {
+      app.innerHTML = '<div class="empty">Failed to load the attention queue. Is the daemon running?</div>';
+    }
+  }
+  if (_attentionRefreshTimer) clearInterval(_attentionRefreshTimer);
+  _attentionRefreshTimer = setInterval(() => {
+    if (currentTab === 'attention') loadAttentionQueue();
+    else { clearInterval(_attentionRefreshTimer); _attentionRefreshTimer = null; }
+  }, 15000);
+}
+
+// Badge count on the Attention tab itself — questions + ready-to-review
+// drafts are the two states that genuinely block on a human.
+function updateAttentionBadge(questionCount, pendingDraftCount) {
+  const tabEl = document.getElementById('tab-attention');
+  if (!tabEl) return;
+  const urgent = questionCount + pendingDraftCount;
+  tabEl.textContent = urgent > 0 ? `Attention (${urgent})` : 'Attention';
+  tabEl.style.color = urgent > 0 ? 'var(--yellow)' : '';
+}
+
+function renderAttentionQueue(questions, pendingDrafts, activeGoals) {
+  if (questions.length === 0 && pendingDrafts.length === 0 && activeGoals.length === 0) {
+    setAppContent('<div class="empty">Nothing needs your attention right now. Start a new goal from <strong>Activity → Plan</strong>, or ask the <strong>Advisor</strong>.</div>');
+    return;
+  }
+
+  let html = '';
+
+  if (questions.length > 0) {
+    html += '<div class="dash-section-title">Questions (' + questions.length + ')</div>';
+    html += questions.map((q, i) => `
+      <div class="card question-card" id="q-${esc(q.interaction_id || i)}">
+        <div class="card-header">
+          <span class="card-title" style="font-size:0.95rem">${esc(q.prompt || q.question || 'Agent question')}</span>
+          <span class="badge badge-question">Waiting</span>
+        </div>
+        <div class="card-meta">${timeAgo(q.created_at || q.timestamp)}
+          ${q.goal_id ? ' &middot; goal: <code>' + esc(q.goal_id.slice(0, 8)) + '</code>' : ''}</div>
+        ${q.context ? `<div style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">${esc(q.context)}</div>` : ''}
+        <div class="answer-input">
+          <input id="ans-${i}" type="text" placeholder="Type your answer..."
+                 onkeydown="if(event.key==='Enter')submitAnswer('${esc(q.interaction_id || '')}',${i})">
+          <button class="btn btn-primary btn-sm"
+                  onclick="submitAnswer('${esc(q.interaction_id || '')}',${i})">Reply</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  if (pendingDrafts.length > 0) {
+    html += `<div class="dash-section-title" style="margin-top:${questions.length ? '1rem' : '0'}">Ready to Review (${pendingDrafts.length})</div>`;
+    html += pendingDrafts.map(d => `
+      <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
+        <div class="card-header">
+          <span class="card-title">${esc(d.title)}</span>
+          <span class="badge badge-pending">Needs Review</span>
+        </div>
+        <div class="card-meta">${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot; ${timeAgo(d.created_at)}</div>
+      </div>
+    `).join('');
+  }
+
+  if (activeGoals.length > 0) {
+    html += `<div class="dash-section-title" style="margin-top:${(questions.length || pendingDrafts.length) ? '1rem' : '0'}">Running (${activeGoals.length})</div>`;
+    html += activeGoals.map(g => {
+      const elapsedMins = Math.max(0, Math.round(g.elapsed_secs / 60));
+      const elapsedLabel = elapsedMins < 1 ? '<1m' : elapsedMins + 'm';
+      return `<div class="card" id="active-row-${esc(g.goal_id)}">
+        <div class="card-header clickable" onclick="toggleActiveRow('${esc(g.goal_id)}')">
+          <span class="card-title">${esc(g.title)}</span>
+          <span class="badge ${g.state === 'running' ? 'badge-success' : 'badge-info'}">${esc(g.state)}</span>
+        </div>
+        <div class="card-meta">
+          ${elapsedLabel} elapsed${g.phase ? ' &middot; phase ' + esc(g.phase) : ''} &middot;
+          <code style="font-size:0.75rem">${esc(g.goal_id.slice(0, 8))}</code>
+        </div>
+        <div class="card-meta" style="margin-top:0.25rem;color:var(--muted)">
+          ${g.last_event ? esc(g.last_event.slice(0, 160)) : 'No output yet.'}
+        </div>
+        <div id="active-expand-${esc(g.goal_id)}" style="display:none;margin-top:0.75rem">
+          <div class="advisor-input-row">
+            <input type="text" id="active-msg-${esc(g.goal_id)}" placeholder="Send info / ask this agent…"
+                   onkeydown="if(event.key==='Enter') sendActiveGoalMessage('${esc(g.goal_id)}')">
+            <button class="btn btn-primary btn-sm" onclick="sendActiveGoalMessage('${esc(g.goal_id)}')">Send</button>
+          </div>
+          <div id="active-msg-status-${esc(g.goal_id)}" style="font-size:0.8rem;color:var(--muted);margin-top:0.4rem"></div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  html += '<div style="margin-top:1rem;font-size:0.8rem;color:var(--muted);text-align:right">' +
+    '<button class="btn btn-sm btn-ghost" onclick="loadAttentionQueue()">Refresh</button></div>';
+
+  setAppContent(html);
+}
+
 // ── Active tab (v0.17.0.12.6 item 5) ───────────────────────────
 // Lists Running/Configured goals with elapsed time + last event. Each row
 // expands to a free-text "Send info / ask this agent" input that posts to
@@ -1798,7 +1983,7 @@ function buildSubPhaseMap(phases) {
 }
 
 async function loadPlan() {
-  if (currentTab !== 'plan') return;
+  if (currentTab !== 'activity:plan') return;
   app.innerHTML = '<div class="loading">Loading plan...</div>';
   try {
     const resp = await fetch('/api/plan/phases');
@@ -1808,7 +1993,7 @@ async function loadPlan() {
     planPhases = [];
   }
   // Bail if the user navigated away while this fetch was in flight.
-  if (currentTab !== 'plan') return;
+  if (currentTab !== 'activity:plan') return;
   renderPlan();
 }
 
@@ -1951,8 +2136,8 @@ function renderPhaseCard(ph, subMap) {
   // Active button: pr_ready → link to specific draft detail; running → info
   const activeBtn = isPrReady
     ? (ph.draft_id
-        ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="viewDraftDetail('${esc(ph.draft_id)}')" title="Draft ready — click to review">Review Draft</button>`
-        : `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts')" title="Draft ready — click to review">Review Draft</button>`)
+        ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="viewDraftDetail('${esc(ph.draft_id)}')" title="Proposed change ready — click to review">Review Proposed Change</button>`
+        : `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts')" title="Proposed change ready — click to review">Review Proposed Change</button>`)
     : `<button class="btn btn-sm btn-ghost" onclick="showAlert('A goal for this phase is already running. Use the Dashboard to monitor progress, or the Drafts tab to review the output.')" title="A goal for this phase is already active">Active &#9654;</button>`;
   return `<div class="card" id="phase-card-${esc(ph.id)}">
     <div class="card-header">
@@ -2194,17 +2379,17 @@ async function submitAddPhase() {
 
 // ── Draft Review ───────────────────────────────────────────────
 async function loadDrafts() {
-  if (currentTab !== 'drafts') return;
+  if (currentTab !== 'activity:drafts') return;
   app.innerHTML = '<div class="loading">Loading drafts...</div>';
   try {
     const resp = await fetch('/api/drafts');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     drafts = await resp.json();
     // Bail if the user navigated away while this fetch was in flight.
-    if (currentTab !== 'drafts') return;
+    if (currentTab !== 'activity:drafts') return;
     renderDraftList();
   } catch (e) {
-    if (currentTab === 'drafts') {
+    if (currentTab === 'activity:drafts') {
       app.innerHTML = '<div class="empty">Failed to load drafts. Is the daemon running?</div>';
     }
   }
@@ -2241,7 +2426,7 @@ function renderDraftList() {
     <div class="card clickable" onclick="showDraftDetail('${d.package_id}')">
       <div class="card-header">
         <span class="card-title">${esc(d.title)}</span>
-        <span class="badge ${badgeClass(d.status)}">${esc(draftStatus(d))}</span>
+        <span class="badge ${badgeClass(d.status)}">${esc(humanizeStatus(draftStatus(d)))}</span>
       </div>
       <div class="card-meta">
         ${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot;
@@ -2253,7 +2438,7 @@ function renderDraftList() {
 }
 
 async function showDraftDetail(id) {
-  if (currentTab !== 'drafts') return;
+  if (currentTab !== 'activity:drafts') return;
   app.innerHTML = '<div class="loading">Loading draft...</div>';
   try {
     const [draftResp, phasesResp, dialogResp] = await Promise.allSettled([
@@ -2262,7 +2447,7 @@ async function showDraftDetail(id) {
       fetch('/api/drafts/' + id + '/dialog'),
     ]);
     // Bail if the user navigated away while these fetches were in flight.
-    if (currentTab !== 'drafts') return;
+    if (currentTab !== 'activity:drafts') return;
     if (draftResp.status !== 'fulfilled' || !draftResp.value.ok) {
       const reason = draftResp.status === 'fulfilled' ? ('HTTP ' + draftResp.value.status) : draftResp.reason;
       console.error('Failed to load draft ' + id + ':', reason);
@@ -2282,10 +2467,10 @@ async function showDraftDetail(id) {
       ? (await dialogResp.value.json().catch(() => ({ entries: [] }))).entries || []
       : [];
 
-    if (currentTab !== 'drafts') return;
+    if (currentTab !== 'activity:drafts') return;
     renderDraftDetail(d, phaseDescription, dialogEntries);
   } catch (e) {
-    if (currentTab !== 'drafts') return;
+    if (currentTab !== 'activity:drafts') return;
     console.error('Failed to load draft ' + id + ':', e);
     showAlert('Failed to load draft details: ' + e.message);
     renderDraftList();
@@ -2344,6 +2529,37 @@ function computeDependencyWarnings(d, selection) {
   return warnings;
 }
 
+// Visual preview for image/video artifacts (v0.17.0.12.17 item 5): the
+// Changes list previously showed every artifact as a bare resource_uri text
+// row, even though the backend already carries `ArtifactKind::Image`/`Video`
+// metadata for renders. Fetches bytes from the new
+// `/api/drafts/:id/artifact?uri=...` endpoint.
+function renderArtifactPreview(packageId, a) {
+  const kind = a.kind;
+  if (!kind || (kind.type !== 'image' && kind.type !== 'video')) return '';
+  const src = '/api/drafts/' + packageId + '/artifact?uri=' + encodeURIComponent(a.resource_uri);
+  const dims = kind.width && kind.height ? `${kind.width}×${kind.height}` : '';
+  if (kind.type === 'image') {
+    const caption = [dims, kind.format].filter(Boolean).join(' · ');
+    return `<div style="margin-top:0.5rem">
+      <img src="${esc(src)}" alt="${esc(a.resource_uri)}" loading="lazy"
+           style="max-width:320px;max-height:240px;border-radius:6px;border:1px solid var(--border);display:block"
+           onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div style="display:none;font-size:0.78rem;color:var(--muted)">Preview unavailable.</div>
+      ${caption ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem">${esc(caption)}</div>` : ''}
+    </div>`;
+  }
+  const durationLabel = typeof kind.duration_secs === 'number' ? kind.duration_secs.toFixed(1) + 's' : '';
+  const caption = [dims, durationLabel, kind.fps ? kind.fps + 'fps' : '', kind.format].filter(Boolean).join(' · ');
+  return `<div style="margin-top:0.5rem">
+    <video src="${esc(src)}" controls preload="metadata"
+           style="max-width:320px;max-height:240px;border-radius:6px;border:1px solid var(--border);display:block"
+           onerror="this.style.display='none';this.nextElementSibling.style.display='block'"></video>
+    <div style="display:none;font-size:0.78rem;color:var(--muted)">Preview unavailable.</div>
+    ${caption ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem">${esc(caption)}</div>` : ''}
+  </div>`;
+}
+
 function renderSupervisorReviewBody(sv) {
   const verdict = (sv.verdict || sv.result || '').toLowerCase();
   const verdictColor = verdict === 'pass' ? 'var(--green)' : verdict === 'block' ? 'var(--red)' : 'var(--yellow)';
@@ -2389,19 +2605,20 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
   }
   const summarySection = `<details open class="section"><summary>Summary</summary><div class="detail-body">${summaryBody || '<p style="color:var(--muted)">No summary.</p>'}</div></details>`;
 
-  // Supervisor Review section (item 7): this draft's own review, plus (when
-  // it differs — e.g. a follow-up draft that didn't re-run the supervisor)
-  // the initial review from the goal's first draft.
+  // AI Safety Review section (item 7; renamed from "Supervisor Review" as
+  // part of the plain-language copy pass, item 6): this draft's own review,
+  // plus (when it differs — e.g. a follow-up draft that didn't re-run the
+  // supervisor) the initial review from the goal's first draft.
   let supervisorBody = d.supervisor_review ? renderSupervisorReviewBody(d.supervisor_review) : '';
   if (d.initial_supervisor_review) {
     supervisorBody += `<div style="margin-top:${supervisorBody ? '1rem' : '0'};padding-top:${supervisorBody ? '0.75rem' : '0'};${supervisorBody ? 'border-top:1px solid var(--border)' : ''}">
-      <div style="font-weight:600;font-size:0.85rem;margin-bottom:0.25rem;color:var(--muted)">Initial Supervisor Review (from the goal's first draft)</div>
+      <div style="font-weight:600;font-size:0.85rem;margin-bottom:0.25rem;color:var(--muted)">Initial AI Safety Review (from the goal's first proposed change)</div>
       ${renderSupervisorReviewBody(d.initial_supervisor_review)}
     </div>`;
   }
   const supervisorSection = supervisorBody
-    ? `<details open class="section"><summary>Supervisor Review</summary><div class="detail-body">${supervisorBody}</div></details>`
-    : `<details class="section"><summary>Supervisor Review</summary><div class="detail-body"><p style="color:var(--muted)">No supervisor review is attached to this draft.</p></div></details>`;
+    ? `<details open class="section"><summary>AI Safety Review</summary><div class="detail-body">${supervisorBody}</div></details>`
+    : `<details class="section"><summary>AI Safety Review</summary><div class="detail-body"><p style="color:var(--muted)">No AI safety review is attached to this proposed change.</p></div></details>`;
 
   // Agent Decision Log section.
   let decisionBody = '';
@@ -2428,10 +2645,11 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
         <div class="artifact" style="display:flex;align-items:flex-start;gap:0.5rem">
           <input type="checkbox" style="margin-top:0.3rem" ${selection[a.resource_uri] !== false ? 'checked' : ''}
                  onchange="toggleArtifactSelection('${d.package_id}', ${JSON.stringify(a.resource_uri)}, this.checked)">
-          <div>
+          <div style="flex:1">
             <span class="artifact-uri">${esc(a.resource_uri)}</span>
             <span style="color:var(--muted);margin-left:0.4rem">${esc(a.change_type || a.disposition || '')}</span>
             ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
+            ${renderArtifactPreview(d.package_id, a)}
           </div>
         </div>`).join('');
   // Select All / Clear All (item 8): bulk-toggle every checkbox at once.
@@ -2476,7 +2694,9 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
         </div>`).join('')}
     </div></details>` : '';
 
-  // Constitution Check section.
+  // Safety Rules Check section (renamed from "Constitution Check" as part
+  // of the plain-language copy pass, item 6 — "Constitution" is TA's internal
+  // name for its policy-enforcement layer, not a term a reviewer would know).
   let constitutionBody = '';
   if (Array.isArray(d.validation_log) && d.validation_log.length > 0) {
     constitutionBody = d.validation_log.map(entry => {
@@ -2486,7 +2706,7 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
       return `<div style="display:flex;gap:0.5rem;padding:0.2rem 0;font-size:0.85rem"><span style="color:${color};flex-shrink:0">${esc(result || '·')}</span><span>${esc(rule)}</span></div>`;
     }).join('');
   }
-  const constitutionSection = constitutionBody ? `<details class="section"><summary>Constitution Check</summary><div class="detail-body">${constitutionBody}</div></details>` : '';
+  const constitutionSection = constitutionBody ? `<details class="section"><summary>Safety Rules Check</summary><div class="detail-body">${constitutionBody}</div></details>` : '';
 
   // Pending actions.
   const pendingSection = pendingActions.length > 0 ? `
@@ -2498,15 +2718,17 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
         </div>`).join('')}
     </div></details>` : '';
 
-  // Per-draft Q&A dialog (items 11, 12).
+  // Per-draft Q&A dialog (items 11, 12). Rendered above the action row
+  // (item 4, v0.17.0.12.17): a reviewer asking "is this safe to apply?"
+  // reads the answer before hitting Approve/Apply/Deny, not after.
   const dialogSection = renderDraftDialogSection(d.package_id, dialogEntries);
 
   setAppContent(`
     <span class="back" onclick="loadDrafts()">&larr; Back to drafts</span>
     <div class="detail">
       <div class="card-header">
-        <span class="card-title">${esc(d.goal && d.goal.title || 'Draft')}</span>
-        <span class="badge ${badgeClass(d.status)}">${esc(status)}</span>
+        <span class="card-title">${esc(d.goal && d.goal.title || 'Proposed Change')}</span>
+        <span class="badge ${badgeClass(d.status)}">${esc(humanizeStatus(status))}</span>
       </div>
       <div class="card-meta">
         <code>${d.package_id}</code> &middot; ${new Date(d.created_at).toLocaleString()}
@@ -2520,6 +2742,7 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
       ${advisorPatchesSection}
       ${constitutionSection}
       ${pendingSection}
+      ${dialogSection}
       <div class="actions">
         ${isReviewable ? `
           <button class="btn btn-approve" onclick="doDraftAction('${d.package_id}','approve')">Approve</button>
@@ -2532,7 +2755,6 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
           <button class="btn btn-ghost" onclick="loadDrafts()">&larr; Back</button>
         `}
       </div>
-      ${dialogSection}
     </div>
   `);
 }
@@ -2849,7 +3071,10 @@ async function submitAnswer(id, idx) {
         card.style.opacity = '0.5';
         card.innerHTML += '<div style="color:var(--green);margin-top:0.5rem;font-size:0.85rem">Answer sent.</div>';
       }
-      setTimeout(loadQuestions, 800);
+      // Answered from the Attention Queue (the only place this renders since
+      // the redesign) — refresh that, not the now-unreachable standalone
+      // questions view.
+      setTimeout(() => { if (currentTab === 'attention') loadAttentionQueue(); else loadQuestions(); }, 800);
     } else {
       const text = await resp.text();
       showAlert('Failed to send answer: ' + text);
@@ -3931,6 +4156,135 @@ async function pollWorkflowStatus(id) {
   _wfStatusPollers[id] = setInterval(doFetch, 2000);
 }
 
+// ── Team & Roles (v0.17.0.12.17 item 3) ─────────────────────────
+// Before this, `.ta/team.toml` (who fills each role — reviewer/implementer/
+// qa/... — and at what agent/security/persona) existed on the backend since
+// v0.17.0.3 with zero Studio UI: confirmed no mentions of team/role/
+// reviewer/implementer anywhere in Studio's render code
+// (docs/design/ta-concepts-and-architecture.md §6). This is that UI, folded
+// into Configuration alongside the agent-switching tiers from
+// v0.17.0.12.12/12.13 per the phase's item 3.
+const WELL_KNOWN_ROLES = ['implementer', 'reviewer', 'qa', 'architect', 'release_manager'];
+
+async function loadTeamRoles() {
+  app.innerHTML = '<div class="loading">Loading team...</div>';
+  try {
+    const [teamResp, agentsResp, personasResp] = await Promise.allSettled([
+      fetch('/api/team'),
+      fetch('/api/agents/profiles'),
+      fetch('/api/personas'),
+    ]);
+    const members = teamResp.status === 'fulfilled' && teamResp.value.ok
+      ? (await teamResp.value.json().catch(() => ({ members: [] }))).members || [] : [];
+    const agentProfiles = agentsResp.status === 'fulfilled' && agentsResp.value.ok
+      ? (await agentsResp.value.json().catch(() => ({ profiles: [] }))).profiles || [] : [];
+    const personas = personasResp.status === 'fulfilled' && personasResp.value.ok
+      ? (await personasResp.value.json().catch(() => ({ personas: [] }))).personas || [] : [];
+    renderTeamRoles(members, agentProfiles, personas);
+  } catch (e) {
+    app.innerHTML = '<div class="empty">Failed to load team assignments. Is the daemon running?</div>';
+  }
+}
+
+function renderTeamRoles(members, agentProfiles, personas) {
+  const assignedHtml = members.length === 0
+    ? '<p style="color:var(--muted);font-size:0.85rem">No roles assigned yet — every role below runs on whatever agent/model a goal falls back to.</p>'
+    : members.map(m => `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">${esc(m.role)}</span>
+          <button class="btn btn-ghost btn-sm" onclick="removeTeamMember('${esc(m.role)}')">Remove</button>
+        </div>
+        <div class="card-meta">
+          agent: <code>${esc(m.agent_id)}</code> &middot; security: ${esc(m.security)}
+          ${m.persona ? ' &middot; persona: <code>' + esc(m.persona) + '</code>' : ''}
+        </div>
+      </div>
+    `).join('');
+
+  setAppContent(`
+    <div class="dash-section-title">Assigned Roles</div>
+    ${assignedHtml}
+    <div class="dash-section-title" style="margin-top:1rem">Assign a Role</div>
+    <div class="card">
+      <div style="display:flex;flex-direction:column;gap:0.6rem">
+        <label style="font-size:0.8rem;color:var(--muted)">Role
+          <input id="team-role-input" list="team-role-suggestions" placeholder="e.g. reviewer, or a custom role name"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;color:var(--text);font-size:0.9rem;margin-top:0.2rem">
+          <datalist id="team-role-suggestions">
+            ${WELL_KNOWN_ROLES.map(r => `<option value="${esc(r)}">`).join('')}
+          </datalist>
+        </label>
+        <label style="font-size:0.8rem;color:var(--muted)">Agent / model
+          <input id="team-agent-input" list="team-agent-suggestions" placeholder="e.g. claude-sonnet-4-6"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;color:var(--text);font-size:0.9rem;margin-top:0.2rem">
+          <datalist id="team-agent-suggestions">
+            ${agentProfiles.map(p => `<option value="${esc(p.name)}">`).join('')}
+          </datalist>
+        </label>
+        <label style="font-size:0.8rem;color:var(--muted)">Security
+          <select id="team-security-input" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;color:var(--text);font-size:0.9rem;margin-top:0.2rem">
+            <option value="read_only">read_only — answers/diffs only, never acts</option>
+            <option value="suggest">suggest — presents the command to run</option>
+            <option value="auto">auto — fires automatically at high confidence</option>
+          </select>
+        </label>
+        <label style="font-size:0.8rem;color:var(--muted)">Persona (optional)
+          <input id="team-persona-input" list="team-persona-suggestions" placeholder="e.g. strict-reviewer"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;color:var(--text);font-size:0.9rem;margin-top:0.2rem">
+          <datalist id="team-persona-suggestions">
+            ${personas.map(p => `<option value="${esc(p.name)}">`).join('')}
+          </datalist>
+        </label>
+        <div>
+          <button class="btn btn-primary btn-sm" onclick="assignTeamMember()">Assign</button>
+        </div>
+        <div id="team-assign-status" style="font-size:0.8rem;color:var(--muted)"></div>
+      </div>
+    </div>
+  `);
+}
+
+async function assignTeamMember() {
+  const role = document.getElementById('team-role-input').value.trim();
+  const agentId = document.getElementById('team-agent-input').value.trim();
+  const security = document.getElementById('team-security-input').value;
+  const persona = document.getElementById('team-persona-input').value.trim();
+  const statusEl = document.getElementById('team-assign-status');
+  if (!role || !agentId) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Role and agent/model are both required.'; }
+    return;
+  }
+  if (statusEl) { statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'Assigning…'; }
+  try {
+    const resp = await fetch('/api/team/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role, agent_id: agentId, security, persona: persona || null }),
+    });
+    if (resp.ok) {
+      loadTeamRoles();
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Failed: ' + (data.error || resp.status); }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Network error: ' + e.message; }
+  }
+}
+
+async function removeTeamMember(role) {
+  showConfirm(`Remove the "${role}" role assignment?`, async () => {
+    try {
+      const resp = await fetch('/api/team/' + encodeURIComponent(role), { method: 'DELETE' });
+      if (resp.ok) loadTeamRoles();
+      else showAlert('Failed to remove: ' + await resp.text());
+    } catch (e) {
+      showAlert('Network error: ' + e.message);
+    }
+  });
+}
+
 // ── Personas (v0.14.20) ───────────────────────────────────────
 // ── Agents panel (v0.16.3) ───────────────────────────────────────
 
@@ -4303,7 +4657,7 @@ function startReleaseGatesPoller() {
 }
 
 async function pollReleaseGates() {
-  if (currentTab !== 'release') {
+  if (currentTab !== 'activity:release') {
     clearInterval(releaseApprovalPoller);
     releaseApprovalPoller = null;
     return;
@@ -4388,7 +4742,7 @@ async function pollHealthSignals() {
       const urgent = _healthSignals.filter(s => s.severity === 'warn' || s.severity === 'crit').length;
       tabEl.textContent = urgent > 0 ? `Health (${urgent})` : 'Health';
     }
-    if (currentTab === 'health') renderHealthPageContent();
+    if (currentTab === 'activity:health') renderHealthPageContent();
   } catch (_) {}
 }
 
@@ -4439,7 +4793,7 @@ async function runCleanup() {
 
 function renderHealthPageContent() {
   const app = document.getElementById('app');
-  if (currentTab !== 'health') return;
+  if (currentTab !== 'activity:health') return;
   const signals = _healthSignals;
   if (signals.length === 0) {
     setAppContent(`<div class="card"><div class="card-header"><span class="card-title">System Health</span></div>
@@ -4519,7 +4873,9 @@ function closeLinkModal(e) {
 }
 
 // ── Boot ──────────────────────────────────────────────────────
-loadDashboard();
+// Attention is the landing destination (v0.17.0.12.17 item 1) — "what needs
+// me right now" beats a stats dashboard as the first thing a user sees.
+switchTab('attention');
 checkWizard();
 pollHealthSignals();
 loadVersion();

@@ -25,7 +25,7 @@ use crate::draft_package::ArtifactDisposition;
 ///
 /// Tracks the reviewer's progress through a draft across multiple CLI invocations,
 /// including comments, dispositions, and current focus.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReviewSession {
     /// Unique session identifier.
     pub session_id: Uuid,
@@ -165,7 +165,7 @@ impl ReviewSession {
 }
 
 /// Review state lifecycle.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewState {
     /// Session is active (reviewer is working through artifacts).
@@ -179,7 +179,7 @@ pub enum ReviewState {
 }
 
 /// Review data for a single artifact.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactReview {
     /// The artifact's resource URI.
     pub resource_uri: String,
@@ -195,7 +195,7 @@ pub struct ArtifactReview {
 /// A thread of comments on an artifact.
 ///
 /// Supports multi-party discussion: reviewer, agent, other reviewers, etc.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CommentThread {
     pub comments: Vec<Comment>,
 }
@@ -245,7 +245,7 @@ impl Default for CommentThread {
 }
 
 /// A single comment in a thread.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Comment {
     /// Who wrote the comment (human reviewer, agent, etc.).
     pub commenter: String,
@@ -263,7 +263,7 @@ pub struct Comment {
 ///
 /// Enables compliance reporting: reviewers document *why* they approved or rejected,
 /// what alternatives they considered, and what principles guided the decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReviewReasoning {
     /// The reviewer's rationale for their decision.
     pub rationale: String,
@@ -276,7 +276,7 @@ pub struct ReviewReasoning {
 }
 
 /// Session-level note (not tied to a specific artifact).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionNote {
     pub text: String,
     pub created_at: DateTime<Utc>,

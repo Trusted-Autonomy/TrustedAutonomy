@@ -1,13 +1,13 @@
 //! html.rs — HTML output adapter with JavaScript-free progressive disclosure.
 
 use crate::error::ChangeSetError;
-use crate::output_adapters::{matches_file_filters, DetailLevel, OutputAdapter, RenderContext};
+use crate::output_renderers::{matches_file_filters, DetailLevel, OutputRenderer, RenderContext};
 use crate::pr_package::{Artifact, ArtifactDisposition, ChangeType};
 
 #[derive(Default)]
-pub struct HtmlAdapter {}
+pub struct HtmlRenderer {}
 
-impl HtmlAdapter {
+impl HtmlRenderer {
     pub fn new() -> Self {
         Self {}
     }
@@ -80,9 +80,9 @@ impl HtmlAdapter {
     }
 }
 
-impl OutputAdapter for HtmlAdapter {
+impl OutputRenderer for HtmlRenderer {
     fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
-        use crate::output_adapters::SectionFilter;
+        use crate::output_renderers::SectionFilter;
 
         let pkg = ctx.package;
         let mut html = String::from("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn disposition_badge_renders_all_variants() {
-        let adapter = HtmlAdapter::new();
+        let adapter = HtmlRenderer::new();
         assert!(adapter
             .disposition_badge(&ArtifactDisposition::Pending)
             .contains("pending"));
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn css_includes_discuss_status_class() {
-        let adapter = HtmlAdapter::new();
+        let adapter = HtmlRenderer::new();
         let css = adapter.css();
         assert!(css.contains(".status.discuss"));
         assert!(css.contains("#dbeafe"));
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn html_output_includes_disposition_badges() {
         use crate::draft_package::*;
-        use crate::output_adapters::RenderContext;
+        use crate::output_renderers::RenderContext;
         use chrono::Utc;
         use uuid::Uuid;
 
@@ -408,7 +408,7 @@ mod tests {
         };
         pkg.status = DraftStatus::PendingReview;
 
-        let adapter = HtmlAdapter::new();
+        let adapter = HtmlRenderer::new();
         let ctx = RenderContext {
             package: &pkg,
             detail_level: DetailLevel::Top,
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn html_contains_details_for_collapsible_files() {
         use crate::draft_package::*;
-        use crate::output_adapters::RenderContext;
+        use crate::output_renderers::RenderContext;
         use chrono::Utc;
         use uuid::Uuid;
 
@@ -524,7 +524,7 @@ mod tests {
             plan_md_base: None,
         };
 
-        let adapter = HtmlAdapter::new();
+        let adapter = HtmlRenderer::new();
         let ctx = RenderContext {
             package: &pkg,
             detail_level: DetailLevel::Top,
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn html_agent_decision_log_renders_details() {
         use crate::draft_package::*;
-        use crate::output_adapters::RenderContext;
+        use crate::output_renderers::RenderContext;
         use chrono::Utc;
         use uuid::Uuid;
 
@@ -645,7 +645,7 @@ mod tests {
             context: None,
         }];
 
-        let adapter = HtmlAdapter::new();
+        let adapter = HtmlRenderer::new();
         let ctx = RenderContext {
             package: &pkg,
             detail_level: DetailLevel::Top,

@@ -1,0 +1,476 @@
+{
+  "$defs": {
+    "GoalRunState": {
+      "description": "The lifecycle state of a GoalRun.\n\nIn Rust, enums can carry data per variant (like `Failed { reason }`).\nThe `#[serde(tag = \"state\")]` attribute makes this serialize as\n`{\"state\": \"running\"}` in JSON — clean and readable.\nThe lifecycle state of a GoalRun (v0.17.0.9: `#[non_exhaustive]` added).\n\nDownstream crates that match on this enum must add a `_` arm. Use\n`GoalRunState::Custom { tag }` when extending the state machine without\nforking this crate.",
+      "oneOf": [
+        {
+          "description": "Just created, not yet configured with manifest/workspace.",
+          "properties": {
+            "state": {
+              "const": "created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Manifest issued and workspace allocated — ready for the agent.",
+          "properties": {
+            "state": {
+              "const": "configured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Agent is actively working (making tool calls).",
+          "properties": {
+            "state": {
+              "const": "running",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Agent has built a PR package — awaiting review.",
+          "properties": {
+            "state": {
+              "const": "pr_ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A reviewer is looking at the PR package.",
+          "properties": {
+            "state": {
+              "const": "under_review",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The PR package has been approved.",
+          "properties": {
+            "approved_by": {
+              "type": "string"
+            },
+            "state": {
+              "const": "approved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "approved_by"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Approved changes have been applied to the target.",
+          "properties": {
+            "state": {
+              "const": "applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "PR/review was merged and main branch was synced (v0.12.0.1).\nThe full run→draft→apply→merge→sync loop is complete.",
+          "properties": {
+            "state": {
+              "const": "merged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Goal completed successfully.",
+          "properties": {
+            "state": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Agent is mid-run and waiting for human input before continuing.",
+          "properties": {
+            "interaction_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "question_preview": {
+              "type": "string"
+            },
+            "state": {
+              "const": "awaiting_input",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "interaction_id",
+            "question_preview"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Agent exited cleanly; draft creation is in progress (v0.13.14).\n\nThis state closes the watchdog race: the exit handler atomically\nwrites `Finalizing` before starting the (slow) draft build, so the\nwatchdog will not mark the goal `Failed` while the build is ongoing.\n\nThe watchdog skips `Finalizing` goals unless `finalize_timeout_secs`\n(default 1800s) is exceeded, at which point it transitions to `Failed`\nwith a message directing the user to `ta goal recover`.\n\n`run_pid` is the PID of the `ta run` process performing the draft build.\nIf the watchdog can confirm this process is still alive, it extends the\ndeadline indefinitely — the timeout only fires when the process is dead\nand the state is still stuck (v0.13.17).",
+          "properties": {
+            "exit_code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "finalize_started_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "run_pid": {
+              "default": null,
+              "description": "PID of the `ta run` process building the draft. Watchdog uses this\nto distinguish \"still building\" from \"interrupted and stuck\".",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "finalizing",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "exit_code",
+            "finalize_started_at"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Agent wrote `work_complete` checkpoint; draft build has not started yet (v0.14.7.2).\n\nThis state represents \"agent finished, draft build pending\". It fills the gap\nbetween `Finalizing` (draft build running) and `PrReady` (draft built).\n\nThe watchdog detects `DraftPending` + dead PID as \"build not started\" and\noffers to auto-heal by running `ta draft build`.\n\nTransition path: `Running` → `DraftPending` (agent exits after `work_complete`)\n  → `PrReady` (after `ta draft build`).",
+          "properties": {
+            "exit_code": {
+              "description": "Exit code of the agent process (0 = clean exit).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "pending_since": {
+              "description": "When the agent indicated work was complete.",
+              "format": "date-time",
+              "type": "string"
+            },
+            "state": {
+              "const": "draft_pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "pending_since",
+            "exit_code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Goal failed at some point.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Extension state for plugins and external state machines (v0.17.0.9).\n\nUse this to attach arbitrary string tags without forking `ta-goal`.\nExample: `GoalRunState::Custom { tag: \"waiting_for_ci\".into() }`.\n\nNote: this must be a struct-like variant (named field), not a bare\nnewtype (`Custom(String)`) — `#[serde(tag = \"state\")]` internal\ntagging cannot serialize a newtype variant wrapping a primitive like\n`String` (serde requires the payload to serialize as a map so the\ntag field can be merged in). A bare `Custom(String)` compiles fine\nbut fails at serialization time with \"cannot serialize tagged\nnewtype variant ... containing a string\" the first time it's\nactually persisted (v0.17.0.12.7 discovered this when adding the\nfirst real `Custom` usage — `conflict_resolution`).",
+          "properties": {
+            "state": {
+              "const": "custom",
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "tag"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/goal.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A GoalRun — one unit of agent work from start to completion.\n\nThis is the top-level execution unit introduced by the Plan Revision doc.\nIt replaces ad-hoc goal tracking with a formal lifecycle.",
+  "properties": {
+    "agent_id": {
+      "description": "The agent working on this goal.",
+      "type": "string"
+    },
+    "agent_model": {
+      "description": "Model identifier string (e.g. `\"claude-sonnet-4-6\"`).\nPopulated from stream-json `system` init event.",
+      "type": "string"
+    },
+    "agent_pid": {
+      "description": "Agent process ID for liveness checking (v0.11.2.4).\nPopulated when `ta run` spawns the agent subprocess. The daemon watchdog\nreads this to verify the agent process is still alive.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "context_from": {
+      "description": "Goals whose output feeds into this one's context (v0.9.8.2).",
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "created_at": {
+      "description": "When this goal run was created.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "goal_run_id": {
+      "description": "Unique identifier for this goal run.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "heartbeat_required": {
+      "description": "Whether this agent sends heartbeats to the daemon (v0.13.14).\n\nWhen `false` (default), the watchdog disables stale-based detection for this goal\nand only acts on zombie conditions (PID gone + non-zero exit). Claude Code and most\nagent frameworks do not send heartbeats, so this defaults to `false`.\n\nWhen `true`, a goal with no state update for `stale_threshold_secs` emits a\n`GoalStale` event. This is intended for custom agents that explicitly call\n`POST /api/goals/:id/heartbeat` to signal liveness.",
+      "type": "boolean"
+    },
+    "initiated_by": {
+      "description": "Authenticated identity that initiated this goal (v0.14.5).\n\nSet by `ta run` from the active auth middleware. Format is the `user_id`\nreturned by the middleware (e.g., `\"alice\"`, `\"ci\"`, `\"local\"`).\nUsed in audit records and review UIs to show who triggered the goal.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "input_tokens": {
+      "description": "Total LLM input tokens consumed during this goal's agent session.\nPopulated by `ta run` from stream-json usage events. `0` if unavailable.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "is_macro": {
+      "description": "Whether this is a macro goal (supports inner-loop iteration with sub-goals).",
+      "type": "boolean"
+    },
+    "manifest_id": {
+      "description": "The capability manifest issued for this goal run.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "memory_entries_created": {
+      "description": "Memory entry IDs written during this goal run (v0.15.13.2).\n\nPopulated by `ta draft build` when it detects an empty overlay diff but\nfinds memory entries whose `goal_id` matches this goal. Used by\n`ta draft deny` to remove those entries from the store when the reviewer\nrejects the analysis results.",
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "objective": {
+      "description": "Detailed objective describing what needs to be accomplished.",
+      "type": "string"
+    },
+    "output_tokens": {
+      "description": "Total LLM output tokens generated during this goal's agent session.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "parent_goal_id": {
+      "description": "Parent goal ID for follow-up goals (enables iterative refinement).",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "parent_macro_id": {
+      "description": "Parent macro goal ID for sub-goals created during a macro session.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "plan_phase": {
+      "description": "Optional plan phase this goal is working on (e.g., \"4b\").",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pr_package_id": {
+      "description": "The PR package ID, if one has been built.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pr_url": {
+      "description": "PR URL created by `ta draft apply` (v0.11.3).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "progress_note": {
+      "description": "Short status note written during draft-build phase (v0.13.17).\nWritten by `ta run` at each major step: \"diffing N files\", \"packing N artifacts\".\nWatchdog and `ta goal status` display this so the user can see progress.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_name": {
+      "description": "Project name this goal belongs to (v0.10.18).\nUsed for multi-project routing: replies in a goal's thread auto-resolve\nto this project without requiring explicit `@ta <project>` prefix.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "description": "Workflow role this goal fulfills (v0.9.8.2).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_dir": {
+      "description": "Path to the original source project (for overlay-based goals).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_snapshot": {
+      "description": "Source file snapshot taken at goal start (for conflict detection).\nSerialized as embedded JSON — allows concurrent session conflict detection."
+    },
+    "stage": {
+      "description": "Workflow stage this goal belongs to (v0.9.8.2).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "$ref": "#/$defs/GoalRunState",
+      "description": "Current lifecycle state."
+    },
+    "store_path": {
+      "description": "Path to the change store directory.",
+      "type": "string"
+    },
+    "sub_goal_ids": {
+      "description": "IDs of sub-goals created within this macro goal session.",
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "tag": {
+      "description": "Human-friendly tag for this goal (e.g., \"shell-routing-01\").\nAuto-generated from title on creation. The primary display ID everywhere.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "thread_id": {
+      "description": "External thread identifier for cross-channel tracking (v0.10.18).\nStores the channel-specific thread/conversation ID (e.g., Discord thread ID,\nSlack thread_ts, email Message-ID) so replies auto-route to the same project.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "title": {
+      "description": "Human-readable title (e.g., \"Fix authentication bug\").",
+      "type": "string"
+    },
+    "updated_at": {
+      "description": "When this goal run was last updated.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "vcs_isolation": {
+      "description": "VCS isolation mode active for this goal's agent (v0.13.17.3).\n\nSet by `ta run` after calling `stage_env()`. Examples:\n- `\"isolated (git)\"` — agent has its own `.git` in staging\n- `\"inherit-read (git)\"` — agent can read but not write to parent git\n- `\"none (git)\"` — all git operations blocked",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workflow_id": {
+      "description": "Workflow ID this goal belongs to (v0.9.8.2).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_path": {
+      "description": "Path to the staging workspace directory.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "goal_run_id",
+    "title",
+    "objective",
+    "agent_id",
+    "state",
+    "manifest_id",
+    "workspace_path",
+    "store_path",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "GoalRun",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

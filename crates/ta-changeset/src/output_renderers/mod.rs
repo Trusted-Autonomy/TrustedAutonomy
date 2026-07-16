@@ -1,4 +1,4 @@
-//! output_adapters — Pluggable output renderers for draft review (v0.2.3).
+//! output_renderers — Pluggable output renderers for draft review (v0.2.3).
 //!
 //! Output adapters transform DraftPackage data into different formats for review:
 //! - **Terminal**: Colored inline diff with tiered display (default)
@@ -150,7 +150,7 @@ pub trait DiffProvider {
 }
 
 /// Output adapter trait — renders draft packages in different formats.
-pub trait OutputAdapter {
+pub trait OutputRenderer {
     /// Render the draft package to a string.
     fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError>;
 
@@ -229,12 +229,12 @@ pub fn matches_file_filters(uri: &str, filters: &[String]) -> bool {
 ///
 /// The `color` parameter controls ANSI color output for the terminal adapter.
 /// It is ignored for other formats.
-pub fn get_adapter(format: OutputFormat, color: bool) -> Box<dyn OutputAdapter> {
+pub fn get_renderer(format: OutputFormat, color: bool) -> Box<dyn OutputRenderer> {
     match format {
-        OutputFormat::Terminal => Box::new(terminal::TerminalAdapter::with_color(color)),
-        OutputFormat::Markdown => Box::new(markdown::MarkdownAdapter::new()),
-        OutputFormat::Json => Box::new(json::JsonAdapter::new()),
-        OutputFormat::Html => Box::new(html::HtmlAdapter::new()),
+        OutputFormat::Terminal => Box::new(terminal::TerminalRenderer::with_color(color)),
+        OutputFormat::Markdown => Box::new(markdown::MarkdownRenderer::new()),
+        OutputFormat::Json => Box::new(json::JsonRenderer::new()),
+        OutputFormat::Html => Box::new(html::HtmlRenderer::new()),
     }
 }
 

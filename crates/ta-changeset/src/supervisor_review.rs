@@ -7,7 +7,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 /// Verdict from the supervisor agent review.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SupervisorVerdict {
     /// Changes are aligned with the goal and constitution.
@@ -37,7 +37,7 @@ impl Default for SupervisorVerdict {
 
 /// The result of an AI supervisor reviewing staged changes.
 /// Embedded in `DraftPackage.supervisor_review`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SupervisorReview {
     /// Overall verdict: pass, warn, or block.
     pub verdict: SupervisorVerdict,
@@ -51,6 +51,33 @@ pub struct SupervisorReview {
     pub agent: String,
     /// How long the supervisor took in seconds.
     pub duration_secs: f32,
+    /// Confidence (0.0-1.0) the supervisor had in this verdict, computed from
+    /// the verdict severity, scope check, and finding count — consumed by the
+    /// shared Decision gate (`ta-decision::decide`) alongside `risk_score`.
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+}
+
+fn default_confidence() -> f64 {
+    0.5
+}
+
+/// Compute a supervisor's confidence from its own verdict and findings.
+///
+/// Not a fixed constant: `Pass` starts high, `Warn` moderate; `scope_ok ==
+/// false` and each additional finding erode it further, reflecting that a
+/// review with more concerns is one we should trust less for auto-approval.
+pub fn compute_confidence(verdict: &SupervisorVerdict, scope_ok: bool, findings: &[String]) -> f64 {
+    let mut score = match verdict {
+        SupervisorVerdict::Pass => 0.95,
+        SupervisorVerdict::Block => 0.9,
+        SupervisorVerdict::Warn => 0.6,
+    };
+    if !scope_ok {
+        score -= 0.15;
+    }
+    score -= findings.len() as f64 * 0.05;
+    score.clamp(0.0, 1.0)
 }
 
 /// Configuration for the supervisor passed at runtime (derived from WorkflowConfig).
@@ -744,6 +771,7 @@ fn parse_supervisor_response_or_text(text: &str, agent: &str) -> SupervisorRevie
     } else {
         text.trim().to_string()
     };
+    let confidence = compute_confidence(&SupervisorVerdict::Warn, true, &[]);
     SupervisorReview {
         verdict: SupervisorVerdict::Warn,
         scope_ok: true,
@@ -751,6 +779,7 @@ fn parse_supervisor_response_or_text(text: &str, agent: &str) -> SupervisorRevie
         summary,
         agent: agent.to_string(),
         duration_secs: 0.0,
+        confidence,
     }
 }
 
@@ -913,6 +942,9 @@ pub fn fallback_supervisor_review(
         summary: "Supervisor could not complete review (fallback to warn).".to_string(),
         agent: agent.to_string(),
         duration_secs,
+        // Deliberately low, not the formula's ~0.55: this review never actually
+        // happened, so it must never be trusted enough to auto-approve.
+        confidence: 0.1,
     }
 }
 
@@ -1007,6 +1039,7 @@ pub(crate) fn apply_hedging_quality_gate(review: &mut SupervisorReview) -> bool 
         review.findings.push(
             "Supervisor produced unverified finding — staging access may be missing or supervisor did not read the file.".to_string()
         );
+        review.confidence = compute_confidence(&review.verdict, review.scope_ok, &review.findings);
     }
     hedged
 }
@@ -1029,15 +1062,19 @@ fn parse_supervisor_response(text: &str) -> anyhow::Result<SupervisorReview> {
         _ => SupervisorVerdict::Warn, // Default to warn for unknown values
     };
 
+    let scope_ok = parsed.scope_ok.unwrap_or(true);
+    let findings = parsed.findings.unwrap_or_default();
+    let confidence = compute_confidence(&verdict, scope_ok, &findings);
     Ok(SupervisorReview {
         verdict,
-        scope_ok: parsed.scope_ok.unwrap_or(true),
-        findings: parsed.findings.unwrap_or_default(),
+        scope_ok,
+        findings,
         summary: parsed
             .summary
             .unwrap_or_else(|| "No summary provided.".to_string()),
         agent: "builtin".to_string(),
         duration_secs: 0.0, // Will be overwritten by caller
+        confidence,
     })
 }
 
@@ -1104,6 +1141,49 @@ mod tests {
     /// acquire this lock to prevent parallel races where the wrong mock binary is found.
     #[cfg(unix)]
     static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn compute_confidence_pass_clean_is_high() {
+        let c = compute_confidence(&SupervisorVerdict::Pass, true, &[]);
+        assert!(c > 0.9, "clean pass should be high confidence, got {c}");
+    }
+
+    #[test]
+    fn compute_confidence_degrades_with_findings_and_scope() {
+        let clean = compute_confidence(&SupervisorVerdict::Pass, true, &[]);
+        let with_findings = compute_confidence(
+            &SupervisorVerdict::Pass,
+            true,
+            &["a".to_string(), "b".to_string()],
+        );
+        let out_of_scope = compute_confidence(&SupervisorVerdict::Pass, false, &[]);
+        assert!(with_findings < clean);
+        assert!(out_of_scope < clean);
+    }
+
+    #[test]
+    fn compute_confidence_warn_lower_than_pass() {
+        let pass = compute_confidence(&SupervisorVerdict::Pass, true, &[]);
+        let warn = compute_confidence(&SupervisorVerdict::Warn, true, &[]);
+        assert!(warn < pass);
+    }
+
+    #[test]
+    fn compute_confidence_clamped_to_unit_interval() {
+        let many_findings: Vec<String> = (0..50).map(|i| i.to_string()).collect();
+        let c = compute_confidence(&SupervisorVerdict::Warn, false, &many_findings);
+        assert!((0.0..=1.0).contains(&c));
+        assert_eq!(c, 0.0);
+    }
+
+    #[test]
+    fn fallback_review_has_low_confidence() {
+        let review = fallback_supervisor_review("builtin", "timed out", 1.0);
+        assert!(
+            review.confidence < 0.5,
+            "fallback review must never be trusted for auto-approval"
+        );
+    }
 
     #[test]
     fn test_build_supervisor_prompt_includes_objective() {
@@ -1576,6 +1656,7 @@ mod tests {
             summary: "Looks fine.".to_string(),
             agent: "claude-code".to_string(),
             duration_secs: 0.0,
+            confidence: 0.95,
         };
         let fired = apply_hedging_quality_gate(&mut review);
         assert!(fired, "quality gate should fire on 'cannot be verified'");
@@ -1606,6 +1687,7 @@ mod tests {
             summary: "One finding.".to_string(),
             agent: "claude-code".to_string(),
             duration_secs: 0.0,
+            confidence: 0.9,
         };
         let fired = apply_hedging_quality_gate(&mut review);
         assert!(
@@ -1626,6 +1708,7 @@ mod tests {
             summary: "Block.".to_string(),
             agent: "claude-code".to_string(),
             duration_secs: 0.0,
+            confidence: 0.9,
         };
         apply_hedging_quality_gate(&mut review);
         // Block should not be downgraded — only Pass is upgraded to Warn

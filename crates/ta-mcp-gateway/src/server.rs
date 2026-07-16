@@ -526,9 +526,16 @@ impl GatewayState {
         // channel(s) via ChannelRegistry instead of hardcoding AutoApproveChannel.
         let review_channel = Self::build_review_channel(&config);
 
+        // Any application implementing the Commit contract registers its own
+        // verb here instead of requiring a core-crate edit to a hardcoded
+        // array (v0.17.0.12.15). "publish" is Commit for the social endpoint.
+        let mut policy_engine = PolicyEngine::new();
+        policy_engine.register_commit_verb("publish"); // social
+        policy_engine.register_commit_verb("apply_mutation"); // DB proxy
+
         Ok(Self {
             config,
-            policy_engine: PolicyEngine::new(),
+            policy_engine,
             goal_store,
             connectors: HashMap::new(),
             pr_packages: HashMap::new(),
@@ -1105,17 +1112,28 @@ impl TaGatewayServer {
         tools::workflow::handle_workflow(&self.state, params)
     }
 
-    // ── Interactive tools (v0.9.9.1) ─────────────────────────
+    // ── Interactive tools (v0.9.9.1, superseded by ta_human_verify in v0.17.0.12.26) ──
 
     #[tool(
-        description = "Ask the human a question and wait for their response. Use this when you need clarification, want to propose options, or need human input before proceeding. The question is delivered through whatever channel the human is using (terminal, Slack, Discord, web UI). Your execution pauses until they respond or the timeout expires."
+        description = "Deprecated: use ta_human_verify instead (identical parameters, now confidence-gated). Kept registered so existing agent prompts/docs referencing this name keep working unchanged."
     )]
     fn ta_ask_human(
         &self,
         Parameters(params): Parameters<tools::human::AskHumanParams>,
     ) -> Result<CallToolResult, McpError> {
         self.audit("ta_ask_human", None, None);
-        tools::human::handle_ask_human(&self.state, params)
+        tools::human_verify::handle_ask_human_deprecated(&self.state, params)
+    }
+
+    #[tool(
+        description = "Verify/ask the human a question through TA's two-stage confidence-gated pipeline (v0.17.0.12.26). A synthetic opinion pass (a headless agent answers like a human reviewer would) and an independent validator pass (critiques that reasoning) feed the shared ta_decision gate against per-workload thresholds; only a high-confidence/low-risk pair auto-confirms, fully documented in .ta/human-verify-audit.jsonl. Anything uncertain, high-risk, or from a non-'auto' security tier falls through to a real blocking human question exactly like the deprecated ta_ask_human. Your execution pauses only on that fallback path, until the human responds or the timeout expires."
+    )]
+    fn ta_human_verify(
+        &self,
+        Parameters(params): Parameters<tools::human_verify::HumanVerifyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_human_verify", None, None);
+        tools::human_verify::handle_human_verify(&self.state, params)
     }
 
     // ── Unreal Engine 5 tools (v0.14.14) ─────────────────────────────
@@ -1536,7 +1554,8 @@ mod tests {
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan, ta_plan_status (v0.14.3.2),
         //           ta_context, ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
-        //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1),
+        //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1, deprecated alias
+        //           for ta_human_verify as of v0.17.0.12.26),
         //           ta_external_action (v0.13.4),
         //           ue5_python_exec, ue5_scene_query, ue5_asset_list,
         //           ue5_mrq_submit, ue5_mrq_status (v0.14.14),
@@ -1545,8 +1564,9 @@ mod tests {
         //           unity_addressables_build, unity_render_capture (v0.15.3)
         //           community_search, community_get, community_annotate,
         //           community_feedback, community_suggest (v0.17.0.12.4)
+        //           ta_human_verify (v0.17.0.12.26)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 40, "expected 40 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 41, "expected 41 tools, got: {:?}", names);
     }
 
     #[test]

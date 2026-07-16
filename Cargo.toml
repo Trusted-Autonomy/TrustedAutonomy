@@ -14,6 +14,7 @@ exclude = [
 members = [
     "crates/ta-audit",
     "crates/ta-changeset",
+    "crates/ta-decision",
     "crates/ta-daemon",
     "crates/ta-goal",
     "crates/ta-mcp-gateway",
@@ -30,6 +31,7 @@ members = [
     "crates/ta-workflow",
     "crates/ta-build",
     "crates/ta-output-schema",
+    "crates/ta-plugin",
     "crates/ta-runtime",
     "crates/ta-actions",
     "crates/ta-db-overlay",
@@ -50,12 +52,14 @@ members = [
     "crates/ta-extension",
     "crates/ta-init",
     "crates/ta-governed-paths",
+    "crates/ta-intake",
+    "crates/ta-brain",
 ]
 
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.17.0-alpha.12.9"
+version = "0.17.0-alpha.12.24"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -101,7 +105,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
 # JSON Schema generation — used by rmcp for MCP tool parameter schemas.
-schemars = "1"
+schemars = { version = "1", features = ["uuid1"] }
 
 # YAML configuration parsing — used for agent launch configs.
 serde_yaml = "0.9"

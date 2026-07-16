@@ -1,0 +1,18 @@
+[package]
+name = "ta-data-spec"
+version.workspace = true
+edition = "2021"
+description = "Versioned JSON Schema data-format specs for TA's core wire types (Goal, Draft/Artifact, TriggerEvent, RoutingDecision, Persona) — the contract Studio and community configs/plugins build against without compiling Rust"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "autonomy", "schema", "spec"]
+categories = ["development-tools"]
+
+[dependencies]
+schemars = { workspace = true }
+serde_json = { workspace = true }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.21" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.21" }
+ta-brain = { path = "../ta-brain", version = "0.17.0-alpha.12.21" }
+ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.21" }

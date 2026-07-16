@@ -20,16 +20,24 @@
 //! | `create_draft`     | Write a draft to the platform's native draft state       |
 //! | `create_scheduled` | Schedule a post at a future time (platform scheduler)    |
 //! | `draft_status`     | Poll whether a draft was published, deleted, or open     |
+//! | `publish`          | Commit: publish a previously created draft to the platform |
 //! | `health`           | Connectivity + credential check                          |
 //! | `capabilities`     | Advertise which optional ops this plugin supports        |
 //!
-//! ## Safety invariant — `publish` is absent by design
+//! ## `publish` is Commit for this endpoint (corrected 2026-07-04)
 //!
-//! The `publish` operation is intentionally absent from this protocol.
-//! TA never publishes social media posts on behalf of the user. Plugins
-//! expose only `create_draft` and `create_scheduled`; the user publishes
-//! from their native platform UI or scheduler (e.g., LinkedIn, Buffer).
-//! This is a deliberate safety boundary enforced at the type level.
+//! `publish` **is** `Commit()` for the social endpoint, invoked exactly as
+//! generically as VCS's `commit()`+`push()` or DB's mutation-apply — same
+//! invocation mechanism every endpoint uses, only the function body differs.
+//! An earlier design treated "TA never publishes on behalf of the user" as a
+//! permanent architectural fork requiring a separate `CommitCapability`
+//! distinction; that was over-engineered. The real invariant is conservatism
+//! by policy, not architecture: `publish` is registered as an
+//! approval-required verb (`PolicyEngine::register_commit_verb`) and every
+//! call is gated by the same `ta-decision::decide()` Decision function every
+//! other Commit implementation uses — so a human (or a very deliberately
+//! configured `AdvisorSecurity::Auto`) still controls whether a post actually
+//! goes out, without needing a second type-level safety mechanism.
 
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +59,6 @@ pub const SOCIAL_PROTOCOL_VERSION: u32 = 1;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SocialPluginRequest {
     /// Create a draft in the platform's native draft state.
-    ///
-    /// NOTE: There is intentionally no `Publish` variant. TA never publishes.
     CreateDraft(CreateSocialDraftParams),
 
     /// Schedule a post at a future time via the platform's native scheduler.
@@ -63,6 +69,11 @@ pub enum SocialPluginRequest {
 
     /// Poll the current state of a previously created draft or scheduled post.
     DraftStatus(SocialDraftStatusParams),
+
+    /// Publish a previously created draft — Commit for this endpoint. Only
+    /// reachable via `ExternalSocialAdapter::publish()`, which gates every
+    /// call through the shared Decision function first.
+    Publish(PublishSocialParams),
 
     /// Connectivity and credential health check.
     Health(SocialHealthParams),
@@ -159,8 +170,8 @@ impl SocialPluginResponse {
 /// For LinkedIn: Draft Share API. For X: draft tweet endpoint.
 /// For Buffer: Buffer Draft queue.
 ///
-/// The user sees the draft in their platform UI and publishes when ready.
-/// TA never publishes directly.
+/// The user can publish from their native platform UI, or TA can publish it
+/// via `ExternalSocialAdapter::publish()` once the Decision gate clears it.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CreateSocialDraftParams {
     /// Post content to draft.
@@ -206,6 +217,17 @@ pub struct CreateScheduledParams {
 /// Parameters for the `draft_status` operation.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct SocialDraftStatusParams {
+    /// Platform-specific draft ID returned by `create_draft` or `create_scheduled`.
+    pub draft_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// publish
+// ---------------------------------------------------------------------------
+
+/// Parameters for the `publish` operation — Commit for the social endpoint.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct PublishSocialParams {
     /// Platform-specific draft ID returned by `create_draft` or `create_scheduled`.
     pub draft_id: String,
 }
@@ -337,14 +359,16 @@ mod tests {
     }
 
     #[test]
-    fn no_publish_op_variant() {
-        // The protocol MUST NOT have a Publish variant.
-        let req = SocialPluginRequest::Health(SocialHealthParams {});
+    fn publish_request_roundtrip() {
+        // Corrected 2026-07-04: publish IS Commit for the social endpoint,
+        // gated by the Decision function rather than absent by design.
+        let req = SocialPluginRequest::Publish(PublishSocialParams {
+            draft_id: "linkedin-draft-abc123".to_string(),
+        });
         let json = serde_json::to_string(&req).unwrap();
-        assert!(
-            !json.contains("\"publish\""),
-            "Publish op must not exist in the social protocol"
-        );
+        assert!(json.contains("\"op\":\"publish\""));
+        let parsed: SocialPluginRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
     }
 
     #[test]

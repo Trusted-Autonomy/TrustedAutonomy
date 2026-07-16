@@ -31,22 +31,23 @@ async-stream = { workspace = true }
 sha2 = { workspace = true }
 
 # Internal crates
-ta-mcp-gateway = { path = "../ta-mcp-gateway", version = "0.17.0-alpha.12.9" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.9" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.9" }
-ta-memory = { path = "../ta-memory", version = "0.17.0-alpha.12.9" }
-ta-events = { path = "../ta-events", version = "0.17.0-alpha.12.9" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.9" }
-ta-runtime = { path = "../ta-runtime", version = "0.17.0-alpha.12.9" }
-ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.9" }
-ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.9" }
-ta-connector-slack = { path = "../ta-connectors/slack", version = "0.17.0-alpha.12.9" }
-ta-connector-email = { path = "../ta-connectors/email", version = "0.17.0-alpha.12.9" }
+ta-mcp-gateway = { path = "../ta-mcp-gateway", version = "0.17.0-alpha.12.24" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.24" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.24" }
+ta-memory = { path = "../ta-memory", version = "0.17.0-alpha.12.24" }
+ta-events = { path = "../ta-events", version = "0.17.0-alpha.12.24" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.24" }
+ta-runtime = { path = "../ta-runtime", version = "0.17.0-alpha.12.24" }
+ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.24" }
+ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.24" }
+ta-connector-slack = { path = "../ta-connectors/slack", version = "0.17.0-alpha.12.24" }
+ta-connector-email = { path = "../ta-connectors/email", version = "0.17.0-alpha.12.24" }
 reqwest = { workspace = true }
-ta-output-schema = { path = "../ta-output-schema", version = "0.17.0-alpha.12.9" }
-ta-extension = { path = "../ta-extension", version = "0.17.0-alpha.12.9" }
-ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.9" }
-ta-advisor = { path = "../ta-advisor", version = "0.17.0-alpha.12.9" }
+ta-output-schema = { path = "../ta-output-schema", version = "0.17.0-alpha.12.24" }
+ta-extension = { path = "../ta-extension", version = "0.17.0-alpha.12.24" }
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.24" }
+ta-advisor = { path = "../ta-advisor", version = "0.17.0-alpha.12.24" }
+ta-data-spec = { path = "../ta-data-spec", version = "0.17.0-alpha.12.24" }
 which = "7"
 libc = { workspace = true }
 async-trait = "0.1"

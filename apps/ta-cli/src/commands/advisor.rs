@@ -4,6 +4,7 @@
 //   ta advisor ask "<message>"                  — classify intent and print numbered option card
 //   ta advisor advise "<message>"               — inject a mid-run note to the active goal
 //   ta advisor advise --goal <id> "<message>"   — target a specific goal
+//   ta advisor create "<prompt>"                — route a free-text prompt to a goal (v0.17.0.12.23)
 //
 // The advisor classifies your input, returns a numbered menu of actions, and
 // accepts a number from stdin to confirm. Security level is read from daemon
@@ -14,6 +15,7 @@
 // In auto mode:      high-confidence (≥80%) goals fire automatically.
 
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 use clap::Subcommand;
 use ta_goal::{GoalRunState, GoalRunStore};
@@ -22,7 +24,7 @@ use ta_runtime::{build_channel, AgentFrameworkManifest, ChannelType, HumanNote, 
 use ta_session::workflow_session::AdvisorSecurity;
 use ta_session::{AdvisorContext, AdvisorSession};
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum AdvisorCommands {
     /// Ask the advisor a question or give it a natural language instruction.
     ///
@@ -69,6 +71,37 @@ pub enum AdvisorCommands {
         #[arg(long)]
         goal: Option<String>,
     },
+
+    /// Turn a natural-language prompt directly into a routed goal (v0.17.0.12.23).
+    ///
+    /// Routes the raw prompt through `ta-brain::route()` exactly as an
+    /// explicit `ta run` invocation is. If workload-classification confidence
+    /// is high, the goal is created (or, at read_only/suggest security,
+    /// printed as a copyable `ta run` command) with zero clarification. If
+    /// confidence is low, asks exactly one clarifying question — via the
+    /// same `ta_ask_human`-backed headless-agent mechanism used for
+    /// draft-review conversations — then re-routes with the answer.
+    ///
+    /// Examples:
+    ///   ta advisor create "also clean up the flaky login test"
+    ///   ta advisor create "fix the auth bypass" --security auto
+    ///   ta advisor create "improve onboarding" --no-input --json
+    Create {
+        /// The free-text description of what you want done.
+        prompt: String,
+        /// Security tier override fed into routing (read_only/suggest/auto).
+        /// Defaults to whatever `route()` resolves from `.ta/workflow.toml`
+        /// / `.ta/team.toml`.
+        #[arg(long)]
+        security: Option<String>,
+        /// Skip the clarifying question (accept low-confidence routing as-is)
+        /// and skip the suggest-tier run confirmation prompt.
+        #[arg(long)]
+        no_input: bool,
+        /// Output the routing result as JSON instead of creating/printing a goal.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn execute(cmd: &AdvisorCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -90,6 +123,12 @@ pub fn execute(cmd: &AdvisorCommands, config: &GatewayConfig) -> anyhow::Result<
             *json,
         ),
         AdvisorCommands::Advise { message, goal } => advise(config, message, goal.as_deref()),
+        AdvisorCommands::Create {
+            prompt,
+            security,
+            no_input,
+            json,
+        } => create(config, prompt, security.as_deref(), *no_input, *json),
     }
 }
 
@@ -248,6 +287,220 @@ pub fn advise(
     println!("Delivery:  {}", delivery);
 
     Ok(())
+}
+
+/// Clarifier that asks its one question via the real headless-agent
+/// mechanism: spawns a short-lived `ta run --headless` clarification agent
+/// (`ta_session::intent_agent`) that calls `ta_ask_human`, then polls for
+/// the answer file it writes.
+struct HeadlessClarifier<'a> {
+    workspace_root: &'a std::path::Path,
+    raw_prompt: String,
+}
+
+impl ta_advisor::Clarifier for HeadlessClarifier<'_> {
+    fn ask(&self, question: &str, _decision: &ta_brain::RoutingDecision) -> Option<String> {
+        let ta_bin = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "Could not resolve the `ta` binary path to ask a clarifying question: {}. \
+                           Skipping clarification and routing with the original prompt.",
+                    e
+                );
+                return None;
+            }
+        };
+
+        let intent_config = ta_session::IntentAgentConfig::new(
+            self.workspace_root.to_path_buf(),
+            self.raw_prompt.clone(),
+            question.to_string(),
+        )
+        .with_timeout(Duration::from_secs(600));
+
+        println!("\nAdvisor needs to ask a clarifying question:");
+        println!("  {}", question);
+
+        if let Err(e) = ta_session::spawn_intent_agent(&intent_config, &ta_bin) {
+            eprintln!(
+                "Failed to spawn the clarification agent: {}. \
+                 Routing with the original prompt instead.",
+                e
+            );
+            return None;
+        }
+
+        match ta_session::poll_intent_answer(
+            self.workspace_root,
+            intent_config.item_id,
+            intent_config.timeout,
+            Duration::from_secs(1),
+        ) {
+            ta_session::IntentAgentOutcome::Answered(answer) => Some(answer),
+            ta_session::IntentAgentOutcome::TimedOut => {
+                eprintln!(
+                    "Clarifying question timed out after {}s. \
+                     Routing with the original prompt instead.",
+                    intent_config.timeout.as_secs()
+                );
+                None
+            }
+        }
+    }
+}
+
+/// `ta advisor create "<prompt>"` — advisor-driven goal creation (v0.17.0.12.23):
+/// turn a raw natural-language prompt into a routed goal, asking at most one
+/// clarifying question when routing confidence is low.
+fn create(
+    config: &GatewayConfig,
+    prompt: &str,
+    security_override: Option<&str>,
+    no_input: bool,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        anyhow::bail!(
+            "Prompt cannot be empty. Provide a natural-language description of the goal, \
+             e.g. `ta advisor create \"fix the flaky login test\"`."
+        );
+    }
+
+    let no_op_clarifier = ta_advisor::NoClarification;
+    let headless_clarifier = HeadlessClarifier {
+        workspace_root: &config.workspace_root,
+        raw_prompt: prompt.to_string(),
+    };
+    let clarifier: &dyn ta_advisor::Clarifier = if no_input {
+        &no_op_clarifier
+    } else {
+        &headless_clarifier
+    };
+
+    let result = ta_advisor::run_pipeline_with_security(
+        prompt,
+        &config.workspace_root,
+        clarifier,
+        security_override,
+    );
+
+    if json_output {
+        #[derive(serde::Serialize)]
+        struct CreateOutput<'a> {
+            goal_title: &'a str,
+            objective: &'a str,
+            decision: &'a ta_brain::RoutingDecision,
+            clarified: bool,
+            clarification_answer: &'a Option<String>,
+        }
+        let out = CreateOutput {
+            goal_title: &result.goal_title,
+            objective: &result.objective,
+            decision: &result.decision,
+            clarified: result.clarified,
+            clarification_answer: &result.clarification_answer,
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        );
+        return Ok(());
+    }
+
+    print_pipeline_result(&result);
+
+    let run_args = goal_run_args(&result);
+    match result.decision.security_tier {
+        AdvisorSecurity::Auto => {
+            println!("\nAuto-firing (security=auto, confidence sufficient):");
+            println!("  ta {}", run_args.join(" "));
+            run_ta_command(
+                config,
+                &run_args.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        }
+        AdvisorSecurity::Suggest => {
+            println!("\nRun this now?");
+            println!("  ta {}", run_args.join(" "));
+            if no_input {
+                println!("(suggest mode, --no-input — not running automatically)");
+                return Ok(());
+            }
+            print!("Run this now? [y/N]: ");
+            io::stdout().flush()?;
+            let mut line = String::new();
+            io::stdin().lock().read_line(&mut line)?;
+            if line.trim().eq_ignore_ascii_case("y") {
+                run_ta_command(
+                    config,
+                    &run_args.iter().map(String::as_str).collect::<Vec<_>>(),
+                )
+            } else {
+                println!("Not run.");
+                Ok(())
+            }
+        }
+        AdvisorSecurity::ReadOnly => {
+            println!("\n(read_only mode — copy and run manually)");
+            println!("  ta {}", run_args.join(" "));
+            let _ = copy_to_clipboard(&format!("ta {}", run_args.join(" ")));
+            Ok(())
+        }
+    }
+}
+
+/// Print the routing summary (team/persona/agent/security/priority/workload)
+/// and, if a clarifying question was asked, the Q&A — Observable & Actionable.
+fn print_pipeline_result(result: &ta_advisor::PipelineResult) {
+    let decision = &result.decision;
+    println!(
+        "[routing] team={} persona={} agent={} security={} priority={} workload={} ({:.0}% confidence)",
+        decision.team,
+        decision.persona.as_deref().unwrap_or("-"),
+        decision.agent,
+        decision.security_tier,
+        decision.priority,
+        decision.workload_type,
+        decision.workload_confidence * 100.0
+    );
+    if let Some(template) = &decision.resolved_workflow_template {
+        println!("[routing] matched workflow template: {}", template);
+    }
+    if result.clarified {
+        println!(
+            "[clarified] answer: {}",
+            result.clarification_answer.as_deref().unwrap_or("")
+        );
+    }
+}
+
+/// Build the `ta run ...` argv for the routed goal — `--headless` since this
+/// entry point is meant to fire directly, not launch an interactive session.
+fn goal_run_args(result: &ta_advisor::PipelineResult) -> Vec<String> {
+    let decision = &result.decision;
+    let mut args = vec![
+        "run".to_string(),
+        result.objective.clone(),
+        "--headless".to_string(),
+        "--agent".to_string(),
+        decision.agent.clone(),
+        "--team".to_string(),
+        decision.team.to_string(),
+        "--security".to_string(),
+        decision.security_tier.to_string(),
+        "--priority".to_string(),
+        decision.priority.to_string(),
+        "--workload".to_string(),
+        decision.workload_type.clone(),
+    ];
+    if let Some(persona) = &decision.persona {
+        args.push("--persona".to_string());
+        args.push(persona.clone());
+    }
+    args
 }
 
 /// Resolve the target goal for injection.

@@ -1,0 +1,99 @@
+{
+  "$defs": {
+    "AdvisorSecurity": {
+      "description": "Security level for the advisor agent: controls what actions it may take autonomously.",
+      "oneOf": [
+        {
+          "const": "read_only",
+          "description": "Advisor can only answer questions and present diffs — never starts a goal or\napplies a draft autonomously.",
+          "type": "string"
+        },
+        {
+          "const": "suggest",
+          "description": "Advisor presents the exact `ta run \"...\"` command for the human to copy-paste.",
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "At ≥80% intent confidence, advisor fires `ta run` directly without prompting.",
+          "type": "string"
+        }
+      ]
+    },
+    "Priority": {
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "urgent"
+      ],
+      "type": "string"
+    },
+    "TeamRole": {
+      "description": "Role of the agent/team member producing or consuming an action.\n\nData-defined (per `TA-CONSTITUTION.md` §1.6): this is an open role name, not a\nclosed enum, so a `team.toml` can declare any role (e.g. `\"security-team\"`)\nwithout a TA core change. The five well-known names below are recognized as\nconstants/constructors for defaults and documentation but are not exhaustive.",
+      "type": "string"
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/routing_decision.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent": {
+      "description": "Resolved agent/framework ID.",
+      "type": "string"
+    },
+    "persona": {
+      "description": "Resolved persona name, if any tier bound one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "priority": {
+      "$ref": "#/$defs/Priority",
+      "description": "Resolved priority relative to other pending requests."
+    },
+    "rationale": {
+      "description": "One line per resolution step, most-specific-tier-first, e.g.\n`\"agent: tier=persona value=claude-opus-4-8\"`. Always populated,\nalways surfaced to a human (Observable & Actionable).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "resolved_workflow_template": {
+      "description": "Workflow template `ta-workflow::intent::resolve_intent` matched\nagainst the request text at or above its own confidence threshold,\nwhen no `workflow_name_or_path` was given explicitly (v0.17.0.12.23).\nFolds workflow-template matching into `route()` as one signal among\nseveral, rather than a second, parallel intent system a caller would\nneed to consult separately.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "security_tier": {
+      "$ref": "#/$defs/AdvisorSecurity",
+      "description": "Resolved security tier — reuses the existing `AdvisorSecurity`\ntri-state (read_only/suggest/auto) rather than a new trust-level\nconcept, per `docs/design/ta-concepts-and-architecture.md` §3."
+    },
+    "team": {
+      "$ref": "#/$defs/TeamRole",
+      "description": "Which team role handles this request (§3's \"Role\" node)."
+    },
+    "workload_confidence": {
+      "description": "Confidence in `workload_type` when it was inferred (1.0 when\nexplicit). Gates the `security_tier = \"auto\"` tier — see `route()`.",
+      "format": "float",
+      "type": "number"
+    },
+    "workload_type": {
+      "description": "The workload type this request was classified as (e.g. \"bugfix\",\n\"docs\", \"security\") — either explicit or inferred.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "team",
+    "agent",
+    "security_tier",
+    "priority",
+    "workload_type",
+    "workload_confidence",
+    "rationale"
+  ],
+  "title": "RoutingDecision",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

@@ -12,7 +12,7 @@ use clap::Subcommand;
 use ta_goal::{GoalOutcome, VelocityHistoryStore, VelocityStore};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum StatsCommands {
     /// Show aggregate velocity stats (build time, outcomes, rework, cost).
     ///

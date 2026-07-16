@@ -13,15 +13,15 @@ use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
 use ta_changeset::diff::DiffContent;
 use ta_changeset::diff_handlers::DiffHandlersConfig;
 use ta_changeset::draft_package::{
-    AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, ApplyProvenance,
-    ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType, Changes,
-    DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal, Iteration,
-    Plan, Provenance, RequestedAction, ReviewRequests, Risk, Signatures, Summary,
+    assess_risk, AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType,
+    ApplyProvenance, ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType,
+    Changes, DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal,
+    Iteration, Plan, Provenance, RequestedAction, ReviewRequests, Signatures, Summary,
     VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
-use ta_changeset::output_adapters::{
-    get_adapter, DetailLevel, DiffProvider, OutputFormat, RenderContext,
+use ta_changeset::output_renderers::{
+    get_renderer, DetailLevel, DiffProvider, OutputFormat, RenderContext,
 };
 use ta_changeset::review_session::{ReviewSession, ReviewState};
 use ta_changeset::review_session_store::ReviewSessionStore;
@@ -50,7 +50,7 @@ pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatter
     excludes
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum DraftCommands {
     /// Build a draft package from overlay workspace diffs.
     Build {
@@ -255,7 +255,10 @@ pub enum DraftCommands {
         id: String,
         /// Artifact URI to amend (e.g., "fs://workspace/src/main.rs").
         artifact_uri: String,
-        /// Replace the artifact content with a corrected file.
+        /// Replace the artifact content with a corrected file. If `artifact_uri` isn't
+        /// already in the draft, this adds it as a new artifact instead of erroring
+        /// (amend --add) — use this to recover a file an agent's description claimed
+        /// to touch but that never became a tracked artifact.
         #[arg(long)]
         file: Option<String>,
         /// Remove the artifact from the draft entirely.
@@ -389,7 +392,7 @@ pub enum DraftCommands {
 }
 
 /// Review session subcommands for multi-turn artifact review.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ReviewCommands {
     /// Start or resume a review session for a draft package.
     Start {
@@ -2386,15 +2389,11 @@ pub(crate) fn build_package(
             next_steps: vec!["Review and apply changes".to_string()],
             decision_log,
         },
+        risk: assess_risk(&artifacts),
         changes: Changes {
             artifacts,
             patch_sets: vec![],
             pending_actions: vec![],
-        },
-        risk: Risk {
-            risk_score: 0,
-            findings: vec![],
-            policy_decisions: vec![],
         },
         provenance: Provenance {
             inputs: vec![],
@@ -2850,7 +2849,7 @@ fn build_memory_only_draft(
 ) -> anyhow::Result<()> {
     use ta_changeset::draft_package::{
         AgentIdentity, Changes, Goal, Iteration, Plan, Provenance, RequestedAction, ReviewRequests,
-        Risk, Signatures, Summary, WorkspaceRef,
+        Signatures, Summary, WorkspaceRef,
     };
 
     let goal_store = GoalRunStore::new(&config.goals_dir)?;
@@ -2976,15 +2975,11 @@ fn build_memory_only_draft(
             next_steps: vec!["Review memory entries and approve or deny".to_string()],
             decision_log: vec![],
         },
+        risk: assess_risk(std::slice::from_ref(&artifact)),
         changes: Changes {
             artifacts: vec![artifact],
             patch_sets: vec![],
             pending_actions: vec![],
-        },
-        risk: Risk {
-            risk_score: 0,
-            findings: vec![],
-            policy_decisions: vec![],
         },
         provenance: Provenance {
             inputs: vec![],
@@ -3766,7 +3761,7 @@ fn view_package(
         .map_err(|e| anyhow::anyhow!(e))?;
     let section_filter = section_str
         .map(|s| {
-            s.parse::<ta_changeset::output_adapters::SectionFilter>()
+            s.parse::<ta_changeset::output_renderers::SectionFilter>()
                 .map_err(|e| anyhow::anyhow!(e))
         })
         .transpose()?;
@@ -3854,7 +3849,7 @@ fn view_package(
     };
 
     // Get the adapter and render.
-    let adapter = get_adapter(output_format, effective_color);
+    let adapter = get_renderer(output_format, effective_color);
     let output = adapter.render(&ctx).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!("{}", output);
@@ -4531,18 +4526,22 @@ fn deny_package(
             if let Ok(Some(goal)) = store.get(goal_id) {
                 if let Some(ref phase_id) = goal.plan_phase {
                     let note = "phase reset to pending — goal denied";
-                    if let Err(e) = super::plan::reset_phase_if_in_progress(
+                    match super::plan::reset_phase_if_in_progress(
                         &config.workspace_root,
                         phase_id,
                         note,
                     ) {
-                        tracing::warn!(
-                            phase = %phase_id,
-                            error = %e,
-                            "Failed to reset plan phase on denial"
-                        );
-                    } else {
-                        println!("Plan: phase {} reset to pending (goal denied)", phase_id);
+                        Ok(true) => {
+                            println!("Plan: phase {} reset to pending (goal denied)", phase_id);
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                phase = %phase_id,
+                                error = %e,
+                                "Failed to reset plan phase on denial"
+                            );
+                        }
                     }
                     // Best-effort: tell the daemon to release the in-memory phase claim.
                     release_phase_claim_via_daemon(&config.workspace_root, phase_id);
@@ -5410,7 +5409,7 @@ fn assign_dispositions(
 /// Format: goal title as subject line, then the same medium-detail rendering
 /// used by `ta draft view` (no color, no ANSI escapes).
 fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
-    use ta_changeset::output_adapters::{get_adapter, DetailLevel, OutputFormat, RenderContext};
+    use ta_changeset::output_renderers::{get_renderer, DetailLevel, OutputFormat, RenderContext};
 
     // Render using the terminal adapter with no color — same output as `ta draft view`.
     let ctx = RenderContext {
@@ -5420,7 +5419,7 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
         diff_provider: None,
         section_filter: None,
     };
-    let adapter = get_adapter(OutputFormat::Terminal, false);
+    let adapter = get_renderer(OutputFormat::Terminal, false);
     let rendered = adapter
         .render(&ctx)
         .unwrap_or_else(|_| format!("{}\n\n{}", goal.title, pkg.summary.what_changed));
@@ -6007,17 +6006,19 @@ fn apply_package(
             );
         }
 
-        // Load workflow config to check approval_required.
-        let approval_required = {
+        // Load workflow config to check approval_required and auto-approval thresholds.
+        let (approval_required, auto_approval_thresholds) = {
             // Determine source_dir: look up the goal first, or fall back to target param.
             let wf_dir = match target {
                 Some(t) => std::path::PathBuf::from(t),
                 None => config.workspace_root.clone(),
             };
             let wf_path = wf_dir.join(".ta/workflow.toml");
-            ta_submit::WorkflowConfig::load_or_default(&wf_path)
-                .draft
-                .approval_required
+            let draft_cfg = ta_submit::WorkflowConfig::load_or_default(&wf_path).draft;
+            (
+                draft_cfg.approval_required,
+                ta_decision::DecisionThresholds::from(draft_cfg.auto_approval),
+            )
         };
 
         if matches!(pkg.status, DraftStatus::PendingReview) {
@@ -6032,6 +6033,42 @@ fn apply_package(
                     id,
                     id
                 );
+            }
+            // `approval_required = false` means "apply implies approval" — but that must
+            // not bypass the shared Decision gate when a supervisor review is present.
+            // Elevated risk or a non-Commit verdict still requires a human even in the
+            // single-author flow (v0.17.0.12.15).
+            if let Some(review) = &pkg.supervisor_review {
+                let verdict = match review.verdict {
+                    ta_changeset::SupervisorVerdict::Pass => ta_decision::Verdict::Pass,
+                    ta_changeset::SupervisorVerdict::Warn => ta_decision::Verdict::Warn,
+                    ta_changeset::SupervisorVerdict::Block => ta_decision::Verdict::Block,
+                };
+                let decision = ta_decision::decide(
+                    &ta_decision::DecisionInput {
+                        verdict,
+                        risk_score: pkg.risk.risk_score,
+                        confidence: review.confidence,
+                    },
+                    &auto_approval_thresholds,
+                );
+                record_decision_telemetry(config, &pkg, decision, review.confidence);
+                if !decision.is_auto_approvable() {
+                    anyhow::bail!(
+                        "Draft \"{}\" cannot be auto-approved on apply: the Decision gate \
+                         returned {:?} (supervisor verdict {:?}, confidence {:.2}, risk score {}).\n\
+                         \n\
+                         Run `ta draft approve {}` after review, then re-run `ta draft apply {}`.\n\
+                         (Adjust `[draft.auto_approval]` thresholds in workflow.toml to change this.)",
+                        pkg.goal.title,
+                        decision,
+                        review.verdict,
+                        review.confidence,
+                        pkg.risk.risk_score,
+                        id,
+                        id
+                    );
+                }
             }
             pkg.status = DraftStatus::Approved {
                 approved_by: "auto (apply)".to_string(),
@@ -8948,19 +8985,22 @@ fn amend_package(
             pkg.changes.artifacts.len()
         );
     } else if let Some(corrected_file) = file_path {
-        // ── File replacement mode ──
+        // ── File replacement / addition mode ──
         let corrected_path = std::path::Path::new(corrected_file);
         if !corrected_path.exists() {
             anyhow::bail!("Corrected file not found: {}", corrected_file);
         }
 
-        // Find the artifact.
+        // Find the artifact, if one already exists for this URI. When absent,
+        // `--file` inserts a brand-new artifact (amend --add) instead of erroring —
+        // this recovers files an agent's change description claimed to touch
+        // (e.g. listed under `[deps: ...]`) that never became a tracked artifact.
         let artifact_idx = pkg
             .changes
             .artifacts
             .iter()
-            .position(|a| a.resource_uri == normalized_uri)
-            .ok_or_else(|| anyhow::anyhow!("Artifact not found in draft: {}", normalized_uri))?;
+            .position(|a| a.resource_uri == normalized_uri);
+        let is_new_artifact = artifact_idx.is_none();
 
         // Read the corrected content.
         let corrected_content = fs::read_to_string(corrected_path)?;
@@ -8997,10 +9037,14 @@ fn amend_package(
             None
         };
 
-        // Update the changeset in the store if we have a goal.
+        // Update the changeset in the store if we have a goal. Track the index the
+        // new/updated changeset lands at (JsonFileStore::save always appends), so a
+        // brand-new artifact's diff_ref resolves to real content instead of dangling.
+        let mut new_changeset_index: Option<usize> = None;
         if let Some(goal) = goal {
             let mut store = JsonFileStore::new(goal.store_path.clone())?;
             let goal_id_str = goal.goal_run_id.to_string();
+            new_changeset_index = store.list(&goal_id_str).ok().map(|l| l.len());
             let cs = if let Some(ref diff) = new_diff {
                 ChangeSet::new(
                     normalized_uri.clone(),
@@ -9034,12 +9078,42 @@ fn amend_package(
             fs::write(&staging_file, &corrected_content)?;
         }
 
-        // Update the artifact metadata.
-        let artifact = &mut pkg.changes.artifacts[artifact_idx];
+        // Update the artifact metadata — either the existing entry (replace) or a
+        // freshly-inserted one (add).
+        let (amendment_type, verb) = if is_new_artifact {
+            (AmendmentType::Added, "added")
+        } else {
+            (AmendmentType::FileReplaced, "amended")
+        };
+
+        let artifact = match artifact_idx {
+            Some(idx) => &mut pkg.changes.artifacts[idx],
+            None => {
+                pkg.changes.artifacts.push(Artifact {
+                    resource_uri: normalized_uri.clone(),
+                    change_type: ChangeType::Add,
+                    diff_ref: new_changeset_index
+                        .map(|i| format!("changeset:{}", i))
+                        .unwrap_or_else(|| normalized_uri.clone()),
+                    tests_run: vec![],
+                    disposition: ArtifactDisposition::Pending,
+                    rationale: None,
+                    dependencies: vec![],
+                    explanation_tiers: None,
+                    comments: None,
+                    amendment: None,
+                    kind: None,
+                });
+                pkg.changes
+                    .artifacts
+                    .last_mut()
+                    .expect("just pushed an artifact")
+            }
+        };
         artifact.amendment = Some(AmendmentRecord {
             amended_by: amended_by.to_string(),
             amended_at: Utc::now(),
-            amendment_type: AmendmentType::FileReplaced,
+            amendment_type,
             reason: reason.map(|s| s.to_string()),
         });
 
@@ -9048,9 +9122,13 @@ fn amend_package(
 
         // Record in decision log.
         pkg.plan.decision_log.push(DecisionLogEntry {
-            decision: format!("Human amended artifact: {}", normalized_uri),
+            decision: format!("Human {} artifact: {}", verb, normalized_uri),
             rationale: reason
-                .unwrap_or("Content replaced with corrected file")
+                .unwrap_or(if is_new_artifact {
+                    "Artifact inserted to match a description that referenced it but never tracked it"
+                } else {
+                    "Content replaced with corrected file"
+                })
                 .to_string(),
             alternatives: vec![],
             alternatives_considered: vec![],
@@ -9059,16 +9137,21 @@ fn amend_package(
         });
 
         save_package(config, &pkg)?;
-        println!(
-            "Amended artifact {} in draft {}",
-            normalized_uri, package_id
-        );
+        if is_new_artifact {
+            println!("Added artifact {} to draft {}", normalized_uri, package_id);
+        } else {
+            println!(
+                "Amended artifact {} in draft {}",
+                normalized_uri, package_id
+            );
+        }
         if new_diff.is_some() {
             println!("  Diff recomputed against source");
         }
         println!("  Disposition reset to: pending");
         println!(
-            "  Amended by: {} ({})",
+            "  {} by: {} ({})",
+            if is_new_artifact { "Added" } else { "Amended" },
             amended_by,
             Utc::now().format("%Y-%m-%d %H:%M UTC")
         );
@@ -9475,18 +9558,22 @@ fn close_package(
             if let Ok(Some(goal)) = store.get(goal_id) {
                 if let Some(ref phase_id) = goal.plan_phase {
                     let note = "phase reset to pending — draft closed";
-                    if let Err(e) = super::plan::reset_phase_if_in_progress(
+                    match super::plan::reset_phase_if_in_progress(
                         &config.workspace_root,
                         phase_id,
                         note,
                     ) {
-                        tracing::warn!(
-                            phase = %phase_id,
-                            error = %e,
-                            "Failed to reset plan phase on close"
-                        );
-                    } else {
-                        println!("Plan: phase {} reset to pending (draft closed)", phase_id);
+                        Ok(true) => {
+                            println!("Plan: phase {} reset to pending (draft closed)", phase_id);
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                phase = %phase_id,
+                                error = %e,
+                                "Failed to reset plan phase on close"
+                            );
+                        }
                     }
                     // Best-effort: tell the daemon to release the in-memory phase claim.
                     release_phase_claim_via_daemon(&config.workspace_root, phase_id);
@@ -10005,6 +10092,35 @@ pub fn save_package(config: &GatewayConfig, pkg: &DraftPackage) -> anyhow::Resul
     Ok(())
 }
 
+/// Per-action telemetry (v0.17.0.12.15): record the Decision gate's outcome so
+/// it's queryable per-goal via `ta_decision::Meter`, at `.ta/telemetry.jsonl`.
+///
+/// Best-effort — a telemetry write failure must never block `ta draft apply`.
+fn record_decision_telemetry(
+    config: &GatewayConfig,
+    pkg: &DraftPackage,
+    decision: ta_decision::Decision,
+    confidence: f64,
+) {
+    let goal_id = Uuid::parse_str(&pkg.goal.goal_id).unwrap_or(pkg.package_id);
+    let record = ta_decision::ActionRecord::new(
+        goal_id,
+        ta_decision::ActionKind::Decision,
+        "draft apply gate",
+    )
+    .with_confidence(confidence)
+    .with_risk_score(pkg.risk.risk_score)
+    .with_decision(decision);
+    let meter = ta_decision::Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+    if let Err(e) = meter.record(&record) {
+        tracing::warn!(
+            error = %e,
+            goal_id = %goal_id,
+            "Failed to record per-action telemetry for draft apply gate — apply proceeds regardless"
+        );
+    }
+}
+
 /// Serializable context produced by `ta run` before spawning an async draft build
 /// (v0.15.6.2). Written to `.ta/draft-build-ctx/<goal-id>.json`; read back by
 /// the background `ta draft build --apply-context-file` invocation.
@@ -10028,8 +10144,12 @@ pub fn apply_draft_build_context(
     let ctx_json = fs::read_to_string(ctx_path)?;
     let ctx: DraftBuildContext = serde_json::from_str(&ctx_json)?;
 
-    // Find the latest draft for this goal.
-    let Some(draft_id_str) = super::run::find_latest_draft_id(config, goal_id) else {
+    // Find the latest draft for this goal. Uses the raw package_id (UUID), not the
+    // canonical `<shortref>/<seq>` display form — draft.rs::build_package assigns a
+    // shortref/seq to every draft, so parsing that display form as a UUID always
+    // failed here previously, silently dropping verification_warnings/validation_log/
+    // supervisor_review for every draft (v0.17.0.12.11).
+    let Some(draft_uuid) = super::run::find_latest_draft_package_id(config, goal_id) else {
         tracing::warn!(
             goal_id = goal_id,
             "apply_draft_build_context: no draft found for goal"
@@ -10037,13 +10157,6 @@ pub fn apply_draft_build_context(
         // Remove the context file even on failure — it's stale either way.
         let _ = fs::remove_file(ctx_path);
         return Ok(());
-    };
-    let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id_str) else {
-        let _ = fs::remove_file(ctx_path);
-        anyhow::bail!(
-            "apply_draft_build_context: invalid draft UUID '{}'",
-            draft_id_str
-        );
     };
     let mut pkg = load_package(config, draft_uuid)?;
 
@@ -10053,7 +10166,10 @@ pub fn apply_draft_build_context(
     if !ctx.validation_log.is_empty() {
         pkg.validation_log = ctx.validation_log;
     }
-    if let Some(sup) = ctx.supervisor_review {
+    if let Some(mut sup) = ctx.supervisor_review {
+        // Pre-PASS consistency check: never let a PASS through when an artifact's
+        // own description references a file that isn't itself a tracked artifact.
+        ta_changeset::apply_artifact_consistency_gate(&mut sup, &pkg.changes.artifacts);
         pkg.supervisor_review = Some(sup);
     }
 
@@ -10142,7 +10258,9 @@ pub fn build_draft_inline(
             pkg.validation_log = validation_log.to_vec();
         }
         if let Some(sup) = supervisor_review {
-            pkg.supervisor_review = Some(sup.clone());
+            let mut sup = sup.clone();
+            ta_changeset::apply_artifact_consistency_gate(&mut sup, &pkg.changes.artifacts);
+            pkg.supervisor_review = Some(sup);
         }
         let _ = save_package(config, &pkg);
 
@@ -14043,6 +14161,183 @@ fn run() {
         assert_eq!(staging_content, "# Corrected version\n");
     }
 
+    // ── v0.17.0.12.11 amend --add: --file inserts a missing artifact ──
+
+    #[test]
+    fn amend_file_adds_new_artifact_when_missing() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Amend add test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test amend --add".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Make a change in staging so the draft has one tracked artifact.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+
+        // Build draft.
+        build_package(&config, &goal_id, "Test changes", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        assert_eq!(packages[0].changes.artifacts.len(), 1);
+
+        // A file the agent claimed to have changed but never became an artifact.
+        let missing = TempDir::new().unwrap();
+        let missing_path = missing.path().join("missing.md");
+        std::fs::write(&missing_path, "# CLAUDE.md fix\n").unwrap();
+
+        // amend --add: --file on a URI that isn't in the draft inserts it instead of erroring.
+        amend_package(
+            &config,
+            &pkg_id,
+            "CLAUDE.md",
+            Some(missing_path.to_str().unwrap()),
+            false,
+            Some("Recovering an artifact the agent described but never tracked"),
+            "human",
+        )
+        .unwrap();
+
+        let updated = load_package(&config, packages[0].package_id).unwrap();
+        assert_eq!(updated.changes.artifacts.len(), 2);
+
+        let added = updated
+            .changes
+            .artifacts
+            .iter()
+            .find(|a| a.resource_uri.contains("CLAUDE.md"))
+            .expect("CLAUDE.md should now be a tracked artifact");
+        assert_eq!(added.change_type, ChangeType::Add);
+        assert_eq!(added.disposition, ArtifactDisposition::Pending);
+        let amend = added.amendment.as_ref().expect("amendment record expected");
+        assert_eq!(amend.amendment_type, AmendmentType::Added);
+        assert_eq!(amend.amended_by, "human");
+
+        // Decision log entry should exist.
+        assert!(updated
+            .plan
+            .decision_log
+            .iter()
+            .any(|d| d.decision.contains("added") && d.decision.contains("CLAUDE.md")));
+
+        // New file should be written into the staging workspace.
+        let staging_content =
+            std::fs::read_to_string(goal.workspace_path.join("CLAUDE.md")).unwrap();
+        assert_eq!(staging_content, "# CLAUDE.md fix\n");
+    }
+
+    // ── v0.17.0.12.11 Pre-PASS artifact/description consistency check ──
+
+    #[test]
+    fn apply_draft_build_context_downgrades_inconsistent_pass_verdict() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Consistency gate test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test pre-PASS consistency gate".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Only README.md actually changes in staging — CLAUDE.md is never touched,
+        // so it never becomes its own tracked artifact.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+
+        // But the agent's change_summary.json claims README.md's change depends on
+        // CLAUDE.md — the exact "[deps: ...] mentions a file that isn't tracked"
+        // inconsistency from the 2026-07-03 incident.
+        std::fs::create_dir_all(goal.workspace_path.join(".ta")).unwrap();
+        std::fs::write(
+            goal.workspace_path.join(".ta/change_summary.json"),
+            r#"{
+                "summary": "Updated README",
+                "changes": [
+                    {
+                        "path": "README.md",
+                        "action": "modified",
+                        "what": "Updated README",
+                        "why": "Test",
+                        "depends_on": ["CLAUDE.md"],
+                        "depended_by": [],
+                        "independent": false
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        build_package(&config, &goal_id, "Test changes", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        assert_eq!(packages[0].changes.artifacts.len(), 1);
+
+        // Simulate the async draft-build path attaching a PASS verdict via a
+        // deferred DraftBuildContext file.
+        let ctx = DraftBuildContext {
+            goal_id: goal_id.clone(),
+            verification_warnings: vec![],
+            validation_log: vec![],
+            supervisor_review: Some(ta_changeset::supervisor_review::SupervisorReview {
+                verdict: ta_changeset::supervisor_review::SupervisorVerdict::Pass,
+                scope_ok: true,
+                findings: vec![],
+                summary: "Looks aligned".to_string(),
+                agent: "claude-code".to_string(),
+                duration_secs: 1.0,
+                confidence: 0.95,
+            }),
+        };
+        let ctx_path = project.path().join("ctx.json");
+        std::fs::write(&ctx_path, serde_json::to_string(&ctx).unwrap()).unwrap();
+
+        apply_draft_build_context(&config, &goal_id, &ctx_path).unwrap();
+
+        let updated = load_package(&config, packages[0].package_id).unwrap();
+        let review = updated
+            .supervisor_review
+            .expect("supervisor review should be attached");
+        assert_eq!(
+            review.verdict,
+            ta_changeset::supervisor_review::SupervisorVerdict::Warn,
+            "PASS must be downgraded when a described file isn't tracked as an artifact"
+        );
+        assert!(review
+            .findings
+            .iter()
+            .any(|f| f.contains("described but not tracked") && f.contains("CLAUDE.md")));
+    }
+
     #[test]
     fn amend_rejects_invalid_state() {
         let project = TempDir::new().unwrap();
@@ -16266,7 +16561,7 @@ fn run() {
 
     #[test]
     fn matches_file_filters_always_shows_ta_memory_uri() {
-        use ta_changeset::output_adapters::matches_file_filters;
+        use ta_changeset::output_renderers::matches_file_filters;
         // ta://memory/ URIs should always pass through, even with file filters active.
         assert!(matches_file_filters(
             "ta://memory/some-goal-id",
@@ -16497,6 +16792,182 @@ fn run() {
             "error should suggest ta draft approve: {}",
             msg
         );
+    }
+
+    /// v0.17.0.12.15: even with `approval_required = false` ("apply implies
+    /// approval"), a supervisor review with a low-confidence Warn verdict must
+    /// still be escalated to a human via the shared Decision gate, not silently
+    /// auto-approved.
+    #[test]
+    fn apply_blocked_when_supervisor_review_signals_escalate() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Decision gate escalate test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test the decision gate".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Decision gate escalate test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let mut pkg = packages[0].clone();
+        pkg.supervisor_review = Some(ta_changeset::supervisor_review::SupervisorReview {
+            verdict: ta_changeset::supervisor_review::SupervisorVerdict::Warn,
+            scope_ok: true,
+            findings: vec!["Minor scope drift".to_string()],
+            summary: "Some concerns".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.2, // below min_confidence — Warn + low confidence => Escalate
+        });
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+
+        let err = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Decision gate"),
+            "error should mention the Decision gate: {}",
+            msg
+        );
+        assert!(
+            msg.contains("ta draft approve"),
+            "error should suggest ta draft approve: {}",
+            msg
+        );
+
+        // Draft must remain in PendingReview — the gate must not have mutated state.
+        let reloaded = load_all_packages(&config)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.package_id.to_string() == pkg_id)
+            .unwrap();
+        assert!(matches!(reloaded.status, DraftStatus::PendingReview));
+
+        // Per-action telemetry (v0.17.0.12.15): the Decision gate's outcome
+        // must be recorded and queryable by goal ID.
+        let meter = ta_decision::Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+        let records = meter
+            .query_by_goal(Uuid::parse_str(&goal_id).unwrap())
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, ta_decision::ActionKind::Decision);
+        assert_eq!(records[0].decision, Some(ta_decision::Decision::Escalate));
+        assert_eq!(records[0].confidence, Some(0.2));
+    }
+
+    /// v0.17.0.12.15: a supervisor review with a clean Pass verdict, high
+    /// confidence, and low risk score must still auto-approve on apply —
+    /// the Decision gate should not regress the existing single-author flow.
+    #[test]
+    fn apply_auto_approves_when_supervisor_review_signals_commit() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Decision gate commit test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test the decision gate".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Decision gate commit test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let mut pkg = packages[0].clone();
+        pkg.supervisor_review = Some(ta_changeset::supervisor_review::SupervisorReview {
+            verdict: ta_changeset::supervisor_review::SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![],
+            summary: "Looks good".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.95,
+        });
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap();
+
+        let reloaded = load_all_packages(&config)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.package_id.to_string() == pkg_id)
+            .unwrap();
+        assert!(matches!(reloaded.status, DraftStatus::Applied { .. }));
+
+        let meter = ta_decision::Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+        let records = meter
+            .query_by_goal(Uuid::parse_str(&goal_id).unwrap())
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].decision, Some(ta_decision::Decision::Commit));
     }
 
     // ── v0.15.14.1: ta draft <unknown> clap dispatch boundary ────────────────

@@ -89,8 +89,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Show Rust toolchain
+        # windows-latest ships rustup preinstalled; it auto-installs and selects
+        # whatever `rust-toolchain.toml` pins on the first cargo/rustc invocation
+        # below, the same file `flake.nix` reads for the ubuntu/macos Nix jobs.
+        # No install step needed — this just makes the resolved version visible
+        # in CI logs instead of relying on silent auto-resolution.
+        run: rustc --version && cargo --version
 
       - name: Build all crates
         run: cargo build --workspace --all-targets

@@ -13,7 +13,7 @@ use std::process::Command;
 use clap::Subcommand;
 
 /// `ta daemon` subcommands.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum DaemonCommands {
     /// Start the daemon in the background.
     Start {
@@ -1433,9 +1433,10 @@ fn cmd_config_show(project_root: &Path) -> anyhow::Result<()> {
     if daemon_toml.exists() {
         // Show which source provided the agent.
         let content = std::fs::read_to_string(&daemon_toml).unwrap_or_default();
-        let has_agent_section = content.contains("[agent]");
-        if has_agent_section {
-            println!("  Source:          daemon.toml [agent].default_framework");
+        if content.contains("default =") {
+            println!("  Source:          daemon.toml [agent].default");
+        } else if content.contains("default_framework") {
+            println!("  Source:          daemon.toml [agent].default_framework (legacy)");
         } else {
             println!("  Source:          built-in default");
         }
@@ -1446,7 +1447,7 @@ fn cmd_config_show(project_root: &Path) -> anyhow::Result<()> {
     println!();
     println!("To change the default agent, add to .ta/daemon.toml:");
     println!("  [agent]");
-    println!("  default_framework = \"codex\"  # or: claude-code, claude-flow, ...");
+    println!("  default = \"codex\"  # or: claude-code, claude-flow, ...");
 
     Ok(())
 }

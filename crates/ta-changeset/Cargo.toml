@@ -13,6 +13,7 @@ categories = ["development-tools"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
+schemars = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }

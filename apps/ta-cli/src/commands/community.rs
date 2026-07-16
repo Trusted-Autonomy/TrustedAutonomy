@@ -95,7 +95,7 @@ impl Registry {
 // Subcommands
 // ---------------------------------------------------------------------------
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum CommunityCommands {
     /// List configured community resources with access level and cache status.
     List {

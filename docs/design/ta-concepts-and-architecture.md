@@ -430,3 +430,38 @@ User's actual goal, stated directly: TA should accelerate their own work, but se
 **Studio stays what it already is**: a separately-deployable add-on against the daemon's HTTP/SSE API, with one added discipline going forward — it may never special-case internal Rust types, only the versioned spec.
 
 **Immediate reliability win sitting unaddressed, unrelated to this reorg**: `daemon.log` has been flagged at 5.2GB (threshold 500MB) by multiple recent `ta run` launches — `ta doctor --fix` rotates it. Small, but a real, available win toward the user's actual stated goal (less friction, more reliability) that doesn't require any of the above design work.
+
+---
+
+## 14. Workflow-First: A Lens on Every New Capability (2026-07-06)
+
+New standing principle (`TA-CONSTITUTION.md` §1.8): before building a new capability as compiled Rust code, ask whether it can instead be expressed as a **workflow** — an agent-orchestration composition over TA's existing agent-runtime and consensus infrastructure — since workflow is data/script-defined (composable, community-shareable, changeable without a recompile) where code is not. Code is justified only with a stated reason, and "performance" specifically requires a measured, named bottleneck, not an assumption.
+
+**The triggering worked example — Red Team Review.** Reviewing a completed goal/draft adversarially (actively trying to refute it, not just reading the implementer's own self-report) is fundamentally a multi-agent composition: N independent skeptics, each prompted to find what's *not* actually robust, with disagreement surfaced rather than averaged away. This is exactly the `parallel()` + adversarial-verify shape already used elsewhere (and structurally the same idea as the already-shipped `ConsensusAlgorithm`/`code-review-consensus.toml` template, v0.15.15). It should ship as a **reusable workflow module** — callable on any merged PR/draft — not a new Rust subsystem. Same reasoning applies to the mock-stakeholder review panel (§10-style personas — engineer/PM/artist/exec-sponsor — each independently assessing the finished product): a workflow composition, not new code.
+
+**Applying the lens to the phases already queued this session** (honest audit, not just theory):
+- **v0.17.0.12.14 (plugin unification), 12.16 (CLI consolidation), 12.17 (Studio IA), 12.18 (log rotation), 12.21 (data-format specs)** — genuinely code. These are core platform plumbing that workflows *run on top of*; there's no orchestration-composition equivalent for a shared Rust trait, a CLI arg parser, a frontend, a daemon lifecycle hook, or a machine-checkable schema.
+- **v0.17.0.12.15 (Write/Review/Decision/Commit graph)** — mostly code (the `Decision` gate function, telemetry recording are mechanism, not orchestration) — but note the **Review** stage itself is *already* workflow-composable prior art (the consensus engine): this section's principle isn't new invention, it's naming a pattern TA already has one working instance of.
+- **v0.17.0.12.19 (`ta-intake` triggers)** — the `TriggerEvent` type/trait is genuinely code, but per-type trigger configs are explicitly data (`.ta/triggers/<type>.toml`) already — good alignment, no change needed.
+- **v0.17.0.12.20 (`ta-brain` routing)** — the `route()` pure function is genuinely code (needs to be a fast, deterministic, testable library call from two entry points). But if the "team coordinator" ends up being a persistent process that watches an incoming-request queue and dispatches — that's a stronger candidate to build as a workflow (a polling orchestration script calling `ta-brain::route()`) than as a new always-on Rust daemon subsystem. Flagged to reconsider when that phase is actually scoped in detail, not decided now.
+- **Red Team Review** (new) and the **mock stakeholder review panel** (v0.17.0.12.23, queued) — workflow, not code, per the worked example above.
+
+**Visual node-based workflow builder in Studio** — raised 2026-07-06, plausible and a natural fit given the graph-shaped architecture (§9, `ta-brain`, `workflow.toml`), but explicitly scoped to **v0.18+, as an add-on to 0.17, and must not delay 0.17.0.12.x completion**. Needs v0.17.0.12.21's data-format specs to exist first (the builder needs a stable schema to serialize to/from) — sequencing, not scope, is why it's deferred.
+
+---
+
+## 15. Where Maintenance Tools (`ta doctor`, `ta gc`) Fit — Tier 0, Not Part of the Graph
+
+Raised 2026-07-06: this wasn't addressed anywhere in §1-14. Working through it plainly:
+
+**`ta doctor` isn't a Trigger, isn't the Brain, and isn't part of the Write/Review/Decision/Commit/Reject graph at all.** What it actually checks — daemon health, disk pressure, stale goals/staging dirs/drafts, gitignore coverage, version/plan drift, log size — is the health of **the substrate the three tiers run on top of**, not anything about a specific goal or a specific routing decision. Every other concept in this doc (§9's graph, §13's 3-tier model, `ta-intake`/`ta-brain`) is about *doing work correctly*. `ta doctor` is about *keeping the workshop itself in good repair* so that work can happen at all.
+
+**In plain terms** (matching `what-is-ta.md`'s "contractor" framing): if the AI worker is a contractor and the staging copy is their private jobsite, `ta doctor` is facility maintenance for the office building the contractors work out of — checking the lights, the plumbing, whether the parking lot is full. It has nothing to do with any particular job; it's what keeps the building usable for the next one. Call this **Tier 0**, orthogonal to Triggers/Brain/Back-office, not a fourth tier stacked on top of them.
+
+**Where it sits in the 4-category extensibility model (§2.2)**: `ta doctor`'s checks are in-process, core-only diagnostics — a **Backend**, same category as build backends (v0.17.0.12.12's rename). Not a Plugin (nothing external/community-contributable about disk-space checks), not a Channel/Listener, not a Resource-list.
+
+**Should it be a workflow, per §1.8/§14?** No — and this is a useful *contrasting* example to the Red Team Review one. §1.8's workflow-first lens applies to capabilities that benefit from an LLM agent's judgment or multi-perspective composition. `ta doctor`'s checks are fast, deterministic, mechanical (file exists? process alive? disk bytes free?) with no judgment call involved — there's nothing an agent's reasoning would add. This is a legitimate, non-performance reason to stay code: **the task has no judgment component**, distinct from "it might be slow" (the one justification §1.8 explicitly rejects without measurement).
+
+**`ta gc`** is the same Tier-0 backend, just the non-interactive alias (`doctor --fix --yes`) for cron/unattended use — not a separate concept.
+
+**Action taken**: none needed to the already-queued phases — this doesn't change any of v0.17.0.12.14-22's scope. Worth a one-line mention in the `what-is-ta.md` refresh (v0.17.0.12.22) so a reader doesn't wonder where housekeeping fits after reading about Triggers/Brain/Back-office.

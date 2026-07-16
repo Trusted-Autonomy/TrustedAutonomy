@@ -34,7 +34,7 @@
 // | shutdown   | Clean up the plugin session; plugin exits after reply  |
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
@@ -156,26 +156,21 @@ struct PluginProcess {
 
 impl PluginProcess {
     /// Send a request and read back one response line.
+    ///
+    /// Line framing delegates to the shared `ta_plugin::transport` crate
+    /// (also used by VCS/messaging/social plugins) — this is a long-lived
+    /// process (spawn once, many calls), so it keeps its own `Child`/
+    /// `stdin`/`stdout_reader` rather than using `call_json`'s per-call spawn.
     fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let req = PluginRequest {
             method: method.to_string(),
             params,
         };
-        let mut line = serde_json::to_string(&req)
-            .map_err(|e| RuntimeError::PluginError(format!("serialize request: {}", e)))?;
-        line.push('\n');
+        ta_plugin::transport::write_line(&mut self.stdin, &req)
+            .map_err(|e| RuntimeError::PluginError(e.to_string()))?;
 
-        self.stdin
-            .write_all(line.as_bytes())
-            .map_err(RuntimeError::Io)?;
-
-        let mut response_line = String::new();
-        self.stdout_reader
-            .read_line(&mut response_line)
-            .map_err(RuntimeError::Io)?;
-
-        let resp: PluginResponse = serde_json::from_str(response_line.trim())
-            .map_err(|e| RuntimeError::PluginError(format!("parse response: {}", e)))?;
+        let resp: PluginResponse = ta_plugin::transport::read_line(&mut self.stdout_reader)
+            .map_err(|e| RuntimeError::PluginError(e.to_string()))?;
 
         if resp.ok {
             Ok(resp.result)
@@ -269,6 +264,17 @@ impl ExternalRuntimeAdapter {
             capabilities: handshake.capabilities,
             process: Mutex::new(proc),
         })
+    }
+
+    /// Resolve `name` via `.ta/plugins/agent/<name>/plugin.toml` discovery
+    /// (project-local then user-global), falling back to treating `name`
+    /// as a bare command on PATH if no manifest is found.
+    pub fn discover(name: &str, project_root: &Path) -> Result<Self> {
+        let command = match ta_plugin::find_plugin("agent", name, project_root) {
+            Some(found) => found.plugin_dir.join(&found.manifest.command),
+            None => PathBuf::from(name),
+        };
+        Self::new(&command, name)
     }
 
     /// Plugin version string (from handshake).
@@ -450,5 +456,20 @@ impl AgentHandle for ExternalAgentHandle {
         .unwrap();
         self.call_plugin("stop", params)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_falls_back_to_bare_name_when_no_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .ta/plugins/agent/<name>/plugin.toml exists — discover() must not
+        // panic and must fall back to a bare-name command (which then fails to
+        // spawn, since "definitely-not-a-real-binary" doesn't exist on PATH).
+        let result = ExternalRuntimeAdapter::discover("definitely-not-a-real-binary", dir.path());
+        assert!(result.is_err());
     }
 }

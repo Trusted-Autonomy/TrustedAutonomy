@@ -35,6 +35,7 @@ pub mod project_new;
 pub mod settings;
 pub mod stats;
 pub mod status;
+pub mod team;
 pub mod webhooks;
 pub mod workflow;
 
@@ -510,6 +511,11 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/links", get(links::get_links))
         // Agent profile inventory (v0.16.3).
         .route("/api/agents/profiles", get(agent_profiles::list_profiles))
+        // Team/role assignment (v0.17.0.12.17 item 3): `.ta/team.toml` had no
+        // Studio UI at all before this — see api/team.rs.
+        .route("/api/team", get(team::list_team))
+        .route("/api/team/assign", post(team::assign_team_member))
+        .route("/api/team/{role}", delete(team::remove_team_member))
         // Daemon lifecycle routes (v0.10.10 / v0.17.0.12.2).
         .route("/api/shutdown", post(shutdown_daemon))
         .route("/api/drain/status", get(drain::drain_status))

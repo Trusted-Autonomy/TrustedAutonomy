@@ -6,7 +6,7 @@ use clap::Subcommand;
 use ta_changeset::channel_registry::{self, default_registry};
 use ta_mcp_gateway::GatewayConfig;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ConfigCommands {
     /// Show resolved channel configuration — which channels are active,
     /// their types, capabilities, and status.

@@ -105,6 +105,7 @@ pub async fn save_persona(
             description: body.description.clone(),
             system_prompt: body.system_prompt.clone(),
             constitution: None,
+            agent: None,
         },
         capabilities: ta_goal::PersonaCapabilities {
             allowed_tools: body.allowed_tools.clone(),
