@@ -148,20 +148,30 @@ const VALIDATOR_MARKER: &str = "HUMAN_VERIFY_VALIDATOR_JSON:";
 pub struct HeadlessSyntheticPipeline {
     workspace_root: PathBuf,
     ta_bin: PathBuf,
+    /// Rolling sample of confirmed red-team misses for this call's
+    /// `workload_type`, folded into the opinion/validator prompts as
+    /// few-shot context (v0.17.0.12.27 item 4a) so a confirmed miss changes
+    /// future behavior instead of silently recurring.
+    recent_misses: Vec<crate::verify_audit::VerifyFailureRecord>,
 }
 
 impl HeadlessSyntheticPipeline {
-    pub fn new(workspace_root: PathBuf, ta_bin: PathBuf) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        ta_bin: PathBuf,
+        recent_misses: Vec<crate::verify_audit::VerifyFailureRecord>,
+    ) -> Self {
         Self {
             workspace_root,
             ta_bin,
+            recent_misses,
         }
     }
 }
 
 impl SyntheticPipeline for HeadlessSyntheticPipeline {
     fn opinion(&self, question: &str, context: Option<&str>) -> Result<OpinionResult, String> {
-        let content = build_opinion_context(question, context);
+        let content = build_opinion_context(question, context, &self.recent_misses);
         let context_path = write_context_file(&self.workspace_root, "opinion-context", &content)
             .map_err(|e| format!("failed to write opinion context file: {e}"))?;
 
@@ -182,7 +192,7 @@ impl SyntheticPipeline for HeadlessSyntheticPipeline {
         context: Option<&str>,
         opinion: &OpinionResult,
     ) -> Result<ValidatorResult, String> {
-        let content = build_validator_context(question, context, opinion);
+        let content = build_validator_context(question, context, opinion, &self.recent_misses);
         let context_path = write_context_file(&self.workspace_root, "validator-context", &content)
             .map_err(|e| format!("failed to write validator context file: {e}"))?;
 
@@ -198,7 +208,36 @@ impl SyntheticPipeline for HeadlessSyntheticPipeline {
     }
 }
 
-fn build_opinion_context(question: &str, context: Option<&str>) -> String {
+/// Render a "known past mistakes" section from a rolling sample of confirmed
+/// red-team misses for this workload, or an empty string if there are none
+/// yet. Shared by both the opinion and validator prompt builders (v0.17.0.12.27
+/// item 4a) -- this is how a human-confirmed wrong `Commit` changes future
+/// behavior instead of the identical mistake silently recurring.
+fn render_few_shot_misses(recent_misses: &[crate::verify_audit::VerifyFailureRecord]) -> String {
+    if recent_misses.is_empty() {
+        return String::new();
+    }
+    let mut section = String::new();
+    section.push_str(
+        "## Known past mistakes for this workload\n\n\
+         A red-team review previously found that an auto-confirmed answer for \
+         this workload was actually wrong, in each of these cases. Learn from \
+         them -- do not repeat the same failure pattern.\n\n",
+    );
+    for miss in recent_misses {
+        section.push_str(&format!(
+            "- Q: {}\n  Wrong answer given: {}\n  What was actually wrong: {}\n\n",
+            miss.question, miss.opinion.answer, miss.red_team_explanation
+        ));
+    }
+    section
+}
+
+fn build_opinion_context(
+    question: &str,
+    context: Option<&str>,
+    recent_misses: &[crate::verify_audit::VerifyFailureRecord],
+) -> String {
     let mut ctx = String::new();
     ctx.push_str("# ta_human_verify — Opinion Pass\n\n");
     ctx.push_str(
@@ -211,6 +250,7 @@ fn build_opinion_context(question: &str, context: Option<&str>) -> String {
     if let Some(c) = context {
         ctx.push_str(&format!("## Context\n\n{c}\n\n"));
     }
+    ctx.push_str(&render_few_shot_misses(recent_misses));
     ctx.push_str(
         "## Output protocol\n\n\
          Do your reasoning, then print exactly one final line to stdout of \
@@ -226,6 +266,7 @@ fn build_validator_context(
     question: &str,
     context: Option<&str>,
     opinion: &OpinionResult,
+    recent_misses: &[crate::verify_audit::VerifyFailureRecord],
 ) -> String {
     let mut ctx = String::new();
     ctx.push_str("# ta_human_verify — Validator Pass\n\n");
@@ -244,6 +285,7 @@ fn build_validator_context(
         "## Opinion model's answer\n\n**Answer**: {}\n\n**Reasoning**: {}\n\n**Self-reported confidence**: {:.2}\n\n",
         opinion.answer, opinion.reasoning, opinion.confidence
     ));
+    ctx.push_str(&render_few_shot_misses(recent_misses));
     ctx.push_str(
         "## Your job\n\n\
          Critique the reasoning above — is it sound, does it actually answer \
@@ -266,7 +308,11 @@ fn build_validator_context(
 /// Write a fresh context file under `.ta/human-verify/<uuid>/<label>.md`,
 /// mirroring `advisor_agent::write_advisor_context`'s per-invocation
 /// directory scheme.
-fn write_context_file(
+///
+/// `pub(crate)`: also reused by `verify_audit::HeadlessRedTeamPipeline`
+/// (v0.17.0.12.27), which spawns the same kind of headless subprocess for
+/// its adversarial review pass.
+pub(crate) fn write_context_file(
     workspace_root: &Path,
     label: &str,
     content: &str,
@@ -292,7 +338,10 @@ fn write_context_file(
 /// in the pre-existing `advisor_agent::spawn_advisor_agent`, which sets
 /// `TA_ADVISOR_CONTEXT_FILE` but nothing reads it either). `--objective-file`
 /// is the real, working mechanism for this.
-fn spawn_headless_and_capture(
+///
+/// `pub(crate)`: also reused by `verify_audit::HeadlessRedTeamPipeline`
+/// (v0.17.0.12.27) -- same spawn-and-capture shape, different prompt.
+pub(crate) fn spawn_headless_and_capture(
     ta_bin: &Path,
     workspace_root: &Path,
     goal_title: &str,
@@ -338,7 +387,10 @@ fn spawn_headless_and_capture(
 /// Find the `marker: {json}` line in captured stdout/stderr and parse the
 /// JSON payload, mirroring `spawn_advisor_agent`'s `"goal_id: "` line
 /// extraction from subprocess output.
-fn extract_marker_json<T: serde::de::DeserializeOwned>(
+///
+/// `pub(crate)`: also reused by `verify_audit::HeadlessRedTeamPipeline`
+/// (v0.17.0.12.27) to parse its own marker line.
+pub(crate) fn extract_marker_json<T: serde::de::DeserializeOwned>(
     stdout: &str,
     stderr: &str,
     marker: &str,
@@ -391,7 +443,10 @@ fn load_workflow_toml(workspace_root: &Path) -> HumanVerifyWorkflowToml {
 /// table layers over the built-in default, then `[human_verify.<workload_type>]`
 /// layers over that — each table only needs to override the fields it cares
 /// about (v0.17.0.12.26 item 4).
-fn load_thresholds(workspace_root: &Path, workload_type: &str) -> DecisionThresholds {
+///
+/// `pub(crate)`: also reused by `verify_audit::run_redteam_review`
+/// (v0.17.0.12.27) to compute a threshold-tightening proposal's baseline.
+pub(crate) fn load_thresholds(workspace_root: &Path, workload_type: &str) -> DecisionThresholds {
     let toml = load_workflow_toml(workspace_root);
     let base = toml
         .human_verify
@@ -443,6 +498,10 @@ fn resolve_workload_context(workspace_root: &Path) -> (String, AdvisorSecurity) 
 
 #[derive(Debug, Serialize)]
 struct HumanVerifyAuditEntry<'a> {
+    /// Identifies this entry so a later red-team review pass
+    /// (`verify_audit::run_redteam_review`, v0.17.0.12.27) can record which
+    /// entries it has already looked at.
+    id: Uuid,
     timestamp: String,
     question: &'a str,
     context: Option<&'a str>,
@@ -497,7 +556,12 @@ pub fn handle_human_verify(
         locked.config.workspace_root.clone()
     };
     let ta_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ta"));
-    let pipeline = HeadlessSyntheticPipeline::new(workspace_root, ta_bin);
+    // Resolved again inside handle_human_verify_with_pipeline for gating --
+    // cheap (a small JSONL tail read) and keeps that function's signature
+    // and existing tests (which call it directly) unchanged.
+    let (workload_type, _security_tier) = resolve_workload_context(&workspace_root);
+    let recent_misses = crate::verify_audit::load_recent_misses(&workspace_root, &workload_type, 5);
+    let pipeline = HeadlessSyntheticPipeline::new(workspace_root, ta_bin, recent_misses);
     handle_human_verify_with_pipeline(state, params, &pipeline)
 }
 
@@ -587,8 +651,15 @@ fn handle_human_verify_with_pipeline(
         "ta_human_verify: synthetic pipeline decision"
     );
 
+    // Every *rendered* gate decision, not just Commit, so per-workload
+    // metrics (v0.17.0.12.27 item 5) have a real denominator -- the
+    // Commit-only `.ta/human-verify-audit.jsonl` below can't answer "what
+    // fraction of decisions were auto-confirmed" on its own.
+    crate::verify_audit::record_invocation(&workspace_root, &workload_type, decision);
+
     if decision.is_auto_approvable() {
         let entry = HumanVerifyAuditEntry {
+            id: Uuid::new_v4(),
             timestamp: Utc::now().to_rfc3339(),
             question: &params.question,
             context: params.context.as_deref(),
@@ -986,5 +1057,71 @@ mod tests {
             "got: {}",
             text
         );
+    }
+
+    /// v0.17.0.12.27 item 6: a seeded confirmed-miss must correctly appear
+    /// in future opinion-pass (and validator-pass) few-shot context for its
+    /// workload, so a human-confirmed wrong `Commit` changes future behavior
+    /// instead of the identical mistake silently recurring.
+    #[test]
+    fn seeded_confirmed_miss_appears_in_future_opinion_and_validator_context() {
+        use crate::verify_audit::{append_verify_failure, load_recent_misses, VerifyFailureRecord};
+
+        let dir = tempdir().unwrap();
+        let miss = VerifyFailureRecord {
+            id: uuid::Uuid::new_v4(),
+            audit_entry_id: uuid::Uuid::new_v4(),
+            workload_type: "docs".to_string(),
+            question: "Should we ship the v2 API docs?".to_string(),
+            context: Some("All tests pass.".to_string()),
+            opinion: OpinionResult {
+                answer: "Yes, ship it.".to_string(),
+                reasoning: "All checks green.".to_string(),
+                confidence: 0.95,
+            },
+            validator: ValidatorResult {
+                verdict: Verdict::Pass,
+                risk_score: 5,
+                confidence: 0.95,
+                reasoning: "Sound reasoning, low stakes.".to_string(),
+            },
+            red_team_explanation: "The docs described a removed endpoint as still supported."
+                .to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        };
+        append_verify_failure(dir.path(), &miss).unwrap();
+
+        // A different workload's misses must not leak in.
+        let mut unrelated = miss.clone();
+        unrelated.id = uuid::Uuid::new_v4();
+        unrelated.workload_type = "security".to_string();
+        unrelated.red_team_explanation = "unrelated workload, must not appear".to_string();
+        append_verify_failure(dir.path(), &unrelated).unwrap();
+
+        let recent_misses = load_recent_misses(dir.path(), "docs", 5);
+        assert_eq!(recent_misses.len(), 1);
+
+        let opinion_ctx = build_opinion_context("A new question", None, &recent_misses);
+        assert!(
+            opinion_ctx.contains("The docs described a removed endpoint as still supported."),
+            "got: {opinion_ctx}"
+        );
+        assert!(!opinion_ctx.contains("unrelated workload, must not appear"));
+
+        let opinion = OpinionResult {
+            answer: "Yes".to_string(),
+            reasoning: "Looks fine".to_string(),
+            confidence: 0.9,
+        };
+        let validator_ctx =
+            build_validator_context("A new question", None, &opinion, &recent_misses);
+        assert!(
+            validator_ctx.contains("The docs described a removed endpoint as still supported."),
+            "got: {validator_ctx}"
+        );
+
+        // No seeded misses -> no "known past mistakes" section at all.
+        let empty_ctx = build_opinion_context("A new question", None, &[]);
+        assert!(!empty_ctx.contains("Known past mistakes"));
     }
 }

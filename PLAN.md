@@ -9618,7 +9618,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.27 — Red-Team Autoreward: Adversarial Validation of Auto-Confirmed Verifications
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.26 (`ta_human_verify` + its audit trail)
 
 **What "autoreward" means here**: not model training — TA's headless-CLI-agent architecture has no fine-tuning step. It means closing the feedback loop *procedurally*, using primitives TA already has (audit logs, threshold config, few-shot prompt context): a wrong auto-confirm gets caught, recorded, and changes future behavior — instead of the identical mistake silently recurring.
@@ -9632,13 +9632,13 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 | 3 | **No feedback loop** | Even when a human later discovers a `Commit` decision was wrong, nothing today records it or changes future behavior — the same mistake pattern can recur indefinitely for that `workload_type`. | Item 4, two parts: (a) confirmed misses get folded into future opinion/validator prompts as few-shot context for that workload; (b) misses clustering above a configurable rate auto-*propose* (never silently apply) a threshold tightening, requiring human approval — thresholds are a trust boundary, so changing them without a human in the loop would defeat the point. |
 
 **Items**:
-1. [ ] `ta verify audit [--sample N] [--workload <type>]` (or scheduled via a `ta-intake` trigger, per 12.19's data-defined trigger pattern): samples `Commit`-decision entries from `.ta/human-verify-audit.jsonl` not yet red-team-reviewed.
-2. [ ] Red-team agent: a headless pass distinctly framed from the validator — not "is this reasoning sound" but "assume this is wrong; find the failure the opinion+validator pair missed" (adversarial framing, explicit in the prompt). Produces a verdict (confirmed-correct / confirmed-miss) + explanation.
-3. [ ] Confirmed misses: append to `.ta/verify-failures.jsonl` (committed, not gitignored — this is a durable calibration dataset, not a per-run operational log) with the original question/opinion/validator output/red-team explanation.
-4. [ ] Feedback loop, both mechanisms (no literal RL/fine-tuning): (a) include a rolling sample of confirmed misses for the relevant `workload_type` as few-shot context in future opinion/validator prompts for that workload; (b) auto-propose (not silently apply) a `DecisionThresholds` tightening for any `workload_type` where misses cluster above a configurable rate, surfaced to a human for approval rather than applied automatically — thresholds are a trust boundary, changing them silently would defeat the point.
-5. [ ] Metrics surfaced via existing observability commands (`ta stats` or equivalent): auto-confirm rate, red-team-catch rate, and false-auto-confirm rate, per `workload_type`, over time.
-6. [ ] Tests: a seeded confirmed-miss correctly appears in future opinion-pass few-shot context for its workload; threshold-tightening proposal fires only above the configured miss-rate and never applies without human approval; metrics aggregate correctly across a mixed sample of hits/misses.
-7. [ ] USAGE.md: document the red-team loop, `verify-failures.jsonl`'s role as a durable dataset (not a log to prune), and how to review/approve a threshold-tightening proposal.
+1. [x] `ta verify audit [--sample N] [--workload <type>]` (or scheduled via a `ta-intake` trigger, per 12.19's data-defined trigger pattern): samples `Commit`-decision entries from `.ta/human-verify-audit.jsonl` not yet red-team-reviewed.
+2. [x] Red-team agent: a headless pass distinctly framed from the validator — not "is this reasoning sound" but "assume this is wrong; find the failure the opinion+validator pair missed" (adversarial framing, explicit in the prompt). Produces a verdict (confirmed-correct / confirmed-miss) + explanation.
+3. [x] Confirmed misses: append to `.ta/verify-failures.jsonl` (committed, not gitignored — this is a durable calibration dataset, not a per-run operational log) with the original question/opinion/validator output/red-team explanation.
+4. [x] Feedback loop, both mechanisms (no literal RL/fine-tuning): (a) include a rolling sample of confirmed misses for the relevant `workload_type` as few-shot context in future opinion/validator prompts for that workload; (b) auto-propose (not silently apply) a `DecisionThresholds` tightening for any `workload_type` where misses cluster above a configurable rate, surfaced to a human for approval rather than applied automatically — thresholds are a trust boundary, changing them silently would defeat the point.
+5. [x] Metrics surfaced via existing observability commands (`ta stats` or equivalent): auto-confirm rate, red-team-catch rate, and false-auto-confirm rate, per `workload_type`, over time.
+6. [x] Tests: a seeded confirmed-miss correctly appears in future opinion-pass few-shot context for its workload; threshold-tightening proposal fires only above the configured miss-rate and never applies without human approval; metrics aggregate correctly across a mixed sample of hits/misses.
+7. [x] USAGE.md: document the red-team loop, `verify-failures.jsonl`'s role as a durable dataset (not a log to prune), and how to review/approve a threshold-tightening proposal.
 
 #### Version: `0.17.0-alpha.12.27`
 
@@ -9925,7 +9925,6 @@ Code releases use semver. Content releases don't. Decide:
 
 #### Version: `0.17.5-alpha.3`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

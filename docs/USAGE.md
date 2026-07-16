@@ -2424,6 +2424,58 @@ ta conversation <goal-id>          # Formatted output with turns, roles, timesta
 ta conversation <goal-id> --json   # Raw JSONL for programmatic access
 ```
 
+#### Confidence-Gated Verification (`ta_human_verify`) and the Red-Team Loop
+
+`ta_ask_human` always blocks and waits for you, no matter how routine the question. `ta_human_verify` is the confidence-gated replacement: before escalating to you, it tries two independent LLM passes --
+
+1. **Opinion pass** -- answers the question the way a careful human reviewer would, with its own reasoning and self-reported confidence.
+2. **Validator pass** -- a second, independent pass with no shared context, critiquing the opinion's reasoning rather than trusting its confidence.
+
+The pair is scored through the same gate used everywhere else in TA (`Commit`/`Reject`/`Rework`/`Escalate`). Only `Commit` auto-confirms; everything else falls through to a real blocking question, with the synthetic reasoning attached so you see what the pipeline already found ambiguous. A workload classified as anything other than `security_tier = "auto"` always escalates straight to you, skipping the synthetic stage entirely.
+
+Every auto-confirm is written to `.ta/human-verify-audit.jsonl` (gitignored, machine-local) with the full opinion + validator reasoning -- never a silent black box. Per-`workload_type` thresholds live in `.ta/workflow.toml`:
+
+```toml
+[human_verify.default]
+min_confidence = 0.7
+max_risk_score = 40
+escalate_risk_score = 75
+
+[human_verify.docs]
+min_confidence = 0.5   # docs workloads can auto-confirm at lower confidence
+```
+
+**Auto-confirming isn't the end of the story.** The validator only checks whether the opinion's reasoning is internally sound -- it can't catch a mistake both passes are blind to in the same way. `ta audit human-verify` closes that gap:
+
+```bash
+# Adversarially review unreviewed auto-confirms: "assume this is wrong, find
+# the failure the opinion+validator pair missed" -- never a second soundness
+# check.
+ta audit human-verify sample --sample 10 --workload docs
+
+# Per-workload_type auto-confirm rate, red-team-catch rate, and
+# false-auto-confirm rate, over time.
+ta audit human-verify metrics
+
+# List any pending threshold-tightening proposals.
+ta audit human-verify proposals
+```
+
+Confirmed misses are appended to **`.ta/verify-failures.jsonl` -- committed to git, not gitignored.** It's a durable calibration dataset, not a log to prune: two things read it going forward:
+
+- Future `ta_human_verify` calls for that `workload_type` fold a rolling sample of its confirmed misses into the opinion/validator prompts as few-shot context, so a wrong auto-confirm changes future behavior instead of the identical mistake silently recurring.
+- If misses for a `workload_type` cluster above a configurable rate (`.ta/workflow.toml`'s `[verify_redteam.<workload>]`, default 25% over at least 5 reviewed entries), `ta audit human-verify sample` appends a threshold-tightening *proposal* to `.ta/verify-threshold-proposals.jsonl`.
+
+**Proposals are never applied automatically.** Thresholds are a trust boundary -- `ta audit human-verify proposals` shows the current vs. proposed values; if you agree, edit `.ta/workflow.toml`'s `[human_verify.<workload>]` table by hand:
+
+```toml
+[verify_redteam.docs]
+miss_rate_threshold = 0.25
+min_sample_size = 5
+tighten_min_confidence_step = 0.05
+tighten_max_risk_step = 5
+```
+
 ### Macro vs Interactive: when to use which
 
 These are **different concerns** and can be combined:
