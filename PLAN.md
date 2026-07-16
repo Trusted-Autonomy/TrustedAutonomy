@@ -9618,7 +9618,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.27 — Red-Team Autoreward: Adversarial Validation of Auto-Confirmed Verifications
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.26 (`ta_human_verify` + its audit trail)
 
 **What "autoreward" means here**: not model training — TA's headless-CLI-agent architecture has no fine-tuning step. It means closing the feedback loop *procedurally*, using primitives TA already has (audit logs, threshold config, few-shot prompt context): a wrong auto-confirm gets caught, recorded, and changes future behavior — instead of the identical mistake silently recurring.
