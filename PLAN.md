@@ -9840,7 +9840,68 @@ Code releases use semver. Content releases don't. Decide:
 
 5. [ ] **USAGE.md**: Adapter sections for YouTube, Steam, Homebrew. Plugin adapter authoring guide.
 
+---
+### v0.17.5 — Autonomous Team Systems: Persistent Execution + Budget Guardrails + Pluggable Domain Adapters
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.15 (Decision gate), v0.17.0.12.20 (`ta-brain` routing/security), v0.17.0.12.26 (`ta_human_verify`)
 
+**Why this exists**: per the user's explicit vision (2026-07-15): by end-0.17, someone should be able to author a workflow declaring a team with custom roles (e.g. analyst/strategist/trader), hand that team a goal *and a budget*, let it run continuously rather than one-shot, and have workflow-defined rules + the supervisor + an optional red-team pass auto-approve domain actions (e.g. an actual stock purchase) within that budget — a "virtual office." Investigation this session (2026-07-14/15) confirmed the real primitives already exist (composable workflow YAML, data-defined `TeamRole`, a domain-agnostic `ta-decision::gate::decide()`, natural-language routing) but three concrete things are missing, not just unbuilt: (1) every goal — including scheduled `ta-intake` triggers — is one-shot, `Created → ... → Completed`, then done, with no mechanism for a team to keep running against an ongoing objective across decisions; (2) only an LLM-token budget exists (`ta-policy::BudgetConfig`) — zero concept of an arbitrary business-metric budget (dollars, trade count, anything domain-specific); (3) the generic external-domain-action hook (`StepAction::external_adapter()`) has zero production callers, and the one connector with a real publish path (social) has `risk_score` hardcoded to `0`. This phase closes those three gaps, and additionally unifies a fragmented auto-approval story found during the same investigation: `check_advisor_auto_approve()` (`ta-session::advisor_agent`) is fully built and unit-tested but has zero call sites in production — the real `ta draft apply` gate goes through a separate, disconnected mechanism (`ta_policy::auto_approve::should_auto_approve_draft()`) that never consults `security_tier` at all.
+
+---
+### v0.17.5.1 — Persistent Team Session Runtime
+<!-- status: pending -->
+**Depends on**: v0.17.5
+
+**Goal**: Give a team a persistent execution context that survives across multiple goal-runs, instead of every trigger firing a brand-new goal from zero. Precedent already exists inside `ta-daemon` for exactly this shape of problem — `connector_supervisor.rs` (fault-isolated, heartbeat-monitored, backoff/suspend-managed subprocess supervision) and `watchdog.rs` (a background tokio task for goal liveness) — so this extends that in-process supervision model to a new subject (a team session) rather than standing up a second daemon. A second daemon would either duplicate that supervision machinery or reach across a network boundary into the core daemon for every draft/approval/audit write, reintroducing the cross-process consistency problem TA's staged-review model exists to avoid.
+
+**Items**:
+1. [ ] New `ta-daemon` subsystem module (e.g. `team_session.rs` — deliberately not reusing the `office` name, which already means multi-project daemon config in `office.rs`) modeling a `TeamSession`: a workflow YAML + `team.toml` binding, persistent state at `.ta/team-sessions/<id>/state.json`, and a supervised loop that starts new goal-runs against the shared session state rather than from zero.
+2. [ ] Session state carries context forward between goal-runs within the same session (e.g. a completed "analyst" role's finding is available context for the next "trader" role's goal) — reuse `ta-session::advisor_agent`'s existing context-injection mechanism rather than building a new one.
+3. [ ] Lifecycle commands: `ta team-session start/pause/stop/status <name>`, mirroring the existing `ta connector` command shape.
+4. [ ] Crash recovery: reuse `connector_supervisor.rs`'s backoff/suspend pattern (1s→2s→4s...→60s cap, Suspended after 5 failures in 5 minutes) — a session that crash-loops stops retrying instead of looping forever.
+5. [ ] Tests: session state persists and is readable across two sequential goal-runs; a crash-looping session reaches Suspended and stops; `status` reflects real supervisor state.
+6. [ ] USAGE.md: how to start/monitor/stop a persistent team session.
+
+#### Version: `0.17.5-alpha.1`
+
+---
+### v0.17.5.2 — Workflow-Defined Budget Guardrails (Business-Metric Budgets)
+<!-- status: pending -->
+**Depends on**: v0.17.5.1, v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain::route()`)
+
+**Goal**: Add a second, distinct budget concept alongside the existing LLM-token budget (`ta-policy::BudgetConfig.max_tokens_per_goal`, which stays exactly as-is — that's resource-consumption tracking, not a business-rule guardrail). This one is an arbitrary-unit business metric a workflow declares (e.g. `metric = "usd", total = 1000.0, per_action_max_pct = 10.0`) against a stated objective (e.g. "generate income > 2x within 6 months after fees"). Hard limits are deterministic pre-gate checks — no confidence score ever overrides one. Soft limits feed the Decision gate as an escalation signal, the exact shape already proven by `route()`'s `AUTO_SECURITY_CONFIDENCE_THRESHOLD` (a low-confidence workload classification downgrades `security_tier = auto` to `suggest` today) — this reuses that same "confidence/proximity-to-limit downgrades autonomy" pattern rather than inventing a new one.
+
+**Items**:
+1. [ ] New `WorkflowBudget` config in workflow YAML: `{metric: string, total: f64, per_action_max_pct: Option<f64>, soft_threshold_pct: Option<f64>, objective: Option<string>}` — `metric` is an arbitrary label (`"usd"`, `"trade_count"`, anything), not hardcoded to dollars.
+2. [ ] Running ledger persisted in the team-session state (5.1) — an append-only per-action log (amount, running total, timestamp), same audit-log-JSONL pattern as `.ta/human-verify-audit.jsonl`.
+3. [ ] Hard-limit pre-gate: a new check consulted *before* `ta_human_verify`/`ta-decision::gate::decide()` even runs. Violating it (e.g. a trade exceeding the 10% per-action cap) rejects outright — never reaches the probabilistic verify/approve pipeline at all.
+4. [ ] Soft-limit check: crossing `soft_threshold_pct` of the total forces `Escalate` regardless of what the Decision gate's own verdict would otherwise be — mirrors `route()`'s existing auto→suggest downgrade.
+5. [ ] Observability: the per-session ledger surfaces both budgets (token spend from `BudgetConfig` and business-metric spend from `WorkflowBudget`) side by side — a session can be within its token budget and over its dollar budget, or vice versa; both must be independently visible.
+6. [ ] Tests: an action exceeding the hard per-action cap is rejected before any verify pass runs; crossing the soft threshold forces `Escalate` even with a high-confidence Decision input; the ledger correctly accumulates across multiple sequential actions in one session.
+7. [ ] USAGE.md: document both budget concepts side by side and when each applies.
+
+#### Version: `0.17.5-alpha.2`
+
+---
+### v0.17.5.3 — Pluggable Domain-Action Adapters (User-Authored Plugins, Not Just Built-In)
+<!-- status: pending -->
+**Depends on**: v0.17.5.2, `StepAction::external_adapter()` (existing hook, currently zero production callers), v0.17.4 item 3 (release adapter plugin protocol — reuse its transport, don't invent a second one)
+
+**Goal**: Today, adding a new domain action (e.g. "execute a stock trade via a brokerage API") requires a TA core code change — every existing connector (Slack/Discord/email/social) is built into `ta-daemon`'s own crates, and the one generic hook meant for this (`StepAction::external_adapter()`) has never been dispatched to in production. Make it genuinely user-authorable, reusing the exact same external-subprocess-plugin transport already proven twice in this codebase (`[[connectors.managed]]` in `connector_supervisor.rs`, and v0.17.4 item 3's release-adapter "JSON-over-stdio, same pattern as VCS plugins") rather than inventing a third plugin protocol.
+
+**Items**:
+1. [ ] Plugin manifest format (`.ta/adapters/<name>/manifest.toml`): declares the action verb(s) it handles (e.g. `"trade.execute"`), a risk-scoring subprocess hook that must return a real computed `risk_score` (not the hardcoded `0` the social adapter uses today), and its commit/publish subprocess entrypoint.
+2. [ ] Wire `StepAction::external_adapter()` to actually dispatch to a registered plugin's subprocess — its first real production caller.
+3. [ ] Approval-gate integration: a dispatched action's risk_score/verdict flows through the same `ta-decision::gate::decide()` used by code drafts and `ta_human_verify` — one uniform `Commit`/`Reject`/`Rework`/`Escalate` contract regardless of domain (per the existing "one uniform contract, policy decides caution" design principle), and consults `security_tier` directly to close the gap found this session where `check_advisor_auto_approve()` is unwired and the real draft-apply path never checks `security_tier` at all.
+4. [ ] Budget guardrail (5.2) consulted as part of the same dispatch path for any adapter action carrying a cost/quantity field.
+5. [ ] Reference implementation: a mock/paper-trading adapter (not a real brokerage integration — no live external API dependency in TA's own test suite) proving the full loop end-to-end: analyst/strategist/trader roles from a persistent session (5.1), a `"trade.execute"` action, hard/soft budget enforcement (5.2), and real non-zero risk scoring.
+6. [ ] Docs: `docs/community-adapter-plugin.md` — how to author a new domain adapter, modeled on the existing `docs/community-ide-plugin.md` pattern.
+7. [ ] Tests: a registered mock adapter's action round-trips through the full gate (approve and reject cases); an unregistered action verb is rejected with a clear "no adapter registered for this verb" error, not a silent no-op.
+8. [ ] USAGE.md: adapter authoring guide, linked from the new community-adapter-plugin.md doc.
+
+#### Version: `0.17.5-alpha.3`
+
+---
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
