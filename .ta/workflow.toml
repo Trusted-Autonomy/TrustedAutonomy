@@ -29,7 +29,7 @@ auto_review = true       # Open a PR after push
 
 [submit.git]
 branch_prefix = "feature/"  # Branch naming: feature/<goal-slug>
-target_branch = "refactor/agent-switching-and-3-tier"   # SCOPED 2026-07-05: v0.17.0.12.12-12.22 overhaul lands here, not main, so it can be tested as a whole before merging. Revert to "main" once the overhaul is merged and this is deleted.
+target_branch = "main"
 merge_strategy = "squash" # squash, merge, or rebase
 remote = "origin"        # Git remote name
 pr_template = ".ta/pr-template.md"  # PR body template with {summary}, {why}, etc.
