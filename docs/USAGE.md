@@ -556,21 +556,25 @@ ta draft apply <id>
 
 **Nightly builds**
 
-Nightly pre-releases are built automatically from the latest commit on `main`. They contain the newest features but are not stability-guaranteed.
+Nightly pre-releases are built automatically from the latest commit on `main`. They contain the newest features but are not stability-guaranteed. Each night's build is its own permanently-numbered release (`nightly-YYYYMMDD-<sha>`) rather than one fixed tag, so grab the newest one dynamically:
 
 ```bash
+# Resolve the newest nightly release tag via the GitHub API
+NIGHTLY_TAG=$(curl -sf https://api.github.com/repos/Trusted-Autonomy/TrustedAutonomy/releases \
+  | grep -o '"tag_name": *"nightly-[^"]*"' | head -1 | cut -d'"' -f4)
+
 # macOS (Apple Silicon) — nightly
-curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly/ta-nightly-aarch64-apple-darwin.tar.gz
+curl -LO "https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/${NIGHTLY_TAG}/ta-nightly-aarch64-apple-darwin.tar.gz"
 tar xzf ta-nightly-aarch64-apple-darwin.tar.gz
 sudo cp ta ta-daemon /usr/local/bin/
 
 # Linux (x86_64) — nightly
-curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly/ta-nightly-x86_64-unknown-linux-musl.tar.gz
+curl -LO "https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/${NIGHTLY_TAG}/ta-nightly-x86_64-unknown-linux-musl.tar.gz"
 tar xzf ta-nightly-x86_64-unknown-linux-musl.tar.gz
 sudo cp ta ta-daemon /usr/local/bin/
 ```
 
-Each nightly archive contains both `ta` and `ta-daemon`. See the [nightly release page](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly) for all platforms and the build history.
+Each nightly archive contains both `ta` and `ta-daemon`. Browse all nightly builds (and each build's own build-history table) on the [nightly releases page](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases?q=nightly&expanded=true).
 
 **Option D -- Docker** *(Coming Soon)*
 
