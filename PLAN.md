@@ -9644,7 +9644,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.28 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.11 through v0.17.0.12.27 (all of it, including the post-12.21 additions above — this is the final, doc-only phase for the whole overhaul)
 
 **Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.27 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
