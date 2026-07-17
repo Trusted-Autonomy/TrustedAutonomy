@@ -112,6 +112,12 @@ result-*
 .ta/logs/
 .ta/routing-decisions.jsonl
 .ta/telemetry.jsonl
+.ta/human-verify-audit.jsonl
+.ta/human-verify-invocations.jsonl
+.ta/verify-audit-reviewed.jsonl
+.ta/verify-threshold-proposals.jsonl
+# NOTE: .ta/verify-failures.jsonl is intentionally NOT gitignored -- it's a
+# durable, committed calibration dataset (v0.17.0.12.27), not a per-run log.
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml
@@ -164,6 +170,10 @@ memory/work_queue.md
 .ta/goal-history.jsonl
 .ta/operations.jsonl
 .ta/events.jsonl
+.ta/human-verify-audit.jsonl
+.ta/human-verify-invocations.jsonl
+.ta/verify-audit-reviewed.jsonl
+.ta/verify-threshold-proposals.jsonl
 .ta/change_summary.json
 .ta/consent.json
 .ta/mcp_json_original

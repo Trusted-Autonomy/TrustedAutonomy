@@ -34,6 +34,7 @@ pub mod interceptor;
 pub mod server;
 pub mod tools;
 pub mod validation;
+pub mod verify_audit;
 
 pub use config::GatewayConfig;
 pub use error::GatewayError;

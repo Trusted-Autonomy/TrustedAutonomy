@@ -158,6 +158,53 @@ pub enum AuditCommands {
         #[arg(long)]
         log: Option<String>,
     },
+    /// Red-team adversarial review of `ta_human_verify`'s auto-confirmed
+    /// decisions, and the resulting drift metrics (v0.17.0.12.27).
+    HumanVerify {
+        #[command(subcommand)]
+        command: HumanVerifyAuditCommands,
+    },
+}
+
+/// Subcommands for the red-team review of `ta_human_verify` auto-confirms.
+#[derive(Debug, Subcommand)]
+pub enum HumanVerifyAuditCommands {
+    /// Sample unreviewed `Commit`-decision entries from
+    /// `.ta/human-verify-audit.jsonl` and red-team-review each: an
+    /// adversarial pass framed "assume this is wrong, find the failure the
+    /// opinion+validator pair missed" -- never a second soundness check.
+    /// Confirmed misses are appended to `.ta/verify-failures.jsonl` (a
+    /// durable, committed calibration dataset) and folded into future
+    /// `ta_human_verify` prompts for that workload as few-shot context.
+    ///
+    /// Example:
+    ///   ta audit human-verify sample --sample 10 --workload docs
+    Sample {
+        /// Maximum number of unreviewed entries to review this run.
+        #[arg(long)]
+        sample: Option<usize>,
+        /// Only review entries for this workload_type.
+        #[arg(long)]
+        workload: Option<String>,
+    },
+    /// Show per-workload_type auto-confirm rate, red-team-catch rate, and
+    /// false-auto-confirm rate over time.
+    ///
+    /// Example:
+    ///   ta audit human-verify metrics
+    ///   ta audit human-verify metrics --workload docs
+    Metrics {
+        /// Only show metrics for this workload_type.
+        #[arg(long)]
+        workload: Option<String>,
+    },
+    /// List pending threshold-tightening proposals. Proposals are never
+    /// auto-applied -- review the suggested values here, then edit
+    /// `.ta/workflow.toml`'s `[human_verify.<workload>]` table by hand.
+    ///
+    /// Example:
+    ///   ta audit human-verify proposals
+    Proposals,
 }
 
 /// Subcommands for the goal audit ledger.
@@ -391,6 +438,10 @@ pub fn execute(cmd: &AuditCommands, config: &GatewayConfig) -> anyhow::Result<()
         AuditCommands::Telemetry { goal_id, log } => {
             show_telemetry(config, goal_id, log.as_deref())?;
         }
+
+        AuditCommands::HumanVerify { command } => {
+            execute_human_verify_audit(command, config)?;
+        }
     }
 
     Ok(())
@@ -446,6 +497,161 @@ fn show_telemetry(config: &GatewayConfig, goal_id: &str, log: Option<&str>) -> a
         println!();
     }
     println!("{} action(s) total.", records.len());
+    Ok(())
+}
+
+// ── HumanVerify red-team review subcommand (v0.17.0.12.27) ──
+
+fn execute_human_verify_audit(
+    cmd: &HumanVerifyAuditCommands,
+    config: &GatewayConfig,
+) -> anyhow::Result<()> {
+    match cmd {
+        HumanVerifyAuditCommands::Sample { sample, workload } => {
+            let ta_bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ta"));
+            let pipeline = ta_mcp_gateway::verify_audit::HeadlessRedTeamPipeline::new(
+                config.workspace_root.clone(),
+                ta_bin,
+            );
+            let summary = ta_mcp_gateway::verify_audit::run_redteam_review(
+                &config.workspace_root,
+                &pipeline,
+                *sample,
+                workload.as_deref(),
+            );
+
+            if summary.reviewed == 0 && summary.errors.is_empty() {
+                println!(
+                    "No unreviewed auto-confirmed entries found in .ta/human-verify-audit.jsonl{}.",
+                    workload
+                        .as_deref()
+                        .map(|w| format!(" for workload '{w}'"))
+                        .unwrap_or_default()
+                );
+                return Ok(());
+            }
+
+            println!(
+                "Red-team review: {} entr{} reviewed ({} confirmed correct, {} confirmed miss).",
+                summary.reviewed,
+                if summary.reviewed == 1 { "y" } else { "ies" },
+                summary.confirmed_correct,
+                summary.confirmed_miss
+            );
+            if summary.confirmed_miss > 0 {
+                println!(
+                    "  {} confirmed miss(es) appended to .ta/verify-failures.jsonl.",
+                    summary.confirmed_miss
+                );
+            }
+            for proposal in &summary.proposals {
+                println!(
+                    "\n[proposal] workload '{}': miss rate {:.0}% over {} reviewed entries exceeds \
+                     the configured threshold.",
+                    proposal.workload_type,
+                    proposal.miss_rate * 100.0,
+                    proposal.sample_size
+                );
+                println!(
+                    "  current:  min_confidence={:.2} max_risk_score={}",
+                    proposal.current_thresholds.min_confidence,
+                    proposal.current_thresholds.max_risk_score
+                );
+                println!(
+                    "  proposed: min_confidence={:.2} max_risk_score={}",
+                    proposal.proposed_thresholds.min_confidence,
+                    proposal.proposed_thresholds.max_risk_score
+                );
+                println!(
+                    "  Not applied automatically. To adopt it, edit .ta/workflow.toml's \
+                     [human_verify.{}] table by hand, or review it again later with \
+                     `ta audit human-verify proposals`.",
+                    proposal.workload_type
+                );
+            }
+            for error in &summary.errors {
+                println!("[warn] {error}");
+            }
+        }
+
+        HumanVerifyAuditCommands::Metrics { workload } => {
+            let metrics = ta_mcp_gateway::verify_audit::compute_metrics(&config.workspace_root);
+            let filtered: Vec<_> = metrics
+                .into_iter()
+                .filter(|m| workload.as_deref().is_none_or(|w| m.workload_type == w))
+                .collect();
+
+            if filtered.is_empty() {
+                println!(
+                    "No ta_human_verify invocations recorded yet in \
+                     .ta/human-verify-invocations.jsonl{}.",
+                    workload
+                        .as_deref()
+                        .map(|w| format!(" for workload '{w}'"))
+                        .unwrap_or_default()
+                );
+                return Ok(());
+            }
+
+            for m in &filtered {
+                println!("workload_type: {}", m.workload_type);
+                println!(
+                    "  auto_confirm_rate:      {:.1}%  ({}/{} decisions)",
+                    m.auto_confirm_rate * 100.0,
+                    m.auto_confirm_count,
+                    m.total_decisions
+                );
+                println!(
+                    "  red_team_catch_rate:    {:.1}%  ({} confirmed miss / {} reviewed) [sampled]",
+                    m.red_team_catch_rate * 100.0,
+                    m.confirmed_miss_count,
+                    m.reviewed_count
+                );
+                println!(
+                    "  false_auto_confirm_rate: {:.1}%  ({} confirmed miss / {} auto-confirmed) [sampled]",
+                    m.false_auto_confirm_rate * 100.0,
+                    m.confirmed_miss_count,
+                    m.auto_confirm_count
+                );
+                println!();
+            }
+        }
+
+        HumanVerifyAuditCommands::Proposals => {
+            let proposals =
+                ta_mcp_gateway::verify_audit::load_all_proposals(&config.workspace_root);
+            if proposals.is_empty() {
+                println!(
+                    "No threshold-tightening proposals recorded in \
+                     .ta/verify-threshold-proposals.jsonl."
+                );
+                return Ok(());
+            }
+            for p in &proposals {
+                println!(
+                    "[{}] workload '{}': miss rate {:.0}% over {} reviewed entries",
+                    p.generated_at,
+                    p.workload_type,
+                    p.miss_rate * 100.0,
+                    p.sample_size
+                );
+                println!(
+                    "  current:  min_confidence={:.2} max_risk_score={}",
+                    p.current_thresholds.min_confidence, p.current_thresholds.max_risk_score
+                );
+                println!(
+                    "  proposed: min_confidence={:.2} max_risk_score={}",
+                    p.proposed_thresholds.min_confidence, p.proposed_thresholds.max_risk_score
+                );
+                println!(
+                    "  Not applied automatically -- edit .ta/workflow.toml's \
+                     [human_verify.{}] table by hand to adopt it.\n",
+                    p.workload_type
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1463,5 +1669,72 @@ mod tests {
         let config = GatewayConfig::for_project(project.path());
         let err = show_telemetry(&config, "not-a-uuid", None).unwrap_err();
         assert!(err.to_string().contains("not a valid goal ID"));
+    }
+
+    // ── HumanVerify red-team review subcommand (v0.17.0.12.27) ──
+    // Observability Mandate: an empty project must not crash, and must say
+    // clearly that nothing has been recorded yet.
+
+    #[test]
+    fn human_verify_metrics_on_empty_project_does_not_crash() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        execute_human_verify_audit(
+            &HumanVerifyAuditCommands::Metrics { workload: None },
+            &config,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn human_verify_proposals_on_empty_project_does_not_crash() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        execute_human_verify_audit(&HumanVerifyAuditCommands::Proposals, &config).unwrap();
+    }
+
+    #[test]
+    fn human_verify_sample_on_empty_project_does_not_crash() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        execute_human_verify_audit(
+            &HumanVerifyAuditCommands::Sample {
+                sample: None,
+                workload: None,
+            },
+            &config,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn human_verify_metrics_filters_by_workload() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        ta_mcp_gateway::verify_audit::record_invocation(
+            &config.workspace_root,
+            "docs",
+            ta_decision::Decision::Commit,
+        );
+        ta_mcp_gateway::verify_audit::record_invocation(
+            &config.workspace_root,
+            "security",
+            ta_decision::Decision::Escalate,
+        );
+
+        // Both workloads present with no filter.
+        execute_human_verify_audit(
+            &HumanVerifyAuditCommands::Metrics { workload: None },
+            &config,
+        )
+        .unwrap();
+        // Filtered to just one workload -- also must not crash.
+        execute_human_verify_audit(
+            &HumanVerifyAuditCommands::Metrics {
+                workload: Some("docs".to_string()),
+            },
+            &config,
+        )
+        .unwrap();
     }
 }
