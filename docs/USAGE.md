@@ -15590,4 +15590,4 @@ The team coordinator (`ta intake coordinate --dispatch`, above) uses the identic
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)
 - **Report bugs**: [GitHub Issues](https://github.com/trustedautonomy/ta/issues)
 - **Development roadmap**: [PLAN.md](../PLAN.md)
-- **Architecture overview**: [docs/ARCHITECTURE.md](ARCHITECTURE.md)
+- **Architecture overview**: [docs/architecture/ta-architecture-reference.md](architecture/ta-architecture-reference.md)

@@ -61,4 +61,5 @@ In practice, since Studio itself is JS (it can't import a Rust type even by acci
 ## See also
 
 - [`ta-action-reference.md`](ta-action-reference.md) — the action/verb model these data types flow through.
+- [`ta-architecture-reference.md`](../architecture/ta-architecture-reference.md) §3 — the current-state maintainer reference covering this same boundary alongside the rest of the system's tier/crate structure.
 - [`ta-concepts-and-architecture.md` §13.1](ta-concepts-and-architecture.md) — the design reasoning behind staying monorepo and using data-format specs as the real boundary.

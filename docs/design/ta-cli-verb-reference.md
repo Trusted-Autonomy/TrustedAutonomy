@@ -59,3 +59,5 @@ This is the actual design principle, not just a cleanup: **the full 70+ command 
 - **Agent/workflow-authoring surface (full ~70+ commands)**: this is what a workflow definition, the Advisor's own tool-calling, or a future visual workflow builder (v0.18+) compose against. An LLM predicting "what should happen next in this workflow" needs the *full* verb+noun+flag vocabulary, not the trimmed human one — restricting automation to the same small surface a person sees would make workflows less capable, not safer.
 
 So the reduction target is specifically the **`--help` output and documentation a new user reads first**, not the actual command count. See `docs/design/ta-user-personas.md` for what this looks like from each persona's side — what they'd want to do, what they'd actually type, and what happens invisibly.
+
+See also [`ta-architecture-reference.md`](../architecture/ta-architecture-reference.md) for how the systems these commands drive (triggers, the routing brain, staged review) actually fit together.

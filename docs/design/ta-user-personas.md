@@ -73,3 +73,5 @@ ta show draft <id>       # to see the rendered output, not a code diff
 ## The pattern across all four
 
 Every persona's *explicit* surface is a handful of commands (`run`, `status`, `show`, `approve`/`deny`, and increasingly just natural language to the Advisor). Everything else — agent selection, policy checks, plugin dispatch, team/persona resolution — is implicit, chained by a workflow definition or decided by the Advisor. The full ~70-command surface exists for that implicit layer to compose against, not for a person to memorize. See §4 of `ta-cli-verb-reference.md` for why that's a deliberate split, not a shortfall.
+
+The "just natural language to the Advisor" path referenced above is `ta advisor create` — see [`ta-architecture-reference.md`](../architecture/ta-architecture-reference.md) §1.2 for how it resolves a free-text request through the same routing brain every other entry point uses.

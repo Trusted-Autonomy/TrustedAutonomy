@@ -1,6 +1,6 @@
 # TA Concepts & Architecture: Current State, Right Abstractions, and Refactor Path
 
-**Status**: Living design document review, first written 2026-07-04
+**Status**: Historical design-review record, first written 2026-07-04. As of v0.17.0.12.28, the parts of this document that shipped (§§1-3, 13, 13.1) have been formalized into [`ta-architecture-reference.md`](../architecture/ta-architecture-reference.md) as the current-state maintainer reference — read that doc for "what's built today." This document remains the record of *how* those decisions were reached (the gap analysis, alternatives considered, sequencing rationale) and of what's still deliberately deferred (§4 knowledge hierarchy, §8 community security review workflow, true concurrent sub-goal execution).
 **Purpose**: A single, honest inventory of every core concept TA has, what abstraction each one *should* use, whether it currently does, and a sequenced plan to close the gaps. Written in response to a direct architecture review request after the 0.17.0.12.x cleanup arc and the sage-lore/sage/graphify research (see [`sage-lore-review.md`](sage-lore-review.md)).
 
 **How to use this doc**: it's the reference for (a) what to refactor and when, (b) why Studio's UI is overly complex, (c) why the CLI command surface is overly complex, and (d) what "smallest clean verb set" TA should converge on. Update it as concepts change — don't let it go stale like the old `docs/design/sage-lore-review.md` reference did before this session existed.
