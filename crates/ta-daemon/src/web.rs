@@ -1512,6 +1512,70 @@ mod tests {
         assert!(html.contains("Trusted Autonomy"));
     }
 
+    /// v0.17.0.12.29 item 1: guards against silently reverting the Dashboard
+    /// Advisor-widget flicker fix. There's no JS DOM-testing harness in this
+    /// repo (a Rust workspace shipping one static asset file), so this
+    /// smoke-checks the served markup/script for the specific mechanisms
+    /// the fix relies on: a stable id so the Advisor section survives
+    /// sibling-index shifts from conditional sections above it, a request
+    /// generation counter so a stale in-flight loadDashboard() call can't
+    /// render over a fresher one, and a change-detection key so unrelated
+    /// SSE events skip rebuilding the Advisor section entirely. Full
+    /// behavioral coverage is manual-browser-verified (see PLAN.md item 5).
+    #[tokio::test]
+    async fn index_html_has_dashboard_advisor_flicker_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let resp = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"id="dash-advisor-section""#),
+            "Advisor widget wrapper must have a stable id so DOM diffing can identify it regardless of sibling shifts"
+        );
+        assert!(
+            html.contains("_dashLoadGeneration"),
+            "loadDashboard() must guard against out-of-order SSE-triggered responses clobbering fresher renders"
+        );
+        assert!(
+            html.contains("_lastDashAdvisorRenderKey"),
+            "the Advisor section must only re-render when its own context/dialog data actually changed"
+        );
+    }
+
+    /// v0.17.0.12.29 item 3: guards against the Attention queue's empty-state
+    /// check silently diverging again from `/health/signals` and from
+    /// Approved-but-unapplied drafts (the two data sources it previously
+    /// omitted, which let it say "nothing needs your attention" while the
+    /// health-signals banner showed a stale-draft warning at the same time).
+    #[tokio::test]
+    async fn index_html_attention_queue_includes_health_signals_and_approved_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let resp = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains("fetch('/health/signals')")
+                && html.contains("loadAttentionQueue"),
+            "loadAttentionQueue() must fetch /health/signals so the queue and the health banner never disagree"
+        );
+        assert!(
+            html.contains("d.status === 'Approved'"),
+            "loadAttentionQueue() must include Approved-but-unapplied drafts in its own dataset"
+        );
+    }
+
     #[tokio::test]
     async fn list_drafts_empty() {
         let dir = tempfile::tempdir().unwrap();

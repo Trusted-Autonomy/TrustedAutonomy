@@ -9658,7 +9658,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.29 — Studio Regression Fixes: Dashboard Re-render, Plan Load Caching, Attention/Health Reconciliation
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.17 (Studio IA Redesign) — these are regressions/gaps against that phase's own stated goal, found during live usage on 2026-07-14, not new scope.
 
 **Goal**: Three bugs found by the user actually using Studio day-to-day, each traced to a specific file/line during investigation (2026-07-14). All three are regressions or unfinished work against 12.17's own stated goal ("one canonical Attention Queue," "event-driven not timer-driven refresh"), not new feature requests:
@@ -9668,11 +9668,11 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 3. **Attention/health-signal contradiction.** The Attention queue's empty-state check (`loadAttentionQueue`/`renderAttentionQueue`, `index.html:1731-1782`) only considers pending questions, `PendingReview` drafts, and active goals — it excludes `Approved`-but-unapplied drafts entirely, so it can say "nothing needs your attention" while a completely separate health-check system (`crates/ta-daemon/src/api/health_signals.rs:452`, `check_stale_drafts`) is simultaneously showing a banner for a draft approved-but-unapplied 3+ days. Two independently-computed "does this need me" signals that were never reconciled into the single queue 12.17 was supposed to deliver.
 
 **Items**:
-1. [ ] Dashboard: make the SSE-triggered refresh diff incoming data against currently-rendered state and patch only the changed DOM subtree(s), rather than a full `innerHTML` replace of the whole panel — the Advisor widget specifically should only re-render when its own underlying data (context/dialog) actually changed, not on unrelated goal/draft events.
-2. [ ] `/api/plan/phases`: add a `PlanCache` on `AppState` mirroring the existing `StatusCache`/`SignalsCache` pattern (`crates/ta-daemon/src/api/mod.rs`), keyed on PLAN.md's mtime (or a short TTL matching `StatusCache`'s 5s) — invalidate on write, not on every read. Hoist `parse_plan_phases()`'s 4 `Regex::new` calls (`plan.rs:60-67`) to `LazyLock` statics. Cache the `.ta/goals/*.json` directory scan the same way (used by `active_phase_states`/`active_phase_draft_ids`).
-3. [ ] Attention queue: fold `Approved`-but-unapplied drafts and `/health/signals` results into `loadAttentionQueue`'s own data set and empty-state check, so the same underlying counts drive both the queue list and the "nothing needs attention" message — they must never be able to disagree again.
-4. [ ] Tests: a dashboard re-render test asserting an unrelated SSE event does not replace the Advisor widget's DOM node; a plan-phases cache test asserting a second call within the TTL/mtime window does not re-read PLAN.md from disk; an attention-queue test asserting a stale `Approved` draft or an active health signal both (a) appears in the queue and (b) suppresses the "nothing needs attention" empty state.
-5. [ ] Manual browser verification (matching 12.17's own verification standard) — this is UI/perf, not just unit-testable logic.
+1. [x] Dashboard: make the SSE-triggered refresh diff incoming data against currently-rendered state and patch only the changed DOM subtree(s), rather than a full `innerHTML` replace of the whole panel — the Advisor widget specifically should only re-render when its own underlying data (context/dialog) actually changed, not on unrelated goal/draft events.
+2. [x] `/api/plan/phases`: add a `PlanCache` on `AppState` mirroring the existing `StatusCache`/`SignalsCache` pattern (`crates/ta-daemon/src/api/mod.rs`), keyed on PLAN.md's mtime (or a short TTL matching `StatusCache`'s 5s) — invalidate on write, not on every read. Hoist `parse_plan_phases()`'s 4 `Regex::new` calls (`plan.rs:60-67`) to `LazyLock` statics. Cache the `.ta/goals/*.json` directory scan the same way (used by `active_phase_states`/`active_phase_draft_ids`).
+3. [x] Attention queue: fold `Approved`-but-unapplied drafts and `/health/signals` results into `loadAttentionQueue`'s own data set and empty-state check, so the same underlying counts drive both the queue list and the "nothing needs attention" message — they must never be able to disagree again.
+4. [x] Tests: a dashboard re-render test asserting an unrelated SSE event does not replace the Advisor widget's DOM node; a plan-phases cache test asserting a second call within the TTL/mtime window does not re-read PLAN.md from disk; an attention-queue test asserting a stale `Approved` draft or an active health signal both (a) appears in the queue and (b) suppresses the "nothing needs attention" empty state.
+5. [x] Manual browser verification (matching 12.17's own verification standard) — this is UI/perf, not just unit-testable logic.
 
 #### Version: `0.17.0-alpha.12.29`
 

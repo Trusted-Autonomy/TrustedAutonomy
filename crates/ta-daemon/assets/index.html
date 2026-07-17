@@ -1364,6 +1364,22 @@ function renderStatsTab(data) {
 }
 
 // ── Dashboard ─────────────────────────────────────────────────
+// v0.17.0.12.29 item 1: during an active goal, SSE events fire often (see
+// DASH_SSE_EVENT_TYPES below), so it's common for a new loadDashboard() call
+// to start while a previous one is still awaiting its 8 fetches. Without
+// sequencing, whichever call's fetches happen to resolve LAST wins — which
+// isn't necessarily the most-recently-triggered one — so an older in-flight
+// response can render stale data over already-rendered fresh data, then the
+// truly-latest response lands a moment later and renders over it again. That
+// reads as the Advisor widget (and the rest of the panel) briefly changing
+// then reverting. `_dashLoadGeneration` lets a call detect it's been
+// superseded and bail before touching the DOM.
+let _dashLoadGeneration = 0;
+
+// Last advisor context+dialog JSON rendered into #dash-advisor-section — see
+// the change-detection guard in renderDashboard() (v0.17.0.12.29 item 1).
+let _lastDashAdvisorRenderKey = null;
+
 async function loadDashboard() {
   // Only show the loading placeholder on the very first render — subsequent
   // 30s/SSE-triggered refreshes patch the existing content in place instead
@@ -1372,6 +1388,7 @@ async function loadDashboard() {
   if (!app.firstChild || app.querySelector('.loading, .empty')) {
     app.innerHTML = '<div class="loading">Loading dashboard...</div>';
   }
+  const myGeneration = ++_dashLoadGeneration;
   try {
     const [draftsResp, questionsResp, statusResp, planResp, velocityResp, advisorCtxResp, linksResp, dialogResp] = await Promise.allSettled([
       fetch('/api/drafts'),
@@ -1409,6 +1426,13 @@ async function loadDashboard() {
       ? (await dialogResp.value.json().catch(() => ({ entries: [] }))).entries || []
       : [];
 
+    // A newer loadDashboard() call has since started (another SSE event fired
+    // while these 8 fetches were in flight) — that call's response, once it
+    // lands, is authoritative. Applying this now-stale one would render old
+    // data over whatever the newer call already rendered (or is about to),
+    // which is the "briefly changing then reverting" flicker item 1 fixes.
+    if (myGeneration !== _dashLoadGeneration) return;
+
     // Update subtitle with timestamp.
     document.getElementById('subtitle').textContent =
       'Review Dashboard — updated ' + new Date().toLocaleTimeString();
@@ -1431,7 +1455,7 @@ async function loadDashboard() {
 
     renderDashboard(draftsData, questions, status, phases, velocity, advisorCtx, dialogEntries);
   } catch (e) {
-    if (currentTab === 'activity:overview') {
+    if (currentTab === 'activity:overview' && myGeneration === _dashLoadGeneration) {
       app.innerHTML = '<div class="empty">Failed to load dashboard. Is the daemon running?</div>';
     }
   }
@@ -1552,7 +1576,28 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   // .ta/advisor-history.jsonl conversation as the full Advisor destination
   // (v0.17.0.12.17 item 2 — these were two independently-persisted
   // histories before the merge).
-  html += renderDashAdvisorDialog(dialogEntries || []);
+  //
+  // v0.17.0.12.29 item 1: none of the 11 DASH_SSE_EVENT_TYPES are about the
+  // Advisor (they're goal/draft/plan lifecycle events), yet every one of
+  // them used to trigger a full loadDashboard() → renderDashboard() that
+  // rebuilt this section's markup from scratch. `setAppContent`'s diffing
+  // (v0.17.0.12.6) already turns identical markup into a no-op DOM patch,
+  // but only if the section's *position* among its siblings hasn't shifted
+  // — the Linked Projects panel above it appears/disappears based on
+  // `window._taLinks`, which reflows every following sibling's index and
+  // defeats that positional diff (see morphChildren's own id-mismatch
+  // comment below). Skip rebuilding this section's HTML entirely — reusing
+  // the live DOM node verbatim — whenever the advisor context/dialog data
+  // driving it hasn't actually changed, so an unrelated event can never
+  // touch this subtree at all, regardless of sibling shifts elsewhere.
+  const advisorRenderKey = JSON.stringify({ ctx: advisorCtx, dialog: dialogEntries || [] });
+  const liveAdvisorSection = document.getElementById('dash-advisor-section');
+  if (advisorRenderKey === _lastDashAdvisorRenderKey && liveAdvisorSection) {
+    html += liveAdvisorSection.outerHTML;
+  } else {
+    html += renderDashAdvisorDialog(dialogEntries || []);
+    _lastDashAdvisorRenderKey = advisorRenderKey;
+  }
 
   if (runningAgents.length === 0 && active.length === 0 && pending.length === 0 && questions.length === 0) {
     html += '<div class="empty">Everything is up to date. Start a new goal from the <strong>Plan</strong> section, or check <strong>Attention</strong>.</div>';
@@ -1600,7 +1645,7 @@ function renderDashAdvisorDialog(entries) {
   const emptyHint = entries.length === 0
     ? '<div class="empty" style="padding:1.5rem">Ask the advisor to queue work, answer a question, or act on a draft.<br><span style="font-size:0.8rem;color:var(--muted)">Try: "What should I work on next?" or "fix the flaky login test"</span></div>'
     : '';
-  return `<div class="dash-section">
+  return `<div class="dash-section" id="dash-advisor-section">
     <div class="dash-section-title">Advisor</div>
     <div class="advisor-chat" id="dash-advisor-log" style="max-height:280px;overflow-y:auto">${emptyHint}${historyHtml}</div>
     <div class="advisor-input-row">
@@ -1734,10 +1779,17 @@ async function loadAttentionQueue() {
     app.innerHTML = '<div class="loading">Loading...</div>';
   }
   try {
-    const [questionsResp, draftsResp, activeResp] = await Promise.allSettled([
+    // v0.17.0.12.29 item 3: fold in Approved-but-unapplied drafts and the
+    // independently-computed /health/signals set (e.g. check_stale_drafts)
+    // so this is the ONE dataset that decides both "what's in the queue"
+    // and "is the queue empty" — previously health_signals.rs could show a
+    // stale-draft banner while this endpoint's own empty-state check said
+    // "nothing needs your attention", because the two never shared data.
+    const [questionsResp, draftsResp, activeResp, signalsResp] = await Promise.allSettled([
       fetch('/api/interactions/pending'),
       fetch('/api/drafts'),
       fetch('/api/active/goals'),
+      fetch('/health/signals'),
     ]);
     const questions = questionsResp.status === 'fulfilled' && questionsResp.value.ok
       ? await questionsResp.value.json().catch(() => []) : [];
@@ -1745,14 +1797,18 @@ async function loadAttentionQueue() {
       ? await draftsResp.value.json().catch(() => []) : [];
     const activeGoals = activeResp.status === 'fulfilled' && activeResp.value.ok
       ? await activeResp.value.json().catch(() => []) : [];
+    const healthData = signalsResp.status === 'fulfilled' && signalsResp.value.ok
+      ? await signalsResp.value.json().catch(() => null) : null;
     const pendingDrafts = allDrafts.filter(d => d.status === 'PendingReview');
+    const approvedUnapplied = allDrafts.filter(d => d.status === 'Approved');
+    const healthSignals = (healthData && healthData.signals) || [];
 
-    updateAttentionBadge(questions.length, pendingDrafts.length);
+    updateAttentionBadge(questions.length, pendingDrafts.length, approvedUnapplied.length, healthSignals.length);
 
     // A slow fetch above may have lost the race against the user navigating
     // away — bail before touching #app (same guard pattern as loadDashboard).
     if (currentTab !== 'attention') return;
-    renderAttentionQueue(questions, pendingDrafts, activeGoals);
+    renderAttentionQueue(questions, pendingDrafts, activeGoals, approvedUnapplied, healthSignals);
   } catch (e) {
     if (currentTab === 'attention') {
       app.innerHTML = '<div class="empty">Failed to load the attention queue. Is the daemon running?</div>';
@@ -1765,23 +1821,52 @@ async function loadAttentionQueue() {
   }, 15000);
 }
 
-// Badge count on the Attention tab itself — questions + ready-to-review
-// drafts are the two states that genuinely block on a human.
-function updateAttentionBadge(questionCount, pendingDraftCount) {
+// Badge count on the Attention tab itself. Includes every signal that can
+// appear in the queue (questions, ready-to-review, approved-unapplied
+// drafts, health signals) so the badge can never show "nothing to do" while
+// the queue itself lists something (v0.17.0.12.29 item 3).
+function updateAttentionBadge(questionCount, pendingDraftCount, approvedUnappliedCount = 0, healthSignalCount = 0) {
   const tabEl = document.getElementById('tab-attention');
   if (!tabEl) return;
-  const urgent = questionCount + pendingDraftCount;
+  const urgent = questionCount + pendingDraftCount + approvedUnappliedCount + healthSignalCount;
   tabEl.textContent = urgent > 0 ? `Attention (${urgent})` : 'Attention';
   tabEl.style.color = urgent > 0 ? 'var(--yellow)' : '';
 }
 
-function renderAttentionQueue(questions, pendingDrafts, activeGoals) {
-  if (questions.length === 0 && pendingDrafts.length === 0 && activeGoals.length === 0) {
+function renderAttentionQueue(questions, pendingDrafts, activeGoals, approvedUnapplied = [], healthSignals = []) {
+  if (questions.length === 0 && pendingDrafts.length === 0 && activeGoals.length === 0
+      && approvedUnapplied.length === 0 && healthSignals.length === 0) {
     setAppContent('<div class="empty">Nothing needs your attention right now. Start a new goal from <strong>Activity → Plan</strong>, or ask the <strong>Advisor</strong>.</div>');
     return;
   }
 
   let html = '';
+
+  if (healthSignals.length > 0) {
+    html += '<div class="dash-section-title">Health Signals (' + healthSignals.length + ')</div>';
+    html += healthSignals.map(s => `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title" style="font-size:0.95rem">${esc(s.message)}</span>
+          <span class="badge ${s.severity === 'crit' ? 'badge-denied' : 'badge-pending'}">${esc(s.severity)}</span>
+        </div>
+        ${s.action ? `<div class="card-meta">${esc(s.action)}</div>` : ''}
+      </div>
+    `).join('');
+  }
+
+  if (approvedUnapplied.length > 0) {
+    html += `<div class="dash-section-title" style="margin-top:${healthSignals.length ? '1rem' : '0'}">Approved, Not Yet Applied (${approvedUnapplied.length})</div>`;
+    html += approvedUnapplied.map(d => `
+      <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
+        <div class="card-header">
+          <span class="card-title">${esc(d.title)}</span>
+          <span class="badge badge-pending">Ready to Apply</span>
+        </div>
+        <div class="card-meta">${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot; ${timeAgo(d.created_at)}</div>
+      </div>
+    `).join('');
+  }
 
   if (questions.length > 0) {
     html += '<div class="dash-section-title">Questions (' + questions.length + ')</div>';
@@ -1805,7 +1890,7 @@ function renderAttentionQueue(questions, pendingDrafts, activeGoals) {
   }
 
   if (pendingDrafts.length > 0) {
-    html += `<div class="dash-section-title" style="margin-top:${questions.length ? '1rem' : '0'}">Ready to Review (${pendingDrafts.length})</div>`;
+    html += `<div class="dash-section-title" style="margin-top:${(healthSignals.length || approvedUnapplied.length || questions.length) ? '1rem' : '0'}">Ready to Review (${pendingDrafts.length})</div>`;
     html += pendingDrafts.map(d => `
       <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
         <div class="card-header">
@@ -1818,7 +1903,7 @@ function renderAttentionQueue(questions, pendingDrafts, activeGoals) {
   }
 
   if (activeGoals.length > 0) {
-    html += `<div class="dash-section-title" style="margin-top:${(questions.length || pendingDrafts.length) ? '1rem' : '0'}">Running (${activeGoals.length})</div>`;
+    html += `<div class="dash-section-title" style="margin-top:${(healthSignals.length || approvedUnapplied.length || questions.length || pendingDrafts.length) ? '1rem' : '0'}">Running (${activeGoals.length})</div>`;
     html += activeGoals.map(g => {
       const elapsedMins = Math.max(0, Math.round(g.elapsed_secs / 60));
       const elapsedLabel = elapsedMins < 1 ? '<1m' : elapsedMins + 'm';

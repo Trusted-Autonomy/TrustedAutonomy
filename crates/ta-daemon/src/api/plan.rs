@@ -4,8 +4,20 @@
 // POST /api/plan/phase/add       — append a new pending phase to PLAN.md
 // POST /api/plan/phase/claim     — atomically claim a phase (pending → in_progress)
 // POST /api/goal/start           — start a goal (optionally linked to a phase)
+//
+// Response caching (v0.17.0.12.29): `parse_plan_phases()` re-parses PLAN.md
+// (10,000+ lines) and the `.ta/goals/*.json` directory scan re-reads every
+// goal file on *every* call, including the Dashboard's SSE-triggered
+// background refreshes (not just Plan-tab clicks). `PlanCache` memoizes the
+// parsed phase list keyed on PLAN.md's mtime (invalidated the instant the
+// file changes, never stale) and the goals-directory scan behind a short TTL
+// matching `StatusCache`'s pattern (goal files don't carry a single mtime to
+// key on, and re-scanning the directory every `STATUS_CACHE_TTL_SECS` is
+// cheap enough not to need write-triggered invalidation).
 
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -13,20 +25,120 @@ use axum::response::IntoResponse;
 use axum::Json;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::api::AppState;
+
+// ── Cached regexes (v0.17.0.12.29) ────────────────────────────
+// Previously recompiled on every `parse_plan_phases()` call (i.e. on every
+// `/api/plan/phases` request, including background SSE-triggered refreshes).
+
+static PHASE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^(?:##\s+Phase[\s\u{00a0}]+([0-9a-z.]+)\s+[—\-]\s+(.+)|###\s+(v[\d.]+[a-z]?)\s+[—\-]\s+(.+))$",
+    )
+    .expect("static regex")
+});
+static STATUS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<!--\s*status:\s*(\w+)\s*-->").expect("static regex"));
+static DEP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<!--\s*depends_on:\s*([^>]+?)\s*-->").expect("static regex"));
+static ITEM_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:-|\d+\.)\s+\[([ xX])\]\s+(.+)$").expect("static regex"));
+
+// ── PlanCache (v0.17.0.12.29) ─────────────────────────────────
+
+/// TTL for the cached `.ta/goals/*.json` directory scan, matching
+/// `StatusCache`'s 5-second window (`status.rs`).
+const GOALS_SCAN_CACHE_TTL_SECS: u64 = 5;
+
+/// Thread-safe cache for `/api/plan/phases`: the parsed (pre-annotation)
+/// phase list keyed on PLAN.md's mtime, plus a short-TTL cache of the
+/// `.ta/goals/*.json` scan (`active_phase_states`/`active_phase_draft_ids`).
+///
+/// The parsed phase list itself never carries `running`/`pr_ready`/`draft_id`
+/// — those are re-applied on every request from the (possibly cached) goals
+/// scan, so a cache hit on the phase list never returns stale goal state.
+type GoalsScanEntry = (
+    Instant,
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, String>,
+);
+
+pub struct PlanCache {
+    phases: RwLock<Option<(std::time::SystemTime, Vec<ApiPlanPhase>)>>,
+    goals_scan: RwLock<Option<GoalsScanEntry>>,
+}
+
+impl PlanCache {
+    pub fn new() -> Self {
+        Self {
+            phases: RwLock::new(None),
+            goals_scan: RwLock::new(None),
+        }
+    }
+
+    /// Return cached phases if PLAN.md's mtime matches, or `None`.
+    pub async fn get_phases(&self, mtime: std::time::SystemTime) -> Option<Vec<ApiPlanPhase>> {
+        let guard = self.phases.read().await;
+        if let Some((cached_mtime, phases)) = guard.as_ref() {
+            if *cached_mtime == mtime {
+                return Some(phases.clone());
+            }
+        }
+        None
+    }
+
+    /// Store a freshly-parsed phase list against PLAN.md's current mtime.
+    pub async fn set_phases(&self, mtime: std::time::SystemTime, phases: Vec<ApiPlanPhase>) {
+        let mut guard = self.phases.write().await;
+        *guard = Some((mtime, phases));
+    }
+
+    /// Return the cached goals-directory scan if younger than the TTL.
+    pub async fn get_goals_scan(
+        &self,
+    ) -> Option<(
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    )> {
+        let guard = self.goals_scan.read().await;
+        if let Some((ts, states, drafts)) = guard.as_ref() {
+            if ts.elapsed().as_secs() < GOALS_SCAN_CACHE_TTL_SECS {
+                return Some((states.clone(), drafts.clone()));
+            }
+        }
+        None
+    }
+
+    /// Store a freshly-scanned goals directory snapshot with the current timestamp.
+    pub async fn set_goals_scan(
+        &self,
+        states: std::collections::HashMap<String, String>,
+        drafts: std::collections::HashMap<String, String>,
+    ) {
+        let mut guard = self.goals_scan.write().await;
+        *guard = Some((Instant::now(), states, drafts));
+    }
+}
+
+impl Default for PlanCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── Data types ─────────────────────────────────────────────────
 
 /// A single checklist item from a plan phase.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlanItem {
     pub text: String,
     pub done: bool,
 }
 
 /// A plan phase with full details for the UI.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApiPlanPhase {
     pub id: String,
     pub title: String,
@@ -57,14 +169,13 @@ pub fn parse_plan_phases(content: &str) -> Vec<ApiPlanPhase> {
     // Matches either:
     //   ## Phase 4b — Title
     //   ### v0.3.1 — Title   (or — with em-dash)
-    let phase_re = Regex::new(
-        r"(?m)^(?:##\s+Phase[\s\u{00a0}]+([0-9a-z.]+)\s+[—\-]\s+(.+)|###\s+(v[\d.]+[a-z]?)\s+[—\-]\s+(.+))$",
-    )
-    .expect("static regex");
-    let status_re = Regex::new(r"<!--\s*status:\s*(\w+)\s*-->").expect("static regex");
-    let dep_re = Regex::new(r"<!--\s*depends_on:\s*([^>]+?)\s*-->").expect("static regex");
+    // Compiled once at process startup (LazyLock statics above) instead of on
+    // every call — this function runs on every `/api/plan/phases` request.
+    let phase_re = &*PHASE_RE;
+    let status_re = &*STATUS_RE;
+    let dep_re = &*DEP_RE;
     // Matches both "- [ ] text" (unordered) and "1. [ ] text" (ordered) checklist items.
-    let item_re = Regex::new(r"^(?:-|\d+\.)\s+\[([ xX])\]\s+(.+)$").expect("static regex");
+    let item_re = &*ITEM_RE;
 
     let lines: Vec<&str> = content.lines().collect();
     let n = lines.len();
@@ -340,31 +451,65 @@ pub async fn get_plan_phases(State(state): State<Arc<AppState>>) -> impl IntoRes
     let project_root = state.active_project_root.read().unwrap().clone();
     let plan_path = project_root.join("PLAN.md");
 
-    let content = match std::fs::read_to_string(&plan_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": format!("Could not read PLAN.md: {}", e),
-                    "path": plan_path.display().to_string(),
-                    "hint": "Run `ta plan create` to generate a plan, or create PLAN.md manually."
-                })),
-            )
-                .into_response();
+    let mtime = std::fs::metadata(&plan_path)
+        .and_then(|m| m.modified())
+        .ok();
+
+    // Fast path: PLAN.md's mtime hasn't changed since the last parse — reuse
+    // the cached phase list instead of re-reading and re-parsing 10,000+
+    // lines. A cache miss (e.g. first request, or the file just changed)
+    // falls through to a full read+parse below.
+    let cached_phases = match mtime {
+        Some(mt) => state.plan_cache.get_phases(mt).await,
+        None => None,
+    };
+    let mut phases = match cached_phases {
+        Some(cached) => cached,
+        None => {
+            let content = match std::fs::read_to_string(&plan_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "error": format!("Could not read PLAN.md: {}", e),
+                            "path": plan_path.display().to_string(),
+                            "hint": "Run `ta plan create` to generate a plan, or create PLAN.md manually."
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            let parsed = parse_plan_phases(&content);
+            if let Some(mt) = mtime {
+                state.plan_cache.set_phases(mt, parsed.clone()).await;
+            }
+            parsed
         }
     };
-
-    let mut phases = parse_plan_phases(&content);
 
     // Build the set of known phase IDs for orphan suppression.
     let known_ids: std::collections::HashSet<String> =
         phases.iter().map(|p| p.id.clone()).collect();
 
-    // Annotate phases with their active goal state (orphaned phase IDs are suppressed).
+    // Annotate phases with their active goal state (orphaned phase IDs are
+    // suppressed). The goals-directory scan is itself cached behind a short
+    // TTL (`GOALS_SCAN_CACHE_TTL_SECS`) — it has no single mtime to key on,
+    // unlike PLAN.md, and the Dashboard's SSE-triggered refreshes would
+    // otherwise re-scan+re-parse every goal JSON file on every event.
     let goals_dir = project_root.join(".ta").join("goals");
-    let active_states = active_phase_states(&goals_dir, &known_ids);
-    let draft_ids = active_phase_draft_ids(&goals_dir);
+    let (active_states, draft_ids) = match state.plan_cache.get_goals_scan().await {
+        Some(cached) => cached,
+        None => {
+            let states = active_phase_states(&goals_dir, &known_ids);
+            let drafts = active_phase_draft_ids(&goals_dir);
+            state
+                .plan_cache
+                .set_goals_scan(states.clone(), drafts.clone())
+                .await;
+            (states, drafts)
+        }
+    };
     for ph in &mut phases {
         let state = active_states
             .get(&ph.id)
@@ -1620,6 +1765,115 @@ Future work.
             content.contains("status: done"),
             "PLAN.md should have done status after apply: {}",
             content
+        );
+    }
+
+    // ── PlanCache tests (v0.17.0.12.29) ──────────────────────────
+
+    async fn call_get_plan_phases(state: &Arc<AppState>) -> Vec<serde_json::Value> {
+        use axum::body::to_bytes;
+        use axum::response::IntoResponse;
+        let resp = get_plan_phases(State(state.clone())).await.into_response();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn plan_phases_cache_reuses_content_within_same_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "### v0.1.0 — Original Title\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+
+        let state = Arc::new(AppState::new(
+            std::path::PathBuf::from(dir.path()),
+            crate::config::DaemonConfig::default(),
+        ));
+
+        let first = call_get_plan_phases(&state).await;
+        assert_eq!(first[0]["title"], "Original Title");
+
+        // Overwrite PLAN.md's content on disk but force the mtime back to its
+        // original value — this simulates the read racing a concurrent write
+        // that hasn't bumped the mtime yet, and proves the second call is
+        // served from `PlanCache` rather than re-reading the file: if it had
+        // re-read, it would see "Changed Title" instead.
+        let original_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
+        std::fs::write(
+            &plan_path,
+            "### v0.1.0 — Changed Title\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+        std::fs::File::open(&plan_path)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+
+        let second = call_get_plan_phases(&state).await;
+        assert_eq!(
+            second[0]["title"], "Original Title",
+            "a second call within the same mtime window must be served from PlanCache, not re-read from disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_phases_cache_invalidates_on_mtime_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "### v0.1.0 — Original Title\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+
+        let state = Arc::new(AppState::new(
+            std::path::PathBuf::from(dir.path()),
+            crate::config::DaemonConfig::default(),
+        ));
+
+        let first = call_get_plan_phases(&state).await;
+        assert_eq!(first[0]["title"], "Original Title");
+
+        // A real mtime bump (the normal case — no artificial set_modified)
+        // must invalidate the cache and pick up the new content.
+        let bumped = std::fs::metadata(&plan_path).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(1);
+        std::fs::write(
+            &plan_path,
+            "### v0.1.0 — Changed Title\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+        std::fs::File::open(&plan_path)
+            .unwrap()
+            .set_modified(bumped)
+            .unwrap();
+
+        let second = call_get_plan_phases(&state).await;
+        assert_eq!(
+            second[0]["title"], "Changed Title",
+            "a real mtime change must invalidate PlanCache"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_cache_goals_scan_reused_within_ttl() {
+        let cache = PlanCache::new();
+        assert!(cache.get_goals_scan().await.is_none());
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("v0.1.0".to_string(), "running".to_string());
+        cache
+            .set_goals_scan(states.clone(), Default::default())
+            .await;
+
+        let cached = cache.get_goals_scan().await;
+        assert_eq!(
+            cached.map(|(s, _)| s),
+            Some(states),
+            "goals scan should be served from cache within the TTL window"
         );
     }
 }
