@@ -1807,7 +1807,9 @@ Future work.
             "### v0.1.0 — Changed Title\n<!-- status: pending -->\n",
         )
         .unwrap();
-        std::fs::File::open(&plan_path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plan_path)
             .unwrap()
             .set_modified(original_mtime)
             .unwrap();
@@ -1846,7 +1848,9 @@ Future work.
             "### v0.1.0 — Changed Title\n<!-- status: pending -->\n",
         )
         .unwrap();
-        std::fs::File::open(&plan_path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plan_path)
             .unwrap()
             .set_modified(bumped)
             .unwrap();
