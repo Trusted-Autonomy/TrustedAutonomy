@@ -9658,7 +9658,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.29 — Studio Regression Fixes: Dashboard Re-render, Plan Load Caching, Attention/Health Reconciliation
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.17 (Studio IA Redesign) — these are regressions/gaps against that phase's own stated goal, found during live usage on 2026-07-14, not new scope.
 
 **Goal**: Three bugs found by the user actually using Studio day-to-day, each traced to a specific file/line during investigation (2026-07-14). All three are regressions or unfinished work against 12.17's own stated goal ("one canonical Attention Queue," "event-driven not timer-driven refresh"), not new feature requests:
