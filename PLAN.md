@@ -9644,15 +9644,15 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.28 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.11 through v0.17.0.12.27 (all of it, including the post-12.21 additions above — this is the final, doc-only phase for the whole overhaul)
 
 **Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.27 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
 
 **Items**:
-1. [ ] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, the natural-language advisor entry point from 12.23, the `ta_human_verify` two-stage verification pipeline from 12.26/12.27, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
-2. [ ] Write a new `docs/architecture/` doc for the user themselves (maintainer-level, not plain-language) — the "how it is set up" reference: the 3-tier model as actually built, the `ta-intake`/`ta-brain`/back-office library-crate boundaries, the data-format specs and how they gate Studio/community contributions, and why the codebase stays a single monorepo rather than split repos. This formalizes `docs/design/ta-concepts-and-architecture.md`'s working notes into a stable reference — the design doc can stay as historical record of how the decisions were reached; this new doc is the current-state reference.
-3. [ ] Cross-link both new/refreshed docs with `ta-action-reference.md`, the data-format spec from v0.17.0.12.21, and the CLI verb reference/user-personas docs completed by v0.17.0.12.22.
+1. [x] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, the natural-language advisor entry point from 12.23, the `ta_human_verify` two-stage verification pipeline from 12.26/12.27, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
+2. [x] Write a new `docs/architecture/` doc for the user themselves (maintainer-level, not plain-language) — the "how it is set up" reference: the 3-tier model as actually built, the `ta-intake`/`ta-brain`/back-office library-crate boundaries, the data-format specs and how they gate Studio/community contributions, and why the codebase stays a single monorepo rather than split repos. This formalizes `docs/design/ta-concepts-and-architecture.md`'s working notes into a stable reference — the design doc can stay as historical record of how the decisions were reached; this new doc is the current-state reference.
+3. [x] Cross-link both new/refreshed docs with `ta-action-reference.md`, the data-format spec from v0.17.0.12.21, and the CLI verb reference/user-personas docs completed by v0.17.0.12.22.
 
 #### Version: `0.17.0-alpha.12.28`
 

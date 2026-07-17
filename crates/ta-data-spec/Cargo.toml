@@ -12,7 +12,7 @@ categories = ["development-tools"]
 [dependencies]
 schemars = { workspace = true }
 serde_json = { workspace = true }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.27" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.27" }
-ta-brain = { path = "../ta-brain", version = "0.17.0-alpha.12.27" }
-ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.27" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.28" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.28" }
+ta-brain = { path = "../ta-brain", version = "0.17.0-alpha.12.28" }
+ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.28" }
