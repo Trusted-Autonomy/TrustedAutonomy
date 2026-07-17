@@ -84,6 +84,11 @@ pub struct AppState {
     /// 5-second cache for `/api/status` responses (v0.17.0.6).
     /// Prevents the status endpoint from scanning all goals+drafts on every call.
     pub status_cache: Arc<status::StatusCache>,
+    /// Cache for `/api/plan/phases`: parsed PLAN.md keyed on mtime, plus a
+    /// short-TTL `.ta/goals/*.json` scan (v0.17.0.12.29). Prevents the
+    /// Dashboard's SSE-triggered background refreshes from re-parsing
+    /// PLAN.md and re-scanning every goal file on every event.
+    pub plan_cache: Arc<plan::PlanCache>,
     /// Semaphore bounding concurrent background tasks from `POST /api/cmd` (v0.17.0.9).
     /// Size comes from `commands.max_background_tasks` in daemon.toml (default 4).
     pub cmd_semaphore: Arc<Semaphore>,
@@ -123,6 +128,7 @@ impl AppState {
             phase_claims: Arc::new(PhaseClaims::new()),
             signals_cache: Arc::new(health_signals::SignalsCache::default()),
             status_cache: Arc::new(status::StatusCache::new()),
+            plan_cache: Arc::new(plan::PlanCache::new()),
             cmd_semaphore: Arc::new(Semaphore::new(cmd_max)),
             last_shutdown_attempt: Arc::new(std::sync::Mutex::new(None)),
             project_root,

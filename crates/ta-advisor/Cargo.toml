@@ -17,12 +17,12 @@ tracing = { workspace = true }
 
 # Reuses the existing heuristic classifier as the substrate for the new
 # 4-way taxonomy rather than duplicating keyword-matching logic.
-ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.28" }
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.29" }
 # Team-coordinator capability (v0.17.0.12.20): reuses ta-intake's TriggerEvent
 # and ta-brain's routing/prioritization rather than a new persistent role —
 # see crates/ta-advisor/src/coordinator.rs for the decision rationale.
-ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.28" }
-ta-brain = { path = "../ta-brain", version = "0.17.0-alpha.12.28" }
+ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.29" }
+ta-brain = { path = "../ta-brain", version = "0.17.0-alpha.12.29" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
