@@ -25,22 +25,22 @@ which = { workspace = true }
 toml = { workspace = true }
 
 # Internal crates
-ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.29" }
-ta-events = { path = "../ta-events", version = "0.17.0-alpha.12.29" }
-ta-memory = { path = "../ta-memory", version = "0.17.0-alpha.12.29" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.29" }
-ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.0-alpha.12.29" }
-ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.0-alpha.12.29" }
-ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.0-alpha.12.29" }
-ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.0-alpha.12.29" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.29" }
-ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.29" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.29" }
-ta-workflow = { path = "../ta-workflow", version = "0.17.0-alpha.12.29" }
-ta-actions = { path = "../ta-actions", version = "0.17.0-alpha.12.29" }
-ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.29" }
-ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.29" }
-ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.29" }
+ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.30" }
+ta-events = { path = "../ta-events", version = "0.17.0-alpha.12.30" }
+ta-memory = { path = "../ta-memory", version = "0.17.0-alpha.12.30" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.30" }
+ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.0-alpha.12.30" }
+ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.0-alpha.12.30" }
+ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.0-alpha.12.30" }
+ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.0-alpha.12.30" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.30" }
+ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.30" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.30" }
+ta-workflow = { path = "../ta-workflow", version = "0.17.0-alpha.12.30" }
+ta-actions = { path = "../ta-actions", version = "0.17.0-alpha.12.30" }
+ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.30" }
+ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.30" }
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.30" }
 
 
 [dev-dependencies]

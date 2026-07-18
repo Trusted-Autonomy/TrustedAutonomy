@@ -1401,7 +1401,7 @@ pub fn startup_gc_pass(
             GoalRunState::PrReady | GoalRunState::UnderReview
         ) && goal
             .pr_package_id
-            .is_some_and(|id| is_draft_denied(&pr_packages_dir, id));
+            .is_some_and(|id| ta_changeset::is_draft_denied(&pr_packages_dir, id));
 
         let past_cutoff = if is_failed {
             goal.updated_at < failed_cutoff
@@ -1464,20 +1464,6 @@ pub fn check_log_rotation(
             ta_workspace::RotationOutcome::NotNeeded
         }
     }
-}
-
-/// Check whether the draft package with `id` has `Denied` status.
-///
-/// Reads the package JSON file directly to avoid a dependency on ta-cli from
-/// the daemon crate. Uses a simple string search so it degrades gracefully if
-/// the file is absent or unreadable.
-fn is_draft_denied(pr_packages_dir: &Path, id: uuid::Uuid) -> bool {
-    let path = pr_packages_dir.join(format!("{}.json", id));
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    // DraftStatus::Denied serialises as {"Denied": {...}} — check for the key.
-    content.contains("\"Denied\"")
 }
 
 fn walkdir_size_wd(path: &Path) -> u64 {

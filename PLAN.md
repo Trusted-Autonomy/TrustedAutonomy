@@ -9678,7 +9678,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.30 — Draft-Count Accuracy, Doctor Stale-Draft Automation, and Plan-Status Ordering Fixes
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.29
 
 **Goal**: Three real bugs found verifying the v0.17.0.12.x → v0.17.5 merge into `main` (2026-07-16) — none represent actual stale state; the underlying data was fine, the display/counting logic was wrong:
@@ -9690,13 +9690,13 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 **Explicit correction on the right approach (2026-07-16)**: tracking "what's done" must not be "first found" or "last found" in document order, in either direction. The correct method is to enumerate phases still marked **not done** (`pending`/`in_progress`) and derive current state by reviewing that set against each phase's own `**Depends on**` line — exactly how this session's own manual audits worked all along, not a positional heuristic. Additionally, every place phase versioning is computed or compared must go through the existing canonical extended-semver-aware logic — `phase_id_to_semver()`/`parse_semver_id()` (`plan.rs:1907`, `plan.rs:1963`; already correctly handles 4/5/6-component phase IDs per its own test suite) — never a second, ad-hoc comparison.
 
 **Items**:
-1. [ ] Fix `count_pending_drafts()` to parse each draft file's actual `status` field (mirror the correct pattern already used in `watchdog.rs`'s `is_draft_denied`) instead of substring-matching raw file text.
-2. [ ] `ta doctor --fix`'s `stale_drafts` case: actually invoke the equivalent of `ta draft close --stale` (a library call, not shelling out to itself) instead of only printing the suggestion — gated the same way other `--fix` actions are (confirm/`--yes`), not silently auto-closing without the validation rigor this session established (cross-check against real merged history before closing anything).
-3. [ ] Replace `last_completed_phase_id()`'s reverse-document-order scan with a not-done-first approach: enumerate all phases with status `!= Done`, resolve each one's unmet dependencies from its own `**Depends on**` line, and report the actual next-actionable phase(s) from that set — never a document-position heuristic. Reuse this same computation for the "Next" header's parent-phase display so it never surfaces an unrelated, already-done ancestor again.
-4. [ ] Consolidate the two duplicate scans (`plan.rs:1817` and `plan.rs:4360`) into one shared function.
-5. [ ] Audit every other call site that currently derives phase order/version by document position rather than by parsing through `phase_id_to_semver()`/`parse_semver_id()`, and route them through the shared function from item 3 / the canonical semver parser — no second ad-hoc comparison anywhere in `plan.rs` or elsewhere.
-6. [ ] Tests: a project with phases completed out of document order (a later-in-file phase done before an earlier-in-file one, matching this real case) reports the correct next-actionable phase and correct last-completed version, not a document-position artifact; a draft-count test with a draft whose summary text contains the literal string "PendingReview" while its real status is `applied`, asserting it is NOT counted as pending.
-7. [ ] USAGE.md: note in `ta doctor --fix`'s section that stale-draft cleanup is now automatic (not just a suggestion).
+1. [x] Fix `count_pending_drafts()` to parse each draft file's actual `status` field (mirror the correct pattern already used in `watchdog.rs`'s `is_draft_denied`) instead of substring-matching raw file text.
+2. [x] `ta doctor --fix`'s `stale_drafts` case: actually invoke the equivalent of `ta draft close --stale` (a library call, not shelling out to itself) instead of only printing the suggestion — gated the same way other `--fix` actions are (confirm/`--yes`), not silently auto-closing without the validation rigor this session established (cross-check against real merged history before closing anything).
+3. [x] Replace `last_completed_phase_id()`'s reverse-document-order scan with a not-done-first approach: enumerate all phases with status `!= Done`, resolve each one's unmet dependencies from its own `**Depends on**` line, and report the actual next-actionable phase(s) from that set — never a document-position heuristic. Reuse this same computation for the "Next" header's parent-phase display so it never surfaces an unrelated, already-done ancestor again.
+4. [x] Consolidate the two duplicate scans (`plan.rs:1817` and `plan.rs:4360`) into one shared function.
+5. [x] Audit every other call site that currently derives phase order/version by document position rather than by parsing through `phase_id_to_semver()`/`parse_semver_id()`, and route them through the shared function from item 3 / the canonical semver parser — no second ad-hoc comparison anywhere in `plan.rs` or elsewhere.
+6. [x] Tests: a project with phases completed out of document order (a later-in-file phase done before an earlier-in-file one, matching this real case) reports the correct next-actionable phase and correct last-completed version, not a document-position artifact; a draft-count test with a draft whose summary text contains the literal string "PendingReview" while its real status is `applied`, asserting it is NOT counted as pending.
+7. [x] USAGE.md: note in `ta doctor --fix`'s section that stale-draft cleanup is now automatic (not just a suggestion).
 
 #### Version: `0.17.0-alpha.12.30`
 

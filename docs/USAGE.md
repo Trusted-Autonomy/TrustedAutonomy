@@ -3740,12 +3740,14 @@ ta doctor --fix
 #   ✓ Ran gc to reclaim staging space
 #
 # [warn] 3 draft(s) approved/pending but not applied for 3+ days
-#   Fix: run `ta draft list --stale` to review
-#   Apply fix? [y/N]: n
-#   Skipped.
+#   Fix: run `ta doctor --fix` to close them automatically, or `ta draft list --stale` to review first
+#   Apply fix? [y/N]: y
+#   ✓ Closed 3 stale draft(s)
 #
-# 1 fix(es) applied, 1 skipped.
+# 2 fix(es) applied, 0 skipped.
 ```
+
+Stale-draft cleanup calls the same logic as `ta draft close --stale` directly (not a subprocess) — it only closes drafts already in `Approved`/`PendingReview` status that are older than `gc.stale_threshold_days`, and it's gated behind the same confirm/`--yes` prompt as every other `--fix` action.
 
 Use `--fix --yes` (equivalent to `ta gc`) for non-interactive cleanup in scripts or cron jobs:
 

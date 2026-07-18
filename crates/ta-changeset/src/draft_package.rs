@@ -942,6 +942,56 @@ impl std::fmt::Display for DraftStatus {
     }
 }
 
+/// Minimal shape used to read just the `status` field out of a draft package
+/// JSON file without requiring the rest of the document to deserialize
+/// cleanly (unrelated/evolved fields elsewhere in the file are ignored).
+#[derive(Deserialize)]
+struct DraftStatusOnly {
+    #[serde(default)]
+    status: DraftStatus,
+}
+
+/// Read the real `status` field out of a single draft package JSON file.
+///
+/// Returns `None` if the file is missing, unreadable, or not valid JSON for
+/// this shape. Deliberately does *not* fall back to a raw-text substring
+/// search — a draft's free-text summary/reason prose can legitimately
+/// contain words like "PendingReview" or "denied" that must never be
+/// mistaken for the actual status.
+pub fn read_draft_status(path: &std::path::Path) -> Option<DraftStatus> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<DraftStatusOnly>(&content)
+        .ok()
+        .map(|d| d.status)
+}
+
+/// Count draft packages in `dir` that are still awaiting human review
+/// (status `Draft` or `PendingReview`). Every other status — including
+/// `Approved`, which still needs `ta draft apply` but has already been
+/// reviewed — is excluded, matching what "N draft(s) awaiting your review"
+/// means to a human reading the notification.
+pub fn count_pending_drafts(dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter(|e| {
+            matches!(
+                read_draft_status(&e.path()),
+                Some(DraftStatus::Draft) | Some(DraftStatus::PendingReview)
+            )
+        })
+        .count()
+}
+
+/// True if the draft package with `id` in `dir` has status `Denied`.
+pub fn is_draft_denied(dir: &std::path::Path, id: Uuid) -> bool {
+    let path = dir.join(format!("{}.json", id));
+    matches!(read_draft_status(&path), Some(DraftStatus::Denied { .. }))
+}
+
 /// Create a minimal valid [`DraftPackage`] for testing with the given goal
 /// shortref and draft sequence number.
 ///
@@ -1952,5 +2002,116 @@ mod tests {
         artifacts.push(make_artifact("fs://workspace/Cargo.toml"));
         let risk = assess_risk(&artifacts);
         assert!(risk.risk_score <= 100);
+    }
+
+    // ── count_pending_drafts / is_draft_denied (v0.17.0.12.30) ─────────
+
+    fn write_package(dir: &std::path::Path, pkg: &DraftPackage) {
+        let path = dir.join(format!("{}.json", pkg.package_id));
+        std::fs::write(path, serde_json::to_string_pretty(pkg).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn count_pending_drafts_missing_dir_returns_zero() {
+        assert_eq!(
+            count_pending_drafts(std::path::Path::new("/nonexistent/path/for/ta-test")),
+            0
+        );
+    }
+
+    #[test]
+    fn count_pending_drafts_ignores_free_text_mentioning_pending_review() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Real status is Applied, but the free-text summary happens to
+        // contain the literal string "PendingReview" — a substring search
+        // over the raw file would miscount this as pending.
+        let mut applied = test_package();
+        applied.summary.why =
+            "Note: this used to be PendingReview before it was applied.".to_string();
+        applied.status = DraftStatus::Applied {
+            applied_at: Utc::now(),
+            applied_via: ApplyProvenance::Manual,
+        };
+        write_package(dir.path(), &applied);
+
+        // A genuinely pending draft should still be counted.
+        let mut pending = test_package();
+        pending.status = DraftStatus::PendingReview;
+        write_package(dir.path(), &pending);
+
+        assert_eq!(count_pending_drafts(dir.path()), 1);
+    }
+
+    #[test]
+    fn count_pending_drafts_counts_draft_and_pending_review_only() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let statuses = [
+            DraftStatus::Draft,
+            DraftStatus::PendingReview,
+            DraftStatus::Approved {
+                approved_by: "human".to_string(),
+                approved_at: Utc::now(),
+            },
+            DraftStatus::Denied {
+                reason: "no".to_string(),
+                denied_by: "human".to_string(),
+            },
+            DraftStatus::Applied {
+                applied_at: Utc::now(),
+                applied_via: ApplyProvenance::Manual,
+            },
+            DraftStatus::Superseded {
+                superseded_by: Uuid::new_v4(),
+            },
+            DraftStatus::Closed {
+                closed_at: Utc::now(),
+                reason: None,
+                closed_by: "human".to_string(),
+            },
+        ];
+
+        for status in statuses {
+            let mut pkg = test_package();
+            pkg.status = status;
+            write_package(dir.path(), &pkg);
+        }
+
+        // Only Draft and PendingReview are "awaiting your review".
+        assert_eq!(count_pending_drafts(dir.path()), 2);
+    }
+
+    #[test]
+    fn is_draft_denied_true_for_denied_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pkg = test_package();
+        pkg.status = DraftStatus::Denied {
+            reason: "not good".to_string(),
+            denied_by: "human".to_string(),
+        };
+        let id = pkg.package_id;
+        write_package(dir.path(), &pkg);
+
+        assert!(is_draft_denied(dir.path(), id));
+    }
+
+    #[test]
+    fn is_draft_denied_false_for_non_denied_status_even_with_word_in_prose() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pkg = test_package();
+        // Free text mentions "denied" even though the real status is not.
+        pkg.summary.why = "Previously denied, now resubmitted.".to_string();
+        pkg.status = DraftStatus::PendingReview;
+        let id = pkg.package_id;
+        write_package(dir.path(), &pkg);
+
+        assert!(!is_draft_denied(dir.path(), id));
+    }
+
+    #[test]
+    fn is_draft_denied_false_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_draft_denied(dir.path(), Uuid::new_v4()));
     }
 }

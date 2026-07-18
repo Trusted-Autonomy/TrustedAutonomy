@@ -1733,7 +1733,7 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     if let Some(current) = phases.iter().find(|p| p.status == PlanStatus::InProgress) {
         if is_sub_phase(&current.id) {
             if let Some(parent_id) = parent_phase_id(&current.id) {
-                if let Some(parent) = phases.iter().find(|p| phase_ids_match(&p.id, &parent_id)) {
+                if let Some(parent) = find_active_parent_phase(&phases, &parent_id) {
                     println!("\nCurrent: Phase {} — {}", parent.id, parent.title);
                     println!("         └─ {} — {}", current.id, current.title);
                 } else {
@@ -1749,7 +1749,7 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     if let Some(next) = find_next_pending(&phases, None) {
         if is_sub_phase(&next.id) {
             if let Some(parent_id) = parent_phase_id(&next.id) {
-                if let Some(parent) = phases.iter().find(|p| phase_ids_match(&p.id, &parent_id)) {
+                if let Some(parent) = find_active_parent_phase(&phases, &parent_id) {
                     println!("Next:    Phase {} — {}", parent.id, parent.title);
                     println!("         └─ {} — {}", next.id, next.title);
                 } else {
@@ -1813,11 +1813,12 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     // v0.17.0.12.3: Always show binary version vs last-completed plan phase and flag drift.
     {
         let binary = binary_version();
-        // Find last sequential done phase with a semver ID.
+        // Resolved via the dependency graph, not document position
+        // (v0.17.0.12.30) — see `last_completed_phase_id`.
+        let last_done_id = last_completed_phase_id(&phases);
         let last_done = phases
             .iter()
-            .rev()
-            .find(|p| p.status == PlanStatus::Done && parse_semver_id(&p.id).is_some());
+            .find(|p| phase_ids_match(&p.id, &last_done_id) && p.status == PlanStatus::Done);
         println!();
         match last_done {
             Some(phase) => {
@@ -1888,16 +1889,36 @@ pub fn is_sub_phase(id: &str) -> bool {
     stripped.split('.').count() >= 4
 }
 
-/// Returns the parent phase ID for a sub-phase, or `None` if the ID is not a sub-phase.
+/// Returns the immediate parent phase ID for a sub-phase, or `None` if the ID
+/// is not a sub-phase.
 ///
-/// `v0.16.0.1` → `Some("v0.16.0")`, `v0.15.30.5.1` → `Some("v0.15.30")`.
+/// Drops only the last dot-separated component — `v0.16.0.1` → `Some("v0.16.0")`,
+/// `v0.15.30.5.1` → `Some("v0.15.30.5")`. Previously this always truncated to
+/// exactly 3 components regardless of depth (`v0.15.30.5.1` → `"v0.15.30"`),
+/// which for deeply nested IDs (`v0.17.0.12.30` → `"v0.17.0"`) skipped over the
+/// real immediate parent (`v0.17.0.12`) and landed on an unrelated, often
+/// long-done, top-level ancestor instead (v0.17.0.12.30 fix).
 pub fn parent_phase_id(id: &str) -> Option<String> {
     if !is_sub_phase(id) {
         return None;
     }
     let stripped = id.strip_prefix('v').unwrap_or(id);
     let parts: Vec<&str> = stripped.split('.').collect();
-    Some(format!("v{}", parts[..3].join(".")))
+    Some(format!("v{}", parts[..parts.len() - 1].join(".")))
+}
+
+/// Find the phase matching `parent_id`, but only if it is still relevant
+/// context — i.e. not already `Done`.
+///
+/// Used by the `Current`/`Next` status headers so a sub-phase's ID-truncated
+/// "parent" never surfaces an unrelated, long-done ancestor phase (that ID
+/// prefix match is coincidental, not a real governing relationship, once the
+/// candidate parent is done). If the parent doesn't exist or is already
+/// done, the caller falls back to displaying the sub-phase on its own.
+fn find_active_parent_phase<'a>(phases: &'a [PlanPhase], parent_id: &str) -> Option<&'a PlanPhase> {
+    phases
+        .iter()
+        .find(|p| phase_ids_match(&p.id, parent_id) && p.status != PlanStatus::Done)
 }
 
 /// Parse a semver-style phase ID like "v0.14.3" or "v0.13.17.1" into a comparable tuple of u32s.
@@ -2164,33 +2185,19 @@ pub fn find_phases_needing_done_marker(content: &str) -> Vec<(String, usize)> {
     result
 }
 
-/// Check whether the binary version is ahead of the highest sequential completed phase.
+/// Check whether the binary version is ahead of the last completed phase.
 ///
 /// Returns `Some(warning)` if the binary is ahead, `None` if in sync.
+///
+/// Resolves "last completed phase" via [`last_completed_phase_id`] (the
+/// dependency-graph-based computation) rather than its own document-position
+/// scan — consolidated in v0.17.0.12.30 to avoid a second, independent
+/// heuristic for the same question living alongside the canonical one.
 pub fn check_version_sync(phases: &[PlanPhase]) -> Option<String> {
-    // Find the last phase in the sequential completed chain (no gaps from the first done).
-    // A gap means a Pending phase was encountered before a Done one.
-    let mut last_sequential_done: Option<&PlanPhase> = None;
-    let mut gap_seen = false;
-
-    for phase in phases {
-        if parse_semver_id(&phase.id).is_none() {
-            continue;
-        }
-        match phase.status {
-            PlanStatus::Done => {
-                if !gap_seen {
-                    last_sequential_done = Some(phase);
-                }
-            }
-            PlanStatus::Pending | PlanStatus::InProgress => {
-                gap_seen = true;
-            }
-            PlanStatus::Deferred => {}
-        }
-    }
-
-    let highest_phase = last_sequential_done?;
+    let last_done_id = last_completed_phase_id(phases);
+    let highest_phase = phases
+        .iter()
+        .find(|p| phase_ids_match(&p.id, &last_done_id) && p.status == PlanStatus::Done)?;
     let binary = binary_version();
 
     // Compare binary version vs highest sequential done phase.
@@ -4354,14 +4361,85 @@ pub fn create_gap_semver(last_done: &str, existing_phases: &[PlanPhase]) -> Stri
     }
 }
 
-/// Find the last completed phase ID for gap semver generation.
+/// Compute the set of phases that are actually ready to be worked on next:
+/// status `Pending` (not `Done`, not already claimed `InProgress`, not
+/// `Deferred`), and every phase declared in that phase's own `**Depends on**`
+/// line is `Done`.
 ///
-/// Returns the ID of the highest-indexed Done phase, or "v0.0.0" as a default.
-pub fn last_completed_phase_id(phases: &[PlanPhase]) -> String {
+/// This is the single source of truth for "what's next" — never a
+/// document-position heuristic. A phase's position in PLAN.md (especially
+/// after a merge) does not reflect real completion or dependency order; only
+/// its own declared dependencies do (v0.17.0.12.30).
+pub fn next_actionable_phases(phases: &[PlanPhase]) -> Vec<&PlanPhase> {
     phases
         .iter()
-        .rev()
-        .find(|p| p.status == PlanStatus::Done)
+        .filter(|p| p.status == PlanStatus::Pending)
+        .filter(|p| {
+            p.depends_on.iter().all(|dep_id| {
+                phases
+                    .iter()
+                    .find(|d| phase_ids_match(&d.id, dep_id))
+                    .is_some_and(|d| d.status == PlanStatus::Done)
+            })
+        })
+        .collect()
+}
+
+/// Find the last completed phase ID, used for gap-semver generation and the
+/// `ta plan status` version-check line.
+///
+/// Derives this from the *dependency graph*, not document position: takes the
+/// lowest-semver phase from [`next_actionable_phases`] (the immediate next
+/// step) and returns the highest-semver phase among *that phase's own*
+/// declared dependencies — i.e. what specifically had to finish for the next
+/// step to become ready. All version comparisons go through
+/// [`parse_semver_id`], never a document-position scan.
+///
+/// Falls back to the highest-semver `Done` phase overall (still compared via
+/// `parse_semver_id`, never by position) when there is no next-actionable
+/// phase or it has no declared dependencies — e.g. the whole plan is done, or
+/// a project with no `**Depends on**` lines at all.
+pub fn last_completed_phase_id(phases: &[PlanPhase]) -> String {
+    // Ascending comparator: real semver IDs compare by value; a phase with a
+    // non-semver ID always sorts after every semver phase (never picked by
+    // `max_by` over a real dependency, never mistaken for the primary
+    // next-actionable target over a real one).
+    fn by_semver(a: &&PlanPhase, b: &&PlanPhase) -> std::cmp::Ordering {
+        match (parse_semver_id(&a.id), parse_semver_id(&b.id)) {
+            (Some(sa), Some(sb)) => sa.cmp(&sb),
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    }
+
+    // The immediate next step: lowest-semver phase in the actionable set.
+    // Prefer phases with a real semver ID; fall back to the first actionable
+    // phase found only if none of them parse as semver.
+    let actionable = next_actionable_phases(phases);
+    let primary = actionable
+        .iter()
+        .copied()
+        .filter(|p| parse_semver_id(&p.id).is_some())
+        .min_by(by_semver)
+        .or_else(|| actionable.first().copied());
+
+    if let Some(phase) = primary {
+        let last_dep = phase
+            .depends_on
+            .iter()
+            .filter_map(|dep_id| phases.iter().find(|d| phase_ids_match(&d.id, dep_id)))
+            .filter(|d| d.status == PlanStatus::Done)
+            .max_by(by_semver);
+        if let Some(dep) = last_dep {
+            return dep.id.clone();
+        }
+    }
+
+    phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::Done && parse_semver_id(&p.id).is_some())
+        .max_by(by_semver)
         .map(|p| p.id.clone())
         .unwrap_or_else(|| "v0.0.0".to_string())
 }
@@ -11352,12 +11430,19 @@ More content here that is part of a second paragraph.
     }
 
     #[test]
-    fn parent_phase_id_extracts_three_component_parent() {
+    fn parent_phase_id_extracts_immediate_parent() {
         assert_eq!(parent_phase_id("v0.16.0.1"), Some("v0.16.0".to_string()));
         assert_eq!(parent_phase_id("v0.15.30.5"), Some("v0.15.30".to_string()));
+        // Deep IDs drop only the last component — not a fixed 3-component
+        // truncation, which would skip over the real immediate parent.
         assert_eq!(
             parent_phase_id("v0.15.30.5.1"),
-            Some("v0.15.30".to_string())
+            Some("v0.15.30.5".to_string())
+        );
+        assert_eq!(
+            parent_phase_id("v0.17.0.12.30"),
+            Some("v0.17.0.12".to_string()),
+            "immediate parent of a deeply nested sub-phase must not skip to the top-level ancestor"
         );
         assert_eq!(
             parent_phase_id("v0.16.0"),
@@ -11365,6 +11450,138 @@ More content here that is part of a second paragraph.
             "top-level phase has no parent"
         );
         assert_eq!(parent_phase_id("4b"), None, "non-semver has no parent");
+    }
+
+    #[test]
+    fn find_active_parent_phase_skips_done_ancestor() {
+        // Regression test (v0.17.0.12.30): a done, ID-prefix-matching ancestor
+        // must never be surfaced as the "parent" of a Current/Next header —
+        // only a still-relevant (not-Done) parent should be shown.
+        let phases = vec![
+            make_named_phase("v0.17.0.12", "Meridian Integration", PlanStatus::Done),
+            make_named_phase("v0.17.0.12.30", "Ordering Fixes", PlanStatus::InProgress),
+        ];
+        assert!(
+            find_active_parent_phase(&phases, "v0.17.0.12").is_none(),
+            "a Done parent must not be surfaced as active context"
+        );
+    }
+
+    #[test]
+    fn find_active_parent_phase_returns_pending_parent() {
+        let phases = vec![
+            make_named_phase("v0.17.0.12", "Meridian Integration", PlanStatus::Pending),
+            make_named_phase("v0.17.0.12.30", "Ordering Fixes", PlanStatus::Pending),
+        ];
+        let parent = find_active_parent_phase(&phases, "v0.17.0.12");
+        assert_eq!(parent.map(|p| p.id.as_str()), Some("v0.17.0.12"));
+    }
+
+    // ── v0.17.0.12.30: dependency-graph-based next/last-completed phase ──────
+
+    fn make_phase_with_deps(id: &str, status: PlanStatus, depends_on: &[&str]) -> PlanPhase {
+        PlanPhase {
+            id: id.to_string(),
+            title: format!("Phase {}", id),
+            status,
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            human_review_items: vec![],
+        }
+    }
+
+    #[test]
+    fn next_actionable_phases_requires_satisfied_dependencies() {
+        let phases = vec![
+            make_phase_with_deps("v0.1.0", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.2.0", PlanStatus::Pending, &["v0.1.0"]),
+            make_phase_with_deps("v0.3.0", PlanStatus::Pending, &["v0.2.0"]),
+        ];
+        let actionable = next_actionable_phases(&phases);
+        assert_eq!(
+            actionable.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["v0.2.0"],
+            "only the phase whose dependency is actually Done should be actionable"
+        );
+    }
+
+    #[test]
+    fn next_actionable_phases_ignores_document_position() {
+        // File order deliberately scrambled relative to dependency order.
+        let phases = vec![
+            make_phase_with_deps("v0.3.0", PlanStatus::Pending, &["v0.2.0"]),
+            make_phase_with_deps("v0.1.0", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.2.0", PlanStatus::Pending, &["v0.1.0"]),
+        ];
+        let actionable = next_actionable_phases(&phases);
+        assert_eq!(
+            actionable.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["v0.2.0"],
+            "actionability must come from depends_on, not file position"
+        );
+    }
+
+    #[test]
+    fn last_completed_phase_id_uses_dependency_graph_not_document_position() {
+        // Regression test for the real v0.17.0.12.x → v0.17.5 merge incident
+        // (v0.17.0.12.30): an unrelated phase (v0.17.5) that is Done and
+        // physically last in the file must not be reported as "last
+        // completed" — the phase actually blocking/unlocking current work
+        // (found via depends_on) must be reported instead.
+        let phases = vec![
+            make_phase_with_deps("v0.17.0.12.28", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.17.0.12.30", PlanStatus::Pending, &["v0.17.0.12.29"]),
+            make_phase_with_deps("v0.17.0.12.29", PlanStatus::Done, &["v0.17.0.12.28"]),
+            // Stray, unrelated phase — Done, and last in the file — from a
+            // separately merged branch. Must not be picked over the real
+            // dependency chain.
+            make_phase_with_deps("v0.17.5", PlanStatus::Done, &[]),
+        ];
+
+        assert_eq!(last_completed_phase_id(&phases), "v0.17.0.12.29");
+    }
+
+    #[test]
+    fn last_completed_phase_id_falls_back_to_highest_done_when_plan_complete() {
+        let phases = vec![
+            make_phase_with_deps("v0.1.0", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.2.0", PlanStatus::Done, &["v0.1.0"]),
+        ];
+        assert_eq!(last_completed_phase_id(&phases), "v0.2.0");
+    }
+
+    #[test]
+    fn last_completed_phase_id_defaults_when_nothing_done() {
+        let phases = vec![make_phase_with_deps("v0.1.0", PlanStatus::Pending, &[])];
+        assert_eq!(last_completed_phase_id(&phases), "v0.0.0");
+    }
+
+    #[test]
+    fn check_version_sync_flags_binary_ahead_of_last_completed_phase() {
+        // binary_version() is always well ahead of v0.1.0 in this workspace.
+        let phases = vec![make_phase_with_deps("v0.1.0", PlanStatus::Done, &[])];
+        let warning = check_version_sync(&phases);
+        assert!(
+            warning.is_some_and(|w| w.contains("v0.1.0")),
+            "binary should be reported as ahead of the last completed phase"
+        );
+    }
+
+    #[test]
+    fn check_version_sync_uses_dependency_graph_not_document_position() {
+        // Same scrambled-order setup as `last_completed_phase_id_uses_dependency_graph_*`:
+        // the unrelated, later-in-file v0.17.5 must not be used as the
+        // comparison baseline instead of the real dependency chain.
+        let phases = vec![
+            make_phase_with_deps("v0.17.0.12.28", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.17.0.12.30", PlanStatus::Pending, &["v0.17.0.12.29"]),
+            make_phase_with_deps("v0.17.0.12.29", PlanStatus::Done, &["v0.17.0.12.28"]),
+            make_phase_with_deps("v0.17.5", PlanStatus::Done, &[]),
+        ];
+        let warning = check_version_sync(&phases);
+        assert!(
+            warning.is_none_or(|w| !w.contains("v0.17.5")),
+            "must not compare binary version against the unrelated v0.17.5 phase"
+        );
     }
 
     #[test]
