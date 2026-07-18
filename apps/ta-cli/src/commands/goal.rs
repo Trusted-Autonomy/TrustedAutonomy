@@ -149,6 +149,30 @@ pub fn start_goal_extending_parent(
     goal.transition(GoalRunState::Configured)?;
     goal.transition(GoalRunState::Running)?;
 
+    // v0.17.0.12.33: a follow-up reusing the parent's staging directory does not go
+    // through OverlayWorkspace::create_with_strategy (no fresh copy is made), so it
+    // skips that path's ephemeral-file cleanup. Without this, a `.ta/change_summary.json`
+    // left behind by whichever goal last used this staging directory (possibly months
+    // old, from an earlier link in a long follow-up/serial-phases chain) survives into
+    // this new goal and can be blindly trusted by the supervisor review gate as "what
+    // this goal changed" before the new agent has written its own summary.
+    let stale_summary = goal.workspace_path.join(".ta").join("change_summary.json");
+    if stale_summary.exists() {
+        if let Err(e) = std::fs::remove_file(&stale_summary) {
+            tracing::warn!(
+                path = %stale_summary.display(),
+                error = %e,
+                "failed to clear stale change_summary.json — follow-up goal may start \
+                 with a previous goal's change summary"
+            );
+        } else {
+            tracing::debug!(
+                path = %stale_summary.display(),
+                "cleared stale change_summary.json from reused staging directory"
+            );
+        }
+    }
+
     store.save_with_tag(&mut goal)?;
     Ok(goal)
 }
@@ -3870,6 +3894,66 @@ mod tests {
         // Both goals stored.
         let all_goals = store.list().unwrap();
         assert_eq!(all_goals.len(), 2);
+    }
+
+    /// v0.17.0.12.33: a stale `.ta/change_summary.json` left in a reused staging
+    /// directory by a much older goal must not survive into a new follow-up goal —
+    /// otherwise the supervisor review gate can be fed that old goal's unrelated
+    /// file list before the new agent has had a chance to overwrite it.
+    #[test]
+    fn follow_up_extend_clears_stale_change_summary() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        start_goal(
+            &config,
+            &store,
+            "Parent goal",
+            Some(project.path()),
+            "Parent objective",
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        let parent = &goals[0];
+        let parent_id = parent.goal_run_id;
+
+        // Simulate a stale change_summary.json left behind by a much older goal
+        // that used this same staging directory.
+        let stale_ta_dir = parent.workspace_path.join(".ta");
+        std::fs::create_dir_all(&stale_ta_dir).unwrap();
+        std::fs::write(
+            stale_ta_dir.join("change_summary.json"),
+            r#"{"summary":"months-old unrelated work","changes":[]}"#,
+        )
+        .unwrap();
+
+        let follow_up = start_goal_extending_parent(
+            &config,
+            &store,
+            "Follow-up goal",
+            "Follow-up objective",
+            "test-agent",
+            None,
+            parent,
+            parent_id,
+        )
+        .unwrap();
+
+        assert!(
+            !follow_up
+                .workspace_path
+                .join(".ta/change_summary.json")
+                .exists(),
+            "stale change_summary.json must be cleared when extending parent staging"
+        );
     }
 
     #[test]

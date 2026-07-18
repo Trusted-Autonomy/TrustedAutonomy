@@ -3639,7 +3639,10 @@ pub fn execute(
             }
 
             // Collect changed files from staging dir via change_summary.json or file walk.
-            let changed_files: Vec<String> = collect_changed_files(&staging_path);
+            // change_summary.json entries are validated against source_root before being
+            // trusted (v0.17.0.12.33) — see collect_changed_files doc comment.
+            let source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+            let changed_files: Vec<String> = collect_changed_files(&staging_path, source_root);
 
             // For follow-up goals the supervisor must understand the full parent chain
             // scope, not just the immediate goal title. Build an extended objective
@@ -4889,20 +4892,44 @@ fn shell_quote(s: &str) -> String {
 
 /// Collect changed file paths by reading `.ta/change_summary.json` written by the agent,
 /// or falling back to a recursive walk of source files in the staging directory.
-fn collect_changed_files(staging_path: &std::path::Path) -> Vec<String> {
-    // Prefer reading from change_summary.json — more accurate than a directory walk.
+///
+/// `change_summary.json` is gitignored staging-root state that can outlive the goal that
+/// wrote it (e.g. a follow-up goal reusing a parent's staging directory, v0.17.0.12.33).
+/// Its listed paths are therefore cross-validated against a real staging-vs-`source_root`
+/// diff before being trusted — entries that don't correspond to an actual change are
+/// dropped, since blindly trusting a stale/unrelated file list can feed the supervisor
+/// review files this goal never touched, producing a false-positive BLOCK.
+fn collect_changed_files(
+    staging_path: &std::path::Path,
+    source_root: &std::path::Path,
+) -> Vec<String> {
+    // Prefer reading from change_summary.json — more accurate than a directory walk,
+    // but only once validated against a real diff.
     let summary_path = staging_path.join(".ta/change_summary.json");
     if summary_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&summary_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(changes) = json.get("changes").and_then(|c| c.as_array()) {
-                    let paths: Vec<String> = changes
+                    let candidate_paths: Vec<String> = changes
                         .iter()
                         .filter_map(|c| c.get("path").and_then(|p| p.as_str()))
                         .map(|s| s.to_string())
                         .collect();
-                    if !paths.is_empty() {
-                        return paths;
+                    let had_candidates = !candidate_paths.is_empty();
+                    let validated: Vec<String> = candidate_paths
+                        .into_iter()
+                        .filter(|p| path_actually_changed(staging_path, source_root, p))
+                        .collect();
+                    if !validated.is_empty() {
+                        return validated;
+                    }
+                    if had_candidates {
+                        tracing::warn!(
+                            summary_path = %summary_path.display(),
+                            "change_summary.json listed paths but none differ from source \
+                             — treating it as stale (leftover from a different goal that \
+                             reused this staging directory) and falling back to a directory walk"
+                        );
                     }
                 }
             }
@@ -4914,6 +4941,28 @@ fn collect_changed_files(staging_path: &std::path::Path) -> Vec<String> {
     collect_source_files(staging_path, staging_path, &mut files, 0);
     files.truncate(50);
     files
+}
+
+/// Whether `rel_path` genuinely differs between the staging workspace and the source
+/// it was copied from — i.e. whether it represents a real create/modify/delete, not a
+/// stale `change_summary.json` entry pointing at an untouched file.
+fn path_actually_changed(
+    staging_path: &std::path::Path,
+    source_root: &std::path::Path,
+    rel_path: &str,
+) -> bool {
+    let staging_file = staging_path.join(rel_path);
+    let source_file = source_root.join(rel_path);
+    match (staging_file.exists(), source_file.exists()) {
+        (false, false) => false, // Neither exists — a garbage/stale entry.
+        (true, false) | (false, true) => true, // Created or deleted.
+        (true, true) => match (std::fs::read(&staging_file), std::fs::read(&source_file)) {
+            (Ok(a), Ok(b)) => a != b,
+            // Unreadable (permissions, race) — be conservative and treat as changed
+            // rather than silently dropping a potentially real change.
+            _ => true,
+        },
+    }
 }
 
 /// Recursively collect source file paths relative to `root`.
@@ -7569,6 +7618,135 @@ mod tests {
         std::fs::create_dir_all(&ta_dir).unwrap();
         std::fs::write(ta_dir.join("state.json"), "{}").unwrap();
         assert_eq!(count_changed_files(staging.path(), source.path()), 0);
+    }
+
+    // ── v0.17.0.12.33 collect_changed_files tests: stale change_summary.json
+    // must not be blindly trusted by the supervisor review gate ──
+
+    #[test]
+    fn collect_changed_files_ignores_stale_unrelated_entries() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        // A file that change_summary.json claims changed, but is byte-identical
+        // in staging and source — i.e. a stale entry left over from an old goal
+        // that reused this staging directory (v0.17.0.12.33 incident).
+        std::fs::create_dir_all(staging.path().join("crates/ta-workflow/src")).unwrap();
+        std::fs::create_dir_all(source.path().join("crates/ta-workflow/src")).unwrap();
+        std::fs::write(
+            staging.path().join("crates/ta-workflow/src/unrelated.rs"),
+            "fn unrelated() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("crates/ta-workflow/src/unrelated.rs"),
+            "fn unrelated() {}\n",
+        )
+        .unwrap();
+
+        // The real change this goal actually made — not mentioned in the stale
+        // change_summary.json at all.
+        std::fs::write(staging.path().join("real_change.rs"), "fn real() {}\n").unwrap();
+
+        let ta_dir = staging.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("change_summary.json"),
+            r#"{"summary":"stale","changes":[{"path":"crates/ta-workflow/src/unrelated.rs","action":"modified"}]}"#,
+        )
+        .unwrap();
+
+        let changed = collect_changed_files(staging.path(), source.path());
+
+        // The stale entry must not be blindly trusted as "the complete list of what
+        // changed" — that's the false-positive-BLOCK bug (v0.17.0.12.33): a supervisor
+        // review fed only unrelated files while the real change goes unreported.
+        assert_ne!(
+            changed,
+            vec!["crates/ta-workflow/src/unrelated.rs".to_string()],
+            "an all-stale change_summary.json must not be trusted as-is, got: {:?}",
+            changed
+        );
+        assert!(
+            changed.contains(&"real_change.rs".to_string()),
+            "falling back past a stale summary should still surface the real change, got: {:?}",
+            changed
+        );
+    }
+
+    #[test]
+    fn path_actually_changed_detects_create_modify_and_stale() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        // Created: only in staging.
+        std::fs::write(staging.path().join("created.rs"), "fn c() {}").unwrap();
+        assert!(path_actually_changed(
+            staging.path(),
+            source.path(),
+            "created.rs"
+        ));
+
+        // Modified: differs in content.
+        std::fs::write(staging.path().join("modified.rs"), "fn m() { 1 }").unwrap();
+        std::fs::write(source.path().join("modified.rs"), "fn m() { 0 }").unwrap();
+        assert!(path_actually_changed(
+            staging.path(),
+            source.path(),
+            "modified.rs"
+        ));
+
+        // Stale: identical content in both — not a real change.
+        std::fs::write(staging.path().join("same.rs"), "fn s() {}").unwrap();
+        std::fs::write(source.path().join("same.rs"), "fn s() {}").unwrap();
+        assert!(!path_actually_changed(
+            staging.path(),
+            source.path(),
+            "same.rs"
+        ));
+
+        // Neither exists anywhere — garbage entry.
+        assert!(!path_actually_changed(
+            staging.path(),
+            source.path(),
+            "nonexistent.rs"
+        ));
+    }
+
+    #[test]
+    fn collect_changed_files_keeps_validated_entries() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        // A genuinely new file in staging — a real change.
+        std::fs::write(staging.path().join("added.rs"), "fn added() {}\n").unwrap();
+
+        let ta_dir = staging.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("change_summary.json"),
+            r#"{"summary":"real change","changes":[{"path":"added.rs","action":"created"}]}"#,
+        )
+        .unwrap();
+
+        let changed = collect_changed_files(staging.path(), source.path());
+
+        assert_eq!(
+            changed,
+            vec!["added.rs".to_string()],
+            "a change_summary.json entry backed by a real diff must be trusted as-is"
+        );
+    }
+
+    #[test]
+    fn collect_changed_files_falls_back_when_summary_missing() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        std::fs::write(staging.path().join("only_in_staging.rs"), "fn f() {}\n").unwrap();
+
+        let changed = collect_changed_files(staging.path(), source.path());
+
+        assert!(changed.contains(&"only_in_staging.rs".to_string()));
     }
 
     #[test]
