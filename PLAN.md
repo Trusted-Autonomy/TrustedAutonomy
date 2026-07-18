@@ -9678,7 +9678,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.30 — Draft-Count Accuracy, Doctor Stale-Draft Automation, and Plan-Status Ordering Fixes
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.29
 
 **Goal**: Three real bugs found verifying the v0.17.0.12.x → v0.17.5 merge into `main` (2026-07-16) — none represent actual stale state; the underlying data was fine, the display/counting logic was wrong:
