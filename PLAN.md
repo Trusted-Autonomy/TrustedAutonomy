@@ -9702,7 +9702,7 @@ Recommendation: converge forward onto an explicit pinned version rather than pin
 
 ---
 ### v0.17.0.12.31 — Build-Milestone Automation: VCS-Triggered Phase Continuation
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.13.7 (`serial-phases` workflow), v0.17.0.12.19 (`ta-intake` trigger layer), v0.17.0.12.15 (Decision gate)
 
 **Why**: this session ran a long chain of 0.17.x phases (12.28 through 12.30 and beyond) by hand — launch a phase via `ta run`, wait, validate the draft, apply, watch the PR's CI, fix real failures (e.g. a genuine Windows-only `set_modified()` `PermissionDenied` bug found and fixed live during this run), wait for auto-merge, rebuild/install, then launch the next phase. Per the user's explicit request (2026-07-17): automate this loop. Two existing mechanisms already cover most of it and should be extended, not replaced with a third:
