@@ -70,7 +70,18 @@ pub enum MeridianCommands {
     ///
     /// Example:
     ///   ta meridian suggest
-    Suggest,
+    Suggest {
+        /// Score every PLAN.md phase against `meridian.toml`'s KPIs in-process
+        /// (v0.17.0.13) instead of delegating to the `meridian` binary.
+        ///
+        /// Reads PLAN.md directly and prints a per-phase alignment report —
+        /// no `meridian` binary required.
+        ///
+        /// Example:
+        ///   ta meridian suggest --phases
+        #[arg(long)]
+        phases: bool,
+    },
 }
 
 /// Resolve the `meridian` binary path using a cross-platform priority chain.
@@ -173,6 +184,7 @@ pub fn execute(command: &MeridianCommands, config: &GatewayConfig) -> Result<()>
             let meridian = find_meridian_binary(&config.workspace_root)?;
             list_meridian_tools(&meridian)
         }
+        MeridianCommands::Suggest { phases: true } => phase_alignment_report(config),
         _ => {
             let meridian = find_meridian_binary(&config.workspace_root)?;
             let project_root = &config.workspace_root;
@@ -183,7 +195,7 @@ pub fn execute(command: &MeridianCommands, config: &GatewayConfig) -> Result<()>
                     project_root,
                 ),
                 MeridianCommands::Init => run_meridian_no_path(&meridian, &["init"]),
-                MeridianCommands::Suggest => run_meridian(
+                MeridianCommands::Suggest { .. } => run_meridian(
                     &meridian,
                     &["suggest", "--source", "ta", "--path"],
                     project_root,
@@ -192,6 +204,111 @@ pub fn execute(command: &MeridianCommands, config: &GatewayConfig) -> Result<()>
             }
         }
     }
+}
+
+/// `ta meridian suggest --phases` (v0.17.0.13) — in-process alignment report.
+///
+/// Reads PLAN.md, `.ta/velocity-history.jsonl`, and `meridian.toml`'s
+/// `[[kpi]]` entries directly, computes a per-phase alignment score via
+/// `kpi_alignment::compute_phase_alignments`, and prints a report annotated
+/// with each phase's actual cost from velocity history. No subprocess or
+/// `meridian` binary is required — this is a lightweight TA-native scorer,
+/// not Meridian's full regression engine (see the module doc on
+/// `kpi_alignment.rs` for how the two relate).
+fn phase_alignment_report(config: &GatewayConfig) -> Result<()> {
+    use super::kpi_alignment::{compute_phase_alignments, load_kpi_definitions};
+    use super::plan::load_plan;
+    use ta_goal::VelocityHistoryStore;
+
+    let Some(kpis) = load_kpi_definitions(&config.workspace_root) else {
+        bail!(
+            "No KPI definitions found in meridian.toml at the project root.\n\
+             \n\
+             Run `ta meridian init` to create meridian.toml with starter KPI\n\
+             definitions, then add `[[kpi]]` entries with `name`, `category`,\n\
+             `keywords`, and an optional `weight` before re-running:\n\
+             \n\
+             \tta meridian suggest --phases"
+        );
+    };
+
+    let plan_path = config.workspace_root.join("PLAN.md");
+    let plan_content = std::fs::read_to_string(&plan_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read {} to classify plan phases: {}",
+            plan_path.display(),
+            e
+        )
+    })?;
+    let phases = load_plan(&config.workspace_root)?;
+
+    if phases.is_empty() {
+        println!("No plan phases found in PLAN.md — nothing to score.");
+        return Ok(());
+    }
+
+    // Sum actual cost-per-phase from velocity history — missing/unreadable
+    // history is non-fatal, the report just omits the cost column's data.
+    let cost_by_phase: std::collections::HashMap<String, f64> =
+        VelocityHistoryStore::for_project(&config.workspace_root)
+            .load_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| entry.plan_phase.map(|phase| (phase, entry.cost_usd)))
+            .fold(
+                std::collections::HashMap::new(),
+                |mut acc, (phase, cost)| {
+                    *acc.entry(phase).or_insert(0.0) += cost;
+                    acc
+                },
+            );
+
+    let alignments = compute_phase_alignments(&phases, &plan_content, &kpis);
+    let matched = alignments.iter().filter(|a| a.best_kpi.is_some()).count();
+
+    println!(
+        "Meridian KPI alignment: {} of {} phase(s) matched a configured KPI\n",
+        matched,
+        alignments.len()
+    );
+    println!(
+        "{:<16} {:<8} {:<10} {:<40}",
+        "PHASE", "SCORE", "COST", "KPI (category)"
+    );
+    for alignment in &alignments {
+        let score_str = format!("{:.0}%", alignment.score * 100.0);
+        let cost_str = cost_by_phase
+            .get(&alignment.phase_id)
+            .map(|c| format!("${:.2}", c))
+            .unwrap_or_else(|| "-".to_string());
+        let kpi_str = match (&alignment.best_kpi, &alignment.category) {
+            (Some(kpi), Some(category)) => format!("{} ({})", kpi, category),
+            _ => "unclassified".to_string(),
+        };
+        println!(
+            "{:<16} {:<8} {:<10} {:<40}",
+            alignment.phase_id, score_str, cost_str, kpi_str
+        );
+    }
+
+    let unmatched: Vec<&str> = alignments
+        .iter()
+        .filter(|a| a.best_kpi.is_none())
+        .map(|a| a.phase_id.as_str())
+        .collect();
+    if !unmatched.is_empty() {
+        println!(
+            "\n{} phase(s) didn't match any configured KPI: {}",
+            unmatched.len(),
+            unmatched.join(", ")
+        );
+        println!(
+            "Consider adding keywords to an existing KPI in meridian.toml, or a new \
+             [[kpi]] category, so future phases in this area score against a stated goal."
+        );
+    }
+
+    Ok(())
 }
 
 /// Start a short-lived `meridian serve` session, call `tools/list` via the
@@ -521,6 +638,47 @@ mod tests {
         let _analyze = MeridianCommands::Analyze;
         let _tools = MeridianCommands::Tools;
         let _init = MeridianCommands::Init;
-        let _suggest = MeridianCommands::Suggest;
+        let _suggest = MeridianCommands::Suggest { phases: false };
+    }
+
+    #[test]
+    fn phase_alignment_report_errors_without_kpi_config() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("PLAN.md"),
+            "## Phase 1\n<!-- status: done -->\n",
+        )
+        .unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(tmp.path());
+        let err = phase_alignment_report(&config).unwrap_err();
+        assert!(err.to_string().contains("ta meridian init"));
+    }
+
+    #[test]
+    fn phase_alignment_report_succeeds_with_kpis_and_velocity_history() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("PLAN.md"),
+            "## Phase 1 — Kernel\n<!-- status: done -->\nCore crates.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("meridian.toml"),
+            "[[kpi]]\nname = \"Kernel Stability\"\ncategory = \"reliability\"\nkeywords = [\"kernel\", \"core\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ta")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ta/velocity-history.jsonl"),
+            format!(
+                "{{\"goal_id\":\"{}\",\"title\":\"t\",\"agent\":\"claude\",\"outcome\":\"applied\",\
+                 \"started_at\":\"2026-01-01T00:00:00Z\",\"build_seconds\":10,\"total_seconds\":10,\
+                 \"plan_phase\":\"1\",\"cost_usd\":2.5}}\n",
+                uuid::Uuid::from_u128(1)
+            ),
+        )
+        .unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(tmp.path());
+        assert!(phase_alignment_report(&config).is_ok());
     }
 }

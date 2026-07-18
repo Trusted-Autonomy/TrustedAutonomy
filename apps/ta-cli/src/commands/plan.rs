@@ -48,6 +48,13 @@ pub enum PlanCommands {
         /// Check whether the binary version is ahead of the highest sequential completed phase (v0.14.3).
         #[arg(long)]
         check_versions: bool,
+        /// Augment output with KPI alignment scores from meridian.toml (v0.17.0.13).
+        ///
+        /// Scores every phase in-process against meridian.toml's `[[kpi]]`
+        /// entries — no `meridian` binary required. No-op with a note if
+        /// meridian.toml has no KPI definitions configured.
+        #[arg(long)]
+        kpi: bool,
     },
     /// Show the next pending phase and suggest creating a goal for it.
     Next {
@@ -490,8 +497,9 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             check_constitution,
             check_order,
             check_versions,
+            kpi,
         } => {
-            let result = show_status(config, *json);
+            let result = show_status(config, *json, *kpi);
             if *check_constitution || *check_order || *check_versions {
                 if let Ok(phases) = load_plan(&config.workspace_root) {
                     if *check_constitution {
@@ -1658,8 +1666,28 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> {
+fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> anyhow::Result<()> {
     let phases = load_plan(&config.workspace_root)?;
+
+    // v0.17.0.13: KPI alignment scoring, computed in-process (no subprocess).
+    // `None` means either --kpi wasn't passed or meridian.toml has no KPIs configured.
+    let kpi_alignments: Option<Vec<super::kpi_alignment::PhaseAlignment>> = if kpi_output {
+        let plan_content = std::fs::read_to_string(config.workspace_root.join("PLAN.md")).ok();
+        let kpis = super::kpi_alignment::load_kpi_definitions(&config.workspace_root);
+        match (plan_content, kpis) {
+            (Some(content), Some(kpis)) => Some(super::kpi_alignment::compute_phase_alignments(
+                &phases, &content, &kpis,
+            )),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let kpi_by_phase: std::collections::HashMap<&str, &super::kpi_alignment::PhaseAlignment> =
+        kpi_alignments
+            .as_ref()
+            .map(|v| v.iter().map(|a| (a.phase_id.as_str(), a)).collect())
+            .unwrap_or_default();
 
     let done = phases
         .iter()
@@ -1703,11 +1731,19 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
             "human_review_pending": hr_pending_count,
             "phases": phases.iter().map(|p| {
                 let hr_count = hr_by_phase.get(&p.id).copied().unwrap_or(0);
+                let kpi_alignment = kpi_by_phase.get(p.id.as_str()).map(|a| {
+                    serde_json::json!({
+                        "kpi": a.best_kpi,
+                        "category": a.category,
+                        "score": a.score,
+                    })
+                });
                 serde_json::json!({
                     "id": p.id,
                     "title": p.title,
                     "status": format!("{}", p.status),
                     "human_review_pending": hr_count,
+                    "kpi_alignment": kpi_alignment,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -1842,6 +1878,36 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
             }
             None => {
                 println!("Version: {}  (no completed semver phases found)", binary);
+            }
+        }
+    }
+
+    // v0.17.0.13: --kpi alignment section.
+    if kpi_output {
+        println!();
+        match &kpi_alignments {
+            None => {
+                println!(
+                    "KPI Alignment: no KPI definitions found in meridian.toml.\n\
+                     Run `ta meridian init` to create it, then add `[[kpi]]` entries."
+                );
+            }
+            Some(alignments) => {
+                println!("KPI Alignment (meridian.toml):");
+                for a in alignments {
+                    let score_str = format!("{:.0}%", a.score * 100.0);
+                    match (&a.best_kpi, &a.category) {
+                        (Some(kpi), Some(category)) => {
+                            println!(
+                                "  {:<16} {:<6} {} ({})",
+                                a.phase_id, score_str, kpi, category
+                            );
+                        }
+                        _ => {
+                            println!("  {:<16} {:<6} unclassified", a.phase_id, score_str);
+                        }
+                    }
+                }
             }
         }
     }
@@ -12708,5 +12774,49 @@ persona = "strict-reviewer"
             is_dry_run_merge,
             "dry-run merge should be logged with detail='dry_run'"
         );
+    }
+
+    // v0.17.0.13: `ta plan status --kpi` — in-process KPI alignment scoring.
+
+    #[test]
+    fn show_status_kpi_flag_ok_without_meridian_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PLAN.md"), SAMPLE_PLAN).unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        // No meridian.toml present — should degrade gracefully, not error.
+        assert!(show_status(&config, false, true).is_ok());
+        assert!(show_status(&config, true, true).is_ok());
+    }
+
+    #[test]
+    fn show_status_kpi_flag_ok_with_meridian_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PLAN.md"), SAMPLE_PLAN).unwrap();
+        std::fs::write(
+            dir.path().join("meridian.toml"),
+            "[[kpi]]\nname = \"Kernel Stability\"\ncategory = \"reliability\"\nkeywords = [\"kernel\", \"core\"]\n",
+        )
+        .unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        assert!(show_status(&config, false, true).is_ok());
+        assert!(show_status(&config, true, true).is_ok());
+    }
+
+    #[test]
+    fn show_status_kpi_json_includes_alignment_field() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PLAN.md"), SAMPLE_PLAN).unwrap();
+        std::fs::write(
+            dir.path().join("meridian.toml"),
+            "[[kpi]]\nname = \"Kernel Stability\"\ncategory = \"reliability\"\nkeywords = [\"kernel\", \"core\"]\n",
+        )
+        .unwrap();
+        let phases = load_plan(dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        let kpis = crate::commands::kpi_alignment::load_kpi_definitions(dir.path()).unwrap();
+        let alignments =
+            crate::commands::kpi_alignment::compute_phase_alignments(&phases, &content, &kpis);
+        let kernel_phase = alignments.iter().find(|a| a.phase_id == "1").unwrap();
+        assert_eq!(kernel_phase.best_kpi.as_deref(), Some("Kernel Stability"));
     }
 }

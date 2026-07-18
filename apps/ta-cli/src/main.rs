@@ -886,10 +886,12 @@ enum Commands {
     /// to every goal — agents get meridian tools as native tool calls.
     ///
     /// Subcommands:
-    ///   ta meridian analyze  — run KPI analysis against velocity data
-    ///   ta meridian tools    — list tools exposed by meridian serve (MCP)
-    ///   ta meridian init     — create meridian.toml with starter KPI definitions
-    ///   ta meridian suggest  — surface KPI alignment gaps with suggestions
+    ///   ta meridian analyze          — run KPI analysis against velocity data
+    ///   ta meridian tools            — list tools exposed by meridian serve (MCP)
+    ///   ta meridian init             — create meridian.toml with starter KPI definitions
+    ///   ta meridian suggest          — surface KPI alignment gaps with suggestions
+    ///   ta meridian suggest --phases — score PLAN.md phases against meridian.toml
+    ///                                  in-process, no `meridian` binary required (v0.17.0.13)
     ///
     /// Install Meridian: cargo install meridian
     #[command(hide = true)]
