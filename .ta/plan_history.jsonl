@@ -487,3 +487,4 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.13","source":"daemon_claim","timestamp":"2026-07-18T03:20:55.014199+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.17.0.13","timestamp":"2026-07-18T04:07:56.634898+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.32","source":"daemon_claim","timestamp":"2026-07-18T05:41:31.109400+00:00"}
+{"new_status":"pending","note":"phase reset to pending — draft closed","old_status":"in_progress","phase_id":"v0.17.0.12.32","timestamp":"2026-07-18T06:09:40.482611+00:00"}
