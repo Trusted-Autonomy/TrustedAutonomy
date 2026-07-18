@@ -25,9 +25,9 @@ notify = { workspace = true }
 toml = { workspace = true }
 
 # Workspace crates
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.32" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.32" }
-ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.32" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.33" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.33" }
+ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.33" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

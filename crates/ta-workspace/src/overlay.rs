@@ -1728,6 +1728,11 @@ pub const TA_MANAGED_FILES: &[&str] = &[
 /// with a clean slate regardless of what the source directory contains.
 pub const EPHEMERAL_STAGING_FILES: &[&str] = &[
     ".ta-decisions.json", // Agent Decision Log — written per-run, never applied back
+    // change_summary.json — supervisor review's file list (v0.17.0.12.33). Already
+    // excluded from copy since the whole `.ta/` dir is skipped, but cleared here too
+    // as a belt-and-suspenders guard against future staging strategies (e.g. ProjFS
+    // virtual mode) leaking a stale, unrelated file list into a fresh goal.
+    ".ta/change_summary.json",
 ];
 
 /// Delete ephemeral staging-root files from `staging_dir` after initial copy.
@@ -3175,6 +3180,30 @@ mod tests {
         assert!(
             !overlay.staging_dir().join(".ta-decisions.json").exists(),
             ".ta-decisions.json from source must not carry over into new goal's staging"
+        );
+    }
+
+    /// v0.17.0.12.33: `delete_ephemeral_staging_files` must also clear a stale
+    /// `.ta/change_summary.json` from a freshly-staged directory — belt-and-suspenders
+    /// alongside `.ta` being excluded from the initial copy, so future staging
+    /// strategies (e.g. ProjFS virtual mode) can't silently reintroduce the leak that
+    /// caused a false-positive supervisor BLOCK on an unrelated file list.
+    #[test]
+    fn delete_ephemeral_staging_files_removes_stale_change_summary() {
+        let staging = TempDir::new().unwrap();
+        let ta_dir = staging.path().join(".ta");
+        fs::create_dir_all(&ta_dir).unwrap();
+        fs::write(
+            ta_dir.join("change_summary.json"),
+            r#"{"summary":"months-old unrelated work","changes":[]}"#,
+        )
+        .unwrap();
+
+        delete_ephemeral_staging_files(staging.path());
+
+        assert!(
+            !ta_dir.join("change_summary.json").exists(),
+            "stale change_summary.json must be cleared at staging creation"
         );
     }
 
