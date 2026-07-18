@@ -9740,6 +9740,21 @@ This phase closes both gaps found this session, without replacing either buildin
 #### Version: `0.17.0-alpha.13`
 
 ---
+### v0.17.0.12.32 — `ta setup vcs --force` Silently Drops Unregistered Gitignore Entries
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.30
+
+**Goal**: `ta doctor --fix` (via `ta setup vcs --force`) regenerates `.gitignore`'s TA block strictly from `LOCAL_TA_PATHS` (`crates/ta-workspace/src/partitioning.rs:32-72`), the canonical hardcoded list. Found live during this session's 8-hour run (2026-07-18): 4 real, needed entries from `v0.17.0.12.26`'s `ta_human_verify` feature (`human-verify-audit.jsonl`, `human-verify-invocations.jsonl`, `verify-audit-reviewed.jsonl`, `verify-threshold-proposals.jsonl`) had been added directly to `.gitignore` at some point but never registered in `LOCAL_TA_PATHS` — so the very next `--force` regeneration silently dropped all 4, which would have let those audit logs get accidentally committed on a future `git add -A` had it gone unnoticed. This is exactly the "a future write path that forgets to invalidate silently reintroduces staleness" risk pattern already named and avoided elsewhere in `v0.17.0.12.29`'s design (mtime-keying over manual invalidation) — `LOCAL_TA_PATHS` needs the same self-maintaining property, not another hand-maintained list that can silently drift from what actually gets written to `.ta/`.
+
+**Items**:
+1. [ ] Add the 4 missing paths to `LOCAL_TA_PATHS`.
+2. [ ] Add a test asserting every `.gitignore`-worthy path any TA code actually creates under `.ta/` is present in `LOCAL_TA_PATHS` or `SHARED_TA_PATHS` — e.g. grep the workspace source for `.ta/` path-literal writes (or maintain this via a build-time check) and fail CI if one isn't accounted for in either list, rather than relying on a human noticing a diff during a future `--force` run.
+3. [ ] `ta setup vcs --force`: warn (not just silently rewrite) when it's about to remove a `.ta/`-prefixed line from the existing block that isn't a recognized `LOCAL_TA_PATHS`/`SHARED_TA_PATHS` entry — this is the safety net for whatever item 2's static check misses.
+4. [ ] Tests: a manually-added `.ta/some-real-file.jsonl` line survives a `--force` regeneration warning (not silent removal) when unrecognized; the 4 real paths from this incident are covered by item 1's fix and never drop again.
+
+#### Version: `0.17.0-alpha.12.32`
+
+---
 ### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)
 <!-- status: pending -->
 
