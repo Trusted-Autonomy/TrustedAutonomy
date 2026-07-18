@@ -9725,7 +9725,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 ---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0.12 (Meridian integration), Meridian `suggest` command (v0.1.x)
 
