@@ -2258,6 +2258,28 @@ pub fn execute(
         }
     }
 
+    // v0.17.0.13: Informational one-line KPI alignment hint — computed
+    // in-process against meridian.toml, never blocks the run if unavailable.
+    if !quiet {
+        if let Some(ref phase_id) = goal.plan_phase {
+            let source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+            if let Ok(plan_content) = std::fs::read_to_string(source_root.join("PLAN.md")) {
+                if let Ok(phases) = super::plan::load_plan(source_root) {
+                    if let Some(phase) = phases.iter().find(|p| &p.id == phase_id) {
+                        if let Some(alignment) = super::kpi_alignment::score_one_phase(
+                            source_root,
+                            &plan_content,
+                            &phase.id,
+                            &phase.title,
+                        ) {
+                            println!("{}", super::kpi_alignment::format_one_line(&alignment));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
         // Load context budget config (v0.14.3.1).

@@ -12842,6 +12842,43 @@ ta meridian suggest
 
 Runs Meridian's regression engine against your velocity history to classify past plan phases by business category, score them against the KPIs defined in `meridian.toml`, and surface alignment gaps with concrete suggestions for structuring future phases.
 
+### Aligning Plan Phases to KPIs
+
+The commands above delegate to the `meridian` binary. TA also ships a lightweight, in-process KPI scorer that works without the binary installed — it reads `meridian.toml`'s `[[kpi]]` entries directly and classifies plan phases by keyword overlap with each KPI:
+
+```toml
+[[kpi]]
+name = "Shipping Velocity"
+category = "velocity"
+keywords = ["release", "ship", "deploy", "milestone"]
+weight = 1.0
+
+[[kpi]]
+name = "Reliability"
+category = "reliability"
+keywords = ["test", "bug", "regression", "fix", "stability"]
+```
+
+`weight` defaults to `1.0` and `category` defaults to `"general"` if omitted. This scorer is intentionally simpler than Meridian's own regression engine — it's a fast, always-available approximation, not a replacement for `meridian analyze`/`meridian suggest`.
+
+Score every PLAN.md phase in-process:
+
+```bash
+ta meridian suggest --phases
+```
+
+Prints a per-phase table with the winning KPI, its category, and a match score, plus a list of phases that didn't match any configured KPI.
+
+See KPI alignment inline in plan status:
+
+```bash
+ta plan status --kpi
+```
+
+Adds a "KPI Alignment" section to `ta plan status` output (and a `kpi_alignment` field per phase in `--json` output) — computed in-process, no subprocess call. If `meridian.toml` has no `[[kpi]]` entries, this prints a note pointing at `ta meridian init` instead of failing.
+
+`ta run "title" --phase X` also prints a one-line KPI alignment hint for the phase being claimed, when `meridian.toml` is configured — purely informational, it never blocks the run.
+
 ### How TA feeds Meridian
 
 TA writes token counts and timing data to `.ta/velocity-history.jsonl` whenever a goal completes. Each entry carries Meridian-compatible fields (`tokens_input`, `tokens_output`) in addition to TA's own cost fields, so Meridian can report actual API cost rather than using time as a cost proxy.

@@ -9725,17 +9725,17 @@ This phase closes both gaps found this session, without replacing either buildin
 
 ---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.12 (Meridian integration), Meridian `suggest` command (v0.1.x)
 
 **Goal**: Use Meridian's KPI regression engine against TA plan phases — classify each historical phase by business category, score against KPIs, and surface alignment gaps with concrete suggestions for structuring future phases to better serve stated goals.
 
 **Items**:
-1. [ ] `ta meridian suggest --phases` — reads PLAN.md + velocity-history.jsonl, classifies each plan phase by title+description, scores against KPIs defined in `meridian.toml`; outputs per-phase alignment report
-2. [ ] `ta plan status --kpi` — augments existing plan status output with KPI alignment column (calls Meridian scorer in-process via library, no subprocess needed)
-3. [ ] Auto-KPI suggestion for new phases: during `ta run "title" --phase X`, if Meridian is configured, print a one-line KPI alignment score alongside the phase summary header — informational only, never blocks
-4. [ ] USAGE.md: "Aligning Plan Phases to KPIs" section
+1. [x] `ta meridian suggest --phases` — reads PLAN.md + velocity-history.jsonl, classifies each plan phase by title+description, scores against KPIs defined in `meridian.toml`; outputs per-phase alignment report
+2. [x] `ta plan status --kpi` — augments existing plan status output with KPI alignment column (calls Meridian scorer in-process via library, no subprocess needed)
+3. [x] Auto-KPI suggestion for new phases: during `ta run "title" --phase X`, if Meridian is configured, print a one-line KPI alignment score alongside the phase summary header — informational only, never blocks
+4. [x] USAGE.md: "Aligning Plan Phases to KPIs" section
 
 #### Version: `0.17.0-alpha.13`
 

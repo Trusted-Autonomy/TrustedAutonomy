@@ -27,6 +27,7 @@ pub mod health_signals;
 pub mod init;
 pub mod install;
 pub mod intake;
+pub mod kpi_alignment;
 pub mod link;
 pub mod manifest;
 pub mod memory;
