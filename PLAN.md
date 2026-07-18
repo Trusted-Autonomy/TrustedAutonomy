@@ -9756,7 +9756,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 ---
 ### v0.17.0.12.33 — Supervisor Review Can Be Fed a Stale, Unrelated File List
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.32
 
 **Goal**: Found live during this session's run (2026-07-18): `12.32`'s draft got a false-positive supervisor `BLOCK` — the review complained about ~50 files under `ta-workflow`/`ta-plugin`/`ta-build`/`ta-goal` that goal never touched. Root cause confirmed with direct evidence: `collect_changed_files()` (`apps/ta-cli/src/commands/run.rs:4892-4917`) prefers reading `<staging>/.ta/change_summary.json` over any actual diff, and only falls back to a directory walk if that file is missing/unparseable. That file is in `LOCAL_TA_PATHS` (`crates/ta-workspace/src/partitioning.rs`) — gitignored, never cleared between goals, meant to be written fresh by each goal's own agent. The source repo's own `.ta/change_summary.json` was found dated **March 5** — leftover from a goal months old. Since `ta run` copies the full source tree (including `.ta/`) into each new staging directory at goal-start, this ancient file rides along into every new goal's staging copy. If the new goal's agent hasn't yet overwritten it by the time the supervisor review reads it (timing-dependent, not deterministic), `collect_changed_files` silently returns the *stale* file's contents as "what this goal changed." The stale file (confirmed garbage, unrelated to any current goal) was deleted directly from the source repo as an immediate, safe fix — this phase is the real, durable fix.
