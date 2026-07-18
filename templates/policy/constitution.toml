@@ -45,3 +45,20 @@ exception   = "--skip-plan-merge flag (emergency use only — logged to audit tr
 severity    = "block"
 description = "ta release run is the authoritative release mechanism — agents must not push tags, create GitHub releases, or bump versions outside the release pipeline"
 exception   = "hotfix emergency acknowledged via explicit --skip-release-pipeline flag (logged to audit trail)"
+
+# ── Build-milestone automation opt-in (v0.17.0.12.31) ───────────────
+# `ta-intake`'s `webhook` trigger type only exists (and only fires) when a
+# project explicitly creates `.ta/triggers/webhook.toml` (e.g. via
+# `ta workflow build-milestone`) — there is no default-on webhook listener.
+# On top of that, every merged PR it reacts to must carry the trigger's
+# `require_label` (default "ta-automation", applied via `.ta/workflow.toml`'s
+# `[git] build_milestone_label`) — a human's unrelated merged PR on the same
+# repo/branch is never labeled, so it can never accidentally launch the next
+# plan phase (applied via `.ta/workflow.toml`'s `[submit.git]
+# build_milestone_label`). Enforcement of the label check lives in
+# `ta_intake::webhook::WebhookTriggerSource::poll()`, not this constitution
+# engine — this entry documents the guarantee for a human auditing policy.
+[rules.build-milestone-automation]
+severity    = "warn"
+description = "PR-merged phase continuation requires both an explicit .ta/triggers/webhook.toml opt-in AND a matching PR label (require_label) — never fires from repo/branch matching alone"
+exception   = "require_label set to an empty string in the trigger config explicitly disables the label check (reduced blast-radius protection, still gated by the opt-in trigger file existing)"

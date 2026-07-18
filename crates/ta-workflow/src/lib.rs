@@ -59,7 +59,8 @@ pub use registry::{cached_index_path, RegistryEntry, RegistryIndex};
 pub use error::WorkflowError;
 pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse};
 pub use serial_phases::{
-    evaluate_gates, run_gate, GateFailure, GateResult, SerialPhasesState, StepState, WorkflowGate,
+    decide_gate_failure_action, evaluate_gates, run_gate, GateFailure, GateFailureAction,
+    GateFailureMode, GateResult, SerialPhasesState, StepState, WorkflowGate,
 };
 pub use step_action::{
     ActionRouter, CollectingActionRouter, NoopActionRouter, StepAction, KNOWN_TA_ACTIONS,

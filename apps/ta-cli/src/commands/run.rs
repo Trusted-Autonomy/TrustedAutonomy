@@ -1057,7 +1057,14 @@ pub fn read_routing_decisions(workspace_root: &Path) -> Vec<ta_brain::RoutingDec
 ///
 /// Each phase runs the full single-agent execution loop in the same staging
 /// directory (follow-up chain). After each phase, gate commands are evaluated.
-/// If a gate fails the workflow halts with actionable error + resume instructions.
+///
+/// On gate failure, behavior depends on `on_gate_failure`
+/// (v0.17.0.12.31): `PauseAndTellHuman` (default) halts the workflow with
+/// resume instructions, unchanged from pre-v0.17.0.12.31 behavior. `AutoFix`
+/// launches a follow-up goal whose objective is the gate's own failure
+/// output, re-evaluates gates, and repeats up to `retry_cap` times before
+/// falling back to escalation — a second consecutive failure always
+/// escalates, never retries silently forever.
 ///
 /// Workflow state is persisted to `.ta/serial-workflow-<id>.json` for resume support.
 #[allow(clippy::too_many_arguments)]
@@ -1069,6 +1076,8 @@ pub fn execute_serial_phases(
     phases: &[String],
     gates: &[String],
     quiet: bool,
+    on_gate_failure: ta_workflow::GateFailureMode,
+    retry_cap: u32,
 ) -> anyhow::Result<()> {
     if phases.is_empty() {
         anyhow::bail!(
@@ -1135,96 +1144,147 @@ pub fn execute_serial_phases(
         state.current_step = i;
         let _ = state.save(&state_dir);
 
-        // Build the subprocess command for this phase.
-        let mut cmd = std::process::Command::new(&ta_bin);
-        cmd.arg("run")
-            .arg(title)
-            .arg("--phase")
-            .arg(phase)
-            .arg("--agent")
-            .arg(agent);
+        // `follow_up_from`/`step_objective` are reused across auto-fix retry
+        // iterations: the first attempt follows up on the previous phase's
+        // goal with the caller's objective; each retry follows up on the
+        // just-failed goal with the gate failure as the objective instead.
+        let mut follow_up_from = prev_goal_id.clone();
+        let mut step_objective = objective.to_string();
 
-        if let Some(ref prev_id) = prev_goal_id {
-            cmd.arg("--follow-up-goal").arg(prev_id);
-        }
+        let (goal_id, staging_path) = loop {
+            let mut cmd = std::process::Command::new(&ta_bin);
+            cmd.arg("run")
+                .arg(title)
+                .arg("--phase")
+                .arg(phase)
+                .arg("--agent")
+                .arg(agent);
 
-        if !objective.is_empty() {
-            cmd.arg("--objective").arg(objective);
-        }
+            if let Some(ref follow_up_id) = follow_up_from {
+                cmd.arg("--follow-up-goal").arg(follow_up_id);
+            }
+            if !step_objective.is_empty() {
+                cmd.arg("--objective").arg(&step_objective);
+            }
+            if quiet {
+                cmd.arg("--quiet");
+            }
+            cmd.current_dir(&config.workspace_root);
 
-        if quiet {
-            cmd.arg("--quiet");
-        }
-
-        cmd.current_dir(&config.workspace_root);
-
-        let status = cmd.status().map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to launch agent for phase {}: {}. \
-                 Resume with: ta run --workflow serial-phases --resume-workflow {}",
-                phase,
-                e,
-                workflow_id
-            )
-        })?;
-
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            state.steps[i] = ta_workflow::StepState::AgentFailed {
-                error: format!("exit code {}", code),
-            };
-            let _ = state.save(&state_dir);
-            anyhow::bail!(
-                "Phase {} failed: agent exited with code {}.\n  \
-                 Resume with: ta run --workflow serial-phases --resume-workflow {}",
-                phase,
-                code,
-                workflow_id
-            );
-        }
-
-        // Find the most recently created goal for this phase.
-        let goal_store = GoalRunStore::new(&config.goals_dir)?;
-        let goals = goal_store.list()?;
-        let goal = goals
-            .into_iter()
-            .find(|g| g.plan_phase.as_deref() == Some(phase.as_str()))
-            .ok_or_else(|| {
+            let status = cmd.status().map_err(|e| {
                 anyhow::anyhow!(
-                    "Could not find completed goal for phase '{}' after agent run. \
-                     Check goal store at {}.",
+                    "Failed to launch agent for phase {}: {}. \
+                     Resume with: ta run --workflow serial-phases --resume-workflow {}",
                     phase,
-                    config.goals_dir.display()
+                    e,
+                    workflow_id
                 )
             })?;
 
-        let goal_id = goal.goal_run_id.to_string();
-        let staging_path = goal.workspace_path.clone();
-
-        // Evaluate gates in the staging directory.
-        if !gate_specs.is_empty() {
-            if !quiet {
-                println!("  Evaluating {} gate(s)...", gate_specs.len());
-            }
-            if let Err(failure) = ta_workflow::evaluate_gates(&gate_specs, &staging_path, quiet) {
-                state.steps[i] = ta_workflow::StepState::GateFailed {
-                    goal_id: goal_id.clone(),
-                    failed_gate: failure.gate_name.clone(),
-                    error: failure.to_string(),
+            if !status.success() {
+                let code = status.code().unwrap_or(-1);
+                state.steps[i] = ta_workflow::StepState::AgentFailed {
+                    error: format!("exit code {}", code),
                 };
                 let _ = state.save(&state_dir);
                 anyhow::bail!(
-                    "Gate '{}' failed after phase {}.\n  \
-                     Staging: {}\n  \
-                     Fix the issue, then resume with:\n  \
-                     ta run --workflow serial-phases --resume-workflow {}",
-                    failure.gate_name,
+                    "Phase {} failed: agent exited with code {}.\n  \
+                     Resume with: ta run --workflow serial-phases --resume-workflow {}",
                     phase,
-                    staging_path.display(),
+                    code,
                     workflow_id
                 );
             }
-        }
+
+            // Find the most recently created goal for this phase — `max_by_key`
+            // on `created_at` (not the first match) because an auto-fix retry
+            // creates a second goal with the same `plan_phase`.
+            let goal_store = GoalRunStore::new(&config.goals_dir)?;
+            let goals = goal_store.list()?;
+            let goal = goals
+                .into_iter()
+                .filter(|g| g.plan_phase.as_deref() == Some(phase.as_str()))
+                .max_by_key(|g| g.created_at)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Could not find completed goal for phase '{}' after agent run. \
+                         Check goal store at {}.",
+                        phase,
+                        config.goals_dir.display()
+                    )
+                })?;
+
+            let goal_id = goal.goal_run_id.to_string();
+            let staging_path = goal.workspace_path.clone();
+
+            if gate_specs.is_empty() {
+                break (goal_id, staging_path);
+            }
+
+            if !quiet {
+                println!("  Evaluating {} gate(s)...", gate_specs.len());
+            }
+            match ta_workflow::evaluate_gates(&gate_specs, &staging_path, quiet) {
+                Ok(()) => break (goal_id, staging_path),
+                Err(failure) => {
+                    let attempt = state.gate_fix_attempts[i] + 1;
+                    let action = ta_workflow::decide_gate_failure_action(
+                        on_gate_failure,
+                        attempt,
+                        retry_cap,
+                    );
+
+                    state.steps[i] = ta_workflow::StepState::GateFailed {
+                        goal_id: goal_id.clone(),
+                        failed_gate: failure.gate_name.clone(),
+                        error: failure.to_string(),
+                    };
+                    state.gate_fix_attempts[i] = attempt;
+                    let _ = state.save(&state_dir);
+
+                    match action {
+                        ta_workflow::GateFailureAction::EscalateToHuman => {
+                            anyhow::bail!(
+                                "Gate '{}' failed after phase {} (auto-fix attempt {}/{}).\n  \
+                                 Staging: {}\n  \
+                                 Fix the issue, then resume with:\n  \
+                                 ta run --workflow serial-phases --resume-workflow {}",
+                                failure.gate_name,
+                                phase,
+                                attempt.saturating_sub(1),
+                                retry_cap,
+                                staging_path.display(),
+                                workflow_id
+                            );
+                        }
+                        ta_workflow::GateFailureAction::LaunchFollowUpFix => {
+                            if !quiet {
+                                println!(
+                                    "  Gate '{}' failed (auto-fix attempt {}/{}) — launching \
+                                     follow-up fix goal...",
+                                    failure.gate_name, attempt, retry_cap
+                                );
+                            }
+                            step_objective = format!(
+                                "# Fix gate failure\n\n\
+                                 The `{}` gate failed after phase {} with exit code {:?}.\n\n\
+                                 Command: `{}`\n\n\
+                                 Output:\n```\n{}\n```\n\n\
+                                 Fix the issue so this gate passes, then leave the staging \
+                                 workspace ready for re-verification.",
+                                failure.gate_name,
+                                phase,
+                                failure.exit_code,
+                                failure.command,
+                                failure.output
+                            );
+                            follow_up_from = Some(goal_id);
+                            // Loop again: launch the fix goal and re-evaluate gates.
+                        }
+                    }
+                }
+            }
+        };
 
         // Mark step as passed.
         state.steps[i] = ta_workflow::StepState::Passed {

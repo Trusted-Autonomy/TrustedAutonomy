@@ -4385,44 +4385,59 @@ pub fn next_actionable_phases(phases: &[PlanPhase]) -> Vec<&PlanPhase> {
         .collect()
 }
 
+// Ascending comparator: real semver IDs compare by value; a phase with a
+// non-semver ID always sorts after every semver phase (never picked by
+// `max_by` over a real dependency, never mistaken for the primary
+// next-actionable target over a real one).
+fn by_semver(a: &&PlanPhase, b: &&PlanPhase) -> std::cmp::Ordering {
+    match (parse_semver_id(&a.id), parse_semver_id(&b.id)) {
+        (Some(sa), Some(sb)) => sa.cmp(&sb),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// The single primary next-actionable phase ID, if any.
+///
+/// Consolidates the "pick one" selection out of [`next_actionable_phases`]'s
+/// result set (v0.17.0.12.30 item 4: one shared function, not a second
+/// ad-hoc scan) — takes the lowest-semver phase among those whose
+/// dependencies are all satisfied, preferring phases with a real semver ID
+/// and falling back to the first actionable phase if none parse. Returns
+/// `None` when there is no next-actionable phase — e.g. the whole plan is
+/// done (build-milestone automation treats this as "no-op, milestone
+/// complete", not an error).
+pub fn next_actionable_phase_id(phases: &[PlanPhase]) -> Option<String> {
+    let actionable = next_actionable_phases(phases);
+    actionable
+        .iter()
+        .copied()
+        .filter(|p| parse_semver_id(&p.id).is_some())
+        .min_by(by_semver)
+        .or_else(|| actionable.first().copied())
+        .map(|p| p.id.clone())
+}
+
 /// Find the last completed phase ID, used for gap-semver generation and the
 /// `ta plan status` version-check line.
 ///
 /// Derives this from the *dependency graph*, not document position: takes the
 /// lowest-semver phase from [`next_actionable_phases`] (the immediate next
-/// step) and returns the highest-semver phase among *that phase's own*
-/// declared dependencies — i.e. what specifically had to finish for the next
-/// step to become ready. All version comparisons go through
-/// [`parse_semver_id`], never a document-position scan.
+/// step, via [`next_actionable_phase_id`]) and returns the highest-semver
+/// phase among *that phase's own* declared dependencies — i.e. what
+/// specifically had to finish for the next step to become ready. All version
+/// comparisons go through [`parse_semver_id`], never a document-position scan.
 ///
 /// Falls back to the highest-semver `Done` phase overall (still compared via
 /// `parse_semver_id`, never by position) when there is no next-actionable
 /// phase or it has no declared dependencies — e.g. the whole plan is done, or
 /// a project with no `**Depends on**` lines at all.
 pub fn last_completed_phase_id(phases: &[PlanPhase]) -> String {
-    // Ascending comparator: real semver IDs compare by value; a phase with a
-    // non-semver ID always sorts after every semver phase (never picked by
-    // `max_by` over a real dependency, never mistaken for the primary
-    // next-actionable target over a real one).
-    fn by_semver(a: &&PlanPhase, b: &&PlanPhase) -> std::cmp::Ordering {
-        match (parse_semver_id(&a.id), parse_semver_id(&b.id)) {
-            (Some(sa), Some(sb)) => sa.cmp(&sb),
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-    }
-
-    // The immediate next step: lowest-semver phase in the actionable set.
-    // Prefer phases with a real semver ID; fall back to the first actionable
-    // phase found only if none of them parse as semver.
-    let actionable = next_actionable_phases(phases);
-    let primary = actionable
-        .iter()
-        .copied()
-        .filter(|p| parse_semver_id(&p.id).is_some())
-        .min_by(by_semver)
-        .or_else(|| actionable.first().copied());
+    let primary_id = next_actionable_phase_id(phases);
+    let primary = primary_id
+        .as_deref()
+        .and_then(|id| phases.iter().find(|p| p.id == id));
 
     if let Some(phase) = primary {
         let last_dep = phase
@@ -11553,6 +11568,30 @@ More content here that is part of a second paragraph.
     fn last_completed_phase_id_defaults_when_nothing_done() {
         let phases = vec![make_phase_with_deps("v0.1.0", PlanStatus::Pending, &[])];
         assert_eq!(last_completed_phase_id(&phases), "v0.0.0");
+    }
+
+    #[test]
+    fn next_actionable_phase_id_picks_lowest_semver_actionable_phase() {
+        let phases = vec![
+            make_phase_with_deps("v0.1.0", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.3.0", PlanStatus::Pending, &["v0.2.0"]),
+            make_phase_with_deps("v0.2.0", PlanStatus::Pending, &["v0.1.0"]),
+        ];
+        assert_eq!(
+            next_actionable_phase_id(&phases),
+            Some("v0.2.0".to_string())
+        );
+    }
+
+    #[test]
+    fn next_actionable_phase_id_none_when_milestone_complete() {
+        // v0.17.0.12.31 item 6: the whole chain must be a no-op, not a
+        // crash, when there is no next pending phase.
+        let phases = vec![
+            make_phase_with_deps("v0.1.0", PlanStatus::Done, &[]),
+            make_phase_with_deps("v0.2.0", PlanStatus::Done, &["v0.1.0"]),
+        ];
+        assert_eq!(next_actionable_phase_id(&phases), None);
     }
 
     #[test]
