@@ -128,7 +128,7 @@ pub fn run_vcs_setup(
             } else {
                 String::new()
             };
-            let (updated, changed) = update_gitignore(&existing, force);
+            let (updated, changed, unregistered) = update_gitignore(&existing, force);
             if dry_run {
                 if changed {
                     println!("  [dry-run] Would update .gitignore with TA local-state block.");
@@ -143,6 +143,7 @@ pub fn run_vcs_setup(
                 println!("  [ok] .gitignore already contains TA block — no change needed.");
                 println!("       Use --force to rewrite the block.");
             }
+            warn_unregistered_ta_lines(&unregistered, ".gitignore");
             // Update workflow.toml [submit] adapter field and [commit] auto_stage.
             update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
         }
@@ -153,7 +154,7 @@ pub fn run_vcs_setup(
             } else {
                 String::new()
             };
-            let (updated, changed) = update_p4ignore(&existing, force);
+            let (updated, changed, unregistered) = update_p4ignore(&existing, force);
             if dry_run {
                 if changed {
                     println!("  [dry-run] Would update .p4ignore with TA local-state block.");
@@ -166,6 +167,7 @@ pub fn run_vcs_setup(
             } else {
                 println!("  [ok] .p4ignore already contains TA block — no change needed.");
             }
+            warn_unregistered_ta_lines(&unregistered, ".p4ignore");
             // Warn if P4IGNORE env var is not set.
             if std::env::var("P4IGNORE").is_err() {
                 println!();
@@ -215,6 +217,33 @@ pub fn run_vcs_setup(
     }
 
     Ok(())
+}
+
+/// Print a warning for any `.ta/`-prefixed line preserved from the existing
+/// ignore file that TA doesn't recognize (not in `LOCAL_TA_PATHS` or
+/// `SHARED_TA_PATHS`). These lines are never dropped — see
+/// `update_gitignore`/`update_p4ignore` in `ta_workspace::partitioning` — but
+/// an unrecognized entry usually means either a real TA runtime path that
+/// was never registered (the v0.17.0.12.32 incident) or stale content that
+/// can be cleaned up by hand.
+fn warn_unregistered_ta_lines(unregistered: &[String], ignore_file_name: &str) {
+    if unregistered.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "  ⚠ Found {} unrecognized .ta/-prefixed line(s) in {} that are not in \
+         LOCAL_TA_PATHS/SHARED_TA_PATHS (crates/ta-workspace/src/partitioning.rs):",
+        unregistered.len(),
+        ignore_file_name
+    );
+    for line in unregistered {
+        println!("      {}", line);
+    }
+    println!(
+        "    Preserved as-is — not removed. If this protects a real TA runtime file, \
+         register it in LOCAL_TA_PATHS so future `--force` runs regenerate it consistently."
+    );
 }
 
 /// Write or update the `[submit] adapter = "..."` field in `.ta/workflow.toml`.
@@ -1155,6 +1184,30 @@ source = "registry:ta-channel-slack"
         let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         let count = content.matches("# Trusted Autonomy").count();
         assert_eq!(count, 1, "force should rewrite, not duplicate");
+    }
+
+    /// Regression test for v0.17.0.12.32: a `.ta/`-prefixed line manually
+    /// added to `.gitignore` that TA doesn't recognize (not in
+    /// LOCAL_TA_PATHS/SHARED_TA_PATHS) must survive `ta setup vcs --force`
+    /// end-to-end, not just at the `update_gitignore` unit level.
+    #[test]
+    fn vcs_setup_git_force_preserves_unregistered_entry() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "# Trusted Autonomy — local runtime state (do not commit)\n\
+             .ta/staging/\n.ta/some-real-file.jsonl\n.ta/goals/\n",
+        )
+        .unwrap();
+        let config = test_config(&dir);
+        run_vcs_setup(&config, true, false, None, None).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            content.contains(".ta/some-real-file.jsonl"),
+            "unrecognized entry must survive --force regeneration, not be silently dropped:\n{}",
+            content
+        );
     }
 
     #[test]

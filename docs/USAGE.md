@@ -13852,6 +13852,16 @@ For Perforce projects, it writes the same entries to `.p4ignore`. If `P4IGNORE` 
     export P4IGNORE=.p4ignore   (add to your shell profile)
 ```
 
+**`--force` never silently drops lines it doesn't recognize.** If you've manually added a `.ta/`-prefixed entry to your ignore file that isn't one of TA's own known paths, `ta setup vcs --force` preserves it as-is and prints a warning instead of removing it:
+
+```
+⚠ Found 1 unrecognized .ta/-prefixed line(s) in .gitignore that are not in
+  LOCAL_TA_PATHS/SHARED_TA_PATHS (crates/ta-workspace/src/partitioning.rs):
+      .ta/some-real-file.jsonl
+  Preserved as-is — not removed. If this protects a real TA runtime file,
+  register it in LOCAL_TA_PATHS so future `--force` runs regenerate it consistently.
+```
+
 ### Team Onboarding Workflow
 
 When a teammate clones the repo for the first time:
