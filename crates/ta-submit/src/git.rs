@@ -766,6 +766,59 @@ impl SourceAdapter for GitAdapter {
             .unwrap_or("unknown")
             .to_string();
 
+        // Apply the build-milestone label if configured (v0.17.0.12.31).
+        // Explicit per-project opt-in (`.ta/workflow.toml`'s
+        // `[git] build_milestone_label`) — this is the structured marker
+        // `ta-intake`'s `webhook` trigger type requires before a merged PR
+        // can trigger autonomous phase continuation, so a human's unrelated
+        // PR (unlabeled) never accidentally fires it. Best-effort: a label
+        // failure must not fail PR creation itself.
+        if let Some(label) = &self.config.git.build_milestone_label {
+            // `--force` makes label creation idempotent (updates color/desc
+            // if it already exists instead of erroring).
+            let _ = Command::new("gh")
+                .args([
+                    "label",
+                    "create",
+                    label,
+                    "--color",
+                    "0E8A16",
+                    "--description",
+                    "Applied by TA build-milestone automation",
+                    "--force",
+                ])
+                .current_dir(&self.work_dir)
+                .output();
+            match Command::new("gh")
+                .args(["pr", "edit", &pr_number, "--add-label", label])
+                .current_dir(&self.work_dir)
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    tracing::info!("GitAdapter: applied label '{}' to PR #{}", label, pr_number);
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!(
+                        "[warn] Could not apply label '{}' to PR #{}: {}",
+                        label, pr_number, stderr
+                    );
+                    tracing::warn!(
+                        "GitAdapter: failed to apply label '{}' to PR #{}: {}",
+                        label,
+                        pr_number,
+                        stderr
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[warn] Could not apply label '{}' to PR #{}: {}",
+                        label, pr_number, e
+                    );
+                }
+            }
+        }
+
         // Enable auto-merge if configured (v0.11.2.3).
         let auto_merge_active;
         if self.config.git.auto_merge && self.has_gh_cli() {

@@ -373,6 +373,14 @@ pub enum SessionEvent {
         commit_sha: String,
         /// VCS provider (e.g., "github").
         provider: String,
+        /// Source/head branch the PR was merged from (v0.17.0.12.31).
+        /// Empty string when the provider doesn't report one (e.g. Perforce).
+        #[serde(default)]
+        head_branch: String,
+        /// PR labels at merge time (v0.17.0.12.31), used to gate automation
+        /// that must only fire for PRs explicitly marked by that automation.
+        #[serde(default)]
+        labels: Vec<String>,
     },
 
     /// A commit was pushed to a VCS branch (v0.14.8.3).
@@ -995,6 +1003,8 @@ mod tests {
                 merged_by: "alice".into(),
                 commit_sha: "abc123".into(),
                 provider: "github".into(),
+                head_branch: "feature/add-feature".into(),
+                labels: vec!["ta-automation".into()],
             },
             SessionEvent::VcsBranchPushed {
                 repo: "org/repo".into(),

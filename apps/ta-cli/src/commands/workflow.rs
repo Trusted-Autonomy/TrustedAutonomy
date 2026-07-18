@@ -288,6 +288,58 @@ pub enum WorkflowCommands {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Build-milestone automation (v0.17.0.12.31): a thin, documented preset
+    /// composing the `serial-phases` workflow's `--on-gate-failure=auto-fix`
+    /// mode with the `webhook` intake trigger's PR-merged continuation — not
+    /// a new engine, just this session's manual "launch phase → wait →
+    /// apply → watch CI → fix real failures → wait for merge → rebuild →
+    /// launch next phase" loop made automatic.
+    ///
+    /// Runs the given phases serially (same mechanism as
+    /// `ta run --workflow serial-phases --phases ...`) and, unless
+    /// `--skip-trigger-setup` is passed, writes `.ta/triggers/webhook.toml`
+    /// so a later `ta intake fire webhook` (e.g. from cron, or a CI job
+    /// after a merge webhook lands) continues the chain to the next pending
+    /// PLAN.md phase once this phase's PR is merged with the required label.
+    ///
+    /// Example:
+    ///   ta workflow build-milestone --phases v0.17.0.13,v0.17.1 --on-gate-failure auto-fix
+    BuildMilestone {
+        /// Comma-separated plan phase IDs to run serially.
+        #[arg(long, value_delimiter = ',')]
+        phases: Vec<String>,
+        /// Gate failure mode: "pause" (default, escalate to human) or
+        /// "auto-fix" (launch a follow-up fix goal, retry, then escalate).
+        #[arg(long, default_value = "pause")]
+        on_gate_failure: String,
+        /// Gate commands to evaluate after each phase (e.g. --gates build --gates test).
+        #[arg(long)]
+        gates: Vec<String>,
+        /// Max auto-fix follow-up attempts per gate failure before escalating.
+        #[arg(long, default_value_t = 1)]
+        gate_failure_retry_cap: u32,
+        /// Agent system to use for each phase.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+        /// GitHub repo (org/repo) for the PR-merged continuation trigger.
+        /// Auto-detected from `git remote get-url origin` when omitted.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Base branch PRs merge into.
+        #[arg(long, default_value = "main")]
+        base_branch: String,
+        /// Head/feature branch prefix required for a merged PR to continue the chain.
+        #[arg(long, default_value = "feature/")]
+        head_branch_prefix: String,
+        /// PR label required for a merged PR to continue the chain — the
+        /// opt-in guard against an unrelated human PR triggering automation.
+        #[arg(long, default_value = "ta-automation")]
+        require_label: String,
+        /// Don't write/verify `.ta/triggers/webhook.toml` — use when the
+        /// trigger is already configured or managed separately.
+        #[arg(long)]
+        skip_trigger_setup: bool,
+    },
 }
 
 pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -458,7 +510,214 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
         WorkflowCommands::Install { name, from } => install_template(name, from.as_deref(), config),
         WorkflowCommands::Uninstall { name } => uninstall_template(name, config),
         WorkflowCommands::UpdateIndex { url } => update_index(url.as_deref()),
+        WorkflowCommands::BuildMilestone {
+            phases,
+            on_gate_failure,
+            gates,
+            gate_failure_retry_cap,
+            agent,
+            repo,
+            base_branch,
+            head_branch_prefix,
+            require_label,
+            skip_trigger_setup,
+        } => execute_build_milestone(
+            config,
+            phases,
+            on_gate_failure,
+            gates,
+            *gate_failure_retry_cap,
+            agent,
+            repo.as_deref(),
+            base_branch,
+            head_branch_prefix,
+            require_label,
+            *skip_trigger_setup,
+        ),
     }
+}
+
+/// `ta workflow build-milestone` (v0.17.0.12.31 item 4) — see the
+/// `WorkflowCommands::BuildMilestone` doc comment for the full rationale.
+/// Composes two existing pieces rather than adding a third engine:
+/// `serial_phases::execute_serial_phases` for the phase chain itself, and a
+/// `.ta/triggers/webhook.toml` manifest (`ta-intake`'s `webhook` trigger
+/// type) for the PR-merged continuation that picks the chain back up.
+#[allow(clippy::too_many_arguments)]
+fn execute_build_milestone(
+    config: &GatewayConfig,
+    phases: &[String],
+    on_gate_failure: &str,
+    gates: &[String],
+    gate_failure_retry_cap: u32,
+    agent: &str,
+    repo: Option<&str>,
+    base_branch: &str,
+    head_branch_prefix: &str,
+    require_label: &str,
+    skip_trigger_setup: bool,
+) -> anyhow::Result<()> {
+    if phases.is_empty() {
+        anyhow::bail!(
+            "ta workflow build-milestone requires at least one phase.\n\
+             Usage: ta workflow build-milestone --phases v0.17.0.13,v0.17.1"
+        );
+    }
+
+    let gate_failure_mode =
+        ta_workflow::GateFailureMode::parse(on_gate_failure).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if !skip_trigger_setup {
+        setup_pr_merged_trigger(
+            &config.workspace_root,
+            repo,
+            base_branch,
+            head_branch_prefix,
+            require_label,
+        )?;
+    }
+
+    println!(
+        "Workflow: build-milestone ({} phase{}, on_gate_failure={})",
+        phases.len(),
+        if phases.len() == 1 { "" } else { "s" },
+        on_gate_failure
+    );
+
+    let title = format!("Build milestone: {}", phases.join(", "));
+    super::run::execute_serial_phases(
+        config,
+        &title,
+        agent,
+        "",
+        phases,
+        gates,
+        false,
+        gate_failure_mode,
+        gate_failure_retry_cap,
+    )?;
+
+    if !skip_trigger_setup {
+        println!();
+        println!(
+            "When this phase's PR merges with the '{}' label, continue the chain with:",
+            require_label
+        );
+        println!("  ta intake fire webhook");
+        println!(
+            "(wire this to fire automatically from your CI's post-merge step, or a \
+             `ta intake fire webhook` cron entry — see docs/USAGE.md \"Trigger Layer\".)"
+        );
+    }
+
+    Ok(())
+}
+
+/// Detect `org/repo` from `git remote get-url origin` (supports both
+/// `git@github.com:org/repo.git` and `https://github.com/org/repo.git`
+/// forms). Returns `None` if git isn't available or there's no `origin`.
+fn detect_repo_from_git_remote(workspace_root: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .arg("remote")
+        .arg("get-url")
+        .arg("origin")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stripped = url.strip_suffix(".git").unwrap_or(&url);
+    if let Some(rest) = stripped.strip_prefix("git@github.com:") {
+        return Some(rest.to_string());
+    }
+    for prefix in ["https://github.com/", "http://github.com/"] {
+        if let Some(rest) = stripped.strip_prefix(prefix) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+/// Ensure `.ta/triggers/webhook.toml` exists with the given match settings.
+/// This is the explicit, per-project opt-in step (PLAN.md item 5) — no
+/// trigger config, no automation, regardless of what merges. Leaves an
+/// existing file untouched (never silently overwrites operator edits).
+fn setup_pr_merged_trigger(
+    workspace_root: &std::path::Path,
+    repo: Option<&str>,
+    base_branch: &str,
+    head_branch_prefix: &str,
+    require_label: &str,
+) -> anyhow::Result<()> {
+    let triggers_dir = workspace_root.join(".ta").join("triggers");
+    std::fs::create_dir_all(&triggers_dir)?;
+    let dest = triggers_dir.join("webhook.toml");
+
+    if dest.exists() {
+        println!(
+            "Trigger config already exists: {} (left untouched)",
+            dest.display()
+        );
+        return Ok(());
+    }
+
+    let resolved_repo = repo
+        .map(|r| r.to_string())
+        .or_else(|| detect_repo_from_git_remote(workspace_root))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not determine the GitHub repo for the PR-merged trigger.\n\
+                 Pass --repo org/repo, or run this from a directory with a \
+                 `git remote origin` pointing at GitHub."
+            )
+        })?;
+
+    let contents = format!(
+        "type = \"webhook\"\n\
+         enabled = true\n\
+         dispatch = \"direct\"\n\
+         description = \"Build-milestone automation: continue the phase chain when a \
+tagged PR merges\"\n\
+         \n\
+         [settings]\n\
+         repo = \"{resolved_repo}\"\n\
+         base_branch = \"{base_branch}\"\n\
+         head_branch_prefix = \"{head_branch_prefix}\"\n\
+         require_label = \"{require_label}\"\n\
+         build_command = \"./dev cargo build --release -p ta-cli -p ta-daemon && bash install_local.sh && ta daemon restart\"\n"
+    );
+    std::fs::write(&dest, contents)?;
+    println!("Created: {}", dest.display());
+    println!(
+        "  repo={} base_branch={} head_branch_prefix={} require_label={}",
+        resolved_repo, base_branch, head_branch_prefix, require_label
+    );
+
+    // The trigger only fires for PRs carrying `require_label` — check whether
+    // `.ta/workflow.toml`'s `[git] build_milestone_label` is already set to
+    // apply it, and if not, tell the operator exactly what to add (rather
+    // than blind-rewriting their existing workflow.toml, which could lose
+    // comments/formatting or clobber unrelated settings).
+    let workflow_toml = workspace_root.join(".ta").join("workflow.toml");
+    let current_label = ta_submit::config::WorkflowConfig::load_or_default(&workflow_toml)
+        .submit
+        .git
+        .build_milestone_label;
+    if current_label.as_deref() != Some(require_label) {
+        println!();
+        println!(
+            "NOTE: PRs won't carry the '{}' label yet — add this to {} so the trigger \
+             above actually fires:",
+            require_label,
+            workflow_toml.display()
+        );
+        println!("  [submit.git]");
+        println!("  build_milestone_label = \"{}\"", require_label);
+    }
+    Ok(())
 }
 
 /// Attempt intent resolution when `name` is not a known template.

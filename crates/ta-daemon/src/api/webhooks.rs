@@ -182,6 +182,20 @@ fn map_github_event(event_type: &str, payload: &serde_json::Value) -> Option<Ses
                         .unwrap_or("")
                         .to_string(),
                     provider: "github".to_string(),
+                    head_branch: payload["pull_request"]["head"]["ref"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    labels: payload["pull_request"]["labels"]
+                        .as_array()
+                        .map(|labels| {
+                            labels
+                                .iter()
+                                .filter_map(|l| l["name"].as_str())
+                                .map(|s| s.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 })
             } else {
                 None
@@ -444,6 +458,17 @@ fn map_vcs_event(event: &str, payload: &serde_json::Value) -> Option<SessionEven
                 .to_string(),
             commit_sha: payload["commit_sha"].as_str().unwrap_or("").to_string(),
             provider: payload["provider"].as_str().unwrap_or("vcs").to_string(),
+            head_branch: payload["head_branch"].as_str().unwrap_or("").to_string(),
+            labels: payload["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|l| l.as_str())
+                        .map(|s| s.to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }),
         "branch_pushed" => Some(SessionEvent::VcsBranchPushed {
             repo: payload["repo"].as_str().unwrap_or("unknown").to_string(),
@@ -524,8 +549,10 @@ mod tests {
                 "number": 42,
                 "title": "Add feature",
                 "base": { "ref": "main" },
+                "head": { "ref": "feature/add-feature" },
                 "merge_commit_sha": "abc123",
-                "merged_by": { "login": "alice" }
+                "merged_by": { "login": "alice" },
+                "labels": [{ "name": "ta-automation" }, { "name": "enhancement" }]
             },
             "repository": { "full_name": "org/repo" }
         });
@@ -535,12 +562,44 @@ mod tests {
             pr_number,
             pr_title,
             branch,
+            head_branch,
+            labels,
             ..
         } = event
         {
             assert_eq!(pr_number, 42);
             assert_eq!(pr_title, "Add feature");
             assert_eq!(branch, "main");
+            assert_eq!(head_branch, "feature/add-feature");
+            assert_eq!(labels, vec!["ta-automation", "enhancement"]);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn map_github_pr_merged_missing_head_and_labels_defaults_empty() {
+        let payload = serde_json::json!({
+            "action": "closed",
+            "pull_request": {
+                "merged": true,
+                "number": 7,
+                "title": "No labels here",
+                "base": { "ref": "main" },
+                "merge_commit_sha": "def456",
+                "merged_by": { "login": "bob" }
+            },
+            "repository": { "full_name": "org/repo" }
+        });
+        let event = map_github_event("pull_request", &payload).unwrap();
+        if let SessionEvent::VcsPrMerged {
+            head_branch,
+            labels,
+            ..
+        } = event
+        {
+            assert_eq!(head_branch, "");
+            assert!(labels.is_empty());
         } else {
             panic!("wrong variant");
         }

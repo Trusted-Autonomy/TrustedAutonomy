@@ -25,7 +25,7 @@ use chrono::Utc;
 use clap::Subcommand;
 use ta_intake::{
     discover_triggers, find_trigger, Dispatch, EmailTriggerSource, ScheduleTriggerSource,
-    TriggerEvent, TriggerSource,
+    TriggerEvent, TriggerSource, WebhookTriggerSource,
 };
 
 #[derive(Subcommand, Debug)]
@@ -173,9 +173,10 @@ fn build_source(
             let source = EmailTriggerSource::from_plugin(manifest, project_root)?;
             Ok(Box::new(source))
         }
+        "webhook" => Ok(Box::new(WebhookTriggerSource::new(manifest, project_root))),
         other => anyhow::bail!(
             "No built-in TriggerSource implementation for type '{other}'.\n\
-             Built-in types: schedule, inbound-email.\n\
+             Built-in types: schedule, inbound-email, webhook.\n\
              Community trigger types need their own `TriggerSource` registered \
              (planned for the `ta-brain` routing layer, v0.17.0.12.20)."
         ),
@@ -282,12 +283,127 @@ fn dispatch_direct(
     manifest: &ta_intake::TriggerManifest,
     project_root: &Path,
 ) -> anyhow::Result<()> {
+    // Build-milestone automation (v0.17.0.12.31): a matched "PR merged"
+    // `webhook` trigger event doesn't go through the generic ta-brain
+    // routing + headless-goal path — it drives the specific PR-merged →
+    // pull/build/next-phase sequence PLAN.md item 2 describes, matching
+    // exactly what this session performed by hand for phases 12.28-12.30.
+    if event.trigger_type == "webhook" {
+        return execute_pr_merged_continuation(event, manifest, project_root);
+    }
+
     let input = ta_brain::RoutingInput::Trigger(
         ta_brain::TriggerRoutingInput::from_event_and_manifest(event.clone(), manifest),
     );
     let decision = ta_brain::route(&input, project_root);
     print_routing_decision(&decision);
     execute_routed_goal(event, &decision)
+}
+
+/// Default install/build step run after pulling a merged build-milestone PR,
+/// before resolving and launching the next plan phase — this repo's own
+/// dev-loop build+install+restart sequence (PLAN.md v0.17.0.12.31 item 2b).
+/// Override per-project via `.ta/triggers/webhook.toml`'s `build_command`
+/// setting.
+const DEFAULT_BUILD_COMMAND: &str =
+    "./dev cargo build --release -p ta-cli -p ta-daemon && bash install_local.sh && ta daemon restart";
+
+/// React to a matched PR-merged `webhook` trigger event: pull the merged
+/// branch, rebuild/install, resolve the next pending PLAN.md phase (via the
+/// dependency-graph-aware [`super::plan::next_actionable_phase_id`], not a
+/// document-position heuristic), and launch it — the automated equivalent of
+/// this session's manual "apply, watch CI, rebuild, launch next phase" loop.
+///
+/// A no-op (not an error) when there is no next pending phase: the milestone
+/// chain is complete.
+fn execute_pr_merged_continuation(
+    event: &TriggerEvent,
+    manifest: &ta_intake::TriggerManifest,
+    project_root: &Path,
+) -> anyhow::Result<()> {
+    let source_phase = event.payload["source_phase"].as_str().unwrap_or("unknown");
+    let base_branch = event.payload["base_branch"].as_str().unwrap_or("main");
+
+    println!(
+        "[build-milestone] PR #{} merged (closes {}) — continuing the phase chain.",
+        event.payload["pr_number"], source_phase
+    );
+
+    println!("[build-milestone] git pull origin {base_branch}");
+    run_shell_checked(
+        project_root,
+        &format!("git pull origin {base_branch}"),
+        "git pull",
+    )?;
+
+    let build_command = manifest
+        .get_str("build_command")
+        .unwrap_or(DEFAULT_BUILD_COMMAND);
+    println!("[build-milestone] build command: {build_command}");
+    run_shell_checked(project_root, build_command, "build/install command")?;
+
+    let phases = super::plan::load_plan(project_root)?;
+    match super::plan::next_actionable_phase_id(&phases) {
+        None => {
+            println!(
+                "[build-milestone] no next pending phase after {source_phase} — \
+                 milestone complete, nothing to launch."
+            );
+            Ok(())
+        }
+        Some(next_phase) => {
+            println!("[build-milestone] launching next phase: {next_phase}");
+            let ta_bin = std::env::current_exe().map_err(|e| {
+                anyhow::anyhow!("Could not determine ta binary path for subprocess invocation: {e}")
+            })?;
+            let status = std::process::Command::new(&ta_bin)
+                .arg("run")
+                .arg(&next_phase)
+                .arg("--accept-terms")
+                .current_dir(project_root)
+                .status()
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to launch 'ta run \"{next_phase}\" --accept-terms': {e}"
+                    )
+                })?;
+            if !status.success() {
+                anyhow::bail!(
+                    "'ta run \"{next_phase}\" --accept-terms' exited with {}. \
+                     Check the goal's logs, fix the issue, and re-run \
+                     `ta intake fire webhook` to retry once resolved.",
+                    status
+                );
+            }
+            println!("[build-milestone] phase {next_phase} launched successfully.");
+            Ok(())
+        }
+    }
+}
+
+/// Run a shell command in `project_root`, streaming output, and bail with an
+/// actionable error (naming the failed step and the exact command, per the
+/// Observability Mandate) on non-zero exit.
+fn run_shell_checked(project_root: &Path, command: &str, step_name: &str) -> anyhow::Result<()> {
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+    let status = std::process::Command::new(shell)
+        .arg(shell_flag)
+        .arg(command)
+        .current_dir(project_root)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn {step_name} ('{command}'): {e}"))?;
+    if !status.success() {
+        anyhow::bail!(
+            "{step_name} failed (exit {}). Command: `{}`\n\
+             Re-run manually in {} to see full output, fix the issue, then \
+             re-fire the trigger: `ta intake fire webhook`.",
+            status,
+            command,
+            project_root.display()
+        );
+    }
+    Ok(())
 }
 
 fn print_routing_decision(decision: &ta_brain::RoutingDecision) {

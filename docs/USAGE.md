@@ -1885,6 +1885,19 @@ Gate 'test' failed after phase v0.13.7.1.
 
 The workflow state is saved to `.ta/serial-workflow-<id>.json` so you can inspect which steps passed/failed.
 
+**Automatic gate-failure recovery** (`--on-gate-failure=auto-fix`): instead of stopping on the first gate failure, launch a follow-up goal whose objective is the gate's own failure output (the same follow-up mechanism `--follow-up-goal` uses), then re-evaluate the gates. This repeats up to `--gate-failure-retry-cap` times (default 1) per gate failure — a second consecutive failure always escalates to a human, so this never becomes an infinite fix-loop on a genuinely unfixable failure.
+
+```bash
+ta run "Implement v0.17.0.13" \
+  --workflow serial-phases \
+  --phases v0.17.0.13,v0.17.1 \
+  --gates build --gates test \
+  --on-gate-failure auto-fix \
+  --gate-failure-retry-cap 2
+```
+
+`--on-gate-failure pause` (the default) is unchanged from prior behavior: mark the step failed and stop immediately.
+
 ### Parallel Agent Swarms
 
 Decompose a goal into independent sub-goals. Each sub-goal runs as its own agent in a separate staging directory. After all complete, an optional integration agent merges the results.
@@ -15420,6 +15433,21 @@ account = "intake@example.com"
 max_messages_per_poll = 25
 ```
 
+```toml
+# .ta/triggers/webhook.toml — build-milestone automation (v0.17.0.12.31)
+type = "webhook"
+enabled = true
+dispatch = "direct"
+description = "Continue the phase chain when a build-milestone PR merges."
+
+[settings]
+repo = "org/repo"                                  # required — GitHub "org/repo"
+base_branch = "main"                                # default: "main"
+head_branch_prefix = "feature/"                     # default: "feature/"
+require_label = "ta-automation"                     # default: "ta-automation"; "" disables the check
+build_command = "./dev cargo build --release -p ta-cli -p ta-daemon && bash install_local.sh && ta daemon restart"
+```
+
 Fields common to every trigger type:
 
 | Field | Meaning |
@@ -15430,12 +15458,13 @@ Fields common to every trigger type:
 | `description` | Free-text, shown by `ta intake list`. |
 | `[settings]` | Trigger-type-specific keys (interpreted by that type's `TriggerSource`, not by `ta-intake` itself). |
 
-### The 2 shipped trigger types
+### The 3 shipped trigger types
 
 - **`schedule`** — fires once at least `settings.interval_secs` has elapsed since the last fire (a plain recurring interval; not a full cron-expression parser). `settings.goal_title` sets the created goal's title.
 - **`inbound-email`** — polls the messaging plugin named by `settings.provider` (the same plugin discovery `ta workflow run email-manager` uses) for messages since the last watermark, and normalizes each into one event. `settings.account` and `settings.max_messages_per_poll` are optional.
+- **`webhook`** — polls the event store (`.ta/events/`, populated by `ta-daemon`'s existing `/api/webhooks/github` and `/api/webhooks/vcs` endpoints) for merged pull requests matching `settings.repo`/`base_branch`/`head_branch_prefix` and carrying `settings.require_label`, then extracts the plan phase the PR's title closes (a `vX.Y.Z...` prefix). See "Build-Milestone Automation" below for what happens when it fires.
 
-Both are real, working implementations — not stubs — in `crates/ta-intake` (`schedule.rs`, `email.rs`), each with unit tests covering firing behavior.
+All three are real, working implementations — not stubs — in `crates/ta-intake` (`schedule.rs`, `email.rs`, `webhook.rs`), each with unit tests covering firing behavior.
 
 ### `dispatch`: direct goal vs. queue — a data-defined choice
 
@@ -15467,7 +15496,46 @@ ta intake queue
 
 Each trigger type tracks its own watermark (last-fired timestamp) at `.ta/triggers/.state/<type>.watermark`, so repeated `ta intake fire` calls only act on genuinely new events.
 
-`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, see below) is the primary consumer: every fired event is routed through `ta_brain::route()` before a goal is created, deriving team/persona/agent/security-tier/priority from the same normalized event.
+`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, see below) is the primary consumer: every fired event is routed through `ta_brain::route()` before a goal is created, deriving team/persona/agent/security-tier/priority from the same normalized event. The one exception is the `webhook` trigger type (below) — its events drive a specific pull → build → next-phase sequence instead of the generic routed-goal path.
+
+### Build-Milestone Automation
+
+Automates the loop of launching a plan phase, waiting for its PR to merge, rebuilding/installing, and launching the next phase — the manual sequence a long chain of phases otherwise requires by hand.
+
+**Set it up** with the `ta workflow build-milestone` preset — a thin composition of the `serial-phases` workflow's `--on-gate-failure=auto-fix` mode (see "Serial Phase Chains" above) and the `webhook` trigger type, not a new engine:
+
+```bash
+ta workflow build-milestone \
+  --phases v0.17.0.13,v0.17.1 \
+  --on-gate-failure auto-fix \
+  --gate-failure-retry-cap 1 \
+  --repo org/repo
+```
+
+This runs the given phases serially and, unless `--skip-trigger-setup` is passed, writes `.ta/triggers/webhook.toml` (shown above) so a later `ta intake fire webhook` picks the chain back up once the current phase's PR merges.
+
+**Opt-in requirements (both required — this never fires by default):**
+
+1. **The trigger config must exist.** `.ta/triggers/webhook.toml` is only created by an explicit `ta workflow build-milestone` run (or by hand) — there is no default-on webhook listener.
+2. **The merged PR must carry the required label** (`require_label`, default `"ta-automation"`). A human's unrelated merged PR on the same repo/branch is never labeled, so it can never accidentally launch the next plan phase. TA applies this label automatically to PRs it opens when `.ta/workflow.toml`'s `[submit.git] build_milestone_label` is set to match:
+
+   ```toml
+   # .ta/workflow.toml
+   [submit.git]
+   build_milestone_label = "ta-automation"
+   ```
+
+   `ta workflow build-milestone` prints a reminder if this isn't set yet. Setting `require_label = ""` in the trigger config disables the label check entirely (reduced protection — still gated by the trigger file's existence).
+
+**Continuing the chain** once a labeled PR merges:
+
+```bash
+ta intake fire webhook
+```
+
+This pulls the merged branch, runs the trigger's `build_command` (defaults to this repo's own build+install+restart sequence — override per project), resolves the next pending PLAN.md phase (via the same dependency-graph-aware logic `ta plan status` uses, never document position), and launches it with `ta run "<next-phase-id>" --accept-terms`. Wire this to fire automatically from a CI post-merge step, or a cron entry running `ta intake fire webhook` on an interval. When there is no next pending phase, this is a no-op — the milestone is complete, not an error.
+
+**Tuning the auto-fix retry cap:** `--gate-failure-retry-cap` (default 1) bounds how many follow-up fix goals `serial-phases` launches per gate failure before escalating to a human — see "Serial Phase Chains" above for the full behavior. Raise it for gates prone to flaky/incremental fixes; a second consecutive failure always escalates regardless of the cap's value once exhausted.
 
 ---
 

@@ -50,6 +50,13 @@ pub enum WebhookCommands {
         /// GitHub PR URL (informational — used to set pr_title in test events).
         #[arg(long)]
         pr_url: Option<String>,
+        /// Head/source branch the PR merged from (for pull_request events).
+        #[arg(long, default_value = "feature/test-change")]
+        head_branch: String,
+        /// PR label to include (repeatable). Used to test labeling-gated
+        /// triggers such as ta-intake's `webhook` trigger type.
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
 }
 
@@ -65,6 +72,8 @@ pub fn execute(command: &WebhookCommands, config: &GatewayConfig) -> Result<()> 
             change,
             sha,
             pr_url,
+            head_branch,
+            labels,
         } => test_webhook(
             config,
             provider,
@@ -76,6 +85,8 @@ pub fn execute(command: &WebhookCommands, config: &GatewayConfig) -> Result<()> 
             *change,
             sha,
             pr_url.as_deref(),
+            head_branch,
+            labels,
         ),
     }
 }
@@ -92,6 +103,8 @@ fn test_webhook(
     change: u64,
     sha: &str,
     pr_url: Option<&str>,
+    head_branch: &str,
+    labels: &[String],
 ) -> Result<()> {
     let daemon_url = super::daemon::resolve_daemon_url(&config.workspace_root, None);
     let client = reqwest::blocking::Client::new();
@@ -109,8 +122,10 @@ fn test_webhook(
                     "number": pr,
                     "title": pr_title,
                     "base": { "ref": branch },
+                    "head": { "ref": head_branch },
                     "merge_commit_sha": sha,
-                    "merged_by": { "login": "ta-test" }
+                    "merged_by": { "login": "ta-test" },
+                    "labels": labels.iter().map(|l| serde_json::json!({ "name": l })).collect::<Vec<_>>()
                 },
                 "repository": { "full_name": repo }
             });
@@ -135,7 +150,9 @@ fn test_webhook(
                     "pr_title": pr_title,
                     "merged_by": "ta-test",
                     "commit_sha": sha,
-                    "provider": "vcs"
+                    "provider": "vcs",
+                    "head_branch": head_branch,
+                    "labels": labels
                 }
             });
             (format!("{}/api/webhooks/vcs", daemon_url), body)

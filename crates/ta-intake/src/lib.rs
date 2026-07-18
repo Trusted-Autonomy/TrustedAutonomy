@@ -19,6 +19,7 @@ pub mod event;
 pub mod manifest;
 pub mod queue;
 pub mod schedule;
+pub mod webhook;
 
 pub use discovery::{discover_triggers, find_trigger, DiscoveredTrigger};
 pub use email::{EmailTriggerSource, MessageFetcher};
@@ -26,3 +27,4 @@ pub use event::{TriggerError, TriggerEvent, TriggerSource};
 pub use manifest::{Dispatch, TriggerManifest};
 pub use queue::{append_to_queue, queue_path, read_queue, write_queue};
 pub use schedule::ScheduleTriggerSource;
+pub use webhook::{extract_phase_id_from_title, WebhookTriggerSource};

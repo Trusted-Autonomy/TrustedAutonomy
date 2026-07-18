@@ -323,6 +323,19 @@ enum Commands {
         /// Default (serial-phases): no gates (agent is trusted to leave staging correct).
         #[arg(long)]
         gates: Vec<String>,
+        /// How the serial-phases workflow reacts to a gate failure (v0.17.0.12.31).
+        ///
+        /// "pause" (default): mark the step failed and stop, with resume instructions.
+        /// "auto-fix": launch a follow-up goal whose objective is the gate's own
+        /// failure output, re-evaluate gates, and retry up to --gate-failure-retry-cap
+        /// times before falling back to "pause"'s escalation. A second consecutive
+        /// failure always escalates to a human — never an infinite fix-loop.
+        #[arg(long, default_value = "pause")]
+        on_gate_failure: String,
+        /// Max auto-fix follow-up attempts per gate failure before escalating to a
+        /// human (serial-phases workflow, --on-gate-failure=auto-fix only).
+        #[arg(long, default_value_t = 1)]
+        gate_failure_retry_cap: u32,
         /// Sub-goals for the swarm workflow.
         ///
         /// Each value is the title of one sub-goal agent. Each sub-goal runs
@@ -1538,6 +1551,8 @@ fn dispatch_raw(
             workflow,
             phases,
             gates,
+            on_gate_failure,
+            gate_failure_retry_cap,
             sub_goals,
             integrate,
             skip_onboard_check,
@@ -1592,6 +1607,9 @@ fn dispatch_raw(
                 if let Some(phase_list) = phases {
                     if !phase_list.is_empty() {
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
+                        let gate_failure_mode =
+                            ta_workflow::GateFailureMode::parse(on_gate_failure)
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
                         return commands::run::execute_serial_phases(
                             config,
                             run_title,
@@ -1600,6 +1618,8 @@ fn dispatch_raw(
                             phase_list,
                             gates,
                             *quiet,
+                            gate_failure_mode,
+                            *gate_failure_retry_cap,
                         );
                     }
                 }

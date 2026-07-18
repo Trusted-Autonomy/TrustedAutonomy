@@ -1402,6 +1402,15 @@ pub struct GitConfig {
     /// Defaults to ["main", "master", "trunk", "dev"] when empty.
     #[serde(default)]
     pub protected_branches: Vec<String>,
+
+    /// PR label to apply after `gh pr create` (v0.17.0.12.31), e.g.
+    /// `"ta-automation"`. `None` (default) applies no label — labeling a PR
+    /// is an explicit, deliberate opt-in per project, not default behavior,
+    /// because it's the marker `ta-intake`'s `webhook` trigger type
+    /// requires before a merged PR can trigger build-milestone
+    /// continuation. Set via `.ta/workflow.toml`'s `[submit.git] build_milestone_label`.
+    #[serde(default)]
+    pub build_milestone_label: Option<String>,
 }
 
 impl Default for GitConfig {
@@ -1414,6 +1423,7 @@ impl Default for GitConfig {
             remote: default_remote(),
             auto_merge: false,
             protected_branches: vec![],
+            build_milestone_label: None,
         }
     }
 }

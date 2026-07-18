@@ -72,6 +72,71 @@ impl WorkflowGate {
     }
 }
 
+// ── Gate-failure handling mode (v0.17.0.12.31) ─────────────────────────────
+
+/// How the workflow reacts to a gate failure.
+///
+/// `PauseAndTellHuman` is the long-standing default (and the only behavior
+/// before v0.17.0.12.31): mark the step `GateFailed`, print resume
+/// instructions, and stop. `AutoFix` is additive and opt-in
+/// (`--on-gate-failure=auto-fix`) — it launches a follow-up goal whose
+/// objective is the gate's own failure output, up to `retry_cap` times per
+/// step, before falling back to `PauseAndTellHuman`'s escalation. A second
+/// consecutive failure always escalates to a human — this never becomes an
+/// infinite fix-loop on a genuinely unfixable failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GateFailureMode {
+    #[default]
+    PauseAndTellHuman,
+    AutoFix,
+}
+
+impl GateFailureMode {
+    /// Parse from the `--on-gate-failure` CLI flag value.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "pause" | "pause-and-tell-human" => Ok(GateFailureMode::PauseAndTellHuman),
+            "auto-fix" => Ok(GateFailureMode::AutoFix),
+            other => Err(format!(
+                "unknown --on-gate-failure mode '{other}'. Valid values: pause, auto-fix"
+            )),
+        }
+    }
+}
+
+/// What to do about one specific gate failure, decided by [`decide_gate_failure_action`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateFailureAction {
+    /// Launch a follow-up goal whose objective is the gate failure output,
+    /// then re-evaluate gates.
+    LaunchFollowUpFix,
+    /// Mark the step failed and stop, with resume instructions for a human.
+    EscalateToHuman,
+}
+
+/// Pure decision function for what to do about a gate failure — kept free of
+/// subprocess/goal-store dependencies so it's unit-testable without either
+/// (mirrors `evaluate_gates`/`run_gate` keeping subprocess use at the edges).
+///
+/// `attempt` is 1-based: the attempt number about to be spent on this
+/// failure (i.e. `existing_fix_attempts_for_this_step + 1`).
+pub fn decide_gate_failure_action(
+    mode: GateFailureMode,
+    attempt: u32,
+    retry_cap: u32,
+) -> GateFailureAction {
+    match mode {
+        GateFailureMode::PauseAndTellHuman => GateFailureAction::EscalateToHuman,
+        GateFailureMode::AutoFix => {
+            if attempt <= retry_cap {
+                GateFailureAction::LaunchFollowUpFix
+            } else {
+                GateFailureAction::EscalateToHuman
+            }
+        }
+    }
+}
+
 // ── Step state ──────────────────────────────────────────────────────────────
 
 /// Execution state of a single phase step.
@@ -140,6 +205,12 @@ pub struct SerialPhasesState {
     pub last_goal_id: Option<String>,
     /// Gate names that were configured for this workflow run.
     pub gates: Vec<String>,
+    /// Per-step count of auto-fix follow-up goals launched so far (parallel
+    /// to `phases`/`steps`). `#[serde(default)]` so state files saved before
+    /// v0.17.0.12.31 still load correctly. Only meaningful with
+    /// `GateFailureMode::AutoFix`.
+    #[serde(default)]
+    pub gate_fix_attempts: Vec<u32>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -156,6 +227,7 @@ impl SerialPhasesState {
             staging_path: None,
             last_goal_id: None,
             gates,
+            gate_fix_attempts: vec![0; n],
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -571,6 +643,98 @@ mod tests {
         assert!(result.is_err());
         let failure = result.unwrap_err();
         assert_eq!(failure.gate_name, "custom");
+    }
+
+    #[test]
+    fn gate_failure_mode_parse() {
+        assert_eq!(
+            GateFailureMode::parse("pause").unwrap(),
+            GateFailureMode::PauseAndTellHuman
+        );
+        assert_eq!(
+            GateFailureMode::parse("auto-fix").unwrap(),
+            GateFailureMode::AutoFix
+        );
+        assert!(GateFailureMode::parse("nonsense").is_err());
+    }
+
+    #[test]
+    fn gate_failure_mode_default_is_pause() {
+        assert_eq!(
+            GateFailureMode::default(),
+            GateFailureMode::PauseAndTellHuman
+        );
+    }
+
+    #[test]
+    fn decide_gate_failure_action_pause_mode_always_escalates() {
+        // Today's long-standing default behavior must be unchanged.
+        assert_eq!(
+            decide_gate_failure_action(GateFailureMode::PauseAndTellHuman, 1, 1),
+            GateFailureAction::EscalateToHuman
+        );
+        assert_eq!(
+            decide_gate_failure_action(GateFailureMode::PauseAndTellHuman, 1, 5),
+            GateFailureAction::EscalateToHuman
+        );
+    }
+
+    #[test]
+    fn decide_gate_failure_action_auto_fix_launches_within_cap() {
+        assert_eq!(
+            decide_gate_failure_action(GateFailureMode::AutoFix, 1, 1),
+            GateFailureAction::LaunchFollowUpFix
+        );
+    }
+
+    #[test]
+    fn decide_gate_failure_action_auto_fix_escalates_after_cap_exhausted() {
+        // A second consecutive failure (attempt 2) with the default cap (1)
+        // must always escalate, never retry silently forever.
+        assert_eq!(
+            decide_gate_failure_action(GateFailureMode::AutoFix, 2, 1),
+            GateFailureAction::EscalateToHuman
+        );
+    }
+
+    #[test]
+    fn decide_gate_failure_action_auto_fix_respects_higher_cap() {
+        assert_eq!(
+            decide_gate_failure_action(GateFailureMode::AutoFix, 2, 3),
+            GateFailureAction::LaunchFollowUpFix
+        );
+        assert_eq!(
+            decide_gate_failure_action(GateFailureMode::AutoFix, 4, 3),
+            GateFailureAction::EscalateToHuman
+        );
+    }
+
+    #[test]
+    fn serial_phases_state_new_initializes_gate_fix_attempts() {
+        let state =
+            SerialPhasesState::new("wf-4", vec!["p1".to_string(), "p2".to_string()], vec![]);
+        assert_eq!(state.gate_fix_attempts, vec![0, 0]);
+    }
+
+    #[test]
+    fn serial_phases_state_load_defaults_gate_fix_attempts_for_old_files() {
+        // Simulate a state file saved before v0.17.0.12.31 (no
+        // gate_fix_attempts field) still loading correctly.
+        let dir = tempdir().unwrap();
+        let json = r#"{
+            "workflow_id": "wf-old",
+            "phases": ["p1"],
+            "steps": [{"status": "pending"}],
+            "current_step": 0,
+            "staging_path": null,
+            "last_goal_id": null,
+            "gates": [],
+            "started_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        std::fs::write(dir.path().join("serial-workflow-wf-old.json"), json).unwrap();
+        let loaded = SerialPhasesState::load(dir.path(), "wf-old").unwrap();
+        assert_eq!(loaded.gate_fix_attempts, Vec::<u32>::new());
     }
 
     #[test]
