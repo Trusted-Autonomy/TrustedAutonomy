@@ -9684,7 +9684,11 @@ fn write_goal_audit_entry(
 /// Close all stale draft records (Approved or PendingReview) older than the configured threshold.
 ///
 /// Returns the number of drafts closed.
-fn close_stale_drafts(
+///
+/// `pub(crate)` so `ta doctor --fix`'s `stale_drafts` handler can invoke the
+/// same logic as `ta draft close --stale` directly, instead of only printing
+/// the suggestion (v0.17.0.12.30).
+pub(crate) fn close_stale_drafts(
     config: &GatewayConfig,
     older_than: Option<u64>,
     reason: Option<&str>,

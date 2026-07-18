@@ -1052,9 +1052,22 @@ fn apply_fix(
             Ok("Ran gc to reclaim staging space".to_string())
         }
         "stale_drafts" => {
-            // Use existing draft close-stale logic via CLI passthrough.
-            println!("  Run `ta draft close --stale` to close stale drafts.");
-            Ok("See: ta draft close --stale".to_string())
+            // Invoke the same library call `ta draft close --stale` uses
+            // directly (not a subprocess). The outer `execute_fix` loop has
+            // already gated this on confirm/--yes before calling `apply_fix`,
+            // so `skip_confirm: true` here avoids double-prompting — it does
+            // not bypass the doctor's own fix confirmation. Only drafts
+            // already in a non-terminal review state (Approved/PendingReview)
+            // and older than the configured threshold are closed; drafts
+            // still awaiting a first review response are left alone.
+            let closed = super::draft::close_stale_drafts(
+                config,
+                None, // use configured gc.stale_threshold_days
+                Some("stale — closed by ta doctor --fix"),
+                "ta-doctor",
+                true, // outer confirm/--yes prompt already happened
+            )?;
+            Ok(format!("Closed {} stale draft(s)", closed))
         }
         "stale_failed_goals" | "stale_pr_ready" => {
             // Run GC for stale goals.
@@ -2492,6 +2505,79 @@ mod tests {
         assert!(
             !crash_path.exists(),
             "crash state file should be cleared by fix"
+        );
+    }
+
+    #[test]
+    fn doctor_fix_stale_drafts_closes_stale_draft_via_library_call() {
+        // Regression test for v0.17.0.12.30 item 2: `ta doctor --fix`'s
+        // "stale_drafts" handler must actually close stale drafts (the same
+        // library call `ta draft close --stale` uses), not just print a
+        // suggestion and do nothing.
+        use crate::commands::draft::{build_package, load_all_packages};
+        use crate::commands::health_signals::{HealthSignal, SignalSeverity};
+        use ta_changeset::draft_package::DraftStatus;
+        use ta_goal::GoalRunStore;
+
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = test_config(&project);
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Stale draft fix test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test doctor --fix closes stale drafts".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+        build_package(&config, &goal_id, "Test changes", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        assert_eq!(packages.len(), 1, "should have exactly 1 draft package");
+        assert!(matches!(packages[0].status, DraftStatus::PendingReview));
+        let package_id = packages[0].package_id;
+
+        // Backdate created_at well past the stale threshold — build_package
+        // always stamps "now", so this is the only field we need to rewrite.
+        let path = config.pr_packages_dir.join(format!("{}.json", package_id));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let ancient = (chrono::Utc::now() - chrono::Duration::days(999)).to_rfc3339();
+        value["created_at"] = serde_json::Value::String(ancient);
+        std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let signal = HealthSignal {
+            kind: "stale_drafts".to_string(),
+            severity: SignalSeverity::Warn,
+            message: "1 draft(s) approved/pending but not applied for 3+ days".to_string(),
+            action: "ta doctor --fix".to_string(),
+        };
+        let result = apply_fix(&config, &signal);
+        assert!(result.is_ok(), "apply_fix should not error: {:?}", result);
+        assert!(
+            result.unwrap().contains("Closed 1"),
+            "apply_fix result should report the closed draft"
+        );
+
+        let reloaded = load_all_packages(&config).unwrap();
+        assert!(
+            matches!(reloaded[0].status, DraftStatus::Closed { .. }),
+            "draft should be Closed after ta doctor --fix, got: {:?}",
+            reloaded[0].status
         );
     }
 

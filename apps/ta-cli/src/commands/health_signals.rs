@@ -348,7 +348,7 @@ fn check_stale_drafts_signal(config: &GatewayConfig, signals: &mut Vec<HealthSig
                 "{} draft(s) approved/pending but not applied for {}+ days",
                 stale_count, stale_days
             ),
-            "run `ta draft list --stale` and apply or close them".to_string(),
+            "run `ta doctor --fix` to close them automatically, or `ta draft list --stale` to review first".to_string(),
         ));
     }
 }

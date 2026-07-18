@@ -186,7 +186,7 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
     }
 
     // ── Pending drafts (from draft packages dir) ─────────────────────────
-    let draft_count = count_pending_drafts(&state.pr_packages_dir);
+    let draft_count = ta_changeset::count_pending_drafts(&state.pr_packages_dir);
     if draft_count > 0 {
         let id = format!("pending_drafts:{}", draft_count);
         let notif = Notification::new(
@@ -258,26 +258,7 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
 }
 
 pub fn count_pending_drafts_pub(pr_packages_dir: &std::path::Path) -> usize {
-    count_pending_drafts(pr_packages_dir)
-}
-
-fn count_pending_drafts(pr_packages_dir: &std::path::Path) -> usize {
-    if !pr_packages_dir.exists() {
-        return 0;
-    }
-    std::fs::read_dir(pr_packages_dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-                .filter(|e| {
-                    std::fs::read_to_string(e.path())
-                        .map(|c| c.contains("PendingReview"))
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0)
+    ta_changeset::count_pending_drafts(pr_packages_dir)
 }
 
 #[cfg(test)]
@@ -319,7 +300,7 @@ mod tests {
 
     #[test]
     fn count_pending_drafts_missing_dir() {
-        let count = count_pending_drafts(std::path::Path::new("/nonexistent/path"));
+        let count = count_pending_drafts_pub(std::path::Path::new("/nonexistent/path"));
         assert_eq!(count, 0);
     }
 

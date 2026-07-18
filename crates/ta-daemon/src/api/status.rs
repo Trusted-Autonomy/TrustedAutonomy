@@ -221,7 +221,7 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
     };
 
     // Pending drafts.
-    let pending_drafts = count_pending_drafts(&state.pr_packages_dir);
+    let pending_drafts = ta_changeset::count_pending_drafts(&state.pr_packages_dir);
 
     // Recent events (last 10).
     let recent_events = {
@@ -348,25 +348,6 @@ fn find_next_pending_phase(plan_content: &str) -> Option<PhaseInfo> {
         }
     }
     None
-}
-
-fn count_pending_drafts(pr_packages_dir: &std::path::Path) -> usize {
-    if !pr_packages_dir.exists() {
-        return 0;
-    }
-    std::fs::read_dir(pr_packages_dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-                .filter(|e| {
-                    std::fs::read_to_string(e.path())
-                        .map(|content| content.contains("PendingReview"))
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

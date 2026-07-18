@@ -94,7 +94,7 @@ All outcomes must be **observable** (with details and logging) and **actionable*
 
 ## Current State
 
-**Current version**: `0.17.0-alpha.12.29`
+**Current version**: `0.17.0-alpha.12.30`
 - See **PLAN.md** for the canonical development roadmap with per-phase status
 - `ta plan list` / `ta plan status` show current progress
 - Goals can link to plan phases: `ta run "title" --phase 4b`
