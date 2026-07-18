@@ -9741,7 +9741,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 ---
 ### v0.17.0.12.32 — `ta setup vcs --force` Silently Drops Unregistered Gitignore Entries
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.30
 
 **Goal**: `ta doctor --fix` (via `ta setup vcs --force`) regenerates `.gitignore`'s TA block strictly from `LOCAL_TA_PATHS` (`crates/ta-workspace/src/partitioning.rs:32-72`), the canonical hardcoded list. Found live during this session's 8-hour run (2026-07-18): 4 real, needed entries from `v0.17.0.12.26`'s `ta_human_verify` feature (`human-verify-audit.jsonl`, `human-verify-invocations.jsonl`, `verify-audit-reviewed.jsonl`, `verify-threshold-proposals.jsonl`) had been added directly to `.gitignore` at some point but never registered in `LOCAL_TA_PATHS` — so the very next `--force` regeneration silently dropped all 4, which would have let those audit logs get accidentally committed on a future `git add -A` had it gone unnoticed. This is exactly the "a future write path that forgets to invalidate silently reintroduces staleness" risk pattern already named and avoided elsewhere in `v0.17.0.12.29`'s design (mtime-keying over manual invalidation) — `LOCAL_TA_PATHS` needs the same self-maintaining property, not another hand-maintained list that can silently drift from what actually gets written to `.ta/`.
