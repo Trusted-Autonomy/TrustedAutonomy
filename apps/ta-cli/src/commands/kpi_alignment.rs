@@ -290,6 +290,7 @@ keywords = ["test", "bug", "regression"]
                 status: super::super::plan::PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "2".to_string(),
@@ -297,6 +298,7 @@ keywords = ["test", "bug", "regression"]
                 status: super::super::plan::PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         let kpis = vec![kpi("Velocity", "velocity", &["release", "ship"], 1.0)];

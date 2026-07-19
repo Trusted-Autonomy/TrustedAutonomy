@@ -972,6 +972,7 @@ mod tests {
             status: PlanStatus::Pending,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         };
         assert!(phase_to_candidate(&pending, &[], &[], Utc::now()).is_none());
 
@@ -981,6 +982,7 @@ mod tests {
             status: PlanStatus::Done,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         };
         assert!(phase_to_candidate(&done, &[], &[], Utc::now()).is_none());
 
@@ -990,6 +992,7 @@ mod tests {
             status: PlanStatus::InProgress,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         };
         let result = phase_to_candidate(&in_progress, &[], &[], Utc::now());
         assert!(result.is_some());

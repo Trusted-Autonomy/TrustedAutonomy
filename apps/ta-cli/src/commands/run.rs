@@ -1320,17 +1320,30 @@ pub fn execute_serial_phases(
     Ok(())
 }
 
-// ── Swarm workflow (v0.13.7) ─────────────────────────────────────
+// ── Swarm workflow (v0.13.7, wave-scheduled since v0.17.0.12.34) ─
 
-/// Execute a swarm workflow: run each sub-goal as an independent agent in its
-/// own staging directory, then optionally run an integration agent to merge results.
+/// Execute a swarm workflow: partition sub-goals into dependency waves
+/// (`SwarmState::compute_waves`), run each wave's members genuinely
+/// concurrently via OS threads, then optionally run an integration agent to
+/// merge results.
 ///
-/// Sub-goals are run sequentially in this initial implementation; parallel
-/// execution (via OS threads) is planned for v0.13.7.2.
+/// Waves stay strictly sequential — a later wave only starts once every
+/// sub-goal in the previous wave has completed — but within a wave, all
+/// members launch and run at the same time (see
+/// `ta_workflow::run_concurrently`). Per-agent gates are evaluated inside
+/// each sub-goal's own thread. Failures are reported but do not stop
+/// remaining sub-goals or waves.
 ///
-/// Each sub-goal gets its own staging directory. Per-agent gates are evaluated
-/// after each sub-goal. Failures are reported but do not stop remaining sub-goals.
-/// After all complete, if `--integrate` is set, an integration agent is launched.
+/// When a wave produces more than one *passed* sub-goal, an integration-time
+/// gate (`run_wave_integration_gate`, v0.17.0.12.34 item 3) merges their
+/// changes and re-runs the configured gates against the combination — real
+/// resolution of API drift between concurrently-run sub-goals that the
+/// upfront `api_impact` overlap check (item 2) can't catch, since it only
+/// sees what was *declared*, not what actually happened.
+///
+/// After all waves complete, if `--integrate` is set, an integration agent
+/// is launched over every passed sub-goal (existing v0.13.7 behavior,
+/// unchanged).
 #[allow(clippy::too_many_arguments)]
 pub fn execute_swarm(
     config: &GatewayConfig,
@@ -1387,112 +1400,136 @@ pub fn execute_swarm(
     }
 
     let mut passed_goals: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut wave_no = 0usize;
 
-    for (i, sub_goal_title) in sub_goals.iter().enumerate() {
+    loop {
+        state.mark_dependency_failed_skips();
+        let _ = state.save(&state_dir);
+
+        let waves = state
+            .compute_waves()
+            .map_err(|e| anyhow::anyhow!("Swarm dependency graph error: {}", e))?;
+        let Some(wave) = waves.into_iter().next() else {
+            break; // No Pending sub-goals left.
+        };
+        wave_no += 1;
+
         if !quiet {
             println!(
-                "── Sub-goal [{}/{}]: {} ──────────────────────────",
-                i + 1,
-                sub_goals.len(),
-                sub_goal_title
+                "── Wave {}: {} sub-goal(s) running concurrently ──────────",
+                wave_no,
+                wave.len()
             );
+            for &i in &wave {
+                println!("  [{}/{}] {}", wave_no, wave.len(), sub_goals[i]);
+            }
         }
 
-        state.sub_goal_states[i] = ta_workflow::SubGoalStatus::Running {
-            goal_id: String::new(),
-            staging_path: std::path::PathBuf::new(),
-        };
+        for &i in &wave {
+            state.sub_goal_states[i] = ta_workflow::SubGoalStatus::Running {
+                goal_id: String::new(),
+                staging_path: std::path::PathBuf::new(),
+            };
+        }
         let _ = state.save(&state_dir);
 
-        // Run the sub-goal as an independent agent.
-        let mut cmd = std::process::Command::new(&ta_bin);
-        cmd.arg("run").arg(sub_goal_title).arg("--agent").arg(agent);
-        if !objective.is_empty() {
-            cmd.arg("--objective").arg(objective);
-        }
-        if quiet {
-            cmd.arg("--quiet");
-        }
-        cmd.current_dir(&config.workspace_root);
+        let tasks: Vec<(
+            usize,
+            Box<dyn FnOnce() -> ta_workflow::SubGoalStatus + Send>,
+        )> = wave
+            .iter()
+            .map(|&i| {
+                let sub_goal_title = sub_goals[i].clone();
+                let ta_bin = ta_bin.clone();
+                let workspace_root = config.workspace_root.clone();
+                let goals_dir = config.goals_dir.clone();
+                let agent = agent.to_string();
+                let objective = objective.to_string();
+                let gate_specs = gate_specs.clone();
+                let task: Box<dyn FnOnce() -> ta_workflow::SubGoalStatus + Send> =
+                    Box::new(move || {
+                        run_one_swarm_sub_goal(
+                            &ta_bin,
+                            &workspace_root,
+                            &goals_dir,
+                            &sub_goal_title,
+                            &agent,
+                            &objective,
+                            &gate_specs,
+                            quiet,
+                        )
+                    });
+                (i, task)
+            })
+            .collect();
 
-        let status = cmd.status().map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to launch agent for sub-goal '{}': {}",
-                sub_goal_title,
-                e
-            )
-        })?;
-
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            state.sub_goal_states[i] = ta_workflow::SubGoalStatus::AgentFailed {
-                error: format!("exit code {}", code),
-            };
-            let _ = state.save(&state_dir);
+        let results = ta_workflow::run_concurrently(tasks);
+        for (i, status) in results {
+            if let ta_workflow::SubGoalStatus::Passed {
+                goal_id,
+                staging_path,
+            } = &status
+            {
+                passed_goals.push((goal_id.clone(), staging_path.clone()));
+            }
             if !quiet {
-                eprintln!(
-                    "  Sub-goal '{}' FAILED (exit {}). Continuing.",
-                    sub_goal_title, code
-                );
-            }
-            continue;
-        }
-
-        // Find the most recent goal matching this title.
-        let goal_store = GoalRunStore::new(&config.goals_dir)?;
-        let goals = goal_store.list()?;
-        let goal = match goals
-            .into_iter()
-            .find(|g| g.title.trim() == sub_goal_title.trim())
-        {
-            Some(g) => g,
-            None => {
-                state.sub_goal_states[i] = ta_workflow::SubGoalStatus::AgentFailed {
-                    error: "goal not found in store after agent run".to_string(),
-                };
-                let _ = state.save(&state_dir);
-                if !quiet {
-                    eprintln!(
-                        "  Warning: could not find goal record for '{}'. Continuing.",
-                        sub_goal_title
-                    );
+                match &status {
+                    ta_workflow::SubGoalStatus::Passed { .. } => {
+                        println!("  Sub-goal '{}' passed.", sub_goals[i]);
+                    }
+                    ta_workflow::SubGoalStatus::AgentFailed { error } => {
+                        eprintln!(
+                            "  Sub-goal '{}' FAILED ({}). Continuing.",
+                            sub_goals[i], error
+                        );
+                    }
+                    ta_workflow::SubGoalStatus::GateFailed { failed_gate, .. } => {
+                        eprintln!(
+                            "  Sub-goal '{}' gate FAILED ({}). Continuing.",
+                            sub_goals[i], failed_gate
+                        );
+                    }
+                    _ => {}
                 }
-                continue;
             }
-        };
+            state.sub_goal_states[i] = status;
+        }
+        let _ = state.save(&state_dir);
 
-        let goal_id = goal.goal_run_id.to_string();
-        let staging_path = goal.workspace_path.clone();
-
-        // Evaluate per-agent gates.
-        if !gate_specs.is_empty() {
-            if let Err(failure) = ta_workflow::evaluate_gates(&gate_specs, &staging_path, quiet) {
-                state.sub_goal_states[i] = ta_workflow::SubGoalStatus::GateFailed {
+        // Item 3 (two-tier conflict handling): if this wave produced more
+        // than one *passed* sub-goal, the upfront api_impact check (item 2)
+        // was necessarily blind to any undeclared drift between them —
+        // merge their changes and re-verify with the real gate.
+        let wave_passed: Vec<(String, std::path::PathBuf)> = wave
+            .iter()
+            .filter_map(|&i| match &state.sub_goal_states[i] {
+                ta_workflow::SubGoalStatus::Passed {
                     goal_id,
                     staging_path,
-                    failed_gate: failure.gate_name.clone(),
-                    error: failure.to_string(),
-                };
-                let _ = state.save(&state_dir);
-                if !quiet {
-                    eprintln!(
-                        "  Sub-goal '{}' gate FAILED ({}). Continuing.",
-                        sub_goal_title, failure.gate_name
-                    );
-                }
-                continue;
+                } => Some((goal_id.clone(), staging_path.clone())),
+                _ => None,
+            })
+            .collect();
+
+        if wave_passed.len() > 1 {
+            if !quiet {
+                println!(
+                    "  Wave {} produced {} concurrently-passed sub-goals — running \
+                     integration-time gate...",
+                    wave_no,
+                    wave_passed.len()
+                );
             }
-        }
-
-        state.sub_goal_states[i] = ta_workflow::SubGoalStatus::Passed {
-            goal_id: goal_id.clone(),
-            staging_path: staging_path.clone(),
-        };
-        let _ = state.save(&state_dir);
-        passed_goals.push((goal_id, staging_path));
-
-        if !quiet {
-            println!("  Sub-goal '{}' passed.", sub_goal_title);
+            run_wave_integration_gate(
+                &ta_bin,
+                &config.workspace_root,
+                agent,
+                &wave_passed,
+                &gate_specs,
+                ta_workflow::GateFailureMode::AutoFix,
+                1,
+                quiet,
+            )?;
         }
     }
 
@@ -1576,6 +1613,318 @@ pub fn execute_swarm(
     }
 
     Ok(())
+}
+
+/// Run a single swarm sub-goal to completion: launch the agent subprocess,
+/// find its resulting goal record, and evaluate gates. Synchronous — a wave
+/// member runs one of these on its own OS thread via
+/// `ta_workflow::run_concurrently` (v0.17.0.12.34).
+#[allow(clippy::too_many_arguments)]
+fn run_one_swarm_sub_goal(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    goals_dir: &Path,
+    sub_goal_title: &str,
+    agent: &str,
+    objective: &str,
+    gate_specs: &[ta_workflow::WorkflowGate],
+    quiet: bool,
+) -> ta_workflow::SubGoalStatus {
+    let mut cmd = std::process::Command::new(ta_bin);
+    cmd.arg("run").arg(sub_goal_title).arg("--agent").arg(agent);
+    if !objective.is_empty() {
+        cmd.arg("--objective").arg(objective);
+    }
+    if quiet {
+        cmd.arg("--quiet");
+    }
+    cmd.current_dir(workspace_root);
+
+    let status = match cmd.status() {
+        Ok(s) => s,
+        Err(e) => {
+            return ta_workflow::SubGoalStatus::AgentFailed {
+                error: format!("failed to launch agent: {}", e),
+            };
+        }
+    };
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return ta_workflow::SubGoalStatus::AgentFailed {
+            error: format!("exit code {}", code),
+        };
+    }
+
+    let goal_store = match GoalRunStore::new(goals_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return ta_workflow::SubGoalStatus::AgentFailed {
+                error: format!("could not open goal store: {}", e),
+            };
+        }
+    };
+    let goals = match goal_store.list() {
+        Ok(g) => g,
+        Err(e) => {
+            return ta_workflow::SubGoalStatus::AgentFailed {
+                error: format!("could not list goals: {}", e),
+            };
+        }
+    };
+    // `max_by_key(created_at)`, not the first match — an auto-fix retry (or
+    // a rerun with a reused title) can create a second goal with the same
+    // title; the most recent one is the one this invocation just produced.
+    let goal = match goals
+        .into_iter()
+        .filter(|g| g.title.trim() == sub_goal_title.trim())
+        .max_by_key(|g| g.created_at)
+    {
+        Some(g) => g,
+        None => {
+            return ta_workflow::SubGoalStatus::AgentFailed {
+                error: "goal not found in store after agent run".to_string(),
+            };
+        }
+    };
+
+    let goal_id = goal.goal_run_id.to_string();
+    let staging_path = goal.workspace_path.clone();
+
+    if !gate_specs.is_empty() {
+        if let Err(failure) = ta_workflow::evaluate_gates(gate_specs, &staging_path, quiet) {
+            return ta_workflow::SubGoalStatus::GateFailed {
+                goal_id,
+                staging_path,
+                failed_gate: failure.gate_name.clone(),
+                error: failure.to_string(),
+            };
+        }
+    }
+
+    ta_workflow::SubGoalStatus::Passed {
+        goal_id,
+        staging_path,
+    }
+}
+
+/// Item 3 (v0.17.0.12.34): real, integration-time conflict resolution for a
+/// wave that produced more than one passed sub-goal.
+///
+/// Merges every wave member after the first into the first member's
+/// (`wave_members[0]`) own staging directory — no throwaway copy needed,
+/// since that directory is already a real, tracked goal staging dir — then
+/// re-runs `gate_specs` against the combination. On failure, reuses
+/// `v0.17.0.12.31`'s exact auto-fix mechanism (`decide_gate_failure_action`
+/// plus a `--follow-up-goal` launch) rather than building a second one: a
+/// capped-retry follow-up goal whose objective is the gate's own failure
+/// output, escalating to a human on a second consecutive failure.
+#[allow(clippy::too_many_arguments)]
+fn run_wave_integration_gate(
+    ta_bin: &Path,
+    source_root: &Path,
+    agent: &str,
+    wave_members: &[(String, std::path::PathBuf)],
+    gate_specs: &[ta_workflow::WorkflowGate],
+    on_gate_failure: ta_workflow::GateFailureMode,
+    retry_cap: u32,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let (primary_goal_id, primary_staging) = &wave_members[0];
+
+    let conflicts =
+        merge_wave_into_integration_dir(primary_staging, source_root, &wave_members[1..])?;
+    if !conflicts.is_empty() && !quiet {
+        eprintln!(
+            "  Wave integration: {} file(s) had real merge conflicts (undeclared API-impact \
+             overlap the upfront heuristic missed):",
+            conflicts.len()
+        );
+        for c in &conflicts {
+            eprintln!("    - {}", c);
+        }
+    }
+
+    if gate_specs.is_empty() {
+        if !quiet {
+            println!(
+                "  No gates configured — merge applied to {}'s staging directory without \
+                 verification. Configure --gates to verify the merge automatically.",
+                primary_goal_id
+            );
+        }
+        return Ok(());
+    }
+
+    let mut attempt = 0u32;
+    loop {
+        if !quiet {
+            println!(
+                "  Running integration gate ({} gate(s)) in {}'s staging directory...",
+                gate_specs.len(),
+                primary_goal_id
+            );
+        }
+        match ta_workflow::evaluate_gates(gate_specs, primary_staging, quiet) {
+            Ok(()) => {
+                if !quiet {
+                    println!(
+                        "  Wave integration gate PASSED. Merged result is in {}'s draft \
+                         (ta draft build --goal {}).",
+                        primary_goal_id, primary_goal_id
+                    );
+                }
+                return Ok(());
+            }
+            Err(failure) => {
+                attempt += 1;
+                match ta_workflow::decide_gate_failure_action(on_gate_failure, attempt, retry_cap) {
+                    ta_workflow::GateFailureAction::EscalateToHuman => {
+                        anyhow::bail!(
+                            "Wave integration gate '{}' failed after merging {} concurrently-run \
+                             sub-goals (auto-fix attempt {}/{}). This is real API drift between \
+                             parallel phases the upfront overlap check didn't catch.\n  \
+                             Staging: {}\n  \
+                             Fix the issue there, then re-run gates with:\n  \
+                             ta draft build --goal {}",
+                            failure.gate_name,
+                            wave_members.len(),
+                            attempt.saturating_sub(1),
+                            retry_cap,
+                            primary_staging.display(),
+                            primary_goal_id
+                        );
+                    }
+                    ta_workflow::GateFailureAction::LaunchFollowUpFix => {
+                        if !quiet {
+                            println!(
+                                "  Integration gate '{}' failed (auto-fix attempt {}/{}) — \
+                                 launching follow-up fix goal...",
+                                failure.gate_name, attempt, retry_cap
+                            );
+                        }
+                        let fix_objective = format!(
+                            "# Fix wave integration gate failure\n\n\
+                             The `{}` gate failed after merging {} concurrently-run sub-goals \
+                             into this staging workspace, exit code {:?}.\n\n\
+                             Command: `{}`\n\nOutput:\n```\n{}\n```\n\n\
+                             Fix the issue so this gate passes in this workspace.",
+                            failure.gate_name,
+                            wave_members.len(),
+                            failure.exit_code,
+                            failure.command,
+                            failure.output
+                        );
+                        let mut cmd = std::process::Command::new(ta_bin);
+                        cmd.arg("run")
+                            .arg(format!(
+                                "Fix wave integration gate failure ({})",
+                                failure.gate_name
+                            ))
+                            .arg("--follow-up-goal")
+                            .arg(primary_goal_id)
+                            .arg("--agent")
+                            .arg(agent)
+                            .arg("--objective")
+                            .arg(&fix_objective);
+                        if quiet {
+                            cmd.arg("--quiet");
+                        }
+                        cmd.current_dir(source_root);
+                        let status = cmd.status().map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to launch follow-up fix goal for integration gate \
+                                 failure: {}",
+                                e
+                            )
+                        })?;
+                        if !status.success() {
+                            anyhow::bail!(
+                                "Follow-up fix goal for integration gate '{}' failed to run \
+                                 (exit {:?}). Staging: {}",
+                                failure.gate_name,
+                                status.code(),
+                                primary_staging.display()
+                            );
+                        }
+                        // Loop back around: re-evaluate the gate in the same
+                        // (now-updated) staging directory.
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Merge each of `other_members`' changed files into `primary_dir` (which
+/// already contains its own changes), using a real three-way merge
+/// (`ta_workspace::overlay::three_way_merge`) when a later member touches a
+/// file an earlier member already changed. Returns a description of any file
+/// that came out with unresolved conflict markers, or that hit a case this
+/// automatic pass can't resolve (e.g. one side deleted a file the other
+/// modified).
+fn merge_wave_into_integration_dir(
+    primary_dir: &Path,
+    source_root: &Path,
+    other_members: &[(String, std::path::PathBuf)],
+) -> anyhow::Result<Vec<String>> {
+    let mut conflicts = Vec::new();
+
+    for (goal_id, staging_path) in other_members {
+        for rel in collect_changed_files(staging_path, source_root) {
+            let their_file = staging_path.join(&rel);
+            let source_file = source_root.join(&rel);
+            let integration_file = primary_dir.join(&rel);
+
+            if let Some(parent) = integration_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", parent.display(), e))?;
+            }
+
+            if !integration_file.exists() {
+                // Primary never touched this file — take the other member's
+                // version directly, no merge needed.
+                if their_file.exists() {
+                    std::fs::copy(&their_file, &integration_file)
+                        .map_err(|e| anyhow::anyhow!("Failed to copy {}: {}", rel, e))?;
+                }
+                continue;
+            }
+
+            if !their_file.exists() {
+                // The other member deleted a file the primary kept/modified —
+                // no automatic resolution; leave the primary's version and flag it.
+                conflicts.push(format!(
+                    "{} (goal {} deleted it, primary retained it — manual review needed)",
+                    rel, goal_id
+                ));
+                continue;
+            }
+
+            let base = std::fs::read(&source_file).ok();
+            match ta_workspace::overlay::three_way_merge(
+                base.as_deref(),
+                &integration_file,
+                &their_file,
+            ) {
+                Ok(ta_workspace::overlay::MergeResult::Clean { content, .. }) => {
+                    std::fs::write(&integration_file, content)
+                        .map_err(|e| anyhow::anyhow!("Failed to write merged {}: {}", rel, e))?;
+                }
+                Ok(ta_workspace::overlay::MergeResult::Conflicted { content }) => {
+                    std::fs::write(&integration_file, content).map_err(|e| {
+                        anyhow::anyhow!("Failed to write conflicted {}: {}", rel, e)
+                    })?;
+                    conflicts.push(format!("{} (goal {})", rel, goal_id));
+                }
+                Err(e) => {
+                    conflicts.push(format!("{} (goal {}): merge error: {}", rel, goal_id, e));
+                }
+            }
+        }
+    }
+
+    Ok(conflicts)
 }
 
 // ── Public API ──────────────────────────────────────────────────
@@ -7747,6 +8096,118 @@ mod tests {
         let changed = collect_changed_files(staging.path(), source.path());
 
         assert!(changed.contains(&"only_in_staging.rs".to_string()));
+    }
+
+    // ── v0.17.0.12.34 wave-integration merge tests ──────────────────
+
+    #[test]
+    fn merge_wave_copies_file_only_other_member_touched() {
+        let primary = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        std::fs::write(other.path().join("new_file.rs"), "fn only_other() {}\n").unwrap();
+
+        let conflicts = merge_wave_into_integration_dir(
+            primary.path(),
+            source.path(),
+            &[("goal-b".to_string(), other.path().to_path_buf())],
+        )
+        .unwrap();
+
+        assert!(conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(primary.path().join("new_file.rs")).unwrap(),
+            "fn only_other() {}\n"
+        );
+    }
+
+    #[test]
+    fn merge_wave_three_way_merges_non_overlapping_edits_cleanly() {
+        let primary = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        // Base file with two independent lines each sub-goal edits separately.
+        let base_content = "line one\nline two\nline three\n";
+        std::fs::write(source.path().join("shared.rs"), base_content).unwrap();
+        // Primary already edited line one.
+        std::fs::write(
+            primary.path().join("shared.rs"),
+            "line one CHANGED BY A\nline two\nline three\n",
+        )
+        .unwrap();
+        // Other member edited line three (non-overlapping).
+        std::fs::write(
+            other.path().join("shared.rs"),
+            "line one\nline two\nline three CHANGED BY B\n",
+        )
+        .unwrap();
+
+        let conflicts = merge_wave_into_integration_dir(
+            primary.path(),
+            source.path(),
+            &[("goal-b".to_string(), other.path().to_path_buf())],
+        )
+        .unwrap();
+
+        assert!(
+            conflicts.is_empty(),
+            "expected clean merge, got: {:?}",
+            conflicts
+        );
+        let merged = std::fs::read_to_string(primary.path().join("shared.rs")).unwrap();
+        assert!(merged.contains("CHANGED BY A"));
+        assert!(merged.contains("CHANGED BY B"));
+    }
+
+    #[test]
+    fn merge_wave_flags_real_overlapping_edit_as_conflict() {
+        let primary = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        let base_content = "shared line\n";
+        std::fs::write(source.path().join("shared.rs"), base_content).unwrap();
+        std::fs::write(primary.path().join("shared.rs"), "changed by A\n").unwrap();
+        std::fs::write(other.path().join("shared.rs"), "changed by B\n").unwrap();
+
+        let conflicts = merge_wave_into_integration_dir(
+            primary.path(),
+            source.path(),
+            &[("goal-b".to_string(), other.path().to_path_buf())],
+        )
+        .unwrap();
+
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("shared.rs"));
+        assert!(conflicts[0].contains("goal-b"));
+    }
+
+    #[test]
+    fn merge_wave_flags_delete_modify_case_without_crashing() {
+        let primary = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        std::fs::write(source.path().join("shared.rs"), "original\n").unwrap();
+        std::fs::write(primary.path().join("shared.rs"), "modified by primary\n").unwrap();
+        // `other` deleted the file relative to source — collect_changed_files
+        // will report it as changed but the file won't exist in `other`'s staging.
+        std::fs::write(other.path().join("shared.rs"), "original\n").unwrap();
+        std::fs::remove_file(other.path().join("shared.rs")).unwrap();
+
+        let conflicts = merge_wave_into_integration_dir(
+            primary.path(),
+            source.path(),
+            &[("goal-b".to_string(), other.path().to_path_buf())],
+        )
+        .unwrap();
+
+        // collect_changed_files won't report a file that's absent from both
+        // staging and never written — nothing to merge, no crash, no
+        // spurious conflict.
+        assert!(conflicts.is_empty());
     }
 
     #[test]

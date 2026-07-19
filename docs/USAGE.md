@@ -1960,6 +1960,43 @@ Use `ta workflow validate` to check a swarm definition for unknown dependencies 
 ta workflow validate .ta/workflows/my-swarm.yaml
 ```
 
+Sub-goals with no dependency relationship between them run **genuinely concurrently** — each launches on its own OS thread and their process start times overlap, not a serialized loop. Sub-goals are automatically partitioned into waves: a wave only contains sub-goals whose dependencies are already satisfied, and every wave runs to completion before the next one starts.
+
+### Dependency Waves for Plan Phases (`ta plan waves`)
+
+Before parallelizing a batch of PLAN.md phases, see which ones are actually safe to run concurrently and which must stay sequential:
+
+```bash
+# Defaults to the current next-actionable phases
+ta plan waves
+
+# Or specify an explicit batch
+ta plan waves --phases v0.17.1,v0.17.2,v0.17.3,v0.17.4
+
+# Machine-readable output
+ta plan waves --phases v0.17.1,v0.17.2 --json
+```
+
+This is **read-only analysis** — it doesn't launch anything. It partitions the given phases into ordered waves by parsing two declarations from each phase's PLAN.md entry:
+
+- **`**Depends on**:`** — the existing prose line every phase already has (e.g. `**Depends on**: v0.17.0.12.33 (hard blocking dependency), v0.13.7 (...)`). A real ordering constraint: phases in wave *N* only depend on phases in earlier waves.
+- **`**API impact**:`** (new, v0.17.0.12.34) — an optional, author-declared line naming the functions/structs/traits/exports a phase's work touches, semicolon-separated:
+
+  ```markdown
+  ### v0.17.0.12.34 — Safe Parallel + Sequential Phase Execution
+  <!-- status: in_progress -->
+  **Depends on**: v0.17.0.12.33, v0.17.0.12.31
+  **API impact**: adds ta_decision::gate::Diverge variant; modifies TeamRole::find_by_role signature
+  ```
+
+  Two phases with no `Depends on` relationship between them, but overlapping `API impact` tokens, are still downgraded to separate (sequential) waves — file-overlap alone misses this conflict class, since two phases touching *different* files can still collide if one changes a signature the other's work assumes is unchanged. This is a cheap, conservative, upfront heuristic: it only catches conflicts someone actually declared. Real, undeclared drift between concurrently-run phases is caught later, for real, by the integration-time gate below — declaring `API impact` is optional but recommended for any phase whose scope touches shared internals.
+
+Parallel execution stays **opt-in and conservative**: `ta plan waves` only tells you what's safe; a human (or an automation script) still explicitly chooses to run a wave's members concurrently, e.g. by building a swarm from that wave's phase IDs (`ta run ... --workflow swarm --sub-goals ...`).
+
+#### Integration-time conflict resolution
+
+When a swarm wave produces more than one *passed* sub-goal, `execute_swarm` automatically merges their changes into the first sub-goal's staging directory (a real three-way merge per changed file, base = the current source content) and re-runs the configured `--gates` against the combined result — this is the real backstop for whatever the upfront `API impact` check didn't catch, because it wasn't declared. If the integration gate fails, it reuses the exact same auto-fix mechanism as `--on-gate-failure=auto-fix` (a capped-retry follow-up goal whose objective is the gate's own failure output, escalating to a human on a second consecutive failure) rather than a second, parallel auto-fix path.
+
 ### Follow-Up Iterations
 
 Fix issues discovered during review without losing context. The smart follow-up system scans your goals, drafts, plan phases, and verification failures to find what you want to resume — no need to remember branch names, draft IDs, or internal state.

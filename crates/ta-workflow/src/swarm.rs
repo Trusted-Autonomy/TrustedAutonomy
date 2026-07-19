@@ -1,15 +1,18 @@
-// swarm.rs — Parallel agent swarm workflow (v0.13.7).
+// swarm.rs — Parallel agent swarm workflow (v0.13.7, wave-scheduled since v0.17.0.12.34).
 //
 // Implements the `swarm` built-in workflow:
 //   - Decomposes a goal into independent sub-goals, each with its own staging directory.
-//   - Runs sub-goals concurrently (or sequentially for the initial implementation).
+//   - Partitions sub-goals into dependency waves (`compute_waves`, v0.17.0.12.34)
+//     and runs each wave's members genuinely concurrently via OS threads
+//     (`ta_workflow::run_concurrently`, driven from `execute_swarm` in
+//     `apps/ta-cli/src/commands/run.rs`) — waves themselves stay sequential.
 //   - Validates each sub-goal with per-agent gates.
 //   - An optional integration step merges all sub-goal outputs.
 //   - Persists state to `.ta/swarm-workflow-<id>.json` for progress tracking.
 //
 // Usage (via `ta run --workflow swarm --sub-goals "goal1" "goal2"`):
-//   Sub-goal 1 (separate staging) → Sub-goal 2 (separate staging) →
-//   Integration agent (merges) → single draft.
+//   Wave of ready sub-goals (concurrent, separate staging dirs) →
+//   next wave once dependencies pass → integration agent (merges) → single draft.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +40,13 @@ pub struct SubGoalSpec {
     /// both "compile" and "lint" sub-goals have passed.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Declared API surfaces this sub-goal's work touches (v0.17.0.12.34).
+    ///
+    /// Two sub-goals with overlapping `api_impact` tokens are downgraded to
+    /// sequential waves by [`SwarmState::compute_waves`] even without an
+    /// explicit `depends_on` entry between them — see `dependency_wave`.
+    #[serde(default)]
+    pub api_impact: Vec<String>,
 }
 
 impl SubGoalSpec {
@@ -47,6 +57,7 @@ impl SubGoalSpec {
             objective: None,
             phase: None,
             depends_on: Vec::new(),
+            api_impact: Vec::new(),
         }
     }
 
@@ -58,12 +69,19 @@ impl SubGoalSpec {
             objective: None,
             phase: Some(phase),
             depends_on: Vec::new(),
+            api_impact: Vec::new(),
         }
     }
 
     /// Declare dependency titles — sub-goals that must pass before this one starts.
     pub fn with_deps(mut self, deps: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.depends_on = deps.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Declare API surfaces this sub-goal's work touches (v0.17.0.12.34).
+    pub fn with_api_impact(mut self, impact: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.api_impact = impact.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -436,6 +454,58 @@ impl SwarmState {
 
         Ok(())
     }
+
+    // ── Dependency-wave planning (v0.17.0.12.34) ────────────────────────────
+
+    /// Partition this swarm's `Pending` sub-goals into ordered waves using
+    /// [`crate::dependency_wave::plan_waves`] over `depends_on`/`api_impact`.
+    ///
+    /// Returns waves of sub-goal *indices* (not titles) so the caller can
+    /// index directly into `sub_goals`/`sub_goal_states`. Sub-goals that are
+    /// already complete (passed/failed/skipped) are excluded — they've
+    /// already been scheduled in an earlier round.
+    pub fn compute_waves(&self) -> Result<Vec<Vec<usize>>, crate::dependency_wave::WaveError> {
+        use crate::dependency_wave::WaveNode;
+
+        let pending_indices: Vec<usize> = (0..self.sub_goals.len())
+            .filter(|&i| matches!(self.sub_goal_states[i], SubGoalStatus::Pending))
+            .collect();
+        let pending_titles: std::collections::HashSet<&str> = pending_indices
+            .iter()
+            .map(|&i| self.sub_goals[i].title.as_str())
+            .collect();
+
+        let nodes: Vec<WaveNode> = pending_indices
+            .iter()
+            .map(|&i| {
+                let spec = &self.sub_goals[i];
+                WaveNode::new(spec.title.clone())
+                    .with_deps(
+                        spec.depends_on
+                            .iter()
+                            .filter(|d| pending_titles.contains(d.as_str()))
+                            .cloned(),
+                    )
+                    .with_api_impact(spec.api_impact.clone())
+            })
+            .collect();
+
+        let title_waves = crate::dependency_wave::plan_waves(&nodes)?;
+
+        let title_to_index: std::collections::HashMap<&str, usize> = pending_indices
+            .iter()
+            .map(|&i| (self.sub_goals[i].title.as_str(), i))
+            .collect();
+
+        Ok(title_waves
+            .into_iter()
+            .map(|wave| {
+                wave.iter()
+                    .filter_map(|title| title_to_index.get(title.as_str()).copied())
+                    .collect()
+            })
+            .collect())
+    }
 }
 
 // ── Integration config ──────────────────────────────────────────────────────
@@ -684,5 +754,84 @@ mod tests {
         state.save(dir.path()).unwrap();
         let loaded = SwarmState::load(dir.path(), "sw-ser-1").unwrap();
         assert_eq!(loaded.sub_goals[1].depends_on, vec!["a"]);
+    }
+
+    // ── Dependency-wave planning tests (v0.17.0.12.34) ──────────────────────
+
+    #[test]
+    fn compute_waves_no_deps_single_wave() {
+        let sub_goals = vec![
+            SubGoalSpec::new("a"),
+            SubGoalSpec::new("b"),
+            SubGoalSpec::new("c"),
+        ];
+        let state = SwarmState::new("sw-wave-1", "Parent", sub_goals, false);
+        let waves = state.compute_waves().unwrap();
+        assert_eq!(waves.len(), 1);
+        let mut wave0 = waves[0].clone();
+        wave0.sort_unstable();
+        assert_eq!(wave0, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn compute_waves_respects_explicit_dependency() {
+        let sub_goals = vec![
+            SubGoalSpec::new("a"),
+            SubGoalSpec::new("b").with_deps(["a"]),
+        ];
+        let state = SwarmState::new("sw-wave-2", "Parent", sub_goals, false);
+        let waves = state.compute_waves().unwrap();
+        assert_eq!(waves, vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn compute_waves_downgrades_api_impact_overlap() {
+        let sub_goals = vec![
+            SubGoalSpec::new("a").with_api_impact(["gate::Diverge"]),
+            SubGoalSpec::new("b").with_api_impact(["gate::Diverge"]),
+        ];
+        let state = SwarmState::new("sw-wave-3", "Parent", sub_goals, false);
+        let waves = state.compute_waves().unwrap();
+        assert_eq!(waves, vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn compute_waves_excludes_already_complete_sub_goals() {
+        let sub_goals = vec![SubGoalSpec::new("a"), SubGoalSpec::new("b")];
+        let mut state = SwarmState::new("sw-wave-4", "Parent", sub_goals, false);
+        state.sub_goal_states[0] = SubGoalStatus::Passed {
+            goal_id: "g-a".to_string(),
+            staging_path: PathBuf::from("/tmp/a"),
+        };
+        let waves = state.compute_waves().unwrap();
+        // Only "b" (index 1) is still Pending.
+        assert_eq!(waves, vec![vec![1]]);
+    }
+
+    #[test]
+    fn compute_waves_ignores_deps_already_satisfied_outside_candidate_set() {
+        // "b" depends on "a", but "a" already passed — not part of the
+        // pending candidate set, so it must not trigger an unknown-dependency error.
+        let sub_goals = vec![
+            SubGoalSpec::new("a"),
+            SubGoalSpec::new("b").with_deps(["a"]),
+        ];
+        let mut state = SwarmState::new("sw-wave-5", "Parent", sub_goals, false);
+        state.sub_goal_states[0] = SubGoalStatus::Passed {
+            goal_id: "g-a".to_string(),
+            staging_path: PathBuf::from("/tmp/a"),
+        };
+        let waves = state.compute_waves().unwrap();
+        assert_eq!(waves, vec![vec![1]]);
+    }
+
+    #[test]
+    fn compute_waves_reports_cycle() {
+        let sub_goals = vec![
+            SubGoalSpec::new("a").with_deps(["b"]),
+            SubGoalSpec::new("b").with_deps(["a"]),
+        ];
+        let state = SwarmState::new("sw-wave-6", "Parent", sub_goals, false);
+        assert!(state.compute_waves().is_err());
     }
 }
