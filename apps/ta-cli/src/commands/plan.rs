@@ -459,6 +459,27 @@ pub enum PlanCommands {
         #[arg(long)]
         source: Option<std::path::PathBuf>,
     },
+    /// Show dependency waves for a batch of phases — which can safely run
+    /// concurrently, and which must stay sequential (v0.17.0.12.34).
+    ///
+    /// Read-only analysis: computes waves from each phase's declared
+    /// `**Depends on**` and `**API impact**` lines. Does not launch
+    /// anything — a human (or automation) reviews the output and opts in to
+    /// parallel execution explicitly (e.g. via `ta workflow` with a
+    /// `--sub-goals` swarm built from a wave's members).
+    ///
+    /// Examples:
+    ///   ta plan waves                          (defaults to next-actionable phases)
+    ///   ta plan waves --phases v0.17.1,v0.17.2,v0.17.4
+    Waves {
+        /// Comma-separated phase IDs to plan. Defaults to the current
+        /// next-actionable set (`next_actionable_phases`) when omitted.
+        #[arg(long, value_delimiter = ',')]
+        phases: Option<Vec<String>>,
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for `ta plan review`.
@@ -664,6 +685,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         }
         PlanCommands::BuildStatus { refresh, once } => plan_build_status(config, *refresh, *once),
         PlanCommands::Pragma { no_scan } => plan_pragma(config, *no_scan),
+        PlanCommands::Waves { phases, json } => plan_waves_cmd(config, phases.as_deref(), *json),
     }
 }
 
@@ -727,12 +749,23 @@ pub struct PlanPhase {
     pub title: String,
     /// Current status.
     pub status: PlanStatus,
-    /// Explicit dependencies declared via `<!-- depends_on: v0.13.17.3 -->` comment (v0.14.3).
+    /// Explicit dependencies declared via `<!-- depends_on: v0.13.17.3 -->` comment
+    /// (v0.14.3) or, far more commonly in practice, a `**Depends on**: v0.13.17.3
+    /// (explanation), v0.14.1 (...)` prose line (parsed since v0.17.0.12.34 —
+    /// see `find_depends_on_in_lookahead`). Parenthetical explanations are
+    /// stripped; only the leading phase-id-shaped token from each entry is kept.
     pub depends_on: Vec<String>,
     /// Items from the `#### Human Review` subsection of this phase (v0.15.14.1).
     ///
     /// These items require a human to verify or sign off — agents must not check them.
     pub human_review_items: Vec<String>,
+    /// Declared API surfaces this phase's work touches (v0.17.0.12.34), from a
+    /// `**API impact**: adds Foo::bar; modifies Baz::qux` prose line. Used by
+    /// the dependency-wave planner (`candidate_waves`) to downgrade two
+    /// otherwise-independent phases to sequential waves when they declare
+    /// touching the same API surface — a conflict class plain file-overlap
+    /// can't catch.
+    pub api_impact: Vec<String>,
 }
 
 // ── Schema-driven parsing ────────────────────────────────────────
@@ -893,6 +926,7 @@ pub fn parse_plan_with_schema(content: &str, schema: &PlanSchema) -> Vec<PlanPha
 
                 let status = find_status_in_lookahead(&lines, i + 1, &status_re);
                 let depends_on = find_depends_on_in_lookahead(&lines, i + 1);
+                let api_impact = find_api_impact_in_lookahead(&lines, i + 1);
                 let human_review_items = extract_human_review_items(content, &id, &title);
                 phases.push(PlanPhase {
                     id,
@@ -900,6 +934,7 @@ pub fn parse_plan_with_schema(content: &str, schema: &PlanSchema) -> Vec<PlanPha
                     status,
                     depends_on,
                     human_review_items,
+                    api_impact,
                 });
                 break; // First pattern match wins.
             }
@@ -946,10 +981,24 @@ fn find_status_in_lookahead(lines: &[&str], start: usize, status_re: &Regex) -> 
     PlanStatus::Pending
 }
 
-/// Look ahead from `start` for a `<!-- depends_on: ... -->` comment.
+/// Look ahead from `start` for a dependency declaration, in either of two
+/// forms actually seen in PLAN.md:
+///   - `<!-- depends_on: v0.13.17.3, v0.14.1 -->` (v0.14.3, a plain comma
+///     list, rarely used in practice — 1 occurrence across the whole doc).
+///   - `**Depends on**: v0.13.17.3 (explanation), v0.14.1 (...)` — a bold
+///     prose line (v0.17.0.12.34), the format actually used ~125 times.
+///     Parenthetical explanations are stripped; only the leading
+///     phase-id-shaped token from each comma-separated entry is kept, and
+///     entries that don't start with one (e.g. "Meridian `suggest` command
+///     (v0.1.x)") are silently skipped rather than guessed at.
+///
 /// Scans up to 5 lines ahead, stopping if another phase header is detected.
 fn find_depends_on_in_lookahead(lines: &[&str], start: usize) -> Vec<String> {
-    let dep_re = match Regex::new(r"<!--\s*depends_on:\s*([^>]+?)\s*-->") {
+    let dep_comment_re = match Regex::new(r"<!--\s*depends_on:\s*([^>]+?)\s*-->") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let dep_prose_re = match Regex::new(r"^\*\*Depends [Oo]n\*\*:\s*(.+)$") {
         Ok(r) => r,
         Err(_) => return vec![],
     };
@@ -965,7 +1014,7 @@ fn find_depends_on_in_lookahead(lines: &[&str], start: usize) -> Vec<String> {
         if offset > 0 && header_re.is_match(line) {
             break;
         }
-        if let Some(caps) = dep_re.captures(line) {
+        if let Some(caps) = dep_comment_re.captures(line) {
             let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             return raw
                 .split(',')
@@ -973,8 +1022,94 @@ fn find_depends_on_in_lookahead(lines: &[&str], start: usize) -> Vec<String> {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
+        if let Some(caps) = dep_prose_re.captures(line) {
+            let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            return extract_leading_id_tokens(raw);
+        }
     }
     vec![]
+}
+
+/// Look ahead from `start` for a `**API impact**: adds Foo::bar; modifies
+/// Baz::qux` prose line (v0.17.0.12.34). Entries are semicolon-separated
+/// free-text tokens (not phase IDs) — trimmed verbatim, no id extraction.
+/// Scans up to 5 lines ahead, stopping if another phase header is detected.
+fn find_api_impact_in_lookahead(lines: &[&str], start: usize) -> Vec<String> {
+    let impact_re = match Regex::new(r"^\*\*API [Ii]mpact\*\*:\s*(.+)$") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let header_re = match Regex::new(r"^(?:##\s+Phase|###\s+v[\d.]+[a-z]?\s+[—\-])") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let limit = std::cmp::min(start + 5, lines.len());
+    for (offset, line) in lines[start..limit].iter().enumerate() {
+        let line = line.trim();
+        if offset > 0 && header_re.is_match(line) {
+            break;
+        }
+        if let Some(caps) = impact_re.captures(line) {
+            let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            return split_top_level(raw, ';')
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    vec![]
+}
+
+/// Split `s` on top-level occurrences of `sep`, treating `(...)` spans as
+/// opaque so a comma or semicolon inside a parenthetical explanation doesn't
+/// split an entry in half.
+fn split_top_level(s: &str, sep: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            c if c == sep && depth <= 0 => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+    parts
+}
+
+/// From a `**Depends on**:` prose line's captured text, extract the leading
+/// phase-id-shaped token of each top-level comma-separated entry, dropping
+/// any parenthetical explanation. Entries that don't start with an
+/// id-shaped token (e.g. "Meridian `suggest` command (v0.1.x)", or "None")
+/// are silently skipped — this is a conservative extraction, not a guess.
+fn extract_leading_id_tokens(raw: &str) -> Vec<String> {
+    let id_re = match Regex::new(r"^(v?\d[\da-z.]*)") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    split_top_level(raw, ',')
+        .iter()
+        .filter_map(|entry| {
+            id_re
+                .captures(entry.trim())
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim_end_matches('.').to_string())
+        })
+        .collect()
 }
 
 fn parse_status_str(s: &str) -> PlanStatus {
@@ -1626,6 +1761,79 @@ Add regression tests, deploy.
 }
 
 // ── CLI implementations ──────────────────────────────────────────
+
+/// `ta plan waves` — read-only dependency-wave analysis (v0.17.0.12.34).
+fn plan_waves_cmd(
+    config: &GatewayConfig,
+    explicit_phase_ids: Option<&[String]>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let phases = load_plan(&config.workspace_root)?;
+
+    let candidates: Vec<&PlanPhase> = match explicit_phase_ids {
+        Some(ids) => ids
+            .iter()
+            .filter_map(|wanted| phases.iter().find(|p| phase_ids_match(&p.id, wanted)))
+            .collect(),
+        None => next_actionable_phases(&phases),
+    };
+
+    if candidates.is_empty() {
+        if json_output {
+            println!("{}", serde_json::json!({"waves": []}));
+        } else {
+            println!(
+                "No candidate phases to plan waves for (no next-actionable phase, or none of \
+                 the requested --phases IDs matched PLAN.md)."
+            );
+        }
+        return Ok(());
+    }
+
+    let owned_candidates: Vec<PlanPhase> = candidates.into_iter().cloned().collect();
+    let waves = candidate_waves(&owned_candidates).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot compute dependency waves for the given phases: {}. \
+             Fix the offending **Depends on** declaration in PLAN.md and retry.",
+            e
+        )
+    })?;
+
+    if json_output {
+        println!("{}", serde_json::json!({"waves": waves}));
+        return Ok(());
+    }
+
+    println!(
+        "{} phase(s) partitioned into {} wave(s):\n",
+        owned_candidates.len(),
+        waves.len()
+    );
+    for (i, wave) in waves.iter().enumerate() {
+        let label = if wave.len() > 1 {
+            format!("Wave {} (safe to run concurrently)", i + 1)
+        } else {
+            format!("Wave {} (sequential)", i + 1)
+        };
+        println!("{}:", label);
+        for phase_id in wave {
+            let title = owned_candidates
+                .iter()
+                .find(|p| &p.id == phase_id)
+                .map(|p| p.title.as_str())
+                .unwrap_or("");
+            println!("  - {} — {}", phase_id, title);
+        }
+        println!();
+    }
+    println!(
+        "This is read-only analysis — nothing was launched. To run a wave's \
+         members concurrently, opt in explicitly (e.g. a swarm workflow built \
+         from that wave's phase IDs)."
+    );
+
+    Ok(())
+}
 
 fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
     let phases = load_plan(&config.workspace_root)?;
@@ -4449,6 +4657,42 @@ pub fn next_actionable_phases(phases: &[PlanPhase]) -> Vec<&PlanPhase> {
             })
         })
         .collect()
+}
+
+/// Partition a candidate set of pending phases into dependency waves
+/// (v0.17.0.12.34) — every phase in wave N depends only on phases in waves
+/// < N (already done, by construction of the candidate set) or on other
+/// candidates that come earlier in the wave order; phases within the same
+/// wave declare no ordering or API-impact conflict between them and are
+/// safe to run concurrently.
+///
+/// Read-only analysis: this does not launch anything. Callers typically
+/// pass [`next_actionable_phases`]'s result (or a specific human-selected
+/// batch — this phase's parallel execution is opt-in, not a global
+/// always-on default) to see what's safe to parallelize before choosing to
+/// actually run a batch concurrently.
+///
+/// Dependencies pointing at phases outside the candidate set (e.g. an
+/// already-`Done` phase) are treated as already satisfied and dropped
+/// before graph construction — only intra-batch ordering matters here.
+pub fn candidate_waves(phases: &[PlanPhase]) -> Result<Vec<Vec<String>>, String> {
+    let ids: std::collections::HashSet<&str> = phases.iter().map(|p| p.id.as_str()).collect();
+    let nodes: Vec<ta_workflow::WaveNode> = phases
+        .iter()
+        .map(|p| {
+            let deps: Vec<String> = p
+                .depends_on
+                .iter()
+                .filter(|d| ids.contains(d.as_str()) || ids.iter().any(|id| phase_ids_match(id, d)))
+                .cloned()
+                .collect();
+            ta_workflow::WaveNode::new(p.id.clone())
+                .with_deps(deps)
+                .with_api_impact(p.api_impact.clone())
+        })
+        .collect();
+
+    ta_workflow::plan_waves(&nodes).map_err(|e| e.to_string())
 }
 
 // Ascending comparator: real semver IDs compare by value; a phase with a
@@ -9154,6 +9398,7 @@ Release automation.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             })
             .collect();
         phases.push(PlanPhase {
@@ -9162,6 +9407,7 @@ Release automation.
             status: PlanStatus::InProgress,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         });
         for i in 21..31 {
             phases.push(PlanPhase {
@@ -9170,6 +9416,7 @@ Release automation.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             });
         }
 
@@ -9429,6 +9676,7 @@ Release automation.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "1".to_string(),
@@ -9436,6 +9684,7 @@ Release automation.
                 status: PlanStatus::Deferred,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "2".to_string(),
@@ -9443,6 +9692,7 @@ Release automation.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         let checklist = format_plan_checklist(&phases, None);
@@ -9468,6 +9718,7 @@ Release automation.
             status: PlanStatus::Pending,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         };
         let cmd = suggest_next_goal_command(&phase);
         assert_eq!(cmd, "ta run \"implement Release Pipeline\" --phase v0.3.2");
@@ -10183,6 +10434,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10190,6 +10442,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
@@ -10197,6 +10450,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         assert!(
@@ -10214,6 +10468,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10221,6 +10476,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
@@ -10228,6 +10484,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         let warnings = check_phase_order(&phases);
@@ -10254,6 +10511,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
@@ -10261,6 +10519,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         // Non-semver "4b" should be skipped, no violations.
@@ -10281,6 +10540,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10288,6 +10548,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
@@ -10295,6 +10556,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.4.0".to_string(),
@@ -10302,6 +10564,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         let warnings = check_phase_order(&phases);
@@ -10357,6 +10620,112 @@ Build it.
         assert!(phases[0].depends_on.is_empty());
     }
 
+    // ── Prose "**Depends on**" / "**API impact**" parsing (v0.17.0.12.34) ───
+    //
+    // The real PLAN.md declares dependencies via a bold prose line ~125
+    // times; the `<!-- depends_on: ... -->` HTML comment appears exactly
+    // once. Before this phase, only the comment form was parsed — these
+    // tests cover the format actually used throughout the document.
+
+    #[test]
+    fn depends_on_parsed_from_prose_line_with_parentheticals() {
+        let plan_text = "### v0.17.0.12.34 — Phase\n<!-- status: pending -->\n\
+                          **Depends on**: v0.17.0.12.33 (hard blocking dependency — see rationale above), \
+                          v0.17.0.12.31 (Build-Milestone Automation), v0.13.7 (`serial-phases`/`swarm` workflows)\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(phases.len(), 1);
+        assert_eq!(
+            phases[0].depends_on,
+            vec!["v0.17.0.12.33", "v0.17.0.12.31", "v0.13.7"]
+        );
+    }
+
+    #[test]
+    fn depends_on_parsed_from_prose_line_without_parenthetical() {
+        let plan_text =
+            "### v0.17.0.13 — Phase\n<!-- status: pending -->\n**Depends on**: v0.15.22\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(phases[0].depends_on, vec!["v0.15.22"]);
+    }
+
+    #[test]
+    fn depends_on_prose_skips_non_id_entries() {
+        // "Meridian `suggest` command (v0.1.x)" doesn't start with an
+        // id-shaped token — must be skipped, not guessed at.
+        let plan_text = "### v0.17.0.13 — Phase\n<!-- status: pending -->\n\
+                          **Depends on**: v0.17.0.12 (Meridian integration), Meridian `suggest` command (v0.1.x)\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(phases[0].depends_on, vec!["v0.17.0.12"]);
+    }
+
+    #[test]
+    fn api_impact_parsed_from_prose_line() {
+        let plan_text = "### v0.17.0.12.34 — Phase\n<!-- status: pending -->\n\
+                          **API impact**: adds ta_decision::gate::Diverge variant; modifies TeamRole::find_by_role signature\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(
+            phases[0].api_impact,
+            vec![
+                "adds ta_decision::gate::Diverge variant",
+                "modifies TeamRole::find_by_role signature"
+            ]
+        );
+    }
+
+    #[test]
+    fn api_impact_empty_when_not_declared() {
+        let plan_text =
+            "### v0.17.0.13 — Phase\n<!-- status: pending -->\n**Depends on**: v0.15.22\n";
+        let phases = parse_plan(plan_text);
+        assert!(phases[0].api_impact.is_empty());
+    }
+
+    #[test]
+    fn candidate_waves_sequences_real_dependency() {
+        let plan_text = "### v0.17.1 — A\n<!-- status: pending -->\n\
+                          ### v0.17.2 — B\n<!-- status: pending -->\n**Depends on**: v0.17.1\n";
+        let phases = parse_plan(plan_text);
+        let waves = candidate_waves(&phases).unwrap();
+        assert_eq!(
+            waves,
+            vec![vec!["v0.17.1".to_string()], vec!["v0.17.2".to_string()]]
+        );
+    }
+
+    #[test]
+    fn candidate_waves_groups_independent_phases_into_one_wave() {
+        let plan_text =
+            "### v0.17.1 — A\n<!-- status: pending -->\n### v0.17.2 — B\n<!-- status: pending -->\n";
+        let phases = parse_plan(plan_text);
+        let mut waves = candidate_waves(&phases).unwrap();
+        assert_eq!(waves.len(), 1);
+        waves[0].sort();
+        assert_eq!(waves[0], vec!["v0.17.1".to_string(), "v0.17.2".to_string()]);
+    }
+
+    #[test]
+    fn candidate_waves_downgrades_on_api_impact_overlap() {
+        let plan_text = "### v0.17.1 — A\n<!-- status: pending -->\n**API impact**: Foo::bar\n\
+                          ### v0.17.2 — B\n<!-- status: pending -->\n**API impact**: Foo::bar\n";
+        let phases = parse_plan(plan_text);
+        let waves = candidate_waves(&phases).unwrap();
+        assert_eq!(
+            waves,
+            vec![vec!["v0.17.1".to_string()], vec!["v0.17.2".to_string()]]
+        );
+    }
+
+    #[test]
+    fn candidate_waves_ignores_dependency_outside_candidate_set() {
+        // v0.17.2 depends on v0.17.0, which isn't in the candidate set
+        // (e.g. already Done) — must not be treated as an unknown dependency.
+        let plan_text =
+            "### v0.17.2 — B\n<!-- status: pending -->\n**Depends on**: v0.17.0 (already done)\n";
+        let phases = parse_plan(plan_text);
+        let waves = candidate_waves(&phases).unwrap();
+        assert_eq!(waves, vec![vec!["v0.17.2".to_string()]]);
+    }
+
     #[test]
     fn collect_dependency_warnings_unmet() {
         let phases = vec![
@@ -10366,6 +10735,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10373,6 +10743,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec!["v0.1.0".to_string()],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         let warnings = collect_dependency_warnings(&phases);
@@ -10390,6 +10761,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10397,6 +10769,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec!["v0.1.0".to_string()],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         assert!(collect_dependency_warnings(&phases).is_empty());
@@ -10697,6 +11070,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10704,6 +11078,7 @@ Build it.
                 status: PlanStatus::InProgress,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
@@ -10711,6 +11086,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         let checklist = format_plan_checklist(&phases, None);
@@ -10755,6 +11131,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10762,6 +11139,7 @@ Build it.
                 status: PlanStatus::InProgress,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
@@ -10769,6 +11147,7 @@ Build it.
                 status: PlanStatus::Pending,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         assert_eq!(find_single_in_progress(&phases), Some("v0.2.0".to_string()));
@@ -10783,6 +11162,7 @@ Build it.
                 status: PlanStatus::InProgress,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
@@ -10790,6 +11170,7 @@ Build it.
                 status: PlanStatus::InProgress,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         assert_eq!(find_single_in_progress(&phases), None);
@@ -10803,6 +11184,7 @@ Build it.
             status: PlanStatus::Done,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         }];
         assert_eq!(find_single_in_progress(&phases), None);
     }
@@ -10815,6 +11197,7 @@ Build it.
             status: PlanStatus::Done,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         }];
         assert_eq!(create_gap_semver("v0.15.15.1", &phases), "v0.15.15.1.1");
     }
@@ -10828,6 +11211,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.15.15.1.1".to_string(),
@@ -10835,6 +11219,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         assert_eq!(create_gap_semver("v0.15.15.1", &phases), "v0.15.15.1.2");
@@ -10849,6 +11234,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.15.15.1.1".to_string(),
@@ -10856,6 +11242,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
             PlanPhase {
                 id: "v0.15.15.1.2".to_string(),
@@ -10863,6 +11250,7 @@ Build it.
                 status: PlanStatus::Done,
                 depends_on: vec![],
                 human_review_items: vec![],
+                api_impact: vec![],
             },
         ];
         assert_eq!(create_gap_semver("v0.15.15.1", &phases), "v0.15.15.1.3");
@@ -10979,6 +11367,7 @@ Build it.
             status,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         }
     }
 
@@ -11091,6 +11480,7 @@ Build it.
             status,
             depends_on: vec![],
             human_review_items: vec![],
+            api_impact: vec![],
         }
     }
 
@@ -11567,6 +11957,7 @@ More content here that is part of a second paragraph.
             status,
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             human_review_items: vec![],
+            api_impact: vec![],
         }
     }
 

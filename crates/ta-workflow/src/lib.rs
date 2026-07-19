@@ -13,8 +13,10 @@
 
 pub mod artifact_dag;
 pub mod artifact_store;
+pub mod concurrent;
 pub mod consensus;
 pub mod definition;
+pub mod dependency_wave;
 pub mod error;
 pub mod intent;
 pub mod interaction;
@@ -39,6 +41,7 @@ pub mod yaml_engine;
 
 pub use artifact_dag::{render_ascii, render_dot, MissingInput, ResolvedDag};
 pub use artifact_store::{artifact_key, run_prefix, stage_prefix, ArtifactStore, StoredArtifact};
+pub use concurrent::run_concurrently;
 pub use consensus::{
     run_consensus, ConsensusAlgorithm, ConsensusInput, ConsensusResult, ReviewerVote,
 };
@@ -46,6 +49,7 @@ pub use definition::{
     FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowCatalog,
     WorkflowDefinition,
 };
+pub use dependency_wave::{api_impact_overlaps, plan_waves, WaveError, WaveNode};
 pub use intent::{
     extract_intent, format_confirmation_card, resolve_intent, ExtractedIntent, IntentVerb,
     ResolutionResult, ScopeModifier, TemplateCandidate, CONFIDENCE_THRESHOLD,
