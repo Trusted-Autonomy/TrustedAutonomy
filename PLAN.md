@@ -9796,7 +9796,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 ---
 ### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0 (URI journal pattern established for governed resources), v0.17.0.12.14 (Plugin/Adapter/Connector unification — `ta_plugin` transport, `ExternalDbProxyPlugin`, `.ta/plugins/db/<name>/plugin.toml` discovery, all already built)
 
