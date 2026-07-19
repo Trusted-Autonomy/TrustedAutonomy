@@ -1,0 +1,21 @@
+name = "mysql"
+version = "0.1.0"
+type = "db"
+command = "ta-db-proxy-mysql"
+protocol = "json-stdio"
+capabilities = ["classify_query", "start_capture", "stop_capture", "apply_mutation"]
+description = "MySQL/MariaDB database proxy — binlog change capture, drained at goal end"
+timeout_secs = 60
+
+# Installation:
+# 1. Build: cargo build --release
+# 2. Copy binary to .ta/plugins/db/mysql/ (bundled with TA by default)
+# 3. Copy this plugin.toml alongside it
+#
+# Requirements on the upstream server:
+#   - binlog enabled (log_bin = ON)
+#   - binlog_format = ROW
+#   - the connecting user has REPLICATION SLAVE, REPLICATION CLIENT privileges
+#
+# `upstream_dsn` is a standard MySQL URL, e.g.
+# "mysql://ta_proxy:password@localhost:3306/app".

@@ -1,0 +1,22 @@
+name = "postgres"
+version = "0.1.0"
+type = "db"
+command = "ta-db-proxy-postgres"
+protocol = "json-stdio"
+capabilities = ["classify_query", "start_capture", "stop_capture", "apply_mutation"]
+description = "Postgres database proxy — logical replication slot change capture (test_decoding)"
+timeout_secs = 60
+
+# Installation:
+# 1. Build: cargo build --release
+# 2. Copy binary to .ta/plugins/db/postgres/ (bundled with TA by default)
+# 3. Copy this plugin.toml alongside it
+#
+# Requirements on the upstream server:
+#   - PostgreSQL >= 9.4 (logical replication slots)
+#   - wal_level = logical
+#   - the connecting role has the REPLICATION attribute (or is a superuser)
+#   - max_replication_slots > 0
+#
+# `upstream_dsn` is a standard libpq connection string, e.g.
+# "host=localhost user=ta_proxy password=... dbname=app".

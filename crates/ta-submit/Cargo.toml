@@ -16,11 +16,11 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.34" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.34" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.34" }
-ta-plugin = { path = "../ta-plugin", version = "0.17.0-alpha.12.34" }
-ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.34" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.1-alpha" }
+ta-goal = { path = "../ta-goal", version = "0.17.1-alpha" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.1-alpha" }
+ta-plugin = { path = "../ta-plugin", version = "0.17.1-alpha" }
+ta-decision = { path = "../ta-decision", version = "0.17.1-alpha" }
 toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]

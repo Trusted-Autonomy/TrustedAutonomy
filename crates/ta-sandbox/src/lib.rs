@@ -26,6 +26,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
@@ -91,6 +92,47 @@ pub struct NetworkPolicy {
     /// Domains explicitly denied.
     #[serde(default)]
     pub deny_domains: Vec<String>,
+    /// Host:port targets explicitly allowed (e.g. "127.0.0.1:15432" for a
+    /// local db proxy). Distinct from `allow_domains`, which is
+    /// hostname-only and doesn't distinguish ports — a `db://` goal needs to
+    /// allow the proxy's specific local port while denying the upstream
+    /// database's host:port outright, not just its hostname (v0.17.1).
+    #[serde(default)]
+    pub allow_addrs: Vec<String>,
+    /// Host:port targets explicitly denied. Deny takes precedence over
+    /// `allow_addrs`, same ordering as the domain lists.
+    #[serde(default)]
+    pub deny_addrs: Vec<String>,
+}
+
+impl NetworkPolicy {
+    /// The policy shape a `db://` goal's sandbox is configured with: deny
+    /// direct egress to the real database host:port, allow only the local
+    /// proxy's own listen address — the agent has no network path to the
+    /// real database that doesn't pass through the mediating proxy.
+    pub fn for_db_proxy(upstream_host: &str, upstream_port: u16, proxy_addr: SocketAddr) -> Self {
+        Self {
+            default_action: NetworkAction::Deny,
+            allow_domains: vec![],
+            deny_domains: vec![],
+            allow_addrs: vec![format!("{}:{}", proxy_addr.ip(), proxy_addr.port())],
+            deny_addrs: vec![format!("{upstream_host}:{upstream_port}")],
+        }
+    }
+
+    /// Check whether a `host:port` target is allowed. Deny takes precedence
+    /// over allow, then falls back to `default_action` — same precedence
+    /// order as `SandboxRunner::is_domain_allowed`.
+    pub fn is_addr_allowed(&self, host: &str, port: u16) -> bool {
+        let target = format!("{host}:{port}");
+        if self.deny_addrs.iter().any(|d| d == &target || d == host) {
+            return false;
+        }
+        if self.allow_addrs.iter().any(|a| a == &target || a == host) {
+            return true;
+        }
+        self.default_action == NetworkAction::Allow
+    }
 }
 
 /// Default network action.
@@ -140,6 +182,18 @@ pub enum SandboxError {
 
     #[error("Command timed out after {0}s")]
     Timeout(u64),
+
+    #[error(
+        "Network target '{host}:{port}' is denied by this sandbox's network policy \
+         (command '{command}'). If this goal proxies a database, only the proxy's own \
+         listen address is reachable — the upstream host is intentionally unreachable \
+         so the agent cannot bypass the proxy."
+    )]
+    NetworkDenied {
+        command: String,
+        host: String,
+        port: u16,
+    },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -219,6 +273,26 @@ impl SandboxRunner {
         for arg in args {
             if arg.contains('/') || arg.contains('\\') {
                 self.validate_path(arg)?;
+            }
+        }
+
+        // 4b. Check network targets embedded in the command's own arguments
+        // (`-h host -p port` flag pairs, or a DSN like
+        // `postgres://host:5432/db`) against the network policy. This is
+        // the sandbox's actual enforcement point for db:// goals (v0.17.1):
+        // TA never gives the agent the real DSN, but a db plugin's CLI
+        // client could still be pointed at the real host by name if nothing
+        // checked its arguments — this closes that gap for any command the
+        // sandbox actually runs. It is argument pattern-matching, not
+        // packet-level interception — a command that resolves its target by
+        // some other means (e.g. a config file) isn't caught here.
+        for (host, port) in extract_network_targets(args) {
+            if !self.config.network.is_addr_allowed(&host, port) {
+                return Err(SandboxError::NetworkDenied {
+                    command: command.to_string(),
+                    host,
+                    port,
+                });
             }
         }
 
@@ -374,6 +448,14 @@ impl SandboxRunner {
         // Fall back to default action.
         self.config.network.default_action == NetworkAction::Allow
     }
+
+    /// Check if a `host:port` target is allowed by the network policy —
+    /// the host:port analog of `is_domain_allowed`, used for db proxy
+    /// enforcement (v0.17.1) where the port distinguishes the real database
+    /// from the local proxy on the same host.
+    pub fn is_addr_allowed(&self, host: &str, port: u16) -> bool {
+        self.config.network.is_addr_allowed(host, port)
+    }
 }
 
 impl Default for SandboxConfig {
@@ -484,6 +566,8 @@ impl Default for SandboxConfig {
                     "github.com".to_string(),
                 ],
                 deny_domains: vec![],
+                allow_addrs: vec![],
+                deny_addrs: vec![],
             },
             timeout_secs: 300,
             audit_transcripts: true,
@@ -497,6 +581,8 @@ impl Default for NetworkPolicy {
             default_action: NetworkAction::Deny,
             allow_domains: vec![],
             deny_domains: vec![],
+            allow_addrs: vec![],
+            deny_addrs: vec![],
         }
     }
 }
@@ -549,6 +635,57 @@ fn domain_match(pattern: &str, domain: &str) -> bool {
     }
 
     pattern == domain
+}
+
+/// Extract a `host:port` from a DSN-shaped argument, e.g.
+/// `postgres://user:pass@realhost:5432/mydb` or `realhost:5432`. Returns
+/// `None` for arguments that don't parse as `<...>host:port<...>`.
+fn parse_host_port_from_dsn(arg: &str) -> Option<(String, u16)> {
+    let after_scheme = arg.split_once("://").map(|(_, rest)| rest).unwrap_or(arg);
+    let after_auth = after_scheme
+        .rsplit_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(after_scheme);
+    let host_port = after_auth
+        .split(['/', '?', ' '])
+        .next()
+        .unwrap_or(after_auth);
+    let (host, port_str) = host_port.rsplit_once(':')?;
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    Some((host.to_string(), port))
+}
+
+/// Extract network targets a command's arguments name explicitly: `-h/--host`
+/// paired with `-p/-P/--port` (the common shape across `psql`, `mysql`,
+/// `redis-cli`, `mongosh`, ...), plus any single argument that parses as a
+/// DSN/URL with an embedded host:port. Best-effort pattern matching, not a
+/// full CLI-argument grammar for every possible client.
+fn extract_network_targets(args: &[&str]) -> Vec<(String, u16)> {
+    let mut targets = vec![];
+    let mut host: Option<String> = None;
+    let mut port: Option<u16> = None;
+
+    for (i, arg) in args.iter().enumerate() {
+        if *arg == "-h" || *arg == "--host" {
+            host = args.get(i + 1).map(|s| s.to_string());
+        } else if let Some(v) = arg.strip_prefix("--host=") {
+            host = Some(v.to_string());
+        } else if *arg == "-p" || *arg == "-P" || *arg == "--port" {
+            port = args.get(i + 1).and_then(|s| s.parse().ok());
+        } else if let Some(v) = arg.strip_prefix("--port=") {
+            port = v.parse().ok();
+        } else if let Some(target) = parse_host_port_from_dsn(arg) {
+            targets.push(target);
+        }
+    }
+
+    if let (Some(h), Some(p)) = (host, port) {
+        targets.push((h, p));
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -677,6 +814,78 @@ mod tests {
         assert!(runner.is_domain_allowed("github.com"));
         assert!(runner.is_domain_allowed("crates.io"));
         assert!(!runner.is_domain_allowed("evil.com"));
+    }
+
+    #[test]
+    fn db_proxy_policy_denies_upstream_allows_proxy_addr() {
+        let proxy_addr: SocketAddr = "127.0.0.1:15432".parse().unwrap();
+        let policy = NetworkPolicy::for_db_proxy("real-db.internal", 5432, proxy_addr);
+
+        assert!(!policy.is_addr_allowed("real-db.internal", 5432));
+        assert!(policy.is_addr_allowed("127.0.0.1", 15432));
+        // Default-deny for anything not explicitly the proxy or upstream.
+        assert!(!policy.is_addr_allowed("some-other-host", 9999));
+    }
+
+    #[test]
+    fn extract_network_targets_finds_host_port_flag_pairs() {
+        let targets =
+            extract_network_targets(&["-h", "real-db.internal", "-p", "5432", "-U", "admin"]);
+        assert_eq!(targets, vec![("real-db.internal".to_string(), 5432)]);
+    }
+
+    #[test]
+    fn extract_network_targets_finds_long_flags_and_equals_form() {
+        let targets = extract_network_targets(&["--host=real-db.internal", "--port=5432"]);
+        assert_eq!(targets, vec![("real-db.internal".to_string(), 5432)]);
+    }
+
+    #[test]
+    fn extract_network_targets_finds_dsn_in_single_arg() {
+        let targets = extract_network_targets(&["postgres://user:pass@real-db.internal:5432/mydb"]);
+        assert_eq!(targets, vec![("real-db.internal".to_string(), 5432)]);
+    }
+
+    #[test]
+    fn extract_network_targets_ignores_args_without_a_target() {
+        assert!(extract_network_targets(&["--verbose", "SELECT 1"]).is_empty());
+    }
+
+    #[test]
+    fn agent_attempting_raw_connection_to_real_db_host_is_denied_at_network_layer() {
+        // The concrete guarantee v0.17.1 item 2 asks for: a command the
+        // agent runs inside the sandbox, pointed directly at the real DB
+        // host, is denied before it ever spawns — not merely discouraged by
+        // convention. Denial happens pre-spawn, so this doesn't require
+        // `psql` to actually be installed in the test environment.
+        let mut config = SandboxConfig::default();
+        config.commands.insert(
+            "psql".to_string(),
+            CommandPolicy {
+                description: "Postgres CLI client".to_string(),
+                allowed_args: vec![],
+                forbidden_args: vec![],
+                max_invocations: None,
+                can_write: false,
+            },
+        );
+        let proxy_addr: SocketAddr = "127.0.0.1:15432".parse().unwrap();
+        config.network = NetworkPolicy::for_db_proxy("real-db.internal", 5432, proxy_addr);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut runner = SandboxRunner::new(config, dir.path());
+
+        let err = runner
+            .execute(
+                "psql",
+                &["-h", "real-db.internal", "-p", "5432", "-c", "SELECT 1"],
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SandboxError::NetworkDenied { ref host, port, .. }
+            if host == "real-db.internal" && port == 5432
+        ));
     }
 
     #[test]
