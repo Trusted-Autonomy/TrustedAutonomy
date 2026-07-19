@@ -9773,7 +9773,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 ---
 ### v0.17.0.12.34 — Safe Parallel + Sequential Phase Execution (Dependency Waves, API-Impact Overlap, Integration-Time Resolution)
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Depends on**: v0.17.0.12.33 (hard blocking dependency — see rationale above), v0.17.0.12.31 (Build-Milestone Automation — reuses its auto-fix-retry mechanism), v0.13.7 (`serial-phases`/`swarm` workflows)
 
 **Goal**: Per explicit user request (2026-07-18): enable TA's automation to run independent phases in parallel when safe, falling back to sequential when phases share real dependencies, file overlap, or API-surface overlap — to speed up multi-phase batches without silently corrupting results.
