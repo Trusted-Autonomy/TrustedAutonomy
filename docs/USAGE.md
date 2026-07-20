@@ -80,6 +80,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Unified Policy Config](#unified-policy-config)
    - [Unified Access Control Pattern](#unified-access-control-pattern)
    - [Resource Mediation](#resource-mediation)
+   - [Database Proxy](#database-proxy)
    - [Channel Registry](#channel-registry)
    - [Multi-Channel Routing](#multi-channel-routing)
    - [Channel Plugins](#channel-plugins)
@@ -9685,6 +9686,61 @@ The `MediatorRegistry` routes actions to the correct mediator by URI scheme.
 Built-in mediators:
 - **ApiMediator** (`mcp://`): MCP tool call staging (see [API Mediation](#api-mediation))
 
+### Database Proxy
+
+`db://` is a governed resource scheme like `fs://` — an agent working inside a goal never
+connects to a real database directly. Postgres, MySQL, and SQLite ship as ordinary
+[Plugin-category](#authoring-a-plugin) packages under `.ta/plugins/db/<name>/` (bundled with TA
+by default, but structurally identical to what a third party would author — see
+[`docs/community-db-plugin.md`](community-db-plugin.md) to add a new engine).
+
+**How mutations are captured and reviewed:**
+
+1. At goal start, TA resolves the real connection string from the credential vault and calls the
+   matching plugin's `start_capture` — a Postgres logical replication slot, a recorded MySQL
+   binlog position, or a SQLite shadow-copy snapshot, depending on the engine.
+2. The agent only ever sees the proxy's own local address, never the real DSN.
+3. At `ta draft apply` or `ta draft deny`, `stop_capture` drains whatever changed into
+   `db-overlay.jsonl` (on apply) or discards it (on deny) — either way, the capture resource
+   (replication slot, etc.) is released so nothing leaks past the goal's lifetime.
+4. Captured mutations show up in `ta draft view` as row-level diffs, same as file changes.
+
+**Enforcement — the agent can't bypass the proxy.** Two independent mechanisms guarantee this,
+not just convention:
+
+- **Network policy**: for any goal referencing a `db://` URI, `ta-sandbox`'s `NetworkPolicy` is
+  configured via `NetworkPolicy::for_db_proxy(...)` to deny direct egress to the real database's
+  host:port and allow only the proxy's own listen address. A sandboxed command pointed directly at
+  the real host (`psql -h realhost -p 5432 ...`, or a DSN embedded in an argument) is rejected
+  before it spawns.
+- **Credential vault**: the real DSN is resolved exclusively by the proxy process from
+  `ta-credentials`'s vault and handed to the plugin — never to the agent's environment.
+
+**Policy default — `review`, not `auto`:**
+
+```toml
+# .ta/workflow.toml
+[actions.db_query]
+policy = "review"               # default — every mutation held for human review
+auto_approve_reads = true       # SELECT-class queries can still auto-approve
+allow_schema_drops = false      # default — DROP TABLE/TRUNCATE/ALTER...DROP COLUMN blocked
+```
+
+`policy = "auto"` requires explicit opt-in; there's no way to skip review for DB mutations by
+omission.
+
+**Constitution rules (`.ta/constitution.toml`)** — active by default, no configuration required:
+
+| Rule | Fires when | Effect | Override |
+|---|---|---|---|
+| Large mutation count | A draft modifies more than 100 rows (configurable via `threshold` on a custom `[[rules.warn]]`) | Warn — reviewer sees a flag on the draft | N/A (informational) |
+| Schema-altering statement | A draft contains `DROP TABLE`, `TRUNCATE`, or `ALTER TABLE ... DROP COLUMN` | Block | Set `allow_schema_drops = true` under `[actions.db_query]` |
+
+Note the schema-drop rule is only as strong as what each plugin can actually see: Postgres logical
+replication and MySQL row-based binlog events don't carry DDL at all (a property of those
+replication mechanisms, not a gap in TA) — SQLite's shadow-copy diff does capture it. See each
+plugin's module docs (`plugins/ta-db-proxy-*/src/main.rs`) for what's captured on that engine.
+
 ### Channel Registry
 
 TA's IO channels (terminal, webhook, Slack, etc.) register through a pluggable `ChannelFactory` trait. All channels are equal — the routing config determines which channel handles review, notifications, sessions, and escalation.
@@ -9935,6 +9991,11 @@ timeout_secs = 30
 ```
 
 The binary reads one JSON line (`{"method":"classify_query","params":{"query":"..."}}`), and writes one JSON line back (`{"ok":true,"result":{"class":"read"}}`).
+
+For `db`-kind plugins specifically — the full method list (`start_capture`/`stop_capture`
+change-capture lifecycle, `apply_mutation` replay), the `db-overlay.jsonl` wire shape, and the
+network-policy/credential-vault guarantee a plugin author relies on — see
+[`docs/community-db-plugin.md`](community-db-plugin.md) and [Database Proxy](#database-proxy).
 
 #### Channel Access Control
 
@@ -13591,6 +13652,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.16.1 | Homebrew tap | Pending |
 | v0.16.2 | VCS-agnostic release pipeline | Pending |
 | v0.17.0.7 | Context Compression via headroom proxy (`ta compression` CLI, HeadroomSupervisor, per-agent config) | Done |
+| v0.17.1 | Database Proxy — Postgres/MySQL/SQLite as external `db` plugins, sandbox network-policy enforcement, `db_query` constitution rules | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

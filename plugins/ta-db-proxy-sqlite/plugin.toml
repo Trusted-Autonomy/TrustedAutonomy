@@ -1,0 +1,16 @@
+name = "sqlite"
+version = "0.1.0"
+type = "db"
+command = "ta-db-proxy-sqlite"
+protocol = "json-stdio"
+capabilities = ["classify_query", "start_capture", "stop_capture", "apply_mutation"]
+description = "SQLite database proxy — session-scoped shadow-copy change capture"
+timeout_secs = 30
+
+# Installation:
+# 1. Build: cargo build --release
+# 2. Copy binary to .ta/plugins/db/sqlite/ (bundled with TA by default)
+# 3. Copy this plugin.toml alongside it
+#
+# `upstream_dsn` is a plain filesystem path to the SQLite database file
+# (an optional "sqlite://" prefix is accepted and stripped).

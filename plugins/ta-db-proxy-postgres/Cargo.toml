@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "ta-db-proxy-postgres"
+version = "0.1.0"
+edition = "2021"
+description = "Postgres database proxy plugin for Trusted Autonomy — external JSON-over-stdio plugin (v0.17.1)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ta-db-proxy-postgres"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postgres = "0.19"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

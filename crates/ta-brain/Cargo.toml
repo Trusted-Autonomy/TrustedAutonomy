@@ -18,13 +18,13 @@ chrono = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.34" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.34" }
-ta-intake = { path = "../ta-intake", version = "0.17.0-alpha.12.34" }
+ta-session = { path = "../ta-session", version = "0.17.1-alpha" }
+ta-goal = { path = "../ta-goal", version = "0.17.1-alpha" }
+ta-intake = { path = "../ta-intake", version = "0.17.1-alpha" }
 # Folds ta-workflow's template-matching intent resolver in as one signal
 # route() consults (v0.17.0.12.23), rather than a second, parallel intent
 # system — see route.rs's resolve_workflow_template().
-ta-workflow = { path = "../ta-workflow", version = "0.17.0-alpha.12.34" }
+ta-workflow = { path = "../ta-workflow", version = "0.17.1-alpha" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
