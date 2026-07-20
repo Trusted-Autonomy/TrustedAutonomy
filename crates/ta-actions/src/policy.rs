@@ -20,8 +20,9 @@
 // allowed_domains = ["api.stripe.com", "api.github.com"]
 //
 // [actions.db_query]
-// policy = "review"
-// auto_approve_reads = true
+// policy = "review"               # v0.17.1: this is also the library default for
+// auto_approve_reads = true       # db_query — every DB mutation is held for human
+// allow_schema_drops = false      # review unless a project explicitly opts into "auto".
 // ```
 
 use std::collections::HashMap;
@@ -78,6 +79,14 @@ pub struct ActionPolicyConfig {
     #[serde(default)]
     pub auto_approve_reads: bool,
 
+    /// For `db_query`: allow schema-altering statements (`DROP TABLE`,
+    /// `TRUNCATE`, `ALTER TABLE ... DROP COLUMN`) through the constitution's
+    /// default block rule (v0.17.1). Default `false` — a project must
+    /// explicitly opt in per the plan's "unless `allow_schema_drops = true`"
+    /// clause.
+    #[serde(default)]
+    pub allow_schema_drops: bool,
+
     /// For `email`: optional list of allowed recipient addresses.
     /// If set, any email draft to an address not in this list is flagged with
     /// "Recipient not in allowed_recipients" before creating the draft.
@@ -101,6 +110,7 @@ impl Default for ActionPolicyConfig {
             rate_limit: None,
             allowed_domains: vec![],
             auto_approve_reads: false,
+            allow_schema_drops: false,
             allowed_recipients: vec![],
             max_per_hour: None,
             max_per_day: None,
@@ -308,5 +318,27 @@ max_per_day = 20
         assert!(config.allowed_recipients.is_empty());
         assert!(config.max_per_hour.is_none());
         assert!(config.max_per_day.is_none());
+    }
+
+    #[test]
+    fn db_query_defaults_to_review_policy_with_schema_drops_disallowed() {
+        // v0.17.1: an unconfigured db_query action type must default to
+        // policy=review (never auto) and allow_schema_drops=false — a
+        // project has to opt in explicitly to either relaxation.
+        let policies = ActionPolicies::default();
+        let db = policies.policy_for("db_query");
+        assert_eq!(db.policy, ActionPolicy::Review);
+        assert!(!db.allow_schema_drops);
+    }
+
+    #[test]
+    fn allow_schema_drops_parsed_from_toml() {
+        let toml = r#"
+[actions.db_query]
+policy = "review"
+allow_schema_drops = true
+"#;
+        let policies = make_toml(toml);
+        assert!(policies.policy_for("db_query").allow_schema_drops);
     }
 }

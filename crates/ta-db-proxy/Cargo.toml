@@ -17,9 +17,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.0-alpha.12.34" }
-ta-plugin = { path = "../ta-plugin", version = "0.17.0-alpha.12.34" }
-ta-decision = { path = "../ta-decision", version = "0.17.0-alpha.12.34" }
+ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.1-alpha" }
+ta-plugin = { path = "../ta-plugin", version = "0.17.1-alpha" }
+ta-decision = { path = "../ta-decision", version = "0.17.1-alpha" }
+ta-actions = { path = "../ta-actions", version = "0.17.1-alpha" }
 toml = { workspace = true }
 
 [dev-dependencies]

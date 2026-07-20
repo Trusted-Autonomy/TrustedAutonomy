@@ -1,6 +1,7 @@
 //! External-process `DbProxyPlugin` implementation (§2.2 Plugin category),
 //! discovered via `.ta/plugins/db/<name>/plugin.toml`.
 
+use crate::capture::{CaptureAction, CaptureHandle, CaptureParams};
 use crate::classification::QueryClass;
 use crate::error::{ProxyError, Result};
 use crate::plugin::{DbProxyPlugin, ProxyConfig, ProxyHandle};
@@ -143,6 +144,39 @@ impl DbProxyPlugin for ExternalDbProxyPlugin {
         self.call("apply_mutation", &params)?;
         Ok(())
     }
+
+    fn start_capture(&self, params: &CaptureParams) -> Result<CaptureHandle> {
+        let result = self.call("start_capture", params)?;
+        serde_json::from_value(result).map_err(|e| {
+            ProxyError::Plugin(format!(
+                "db plugin '{}' returned an invalid start_capture result: {e}",
+                self.name
+            ))
+        })
+    }
+
+    fn stop_capture(
+        &self,
+        upstream_dsn: &str,
+        handle: &CaptureHandle,
+        action: CaptureAction,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct StopCaptureParams<'a> {
+            upstream_dsn: &'a str,
+            handle: &'a CaptureHandle,
+            action: CaptureAction,
+        }
+        self.call(
+            "stop_capture",
+            &StopCaptureParams {
+                upstream_dsn,
+                handle,
+                action,
+            },
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +220,119 @@ mod tests {
 
         let plugin = ExternalDbProxyPlugin::discover("mockdb", dir.path()).unwrap();
         assert_eq!(plugin.classify_query("SELECT 1"), QueryClass::Read);
+    }
+
+    /// A community-authored third-party plugin round-trips through
+    /// `ExternalDbProxyPlugin`'s full lifecycle — classify, start_capture,
+    /// stop_capture, apply_mutation — using a fixture (not a real DB) that
+    /// mimics what a third party would actually ship: a `plugin.toml` +
+    /// executable under `.ta/plugins/db/<name>/`, speaking the same
+    /// JSON-stdio envelope as the bundled postgres/mysql/sqlite plugins.
+    /// Exercising this against zero TA core changes is the proof for
+    /// v0.17.1 item 1's extensibility claim.
+    #[cfg(unix)]
+    #[test]
+    fn third_party_plugin_round_trips_full_capture_lifecycle() {
+        use crate::classification::MutationKind;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join(".ta/plugins/db/community-fixture");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        // A minimal but real dispatcher: branches on the requested method,
+        // exactly like a genuine third-party plugin binary would. Uses only
+        // `sh`/`grep` — no TA crate dependency of any kind.
+        let script_path = plugin_dir.join("community-fixture-plugin.sh");
+        std::fs::write(
+            &script_path,
+            r#"#!/bin/sh
+read -r line
+case "$line" in
+  *'"method":"classify_query"'*)
+    echo '{"ok":true,"result":{"class":{"write":"insert"}}}'
+    ;;
+  *'"method":"start_capture"'*)
+    echo '{"ok":true,"result":{"engine":"community-fixture","cursor":{"session":"abc123"}}}'
+    ;;
+  *'"method":"stop_capture"'*)
+    case "$line" in
+      *'"action":"apply"'*)
+        echo '{"ok":true,"result":{"mutations_captured":1}}'
+        ;;
+      *)
+        echo '{"ok":true,"result":{"mutations_captured":0}}'
+        ;;
+    esac
+    ;;
+  *'"method":"apply_mutation"'*)
+    echo '{"ok":true,"result":{}}'
+    ;;
+  *)
+    echo '{"ok":false,"error":"unknown method"}'
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            format!(
+                "name = \"community-fixture\"\ntype = \"db\"\ncommand = \"{}\"\n",
+                script_path.display()
+            ),
+        )
+        .unwrap();
+
+        let plugin = ExternalDbProxyPlugin::discover("community-fixture", dir.path()).unwrap();
+
+        // classify_query
+        assert_eq!(
+            plugin.classify_query("INSERT INTO t VALUES (1)"),
+            QueryClass::Write(MutationKind::Insert)
+        );
+
+        // start_capture
+        let params = CaptureParams {
+            goal_id: "goal-1".to_string(),
+            staging_dir: dir.path().join("staging"),
+            upstream_dsn: "community-fixture://irrelevant".to_string(),
+        };
+        let handle = plugin.start_capture(&params).unwrap();
+        assert_eq!(handle.engine, "community-fixture");
+        assert_eq!(handle.cursor["session"], "abc123");
+
+        // stop_capture(Apply)
+        plugin
+            .stop_capture(
+                "community-fixture://irrelevant",
+                &handle,
+                CaptureAction::Apply,
+            )
+            .unwrap();
+
+        // stop_capture(Discard)
+        plugin
+            .stop_capture(
+                "community-fixture://irrelevant",
+                &handle,
+                CaptureAction::Discard,
+            )
+            .unwrap();
+
+        // apply_mutation
+        plugin
+            .apply_mutation(
+                "community-fixture://irrelevant",
+                "community-fixture://db/table/1",
+                None,
+                &serde_json::json!({"col": "value"}),
+                dir.path(),
+            )
+            .unwrap();
     }
 }

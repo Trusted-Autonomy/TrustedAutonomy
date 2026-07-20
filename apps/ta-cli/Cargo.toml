@@ -43,33 +43,33 @@ which = { workspace = true }
 arboard = { workspace = true }
 
 # Internal crates — version kept in sync with workspace by bump-version.sh
-ta-audit = { path = "../../crates/ta-audit", version = "0.17.0-alpha.12.34" }
-ta-credentials = { path = "../../crates/ta-credentials", version = "0.17.0-alpha.12.34" }
-ta-memory = { path = "../../crates/ta-memory", version = "0.17.0-alpha.12.34" }
-ta-changeset = { path = "../../crates/ta-changeset", version = "0.17.0-alpha.12.34" }
-ta-connector-fs = { path = "../../crates/ta-connectors/fs", version = "0.17.0-alpha.12.34" }
-ta-connector-unreal = { path = "../../crates/ta-connectors/unreal", version = "0.17.0-alpha.12.34" }
-ta-connector-comfyui = { path = "../../crates/ta-connectors/comfyui", version = "0.17.0-alpha.12.34" }
-ta-connector-unity = { path = "../../crates/ta-connectors/unity", version = "0.17.0-alpha.12.34" }
-ta-goal = { path = "../../crates/ta-goal", version = "0.17.0-alpha.12.34" }
-ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway", version = "0.17.0-alpha.12.34" }
-ta-policy = { path = "../../crates/ta-policy", version = "0.17.0-alpha.12.34" }
-ta-mediation = { path = "../../crates/ta-mediation", version = "0.17.0-alpha.12.34" }
-ta-session = { path = "../../crates/ta-session", version = "0.17.0-alpha.12.34" }
-ta-events = { path = "../../crates/ta-events", version = "0.17.0-alpha.12.34" }
-ta-submit = { path = "../../crates/ta-submit", version = "0.17.0-alpha.12.34" }
-ta-decision = { path = "../../crates/ta-decision", version = "0.17.0-alpha.12.34" }
-ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.0-alpha.12.34" }
-ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.0-alpha.12.34" }
-ta-build = { path = "../../crates/ta-build", version = "0.17.0-alpha.12.34" }
-ta-output-schema = { path = "../../crates/ta-output-schema", version = "0.17.0-alpha.12.34" }
-ta-runtime = { path = "../../crates/ta-runtime", version = "0.17.0-alpha.12.34" }
-ta-init = { path = "../../crates/ta-init", version = "0.17.0-alpha.12.34" }
-ta-governed-paths = { path = "../../crates/ta-governed-paths", version = "0.17.0-alpha.12.34" }
-ta-plugin = { path = "../../crates/ta-plugin", version = "0.17.0-alpha.12.34" }
-ta-intake = { path = "../../crates/ta-intake", version = "0.17.0-alpha.12.34" }
-ta-brain = { path = "../../crates/ta-brain", version = "0.17.0-alpha.12.34" }
-ta-advisor = { path = "../../crates/ta-advisor", version = "0.17.0-alpha.12.34" }
+ta-audit = { path = "../../crates/ta-audit", version = "0.17.1-alpha" }
+ta-credentials = { path = "../../crates/ta-credentials", version = "0.17.1-alpha" }
+ta-memory = { path = "../../crates/ta-memory", version = "0.17.1-alpha" }
+ta-changeset = { path = "../../crates/ta-changeset", version = "0.17.1-alpha" }
+ta-connector-fs = { path = "../../crates/ta-connectors/fs", version = "0.17.1-alpha" }
+ta-connector-unreal = { path = "../../crates/ta-connectors/unreal", version = "0.17.1-alpha" }
+ta-connector-comfyui = { path = "../../crates/ta-connectors/comfyui", version = "0.17.1-alpha" }
+ta-connector-unity = { path = "../../crates/ta-connectors/unity", version = "0.17.1-alpha" }
+ta-goal = { path = "../../crates/ta-goal", version = "0.17.1-alpha" }
+ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway", version = "0.17.1-alpha" }
+ta-policy = { path = "../../crates/ta-policy", version = "0.17.1-alpha" }
+ta-mediation = { path = "../../crates/ta-mediation", version = "0.17.1-alpha" }
+ta-session = { path = "../../crates/ta-session", version = "0.17.1-alpha" }
+ta-events = { path = "../../crates/ta-events", version = "0.17.1-alpha" }
+ta-submit = { path = "../../crates/ta-submit", version = "0.17.1-alpha" }
+ta-decision = { path = "../../crates/ta-decision", version = "0.17.1-alpha" }
+ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.1-alpha" }
+ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.1-alpha" }
+ta-build = { path = "../../crates/ta-build", version = "0.17.1-alpha" }
+ta-output-schema = { path = "../../crates/ta-output-schema", version = "0.17.1-alpha" }
+ta-runtime = { path = "../../crates/ta-runtime", version = "0.17.1-alpha" }
+ta-init = { path = "../../crates/ta-init", version = "0.17.1-alpha" }
+ta-governed-paths = { path = "../../crates/ta-governed-paths", version = "0.17.1-alpha" }
+ta-plugin = { path = "../../crates/ta-plugin", version = "0.17.1-alpha" }
+ta-intake = { path = "../../crates/ta-intake", version = "0.17.1-alpha" }
+ta-brain = { path = "../../crates/ta-brain", version = "0.17.1-alpha" }
+ta-advisor = { path = "../../crates/ta-advisor", version = "0.17.1-alpha" }
 
 
 [target.'cfg(windows)'.build-dependencies]

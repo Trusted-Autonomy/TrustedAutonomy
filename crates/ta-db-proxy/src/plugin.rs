@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
+use crate::capture::{CaptureAction, CaptureHandle, CaptureParams};
 use crate::classification::QueryClass;
 use crate::error::Result;
 use ta_db_overlay::OverlayEntry;
@@ -75,5 +76,30 @@ pub trait DbProxyPlugin: Send + Sync {
         before: Option<&serde_json::Value>,
         after: &serde_json::Value,
         staging_dir: &Path,
+    ) -> Result<()>;
+
+    /// Begin change-capture for a goal (v0.17.1): a Postgres logical
+    /// replication slot, a recorded MySQL binlog position, a SQLite
+    /// shadow-copy snapshot — engine-specific. Called once at goal start,
+    /// before the agent can reach the database at all.
+    fn start_capture(&self, params: &CaptureParams) -> Result<CaptureHandle>;
+
+    /// End change-capture for a goal, called once at `ta draft apply`
+    /// (`CaptureAction::Apply`) or `ta draft deny` (`CaptureAction::Discard`).
+    /// Must release the underlying capture resource (drop the replication
+    /// slot, delete the shadow copy, ...) in both cases — a capture that
+    /// only cleans up on `Apply` leaks the resource on every denied draft.
+    ///
+    /// `upstream_dsn` is resolved fresh from the credential vault by the
+    /// caller for this call, exactly like `apply_mutation`'s — `handle.cursor`
+    /// must never be relied on to carry it. `CaptureHandle` is written to
+    /// disk by TA core between `start_capture` and `stop_capture` (see
+    /// `capture.rs`'s doc comment), so a DSN embedded in `cursor` would leak
+    /// plaintext DB credentials into that on-disk state.
+    fn stop_capture(
+        &self,
+        upstream_dsn: &str,
+        handle: &CaptureHandle,
+        action: CaptureAction,
     ) -> Result<()>;
 }
