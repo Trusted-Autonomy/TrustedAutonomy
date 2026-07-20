@@ -127,6 +127,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Add target to pinned toolchain (native builds)
+        # rust-toolchain.toml pins an exact channel (e.g. "1.97.0") with no
+        # host triple, which rustup resolves to its own toolchain separate
+        # from "stable" above. Once this repo's rust-toolchain.toml override
+        # kicks in for `cargo build`, it uses whatever targets *that*
+        # toolchain has — not the "stable" one dtolnay/rust-toolchain just
+        # configured. Add the target directly to the active (overridden)
+        # toolchain so cross-arch native builds (e.g. x86_64-apple-darwin on
+        # an arm64 runner) don't fail with "can't find crate for `core`".
+        if: matrix.cross == false
+        run: rustup target add ${{ matrix.target }}
+
       - name: Install cross (Linux cross-compilation)
         if: matrix.cross == true
         run: cargo install cross --version 0.2.5
