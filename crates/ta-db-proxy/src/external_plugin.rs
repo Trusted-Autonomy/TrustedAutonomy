@@ -182,7 +182,6 @@ impl DbProxyPlugin for ExternalDbProxyPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classification::MutationKind;
 
     #[test]
     fn discover_reports_missing_manifest() {
@@ -234,6 +233,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn third_party_plugin_round_trips_full_capture_lifecycle() {
+        use crate::classification::MutationKind;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
