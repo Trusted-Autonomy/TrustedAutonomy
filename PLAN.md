@@ -10008,6 +10008,81 @@ Code releases use semver. Content releases don't. Decide:
 
 #### Version: `0.17.5-alpha.3`
 
+---
+
+> **Focus**: Replace three disconnected auto-approval mechanisms (`ta_policy::auto_approve`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine) and a Git-specific PR-merge continuation with one modular, data-wired workflow-graph engine — Trigger/Reviewer/Decision/Action nodes composed via TOML, VCS-adapter-mediated (not platform-specific), culminating in a natural-language advisor entry point ("build phases v0.17.3 through v0.17.8"). Full design: `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`. Governed by new constitution §16 (`docs/TA-CONSTITUTION.md`), red-teamed 2026-07-21 (PM, head-of-engineering, non-technical-user passes). Visual graph authoring/editing is explicitly deferred — see v0.18.4.
+
+### v0.17.7.1 — Workflow Graph Engine Core (Node Trait Model + Data-Defined Wiring)
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.34 (dependency-wave planning — reused for parallel dispatch), v0.15.15/v0.15.15.1 (`ta-workflow::consensus` — reused as the `WeightedDecisionNode` engine)
+
+**Goal**: Define the four node traits (`TriggerSource`, `ReviewerNode`, `DecisionNode`, `ActionNode`), a TOML graph-definition schema, and a `ta-workflow::graph` execution engine that loads a graph and runs it node-by-node with typed data on edges. Ship enough to express today's existing single-reviewer approval flow as a graph — proving the abstraction — without yet adding multi-role panels or CI triggers (those are 7.7.2/7.7.3). Per constitution §16.2, every new graph produced by this phase's tooling defaults to `RecommendAction`; a human must explicitly rewire a graph to `AutoApproveAction`.
+
+**Items**:
+1. [ ] `crates/ta-workflow/src/graph/` — `TriggerSource`/`ReviewerNode`/`DecisionNode`/`ActionNode` traits, `GraphContext`, `TriggerPayload`, reusing `ReviewerVote`/`Decision` types from `ta-workflow::consensus` rather than redefining them.
+2. [ ] TOML schema + loader: `.ta/workflows/graphs/<name>.toml` → in-memory graph (see spec §3 for the canonical example).
+3. [ ] `PolicyReviewer` (wraps `ta_policy::auto_approve::should_auto_approve_draft`), `AdvisorConfidenceReviewer` (wraps `ta-decision::gate::decide()`), `WeightedDecisionNode` (wraps `ta-workflow::consensus::run_consensus`, config-driven threshold/algorithm/weights — not hardcoded), `AutoApproveAction` (calls existing `ta draft apply`), `RecommendAction` (surfaces to Studio's existing Attention queue).
+4. [ ] `ta workflow graph run <name>` — CLI entry point to execute a graph definition end-to-end, for testing/debugging before it's wired into `ta draft apply` (that wiring is 7.7.3).
+5. [ ] Tests: a graph round-trips a real draft through `PolicyReviewer` → `WeightedDecisionNode` → `RecommendAction`; swapping only the `ActionNode` to `AutoApproveAction` (same graph, same decision) actually calls `ta draft apply` — proving §16.2's "same decision, different wiring" property in a real test, not just in prose.
+6. [ ] USAGE.md: new "Workflow Graphs" section documenting the TOML format and the four node kinds.
+
+#### Version: `0.17.7-alpha.1`
+
+### v0.17.7.2 — VCS-Adapter CI-Status Generalization + Corrective-Goal Trigger
+<!-- status: pending -->
+**Depends on**: v0.17.7.1
+
+**Goal**: Generalize CI/review-completion triggering off Git specifically, per constitution §16.4 — add a defaulted `SourceAdapter::check_failures()` method (empty-vec default, following the exact pattern `check_review()`/`merge_review()` already use), implement it for the Git adapter, and add the two trigger/action nodes that replace this session's manual "watch CI, read failing log, diagnose, fix, push, repeat" loop.
+
+**Items**:
+1. [ ] `SourceAdapter::check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>>` (default `Ok(vec![])`) in `crates/ta-submit/src/adapter.rs`; `CheckFailure { check_name, log_excerpt }`.
+2. [ ] Git adapter implementation: shells `gh run view --log-failed` for the PR's failing checks, parses into `CheckFailure` entries.
+3. [ ] `VcsTaskCompletionTrigger` (fires on `SourceAdapter::check_review()` reaching a terminal state) and `CiFailureTrigger` (fires specifically when `checks_passing` transitions to `Some(false)`) — both go through `SourceAdapter` only, per §16.4; no direct `gh`/platform calls in trigger code.
+4. [ ] `CorrectiveGoalAction` — on a `CiFailureTrigger` payload, launches `ta run --follow-up` with the `CheckFailure` detail injected as the goal objective. Reuses v0.17.0.12.31's existing auto-fix-retry cap/escalate logic (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second retry mechanism.
+5. [ ] Non-Git adapter behavior: Perforce/SVN/"none" adapters return the `check_failures()` default; `CiFailureTrigger` degrades to "CI failure detail unavailable for this VCS adapter, investigate manually" per §16.4/§1.4 — verified with a test against the SVN or Perforce adapter stub, not just Git.
+6. [ ] Tests: a mock adapter with a scripted failing check drives `CiFailureTrigger` → `CorrectiveGoalAction` end-to-end; the retry cap escalates to human after N consecutive corrective-goal failures (reusing 12.31's existing cap, not a new counter).
+7. [ ] USAGE.md: document `check_failures()`'s adapter-optional contract and the corrective-goal flow.
+
+#### Version: `0.17.7-alpha.2`
+
+### v0.17.7.3 — Multi-Role Review Panels + Single Approval-Gate Unification
+<!-- status: pending -->
+**Depends on**: v0.17.7.1, v0.17.7.2
+
+**Coordination note**: v0.17.5.3 item 3 (Pluggable Domain-Action Adapters) also touches `check_advisor_auto_approve()` wiring and `security_tier` consultation. If v0.17.5.3 lands first, this phase's unification must account for the domain-adapter dispatch path too rather than re-diverging it; if this phase lands first, v0.17.5.3 item 3 should route its risk_score/verdict through the same one-graph gate instead of adding a fourth path. Flagged as an API-impact overlap per the v0.17.0.12.34 dependency-wave process if both are scheduled into the same wave.
+
+**Goal**: Add `AgentPanelReviewer` (spawns a persona agent — PM, head of security, head of engineering, head of sales, etc. — role strings, no core change needed since `TeamRole` is already data-defined per v0.17.0.12.12), make `WeightedDecisionNode`'s threshold/algorithm/weights genuinely config-driven from the graph TOML (removing the hardcoded `threshold=0.75`/`ConsensusAlgorithm::Raft`/empty-weights literals in `governed_workflow.rs`'s `stage_consensus`), and enforce constitution §16.3's named call-site invariant: migrate `ta draft apply`'s real approval check to call exactly one graph instance.
+
+**Items**:
+1. [ ] `AgentPanelReviewer` — spawns a role-persona agent per constitution §1.6 (data-defined `TeamRole`), scores a draft/decision, returns a `ReviewerVote`.
+2. [ ] Wire graph TOML's `[decision] algorithm/threshold/weights` fields through to `ta-workflow::consensus::run_consensus`, replacing `governed_workflow.rs`'s hardcoded literals (`stage_consensus`, ~line 2489-2492).
+3. [ ] **Call-site migration (the §16.3 enforcement)**: `ta draft apply`'s approval gate calls one graph instance. Remove/redirect all other direct callers of `should_auto_approve_draft`, `check_advisor_auto_approve`, and `run_consensus`-for-gating so each becomes a `ReviewerNode` feeding that one graph instead.
+4. [ ] `EscalateAction` — notifies via existing `ta-events::notification` system, halts the graph at that node.
+5. [ ] A reference `phase-review-panel.toml` graph (per spec §3): policy + PM + head-of-security + head-of-engineering reviewers → weighted decision → configurable auto-approve/recommend action.
+6. [ ] Tests: the three previously-independent mechanisms each produce identical `ReviewerVote`s to what they produced standalone (no behavior regression for existing callers during migration); a test asserting the §16.3 invariant statically or at runtime (e.g., a lint/grep-based CI check that no code outside the graph engine calls the three functions directly) so the rule isn't just prose.
+7. [ ] USAGE.md + constitution: remove §16's DRAFT banner and add §16 rows to the Appendix Compliance Checklist once this phase ships (per the graduation gate stated in §16's banner).
+
+#### Version: `0.17.7-alpha.3`
+
+### v0.17.7.4 — Advisor Natural-Language Multi-Phase Entry Point
+<!-- status: pending -->
+**Depends on**: v0.17.7.3
+
+**Goal**: The user-facing payoff of this whole spec (per the non-technical-user red-team pass, the *only* part of v0.17.7 usable without hand-editing TOML): let the advisor parse "build phases v0.17.3 through v0.17.8" (or similar natural language), resolve the range against PLAN.md's existing dependency/ordering data (12.30/12.34), construct one `phase-review-panel`-style graph instance per phase, chain phases via `VcsTaskCompletionTrigger` on each phase's merge, and dispatch independent phases in parallel via v0.17.0.12.34's dependency-wave planner where safe.
+
+**Items**:
+1. [ ] Natural-language phase-range parsing in the advisor (`ta-brain` or advisor-agent layer): "build phases X through Y", "build v0.17.3 to v0.17.8", resolved against PLAN.md's phase graph — ask a clarifying follow-up if the range is ambiguous or crosses an unresolved dependency warning, rather than guessing.
+2. [ ] Per-phase graph instantiation: for each resolved phase, build a `phase-review-panel`-equivalent graph instance (reusing 7.7.3's reference graph as the template, overridable via a project-level default-graph config).
+3. [ ] Phase chaining: each phase's graph completion (`AutoApproveAction` succeeding → apply → PR merged) fires the next phase's `VcsTaskCompletionTrigger`-gated start, replacing this session's manual "watch PR, pull, build, install, launch next phase" loop.
+4. [ ] Parallel dispatch: phases in the same dependency-wave (v0.17.0.12.34) run concurrently via `run_concurrently`; sequential phases run one at a time as today.
+5. [ ] CI-failure handling: uses 7.7.2's `CiFailureTrigger`/`CorrectiveGoalAction` automatically — a failure in the middle of a multi-phase run triggers a corrective goal, not a stall.
+6. [ ] Human escalation: any phase whose panel review doesn't clear threshold, or whose corrective-goal retries are exhausted, escalates and pauses the remaining range rather than silently skipping ahead — mirrors the user's own standing instruction this session ("if you cannot resolve issues with certainty they are aligned with the plan intent, pause until I can respond").
+7. [ ] Tests: a mocked 3-phase range (2 independent, 1 dependent) resolves into the correct wave structure and executes in the right order; an injected CI failure mid-range triggers a corrective goal and the range resumes after it clears; an injected low panel score escalates and halts.
+8. [ ] USAGE.md: "build phases X through Y" worked example, including what happens on failure/escalation.
+
+#### Version: `0.17.7-alpha.4`
+
+---
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
@@ -10210,6 +10285,35 @@ SA cannot productively start until TA's extension surface is stable — building
    - `SA-v0.6.6` — Observability: all PBFT view-changes, HotStuff timeouts, SCP quorum failures, and multi-human escalations exported to the SA audit trail with structured fields (algorithm, round, node-count, fault-count, duration). `sa audit consensus-log --run <id>` command.
 
 Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, SA design work (ADRs, architecture documents, plugin interface sketches) can happen in parallel — just no implementation that depends on unstable TA traits.
+
+---
+
+### v0.18.4 — Studio Frontend Migration (Next.js/React/TS/Tailwind) + Visual Plan Graph
+<!-- status: pending -->
+**Depends on**: v0.17.7.4 (workflow graph engine + PLAN.md phase-ordering/dependency-wave data this visualizes), v0.17.0.12.34 (`ta plan waves` — the data source for the graph view)
+
+**Goal**: Replace Studio's current single-file vanilla-JS frontend (`crates/ta-daemon/assets/index.html`, ~5000 lines, `include_str!`'d directly into the `ta-daemon` binary, no bundler/package.json anywhere) with a Next.js + React + TypeScript + Tailwind v4 app, and build the interactive visual plan-DAG on top of it — nodes are plan phases/goals/drafts, edges are `depends_on`/`api_impact` overlaps, clicking a wave-group launches it (dispatches the same `execute_swarm`/dependency-wave machinery `ta run` uses today), clicking a node opens/approves its draft inline. Full drag-and-drop workflow-graph *authoring* (editing `depends_on`/`api_impact` visually, building new `.ta/workflows/graphs/*.toml` node graphs visually) is explicitly deferred further, to v0.19+ — this phase ships visualization + launch/approve interactivity for the existing plan-phase pipeline, not a graph editor.
+
+**Known constraints from investigation this session** (2026-07-20/21):
+- No graph/DAG rendering library exists anywhere in the repo today (checked react-flow, d3, cytoscape, dagre, vis-network — zero hits) — net-new dependency.
+- CORS already permits `localhost:<port>` origins (`build_cors_layer()` in `crates/ta-daemon/src/web.rs`) — a Next dev server needs no backend change to talk to the daemon.
+- Zero Node.js exists in `ci.yml`/`nightly.yml`/`release.yml` today (Node only appears in the unrelated VS Code extension pipeline) — this phase adds the first Node build step to the core release pipeline.
+- Static export (`output: 'export'`) is the only Next.js mode compatible with shipping a single cross-platform binary (server components/ISR need a live Node runtime at request time, which breaks the current model) — must build the frontend once (e.g. on the Linux CI job) and pass its static output as an artifact into each of the 5 platform build jobs, not rebuild 5x.
+- The current `include_str!`/`include_bytes!` asset-embedding scheme (`crates/ta-daemon/src/web.rs`) only handles a handful of named files, not an arbitrary `_next/` directory tree — needs `rust-embed` (or equivalent) plus a catch-all serving route with correct MIME types and SPA fallback.
+
+**Items**:
+1. [ ] Add Node.js to `flake.nix` alongside the existing Rust toolchain so `./dev` remains the single build entry point.
+2. [ ] Scaffold Next.js (App Router, static export mode) + React + TypeScript + Tailwind v4 in a new `studio/` (or similar) directory; establish lint/format conventions (net-new — the existing `plugins/vscode-ta/` TS setup is a CommonJS Node-extension-host config, not applicable to a browser React app).
+3. [ ] Port Studio's existing 4-tab IA (Attention/Activity/Configuration/Advisor) and all currently-working features (SSE dashboard, draft approve/apply, goal launch, team/role assignment) to the new stack — feature-parity first, no regressions, before adding the graph view.
+4. [ ] `rust-embed`-based (or equivalent) static-directory embedding in `crates/ta-daemon/src/web.rs`, replacing the per-file `include_str!`/`include_bytes!` scheme, with a catch-all route + correct MIME types + SPA fallback.
+5. [ ] CI: add a single Node build step (Ubuntu job) producing the static export artifact; pass it into each of the 5 platform-specific Rust build jobs in `ci.yml`/`nightly.yml`/`release.yml` rather than rebuilding per-platform.
+6. [ ] New `/api/plan/graph` endpoint: joins live goal/draft state with `PLAN.md` phase metadata (title, `depends_on`, `api_impact`) and `ta plan waves`'s wave groupings into a single graph-ready payload (today's `ta plan waves --json` only returns flat phase-ID arrays — this endpoint does the join `ta plan waves` itself doesn't do).
+7. [ ] Visual plan graph component: nodes = phases/goals/drafts (colored by live state via the existing `/api/events` SSE stream), edges = dependency/API-impact overlap; click a wave-group to launch it; click a node to view/approve/apply its draft inline (reusing existing draft-action endpoints).
+8. [ ] Visual warning on nodes with unresolved API-impact overlap before allowing a wave launch.
+9. [ ] Tests: Next.js static export builds and is served correctly by a debug `ta-daemon` build; the graph endpoint's payload correctly joins a real multi-phase PLAN.md fixture; clicking a wave-group in an integration/E2E test actually dispatches a goal.
+10. [ ] USAGE.md: document the new frontend build requirement for contributors (`./dev` still "just works" via the Node addition to `flake.nix`) and the visual plan graph's features.
+
+#### Version: `0.18.4-alpha`
 
 ---
 
