@@ -5958,6 +5958,16 @@ on_failure = "agent"
 
 #### Version: `0.15.14.7-alpha`
 
+---
+### v0.15.15 — Multi-Agent Consensus Review Workflow
+<!-- status: done -->
+<!-- header backfilled 2026-07-26: content and all 10 items were already complete
+     (ends at "#### Version: 0.15.15-alpha" below) but this phase's own header
+     line was missing from PLAN.md, causing every cross-reference to "v0.15.15"
+     (v0.15.15.1's Depends-on, v0.17.7.1's Depends-on) to show as an unresolved
+     dependency against a phantom phase. Found while reviewing v0.17.7.1's
+     dependency-checker output. No content changed, header-only fix. -->
+
 **Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles. Include configurable consensus algorithms/models. Start with Raft and Paxos with Raft as the default — it should do no work if there is no swarm/multi-agent in the workflow.
 
 **Algorithm selection (TA)**:
