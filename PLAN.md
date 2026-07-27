@@ -9828,7 +9828,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
 ### v0.17.2 — Release Management Design Review (Pre-Phase)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Before committing implementation, run a structured design session to finalise the `ta release` command surface, `ReleaseAdapter` trait, channel model, and how release fits into TA's broader conversational UX. Produces a signed-off design document (`docs/release-design.md`) that v0.17.1+ implement against.
 
 #### Questions to resolve
