@@ -6425,7 +6425,7 @@ fn poll_for_phase_draft(
     use ta_changeset::draft_package::{DraftPackage, DraftStatus};
     const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
-    let drafts_dir = workspace_root.join(".ta").join("drafts");
+    let drafts_dir = workspace_root.join(".ta").join("pr_packages");
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout_secs);
     let mut last_heartbeat = start;
@@ -12540,8 +12540,11 @@ More content here that is part of a second paragraph.
             "status": status,
             "plan_phase": phase_id
         });
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
-        let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+        // Real draft storage is `.ta/pr_packages/` (see `ta-mcp-gateway::config::pr_packages_dir`,
+        // `apps/ta-cli/src/commands/draft.rs::save_package`) — this fixture must match, or these
+        // tests validate `poll_for_phase_draft` against a path production code never reads from.
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
+        let pkg_path = root.join(format!(".ta/pr_packages/{}.json", pkg_id));
         std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
     }
 
