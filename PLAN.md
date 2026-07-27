@@ -9828,7 +9828,7 @@ This phase closes both gaps found this session, without replacing either buildin
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
 ### v0.17.2 — Release Management Design Review (Pre-Phase)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Before committing implementation, run a structured design session to finalise the `ta release` command surface, `ReleaseAdapter` trait, channel model, and how release fits into TA's broader conversational UX. Produces a signed-off design document (`docs/release-design.md`) that v0.17.1+ implement against.
 
 #### Questions to resolve
@@ -10018,10 +10018,8 @@ Code releases use semver. Content releases don't. Decide:
 
 #### Version: `0.17.5-alpha.3`
 
----
 
 > **Focus**: Replace three disconnected auto-approval mechanisms (`ta_policy::auto_approve`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine) and a Git-specific PR-merge continuation with one modular, data-wired workflow-graph engine — Trigger/Reviewer/Decision/Action nodes composed via TOML, VCS-adapter-mediated (not platform-specific), culminating in a natural-language advisor entry point ("build phases v0.17.3 through v0.17.8"). Full design: `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`. Governed by new constitution §16 (`docs/TA-CONSTITUTION.md`), red-teamed 2026-07-21 (PM, head-of-engineering, non-technical-user passes). Visual graph authoring/editing is explicitly deferred — see v0.18.4.
-
 ### v0.17.7.1 — Workflow Graph Engine Core (Node Trait Model + Data-Defined Wiring)
 <!-- status: pending -->
 **Depends on**: v0.17.0.12.34 (dependency-wave planning — reused for parallel dispatch), v0.15.15/v0.15.15.1 (`ta-workflow::consensus` — reused as the `WeightedDecisionNode` engine)
@@ -10055,7 +10053,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 6. [ ] USAGE.md: new "Workflow Graphs" section documenting the TOML format and all five node kinds, incl. a worked "implement vs. create" `[worker]` example.
 
 #### Version: `0.17.7-alpha.1`
-
 ### v0.17.7.2 — VCS-Adapter CI-Status Generalization + Corrective-Goal Trigger
 <!-- status: pending -->
 **Depends on**: v0.17.7.1
@@ -10072,7 +10069,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 7. [ ] USAGE.md: document `check_failures()`'s adapter-optional contract and the corrective-goal flow.
 
 #### Version: `0.17.7-alpha.2`
-
 ### v0.17.7.3 — Multi-Role Review Panels + Single Approval-Gate Unification
 <!-- status: pending -->
 **Depends on**: v0.17.7.1, v0.17.7.2
@@ -10091,7 +10087,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 7. [ ] USAGE.md + constitution: remove §16's DRAFT banner and add §16 rows to the Appendix Compliance Checklist once this phase ships (per the graduation gate stated in §16's banner).
 
 #### Version: `0.17.7-alpha.3`
-
 ### v0.17.7.4 — Advisor Natural-Language Multi-Phase Entry Point
 <!-- status: pending -->
 **Depends on**: v0.17.7.3
@@ -10110,7 +10105,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.7-alpha.4`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
@@ -10315,7 +10309,6 @@ SA cannot productively start until TA's extension surface is stable — building
 Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, SA design work (ADRs, architecture documents, plugin interface sketches) can happen in parallel — just no implementation that depends on unstable TA traits.
 
 ---
-
 ### v0.18.4 — Studio Frontend Migration (Next.js/React/TS/Tailwind) + Visual Plan Graph
 <!-- status: pending -->
 **Depends on**: v0.17.7.4 (workflow graph engine + PLAN.md phase-ordering/dependency-wave data this visualizes), v0.17.0.12.34 (`ta plan waves` — the data source for the graph view)
