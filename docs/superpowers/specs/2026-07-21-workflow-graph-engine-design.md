@@ -46,10 +46,40 @@ trait ActionNode {
 
 `ReviewerVote` and `Decision` are the existing types from `ta-workflow::consensus` (`ReviewerVote{role, score, findings, timed_out}`, threshold/algorithm-driven verdict) — reused, not reinvented, per constitution §1.7.
 
+### 2.0 A fifth kind: `WorkerNode` (dispatching new work)
+
+The four traits above only model *reviewing* an already-produced draft — none of them *produce* one. A real workflow needs to start somewhere: "implement this code phase," "create this art asset." Rather than a hardcoded Rust type per domain (`ImplementAction`, `CreateArtAction`, ...) — which would violate constitution §1.6 and require a core PR for every new kind of work — this is one new trait with one shipped implementation, parameterized entirely by data:
+
+```rust
+trait WorkerNode {
+    /// Consumes a work-item spec, dispatches it, returns a reference
+    /// (e.g. a draft ID) for the review graph segment to pick up.
+    fn dispatch(&self, item: &WorkItem, ctx: &GraphContext) -> Result<WorkResult>;
+}
+
+pub struct WorkItem {
+    pub title: String,
+    pub objective: String,
+    pub phase_id: Option<String>,
+    pub verb: String,                  // "implement", "create", "fix" — data, not an enum
+    pub workload_hint: Option<String>, // fed straight into ta-brain::route()
+}
+
+pub struct WorkResult {
+    pub draft_id: String,
+    pub metadata: HashMap<String, String>,
+}
+```
+
+`GoalDispatchAction` is the one shipped `WorkerNode`: it wraps `ta run`/`ta goal start`, passing `verb`/`workload_hint` straight into `ta-brain::route()`'s **already data-defined** `workload_type` classification (`[workload_types.<type>]` in `workflow.toml`, confirmed free-text since v0.17.0.12.12, not a closed enum) — which already resolves team/persona/agent/security_tier. A new domain (art, docs, whatever) is a `workflow.toml` binding, zero new Rust code. `CorrectiveGoalAction` (below) should be reimplemented on top of the same `GoalDispatchAction` machinery rather than hand-rolling its own `ta run --follow-up` call — one dispatch path, not two.
+
+A second `WorkerNode` implementation is only justified when a genuinely different dispatch **transport** is needed (not just a new domain) — e.g. bypassing `ta run` entirely for a raw external pipeline call. That should reuse `StepAction::external_adapter()` (v0.17.5.3's plugin transport) rather than invent a third one, per §1.7.
+
 ### 2.1 v1 node catalog
 
 | Node | Trait | Implementation notes |
 |---|---|---|
+| `GoalDispatchAction` | `WorkerNode` | Wraps `ta run`/`ta goal start`; `verb`/`workload_hint` feed `ta-brain::route()`'s existing data-defined workload classification. The one work-producing node in v1. |
 | `VcsTaskCompletionTrigger` | `TriggerSource` | Fires on a VCS review reaching a terminal or CI state, via `SourceAdapter::check_review()` polling (or a webhook where the adapter supports one) — **not** a `gh`-specific call. Payload includes `ReviewStatus` (state, `checks_passing`). |
 | `CiFailureTrigger` | `TriggerSource` | Fires specifically when `checks_passing` transitions to `Some(false)`. Requires a new `SourceAdapter` method (§4) to fetch which check(s) failed and their logs, since today's `ReviewStatus.checks_passing` is a single opaque bool with no per-check detail. |
 | `PolicyReviewer` | `ReviewerNode` | Wraps existing `ta_policy::auto_approve::should_auto_approve_draft` rule evaluation as one scored vote. |
@@ -59,9 +89,9 @@ trait ActionNode {
 | `AutoApproveAction` | `ActionNode` | Calls `ta draft apply` (existing apply path, existing audit trail) when `Decision.verdict == Pass`. |
 | `RecommendAction` | `ActionNode` | Surfaces the `Decision` to a human via Studio's existing Attention queue — no apply call. |
 | `EscalateAction` | `ActionNode` | Notifies via the existing notification system (`ta-events::notification`) and halts the graph at this node. |
-| `CorrectiveGoalAction` | `ActionNode` | On a `CiFailureTrigger`'s payload, launches a follow-up goal (`ta run --follow-up`) with the failure detail injected as the goal's objective — generalizes what I did manually this session (read failing job log, diagnose, fix, push) into a graph node. |
+| `CorrectiveGoalAction` | `ActionNode` | On a `CiFailureTrigger`'s payload, dispatches a follow-up goal via the same `GoalDispatchAction` machinery, with the failure detail injected as the objective — generalizes what I did manually this session (read failing job log, diagnose, fix, push) into a graph node. |
 
-**Key property**: `AutoApproveAction` and `RecommendAction` consume the exact same `Decision` type. Whether a given `WeightedDecisionNode`'s output becomes binding or advisory is which `ActionNode` the graph wires it to — not a difference in how the decision was computed. This directly satisfies "recommendation vs. auto-approval is just data wiring."
+**Key property**: `AutoApproveAction` and `RecommendAction` consume the exact same `Decision` type. Whether a given `WeightedDecisionNode`'s output becomes binding or advisory is which `ActionNode` the graph wires it to — not a difference in how the decision was computed. This directly satisfies "recommendation vs. auto-approval is just data wiring." `WorkerNode` sits outside this property entirely — dispatching work isn't a decision, so it isn't in scope of constitution §16.1's approval-logic rule.
 
 ## 3. Graph Definition (data-defined, per constitution §1.6)
 
