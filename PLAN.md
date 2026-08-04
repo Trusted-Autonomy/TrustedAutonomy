@@ -9899,24 +9899,24 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.3 — `ta release` Core + Built-in Adapters
-<!-- status: in_progress -->
+<!-- status: done -->
 
 
-1. [ ] **`ReleaseAdapter` trait** in `crates/ta-release/src/adapter.rs`: `prepare`, `publish`, `promote`, `status` methods as designed in v0.17.0. URL-scheme registry for adapter discovery.
+1. [x] **`ReleaseAdapter` trait** in `crates/ta-release/src/adapter.rs`: `prepare`, `publish`, `promote`, `status` methods as designed in v0.17.0. URL-scheme registry for adapter discovery.
 
-2. [ ] **`ta release run <phase> [--label <label>] [--channel <channel>]`**: Bumps version in `Cargo.toml` (or equivalent), commits, tags, pushes, calls adapter `publish`. Without `--label`, derives tag from plan phase. `--channel` defaults to `nightly` for pre-release labels, `stable` otherwise.
+2. [x] **`ta release run <phase> [--label <label>] [--channel <channel>]`**: Bumps version in `Cargo.toml` (or equivalent), commits, tags, pushes, calls adapter `publish`. Without `--label`, derives tag from plan phase. `--channel` defaults to `nightly` for pre-release labels, `stable` otherwise.
 
-3. [ ] **`ta release promote <tag-or-ref> --to <channel>`**: Calls adapter `promote` — no new tag, no rebuild. For GitHub: edits release prerelease flag and `--latest`.
+3. [x] **`ta release promote <tag-or-ref> --to <channel>`**: Calls adapter `promote` — no new tag, no rebuild. For GitHub: edits release prerelease flag and `--latest`.
 
-4. [ ] **`ta release status [<tag>]`**: Calls adapter `status`. Shows current channels, asset checksums, publish timestamp.
+4. [x] **`ta release status [<tag>]`**: Calls adapter `status`. Shows current channels, asset checksums, publish timestamp.
 
-5. [ ] **`GitHubReleaseAdapter`**: Full replacement for current manual tag + `release.yml` dispatch. Draft-first publish (create draft → upload assets → publish) to avoid immutable release race. Channel-aware `--latest` guard.
+5. [x] **`GitHubReleaseAdapter`**: Full replacement for current manual tag + `release.yml` dispatch. Draft-first publish (create draft → upload assets → publish) to avoid immutable release race. Channel-aware `--latest` guard.
 
-6. [ ] **`RemoteFileReleaseAdapter`**: Supports `sftp://`, `s3://`, `file://` publish URLs. Copies release assets to target path. Generates `manifest.json` alongside assets (version, checksums, channel, timestamp).
+6. [x] **`RemoteFileReleaseAdapter`**: Supports `sftp://`, `s3://`, `file://` publish URLs. Copies release assets to target path. Generates `manifest.json` alongside assets (version, checksums, channel, timestamp).
 
-7. [ ] **`release.toml` schema**: `[release]` section — `publish_url`, `default_channel`, `version_files` (paths to bump), `changelog_cmd` (optional shell command to generate changelog).
+7. [x] **`release.toml` schema**: `[release]` section — `publish_url`, `default_channel`, `version_files` (paths to bump), `changelog_cmd` (optional shell command to generate changelog).
 
-8. [ ] **Deprecate `ta release dispatch`**: Keep as alias with deprecation warning pointing to `ta release run`.
+8. [x] **Deprecate `ta release dispatch`**: Keep as alias with deprecation warning pointing to `ta release run`.
 
 #### Version: `0.17.3-alpha`
 

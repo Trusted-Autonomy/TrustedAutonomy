@@ -6822,6 +6822,55 @@ ta release dispatch public-alpha-v0.13.1.1 --workflow release.yml
 gh run list --repo Trusted-Autonomy/TrustedAutonomy --workflow release.yml
 ```
 
+> **Deprecated**: `ta release dispatch` prints a deprecation warning pointing at `ta release run <version> --channel <channel>` — the `ReleaseAdapter`-based publish path described below. `dispatch` is kept as-is (not removed, no removal date yet) since it's still the only path for non-`v*` tag labels until `--label` grows adapter support; see `docs/release-design.md` §7 for the full migration mapping.
+
+#### Release Adapters — Channels, Promote, Status, and Publish Targets
+
+Publishing is pluggable via the `ReleaseAdapter` trait (`crates/ta-release`): built-in `github` and `remote-file` (`s3://`, `sftp://`, `file://`) adapters today, with third-party plugin adapters and content/game-platform adapters (YouTube, Steam) planned for a later phase. Design reference: `docs/release-design.md`.
+
+**Channel model** — one of `draft`, `rc`, `stable`, `lts`, or an adapter-specific custom name (e.g. `nightly` for GitHub):
+
+```bash
+# Move an already-published release to a different channel — no rebuild, no re-tag.
+ta release promote v0.14.16-rc.1 --to stable
+
+# Show current publish state for a version (channels, asset checksums, publish time).
+ta release status v0.14.16-rc.1
+
+# List recent releases across channels (local history + live adapter status where available).
+ta release list --channel stable --limit 10
+
+# List built-in adapters and the publish_url schemes they claim.
+ta release adapters
+```
+
+**Configuring a non-GitHub publish target** — add a `[release]` table to `.release.toml`:
+
+```toml
+# .release.toml
+[release]
+publish_url = "s3://my-bucket/releases"   # or "sftp://host/path", "file:///local/dir"
+default_channel = "stable"                # used by `ta release run` when --channel is omitted
+version_files = ["Cargo.toml"]            # empty/omitted for non-semver (content) adapters
+```
+
+With no `[release]` section at all, `ta release run`/`promote`/`status` resolve to `GitHubReleaseAdapter` as long as a git remote is configured — the zero-config path behaves exactly as before. `RemoteFileReleaseAdapter` doesn't require a semver version — content pipelines can pass an arbitrary label (e.g. `ta release run episode-3 --channel draft`) instead of a version number.
+
+**Opting a pipeline into adapter-based publish** — add a `publish:` step as the pipeline's last step in `.ta/release.yaml` (this replaces the implicit tag-push-GitHub-Actions ending with an explicit `ReleaseAdapter::publish()` call; nothing existing is removed, this is additive):
+
+```yaml
+steps:
+  # ... existing version bump / build / notes / commit-and-tag steps ...
+  - name: Publish
+    publish:
+      adapter: remote-file       # optional — defaults to resolving from .release.toml / git remote
+      assets:
+        - dist/ta-linux-x86_64.tar.gz
+        - dist/ta-macos-arm64.tar.gz
+```
+
+`ta release run <version> --channel <channel> --adapter <name>` passes the channel/adapter through to the pipeline's `publish:` step (both flags are optional overrides on top of `.release.toml`'s `default_channel`/`publish_url`).
+
 From `ta shell`, the `release` shortcut launches the pipeline as a long-running command:
 
 ```

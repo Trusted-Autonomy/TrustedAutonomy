@@ -1,23 +1,21 @@
 [package]
-name = "ta-connector-comfyui"
+name = "ta-release"
 version.workspace = true
 edition = "2021"
-description = "ComfyUI inference connector for Trusted Autonomy"
+description = "ReleaseAdapter trait and built-in adapters (GitHub, RemoteFile) for `ta release`"
 license = "Apache-2.0"
 repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
-keywords = ["ai", "agent", "autonomy", "comfyui", "connector"]
-categories = ["development-tools", "multimedia"]
+keywords = ["ai", "agent", "autonomy", "release", "publish"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
 toml = { workspace = true }
-reqwest = { workspace = true }
-ta-changeset = { path = "../../ta-changeset", version = "0.17.3-alpha" }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -112,7 +112,68 @@ pub enum ReleaseCommands {
         /// intentionally absent for this release.
         #[arg(long, default_value_t = false)]
         skip_plugin_check: bool,
+
+        /// Channel to publish to when the pipeline includes a `publish:` step
+        /// (draft, rc, stable, lts, or an adapter-specific custom name).
+        /// Defaults to `[release] default_channel` in `.release.toml`, or "stable"
+        /// if that's also unset. See `docs/release-design.md` §4.
+        #[arg(long)]
+        channel: Option<String>,
+
+        /// Adapter override for the pipeline's `publish:` step (e.g. "github",
+        /// "remote-file"). Defaults to resolving from `[release] publish_url` in
+        /// `.release.toml`, falling back to `GitHubReleaseAdapter` when a git
+        /// remote is configured. See `ta release adapters` for the full list.
+        #[arg(long)]
+        adapter: Option<String>,
     },
+    /// Move an already-published release to a different channel without rebuilding
+    /// or re-uploading (e.g. promote an RC to stable).
+    ///
+    /// Example:
+    ///   ta release promote v0.14.16-rc.1 --to stable
+    Promote {
+        /// The published release's tag/ref (adapter-specific — a GitHub tag,
+        /// an S3 manifest path, etc; see `ta release status` / `ta release list`).
+        tag_or_ref: String,
+
+        /// Target channel: draft, rc, stable, lts, or an adapter-specific custom name.
+        #[arg(long = "to")]
+        to: String,
+
+        /// Adapter override. Defaults to resolving from `.release.toml`.
+        #[arg(long)]
+        adapter: Option<String>,
+    },
+    /// Show current publish state for a version — which channels it's on, asset
+    /// checksums, and publish timestamp. Calls `ReleaseAdapter::status`.
+    Status {
+        /// Version or tag to query. Defaults to the most recent entry in
+        /// `.ta/release-history.json` when omitted.
+        tag_or_ref: Option<String>,
+
+        /// Adapter override. Defaults to resolving from `.release.toml`.
+        #[arg(long)]
+        adapter: Option<String>,
+    },
+    /// List recent releases across channels — combines local
+    /// `.ta/release-history.json` with live adapter status where available.
+    List {
+        /// Only show releases on this channel.
+        #[arg(long)]
+        channel: Option<String>,
+
+        /// Maximum number of releases to show.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+
+        /// Adapter override. Defaults to resolving from `.release.toml`.
+        #[arg(long)]
+        adapter: Option<String>,
+    },
+    /// List registered release adapters (built-in + discovered plugins) and the
+    /// `publish_url` schemes they claim. Diagnostic: "why did s3://... resolve to X".
+    Adapters,
     /// Show the pipeline that would be executed (without running it).
     Show {
         /// Custom pipeline file (overrides default resolution).
@@ -218,6 +279,8 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             label,
             prerelease,
             skip_plugin_check,
+            channel,
+            adapter,
         } => {
             if *interactive {
                 run_interactive_release(config, version)?;
@@ -234,6 +297,8 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                     from_tag.as_deref(),
                     false,
                     *skip_plugin_check,
+                    channel.as_deref(),
+                    adapter.as_deref(),
                 );
                 match pipeline_result {
                     Err(e) if e.to_string() == "__pipeline_aborted__" => return Ok(()),
@@ -285,16 +350,25 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             workflow,
             skip_ci_check,
             build,
-        } => dispatch_release(
-            config,
-            tag,
-            *prerelease,
-            repo.as_deref(),
-            workflow,
-            *skip_ci_check,
-            *build,
-            false,
-        ),
+        } => {
+            eprintln!(
+                "[deprecated] `ta release dispatch` is deprecated in favor of \
+                 `ta release run <version> --channel <channel>`, which resolves a \
+                 ReleaseAdapter (draft-first publish, no separate dispatch step needed). \
+                 `dispatch` is kept as an alias — see docs/release-design.md §7 for the \
+                 full migration mapping. This command is not scheduled for removal yet."
+            );
+            dispatch_release(
+                config,
+                tag,
+                *prerelease,
+                repo.as_deref(),
+                workflow,
+                *skip_ci_check,
+                *build,
+                false,
+            )
+        }
         ReleaseCommands::ValidateTag {
             tag,
             repo,
@@ -309,6 +383,21 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             false,
             true,
         ),
+        ReleaseCommands::Promote {
+            tag_or_ref,
+            to,
+            adapter,
+        } => promote_release(config, tag_or_ref, to, adapter.as_deref()),
+        ReleaseCommands::Status {
+            tag_or_ref,
+            adapter,
+        } => status_release(config, tag_or_ref.as_deref(), adapter.as_deref()),
+        ReleaseCommands::List {
+            channel,
+            limit,
+            adapter,
+        } => list_releases(config, channel.as_deref(), *limit, adapter.as_deref()),
+        ReleaseCommands::Adapters => list_adapters(),
     }
 }
 
@@ -441,6 +530,15 @@ pub struct PipelineStep {
     #[serde(default)]
     pub post_release_clean_check: bool,
 
+    /// Publish the release via a `ReleaseAdapter` (`ta-release` crate) — resolves an
+    /// adapter from `--adapter`/`[release] publish_url` in `.release.toml`/git-remote
+    /// fallback, then calls `prepare()` + `publish()`. The only place a `ReleaseAdapter`
+    /// is invoked in the pipeline (`docs/release-design.md` §2). Opt-in: add a step with
+    /// `publish: {}` (or `publish: { assets: [...] }`) to `.ta/release.yaml` as the
+    /// pipeline's last step to adopt the new adapter-based publish ending.
+    #[serde(default)]
+    pub publish: Option<PublishStepConfig>,
+
     /// Objective/description for context (used by agent steps and display).
     #[serde(default)]
     pub objective: Option<String>,
@@ -543,6 +641,23 @@ pub struct UpdateReleaseTOMLConfig {
     pub last_tag: bool,
 }
 
+/// Configuration for the built-in `publish` step — invokes a `ReleaseAdapter`
+/// (`docs/release-design.md` §3). See `PipelineStep::publish`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PublishStepConfig {
+    /// Adapter override for this step specifically (falls back to `--adapter` /
+    /// `.release.toml` resolution when unset).
+    #[serde(default)]
+    pub adapter: Option<String>,
+
+    /// Paths (relative to the workspace root) of assets to upload/copy. Supports
+    /// `${VERSION}`/`${TAG}` substitution. Empty by default — a content pipeline or
+    /// code release without pre-built artifacts still publishes (e.g. a source-only
+    /// GitHub tag), just with zero assets attached.
+    #[serde(default)]
+    pub assets: Vec<String>,
+}
+
 impl PipelineStep {
     fn validate(&self) -> anyhow::Result<()> {
         let defined = [
@@ -553,6 +668,7 @@ impl PipelineStep {
             self.record_release_history,
             self.update_release_toml.is_some(),
             self.post_release_clean_check,
+            self.publish.is_some(),
         ]
         .iter()
         .filter(|&&x| x)
@@ -561,7 +677,7 @@ impl PipelineStep {
             anyhow::bail!(
                 "Step '{}': must have one of 'run', 'agent', 'generate_notes', \
                  'constitution_check', 'record_release_history', 'update_release_toml', \
-                 or 'post_release_clean_check'",
+                 'post_release_clean_check', or 'publish'",
                 self.name
             );
         }
@@ -569,7 +685,7 @@ impl PipelineStep {
             anyhow::bail!(
                 "Step '{}': only one of 'run', 'agent', 'generate_notes', \
                  'constitution_check', 'record_release_history', 'update_release_toml', \
-                 or 'post_release_clean_check' may be set",
+                 'post_release_clean_check', or 'publish' may be set",
                 self.name
             );
         }
@@ -898,6 +1014,8 @@ fn run_pipeline(
     from_tag: Option<&str>,
     interactive: bool,
     skip_plugin_check: bool,
+    channel_override: Option<&str>,
+    adapter_override: Option<&str>,
 ) -> anyhow::Result<()> {
     // Acquire a release lockfile so `ta gc` knows not to delete staging dirs mid-pipeline.
     let _lock = if !dry_run {
@@ -1083,6 +1201,15 @@ fn run_pipeline(
             execute_update_release_toml_step(&config.workspace_root, version, toml_cfg)?;
         } else if step.post_release_clean_check {
             execute_post_release_clean_check_step(&config.workspace_root, version)?;
+        } else if let Some(ref publish_cfg) = step.publish {
+            execute_publish_step(
+                config,
+                publish_cfg,
+                version,
+                &commits,
+                channel_override,
+                adapter_override,
+            )?;
         }
 
         println!("[{}/{}] {} — done", i + 1, total, step.name);
@@ -2082,6 +2209,96 @@ fn execute_post_release_clean_check_step(root: &Path, version: &str) -> anyhow::
     Ok(())
 }
 
+/// Execute a `publish:` pipeline step (v0.17.3) — resolves a `ReleaseAdapter` and calls
+/// `prepare()` + `publish()`. The only place a `ReleaseAdapter` is invoked in the pipeline;
+/// see `PipelineStep::publish` and `docs/release-design.md` §2-3.
+fn execute_publish_step(
+    config: &GatewayConfig,
+    step_cfg: &PublishStepConfig,
+    version: &str,
+    commits: &str,
+    channel_override: Option<&str>,
+    adapter_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let root = &config.workspace_root;
+    let release_cfg =
+        ta_release::ReleaseAdapterConfig::load(&root.join(".release.toml")).map_err(|e| {
+            anyhow::anyhow!("Failed to load [release] config from .release.toml: {}", e)
+        })?;
+
+    let channel_str = channel_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| release_cfg.default_channel().to_string());
+    let channel = ta_release::Channel::parse(&channel_str);
+
+    let adapter_name = adapter_override.or(step_cfg.adapter.as_deref());
+    let has_remote = has_git_remote(root);
+    let adapter = ta_release::resolve_adapter(
+        adapter_name,
+        release_cfg.publish_url.as_deref(),
+        has_remote,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Publish step could not resolve a ReleaseAdapter: {}.\n\
+             Set [release] publish_url in .release.toml, pass --adapter, or configure a git remote.\n\
+             Run `ta release adapters` to see the built-in adapters and the schemes they claim.",
+            e
+        )
+    })?;
+
+    let caps = adapter.capabilities();
+    if caps.requires_semver {
+        let version_re = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$")?;
+        if !version_re.is_match(version) {
+            anyhow::bail!(
+                "Adapter '{}' requires a semver version, got '{}'. Pass a semver version or use \
+                 an adapter with requires_semver=false (run `ta release adapters` to check).",
+                adapter.name(),
+                version
+            );
+        }
+    }
+
+    let ctx = ta_release::ReleaseContext {
+        version_or_label: version.to_string(),
+        channel,
+        commits: commits.to_string(),
+        workspace_root: root.clone(),
+    };
+    let prepared = adapter.prepare(&ctx).map_err(|e| {
+        anyhow::anyhow!("Publish step 'prepare' failed ({}): {}", adapter.name(), e)
+    })?;
+
+    let assets: Vec<ta_release::ReleaseAsset> = step_cfg
+        .assets
+        .iter()
+        .map(|a| {
+            let resolved = substitute_vars(a, version, commits, None);
+            ta_release::ReleaseAsset {
+                path: root.join(&resolved),
+                label: None,
+            }
+        })
+        .collect();
+
+    let release_ref = adapter.publish(&prepared, &assets).map_err(|e| {
+        anyhow::anyhow!("Publish step 'publish' failed ({}): {}", adapter.name(), e)
+    })?;
+
+    println!(
+        "  Published via '{}' adapter — ref: {}{}",
+        release_ref.adapter,
+        release_ref.external_id,
+        release_ref
+            .url
+            .as_deref()
+            .map(|u| format!(" ({u})"))
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
 fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_tag: Option<&str>) {
     if let Some(ref cmd) = step.run {
         let resolved = substitute_vars(cmd, version, commits, last_tag);
@@ -2119,6 +2336,13 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
     } else if step.post_release_clean_check {
         println!("  type: post_release_clean_check");
         println!("  would: verify 'git status' is clean — fail if uncommitted changes remain");
+    } else if let Some(ref publish_cfg) = step.publish {
+        println!("  type: publish");
+        println!(
+            "  would: resolve a ReleaseAdapter (adapter: {}) and call prepare()+publish() with {} asset(s)",
+            publish_cfg.adapter.as_deref().unwrap_or("(auto)"),
+            publish_cfg.assets.len()
+        );
     }
     if step.requires_approval {
         let default_hint = if step.default_approve {
@@ -2322,6 +2546,8 @@ fn show_pipeline(
             "update_release_toml"
         } else if step.post_release_clean_check {
             "post_release_clean_check"
+        } else if step.publish.is_some() {
+            "publish"
         } else {
             "unknown"
         };
@@ -2914,6 +3140,8 @@ fn validate_release_with_env(
             "update_release_toml"
         } else if step.post_release_clean_check {
             "post_release_clean_check"
+        } else if step.publish.is_some() {
+            "publish"
         } else {
             "unknown"
         };
@@ -3551,6 +3779,229 @@ fn dispatch_release(
     Ok(())
 }
 
+// ── ReleaseAdapter-backed commands (v0.17.3) ────────────────────
+
+/// Whether a `origin` git remote is configured. `release_git::git_remote_url` only
+/// errors if the `git` binary itself fails to spawn — it returns `Ok("")` for "no
+/// remote configured" or "not a git repo" (non-zero exit, empty stdout) — so this
+/// checks for non-empty output rather than just `.is_ok()`.
+fn has_git_remote(root: &Path) -> bool {
+    // Clear TA agent VCS isolation env vars so this checks `root`'s own git remote,
+    // not the ambient staging overlay's — same pattern as `execute_shell_step`.
+    // `release_git::git_remote_url` doesn't clear these itself, and only errors if
+    // the `git` binary fails to spawn (empty stdout on "no remote"/"not a repo").
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .output();
+    match output {
+        Ok(out) => out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// Resolve a `ReleaseAdapter` the same way `execute_publish_step` does: explicit
+/// `--adapter` override, then `[release] publish_url` in `.release.toml`, then a
+/// git-remote fallback to `GitHubReleaseAdapter`.
+fn resolve_release_adapter(
+    config: &GatewayConfig,
+    adapter_override: Option<&str>,
+) -> anyhow::Result<Box<dyn ta_release::ReleaseAdapter>> {
+    let root = &config.workspace_root;
+    let release_cfg =
+        ta_release::ReleaseAdapterConfig::load(&root.join(".release.toml")).map_err(|e| {
+            anyhow::anyhow!("Failed to load [release] config from .release.toml: {}", e)
+        })?;
+    let has_remote = has_git_remote(root);
+    ta_release::resolve_adapter(
+        adapter_override,
+        release_cfg.publish_url.as_deref(),
+        has_remote,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "{}\nRun `ta release adapters` to see the built-in adapters and the schemes they claim.",
+            e
+        )
+    })
+}
+
+/// `ta release promote <tag-or-ref> --to <channel>` — move an already-published
+/// release to a different channel without rebuilding. `docs/release-design.md` §2-3.
+fn promote_release(
+    config: &GatewayConfig,
+    tag_or_ref: &str,
+    to: &str,
+    adapter_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let adapter = resolve_release_adapter(config, adapter_override)?;
+    let channel = ta_release::Channel::parse(to);
+    let release_ref = ta_release::ReleaseRef {
+        adapter: adapter.name().to_string(),
+        external_id: tag_or_ref.to_string(),
+        url: None,
+    };
+    adapter.promote(&release_ref, &channel).map_err(|e| {
+        anyhow::anyhow!(
+            "Promote failed via '{}' adapter: {}\nRun `ta release status {}` to check current state.",
+            adapter.name(),
+            e,
+            tag_or_ref
+        )
+    })?;
+    println!(
+        "Promoted '{}' to channel '{}' via '{}' adapter.",
+        tag_or_ref,
+        channel,
+        adapter.name()
+    );
+    Ok(())
+}
+
+/// `ta release status [<tag>]` — show current publish state for a version. Falls back
+/// to the most recent `.ta/release-history.json` entry when no tag is given.
+fn status_release(
+    config: &GatewayConfig,
+    tag_or_ref: Option<&str>,
+    adapter_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let history = load_release_history(&config.workspace_root);
+    let version = match tag_or_ref {
+        Some(t) => t.trim_start_matches('v').to_string(),
+        None => history.last().map(|r| r.version.clone()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "No tag given and .ta/release-history.json is empty. \
+                     Pass a version explicitly: ta release status <version>"
+            )
+        })?,
+    };
+
+    let adapter = resolve_release_adapter(config, adapter_override)?;
+    let caps = adapter.capabilities();
+    if !caps.supports_live_status {
+        println!(
+            "Adapter '{}' has no live status query — showing local history only.",
+            adapter.name()
+        );
+    }
+    let status = adapter.status(&version).map_err(|e| {
+        anyhow::anyhow!(
+            "Status query failed via '{}' adapter: {}",
+            adapter.name(),
+            e
+        )
+    })?;
+
+    println!("Version:  {}", version);
+    println!("Adapter:  {}", adapter.name());
+    match status {
+        ta_release::ReleaseStatus::Unknown => {
+            println!("Status:   unknown (adapter has no live query, or version not found)");
+            if let Some(record) = history.iter().rev().find(|r| r.version == version) {
+                println!(
+                    "Local history: tag={} commit={} released_at={}",
+                    record.tag, record.commit, record.released_at
+                );
+            }
+        }
+        ta_release::ReleaseStatus::Known {
+            channels,
+            published_at,
+            asset_checksums,
+        } => {
+            let channel_names: Vec<&str> = channels.iter().map(|c| c.as_str()).collect();
+            println!("Channels: {}", channel_names.join(", "));
+            println!(
+                "Published: {}",
+                published_at.as_deref().unwrap_or("(unknown)")
+            );
+            if !asset_checksums.is_empty() {
+                println!("Assets:");
+                for (name, checksum) in &asset_checksums {
+                    if checksum.is_empty() {
+                        println!("  - {}", name);
+                    } else {
+                        println!("  - {} ({})", name, checksum);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `ta release list [--channel <channel>] [--limit N]` — recent releases across
+/// channels, combining local history with live adapter status where available.
+fn list_releases(
+    config: &GatewayConfig,
+    channel_filter: Option<&str>,
+    limit: usize,
+    adapter_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let adapter = resolve_release_adapter(config, adapter_override)?;
+    let caps = adapter.capabilities();
+
+    if caps.supports_live_status {
+        let entries = adapter
+            .list(limit)
+            .map_err(|e| anyhow::anyhow!("List failed via '{}' adapter: {}", adapter.name(), e))?;
+        if entries.is_empty() {
+            println!(
+                "No releases found via '{}' adapter — falling back to local history.",
+                adapter.name()
+            );
+        } else {
+            println!("Releases (via '{}' adapter):", adapter.name());
+            for entry in &entries {
+                if let ta_release::ReleaseStatus::Known {
+                    channels,
+                    published_at,
+                    ..
+                } = entry
+                {
+                    if let Some(ch) = channel_filter {
+                        if !channels.iter().any(|c| c.as_str() == ch) {
+                            continue;
+                        }
+                    }
+                    let channel_names: Vec<&str> = channels.iter().map(|c| c.as_str()).collect();
+                    println!(
+                        "  {} — {}",
+                        channel_names.join(","),
+                        published_at.as_deref().unwrap_or("(unknown)")
+                    );
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let history = load_release_history(&config.workspace_root);
+    println!("Releases (local .ta/release-history.json):");
+    for record in history.iter().rev().take(limit) {
+        println!(
+            "  {} — tag={} commit={} released_at={}",
+            record.version, record.tag, record.commit, record.released_at
+        );
+    }
+    Ok(())
+}
+
+/// `ta release adapters` — list built-in adapters and the `publish_url` schemes
+/// they claim. Diagnostic: "why did s3://... resolve to X".
+fn list_adapters() -> anyhow::Result<()> {
+    println!("Built-in release adapters:");
+    for (name, schemes) in ta_release::registry::builtin_adapters() {
+        println!("  {} — {}", name, schemes.join(", "));
+    }
+    println!();
+    println!("Third-party plugin adapters are not yet supported (planned v0.17.4).");
+    Ok(())
+}
+
 // ── Default built-in pipeline ───────────────────────────────────
 
 const DEFAULT_PIPELINE_YAML: &str = r#"# .ta/release.yaml — TA release pipeline configuration.
@@ -3841,6 +4292,7 @@ mod tests {
             record_release_history: false,
             update_release_toml: None,
             post_release_clean_check: false,
+            publish: None,
             objective: None,
             requires_approval: false,
             default_approve: false,
@@ -3865,6 +4317,7 @@ mod tests {
             record_release_history: false,
             update_release_toml: None,
             post_release_clean_check: false,
+            publish: None,
             objective: None,
             requires_approval: false,
             default_approve: false,
@@ -4043,7 +4496,10 @@ steps:
         .unwrap();
 
         // Dry run should succeed even though the step would fail.
-        run_pipeline(&config, "1.0.0", true, true, None, None, None, false, true).unwrap();
+        run_pipeline(
+            &config, "1.0.0", true, true, None, None, None, false, true, None, None,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -4415,7 +4871,10 @@ steps:
         .unwrap();
 
         // Run with --yes to skip approvals.
-        run_pipeline(&config, "1.0.0", true, false, None, None, None, false, true).unwrap();
+        run_pipeline(
+            &config, "1.0.0", true, false, None, None, None, false, true, None, None,
+        )
+        .unwrap();
 
         // Verify the marker file was created.
         let marker = temp.path().join("release-marker.txt");
@@ -4665,6 +5124,251 @@ steps:
         pipeline.steps[0].validate().unwrap();
     }
 
+    // ── v0.17.3: publish step / ReleaseAdapter CLI wiring ──────────
+
+    #[test]
+    fn pipeline_step_publish_deserializes_minimal() {
+        let yaml = r#"
+name: test
+steps:
+  - name: publish release
+    publish: {}
+"#;
+        let pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        let step = &pipeline.steps[0];
+        assert!(step.publish.is_some());
+        assert_eq!(step.publish.as_ref().unwrap().adapter, None);
+        assert!(step.publish.as_ref().unwrap().assets.is_empty());
+        step.validate().unwrap();
+    }
+
+    #[test]
+    fn pipeline_step_publish_deserializes_with_adapter_and_assets() {
+        let yaml = r#"
+name: test
+steps:
+  - name: publish release
+    publish:
+      adapter: remote-file
+      assets:
+        - dist/ta-linux.tar.gz
+        - dist/ta-macos.tar.gz
+"#;
+        let pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        let cfg = pipeline.steps[0].publish.as_ref().unwrap();
+        assert_eq!(cfg.adapter.as_deref(), Some("remote-file"));
+        assert_eq!(
+            cfg.assets,
+            vec!["dist/ta-linux.tar.gz", "dist/ta-macos.tar.gz"]
+        );
+    }
+
+    #[test]
+    fn step_validation_rejects_publish_with_run() {
+        let step = PipelineStep {
+            name: "bad".to_string(),
+            run: Some("echo hi".to_string()),
+            agent: None,
+            generate_notes: None,
+            constitution_check: false,
+            record_release_history: false,
+            update_release_toml: None,
+            post_release_clean_check: false,
+            publish: Some(PublishStepConfig::default()),
+            objective: None,
+            requires_approval: false,
+            default_approve: false,
+            output: None,
+            working_dir: None,
+            env: Default::default(),
+        };
+        assert!(step.validate().is_err());
+    }
+
+    #[test]
+    fn step_validation_accepts_publish_alone() {
+        let step = PipelineStep {
+            name: "publish".to_string(),
+            run: None,
+            agent: None,
+            generate_notes: None,
+            constitution_check: false,
+            record_release_history: false,
+            update_release_toml: None,
+            post_release_clean_check: false,
+            publish: Some(PublishStepConfig::default()),
+            objective: None,
+            requires_approval: false,
+            default_approve: false,
+            output: None,
+            working_dir: None,
+            env: Default::default(),
+        };
+        assert!(step.validate().is_ok());
+    }
+
+    #[test]
+    fn list_adapters_runs_without_error() {
+        list_adapters().unwrap();
+    }
+
+    #[test]
+    fn resolve_release_adapter_uses_publish_url_from_release_toml() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        std::fs::write(
+            temp.path().join(".release.toml"),
+            format!(
+                "[release]\npublish_url = \"file://{}\"\n",
+                temp.path().join("out").display()
+            ),
+        )
+        .unwrap();
+        let adapter = resolve_release_adapter(&config, None).unwrap();
+        assert_eq!(adapter.name(), "remote-file");
+    }
+
+    #[test]
+    fn resolve_release_adapter_override_wins_over_release_toml() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        std::fs::write(
+            temp.path().join(".release.toml"),
+            "[release]\npublish_url = \"s3://bucket/x\"\n",
+        )
+        .unwrap();
+        let adapter = resolve_release_adapter(&config, Some("github")).unwrap();
+        assert_eq!(adapter.name(), "github");
+    }
+
+    #[test]
+    fn resolve_release_adapter_falls_back_to_github_with_git_remote() {
+        let temp = TempDir::new().unwrap();
+        git_init_with_commit(temp.path());
+        let out = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(temp.path())
+            // Clear TA agent VCS isolation env vars — see `git_init_with_commit` above
+            // and `has_git_remote`'s doc comment — otherwise this mutates the ambient
+            // staging repo instead of the test's temp directory.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let config = GatewayConfig::for_project(temp.path());
+        let adapter = resolve_release_adapter(&config, None).unwrap();
+        assert_eq!(adapter.name(), "github");
+    }
+
+    #[test]
+    fn resolve_release_adapter_errors_with_no_config_and_no_remote() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let err = resolve_release_adapter(&config, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("ta release adapters"));
+    }
+
+    #[test]
+    fn execute_publish_step_writes_asset_and_manifest_to_local_target() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let out_dir = temp.path().join("out");
+        std::fs::write(
+            temp.path().join(".release.toml"),
+            format!(
+                "[release]\npublish_url = \"file://{}\"\ndefault_channel = \"stable\"\n",
+                out_dir.display()
+            ),
+        )
+        .unwrap();
+
+        // The asset referenced by the publish step must exist relative to workspace_root.
+        std::fs::write(temp.path().join("build.bin"), b"binary-contents").unwrap();
+
+        let step_cfg = PublishStepConfig {
+            adapter: None,
+            assets: vec!["build.bin".to_string()],
+        };
+        execute_publish_step(&config, &step_cfg, "1.0.0", "", None, None).unwrap();
+
+        let manifest_path = out_dir.join("stable").join("manifest.json");
+        assert!(manifest_path.exists());
+        let asset_path = out_dir.join("stable").join("build.bin");
+        assert!(asset_path.exists());
+    }
+
+    #[test]
+    fn execute_publish_step_respects_channel_override() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let out_dir = temp.path().join("out");
+        std::fs::write(
+            temp.path().join(".release.toml"),
+            format!(
+                "[release]\npublish_url = \"file://{}\"\n",
+                out_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let step_cfg = PublishStepConfig::default();
+        execute_publish_step(&config, &step_cfg, "episode-3", "", Some("draft"), None).unwrap();
+
+        assert!(out_dir.join("draft").join("manifest.json").exists());
+        assert!(!out_dir.join("stable").join("manifest.json").exists());
+    }
+
+    #[test]
+    fn dispatch_pipeline_end_to_end_via_publish_step() {
+        // Full pipeline run with a `publish:` step wired to a file:// target.
+        let temp = TempDir::new().unwrap();
+        git_init_with_commit(temp.path());
+        let config = GatewayConfig::for_project(temp.path());
+        let out_dir = temp.path().join("out");
+        std::fs::write(
+            temp.path().join(".release.toml"),
+            format!(
+                "[release]\npublish_url = \"file://{}\"\n",
+                out_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let ta_dir = temp.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("release.yaml"),
+            "name: publish-test\nsteps:\n  - name: publish\n    publish: {}\n",
+        )
+        .unwrap();
+
+        run_pipeline(
+            &config,
+            "1.0.0",
+            true,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            Some("stable"),
+            None,
+        )
+        .unwrap();
+
+        assert!(out_dir.join("stable").join("manifest.json").exists());
+    }
+
     #[test]
     fn default_pipeline_has_update_stable_release_tag_step() {
         let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML).unwrap();
@@ -4818,7 +5522,10 @@ steps:
         .unwrap();
 
         // Dry run should succeed even with failing steps and approval gates.
-        run_pipeline(&config, "1.0.0", false, true, None, None, None, false, true).unwrap();
+        run_pipeline(
+            &config, "1.0.0", false, true, None, None, None, false, true, None, None,
+        )
+        .unwrap();
 
         // Nothing should have been executed — no files created.
         assert!(!temp.path().join("release-marker.txt").exists());
@@ -4871,7 +5578,7 @@ steps:
         // skip_approvals=false, dry_run=false, interactive=false → must fail before
         // executing any steps (stdin is non-TTY in tests).
         let err = run_pipeline(
-            &config, "1.0.0", false, false, None, None, None, false, true,
+            &config, "1.0.0", false, false, None, None, None, false, true, None, None,
         )
         .unwrap_err()
         .to_string();
@@ -5113,6 +5820,8 @@ steps:
             None,
             false,
             true,
+            None,
+            None,
         )
         .unwrap();
 
