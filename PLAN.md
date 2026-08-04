@@ -9899,7 +9899,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.3 — `ta release` Core + Built-in Adapters
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 
 1. [ ] **`ReleaseAdapter` trait** in `crates/ta-release/src/adapter.rs`: `prepare`, `publish`, `promote`, `status` methods as designed in v0.17.0. URL-scheme registry for adapter discovery.
