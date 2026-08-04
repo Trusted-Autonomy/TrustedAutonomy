@@ -10018,6 +10018,133 @@ Code releases use semver. Content releases don't. Decide:
 
 #### Version: `0.17.5-alpha.3`
 
+---
+### v0.17.6 — Least-Privilege Agent Authorization: Biscuit Tokens + Secret Isolation + Swarm Attenuation
+<!-- status: pending -->
+**Depends on**: none — independent of the release-management (v0.17.3/v0.17.4) and autonomous-team (v0.17.5.x) tracks; can be sequenced in parallel with either, or interleaved, per team capacity. Numbered v0.17.6 (the one open slot between v0.17.5.x and v0.17.7.x) rather than a new v0.19.x track — this is a deliberate placement choice made when this phase was added; renumber if a different sequencing is preferred, nothing below hard-depends on the number itself.
+
+**Why this exists**: `docs/architecture/ta-architecture-reference.md` §5 documents TA's actual current-state agent credential/authorization model, and it has real gaps: credentials are plaintext from mint to use (`FileVault` stores `.ta/credentials.json` unencrypted; `bare_process.rs::apply_credentials_to_env` injects the raw secret into the agent's process env, visible to the agent and the LLM driving it); the one real capability-token abstraction that exists (`CredentialVault::issue_token`/`validate_token`) is dead code nothing calls; `ScopedCredential.scopes` is declared but never enforced; and swarm fan-out (`run_one_swarm_sub_goal`) gives every concurrent sub-goal a full-environment clone of the parent with zero credential narrowing.
+
+**Design**: [`docs/superpowers/specs/2026-08-03-agent-credential-security-design.md`](../docs/superpowers/specs/2026-08-03-agent-credential-security-design.md) — produced by a 10-agent design panel (4 parallel research agents on biscuit tokens / secret-broker patterns (SPIFFE, Vault dynamic secrets, macaroons) / human-escalation-PAM standards / swarm-attenuation integration points → 3 independent architecture proposals scored against 5 criteria → synthesis → 2 adversarial verification passes that read the real code against every claim, which found and corrected two real holes: the first synthesis only closed the MCP-tool-call leak path (missing the actual dominant path — Bash-driven `git`/`gh`/`curl`/`npm`/`docker` usage with raw env credentials, now Stage 7 below), and assumed `ToolCallInterceptor` was a live interception point when it's dead code too (now correctly sized as new middleware in Stage 3, not "one more step"). The design's Open Questions section lists remaining human decisions (workload-identity attestation depth, age-key custody, Stage 7's TLS-interception trust model, revocation TTL defaults, `biscuit-auth` dependency sign-off) — resolve these as each relevant stage starts, not as a blocking prerequisite to starting Stage 1.
+
+---
+### v0.17.6.1 — Enforce Declared Credential Scopes + Real Swarm Handoff
+<!-- status: pending -->
+**Depends on**: v0.17.6
+
+**Goal**: Close the two loudest, cheapest-to-fix gaps first: `ScopedCredential.scopes` is declared but never checked anywhere, and `run_one_swarm_sub_goal` hands every sub-goal a full-environment clone of the parent with no narrowing. No new crates, no new token format yet — this stage is pure enforcement of concepts that already exist in the type system.
+
+**Items**:
+1. [ ] `apply_credentials_to_env` (`crates/ta-runtime/src/bare_process.rs`) gains a required-scope input and filters `ScopedCredential`s by `.scopes`/`security_tier` before injecting — today it takes a credential list with nothing to compare scopes against; this is new plumbing, not a conditional bolted onto the existing loop.
+2. [ ] `run_one_swarm_sub_goal` (`apps/ta-cli/src/commands/run.rs`) gets `cmd.env_clear()` plus explicit re-injection of a non-secret baseline (`PATH`, `HOME`, etc.) and an intersected credential/scope set for the sub-goal.
+3. [ ] **The real fix, not just the wrapper**: `run_one_swarm_sub_goal` spawns a *nested `ta run` CLI respawn*, which independently resolves its own credentials deep inside the child process. `.env_clear()` alone doesn't narrow what that child resolves from `.ta/credentials.json`. Add an explicit scope handoff into the recursive `ta run` invocation (new CLI flag or env var carrying the intersected scope set) so the child's own credential resolution actually respects the narrower scope.
+4. [ ] Tests: a sub-goal's spawned process environment contains only the intersected credential set, not the parent's full environment; a credential whose scope excludes the sub-goal's declared need is absent from its env entirely; the nested `ta run` child genuinely resolves the narrowed scope, not just the outer wrapper's env.
+5. [ ] USAGE.md: note that swarm sub-goals now receive scope-narrowed credentials, not full inheritance.
+
+#### Version: `0.17.6-alpha.1`
+
+---
+### v0.17.6.2 — Live Token Issuance + Encryption at Rest
+<!-- status: pending -->
+**Depends on**: v0.17.6.1
+
+**Goal**: Wire up the vault's existing, fully-tested, currently-uncalled `CredentialVault::issue_token`/`validate_token` as the real credential-delivery path (opaque `SessionToken` UUID, `allowed_scopes`, `expires_at`) — ship real value now, before the biscuit migration in v0.17.6.4. Close `FileVault`'s plaintext-at-rest gap in the same pass since it's already touching `vault.rs`.
+
+**Items**:
+1. [ ] `issue_token`/`validate_token` become load-bearing: called from the goal-setup path instead of only from `ta-credentials`'s own tests.
+2. [ ] `ta credential grant <id> --agent <goal_id> --scope <s> --ttl <n>` CLI subcommand.
+3. [ ] `FileVault` gains age-based encryption at rest for `.ta/credentials.json`. Key custody: OS keychain where available, falling back to a chmod-0600 file with a loud `ta doctor` warning on platforms without one (resolve final custody approach at implementation time — see design doc Open Question 3).
+4. [ ] Tests: an issued token expires and fails validation past its TTL; encrypted-at-rest credentials round-trip correctly; a missing/corrupt age key produces an actionable error, not a silent data-loss.
+5. [ ] USAGE.md: document `ta credential grant` and the new encryption-at-rest behavior.
+
+#### Version: `0.17.6-alpha.2`
+
+---
+### v0.17.6.3 — Gateway Live Interception + Secret-Substitution Broker (MCP Path)
+<!-- status: pending -->
+**Depends on**: v0.17.6.2
+
+**Goal**: Build the gateway's actual live pre-dispatch interception/substitution point. **This is new middleware, not an extension of something already running**: `ta-mcp-gateway::ToolCallInterceptor` is constructed and stored today but its `.classify()` is never invoked outside its own tests — it's dead code, same category as `CredentialVault` was before v0.17.6.2. Sized accordingly (larger than a typical single-crate phase) — split into sub-items below rather than one undifferentiated block, and re-split into further sub-phases at execution time if a single goal-run can't carry the whole thing.
+
+**Items**:
+1. [ ] Build the live synchronous interception path: parse the tool call before dispatch, hold/block on an authorization decision, rewrite the outbound payload, relay the response — the actual missing piece, not a wrapper around an existing hook.
+2. [ ] Tool schemas exposed to agents/LLMs carry only symbolic connector ids ("github", "slack-ops"), never `ScopedCredential.value`.
+3. [ ] `ConnectorRegistry` (`.ta/connectors.toml`) with a per-connector `broker_mediated: bool` flag, so migration is connector-by-connector, not a flag day.
+4. [ ] On authorization success, the real secret is attached only to the gateway's own outbound call — never returned to the agent. On a scope deficit, hand off to v0.17.6.6's escalation path instead of a hard failure.
+5. [ ] `bare_process.rs`'s direct env injection becomes an explicitly-flagged reduced-security fallback for non-gateway-mediated connectors, pending v0.17.6.7.
+6. [ ] While this code is being touched: `ta-mediation::ApiMediator` has its own separate, also-unwired `classify()` duplicating `ToolCallInterceptor`'s heuristics — dedupe into one implementation rather than leaving two.
+7. [ ] Tests: a gateway-mediated tool call never contains the raw secret in the agent-visible request or response; an unmediated connector still uses the flagged fallback path without silently failing.
+8. [ ] USAGE.md: document which connectors are broker-mediated and the migration path for adding more.
+
+#### Version: `0.17.6-alpha.3`
+
+---
+### v0.17.6.4 — Migrate Session Tokens to Biscuit
+<!-- status: pending -->
+**Depends on**: v0.17.6.3
+
+**Goal**: Replace the UUID `SessionToken` with real biscuit tokens (`biscuit-auth` crate, Apache-2.0 licensed — confirm dependency sign-off per design doc Open Question 7 before starting), giving TA offline, no-round-trip attenuation — the prerequisite for cryptographic swarm narrowing in v0.17.6.5.
+
+**Items**:
+1. [ ] New `ta-credential-broker` crate (library, embedded in `ta-daemon` — not a separate process; TA's topology is already single-daemon).
+2. [ ] `issue_token`/`validate_token` reimplemented on `BiscuitBuilder`/`Authorizer`, encoding `credential($id)`, `agent($goal_id)`, `uri($scheme, $path)` (reusing the existing `fs://workspace/<path>` / connector URI scheme from `Artifact.resource_uri`), `verb($v)`, `security_tier($tier)`, `expiry($ttl)`.
+3. [ ] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks — the cascade's existing merge model and biscuit's block-chain model become the same operation.
+4. [ ] Local revocation-ID denylist (`.ta/revoked-blocks.jsonl`), checked on every authorize call. Default TTL needs a concrete value (see design doc Open Question 6) — short enough to keep the denylist small.
+5. [ ] `ScopedCredential` formally retired as a delivery type in favor of `RawSecret`/`CapabilityToken`.
+6. [ ] Tests: an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant; a revoked block's descendants are all rejected; verification works fully offline (no network/vault round-trip).
+7. [ ] USAGE.md: explain the biscuit token model at a level a non-cryptographer maintainer can follow.
+
+#### Version: `0.17.6-alpha.4`
+
+---
+### v0.17.6.5 — Swarm Fan-Out Cryptographic Attenuation
+<!-- status: pending -->
+**Depends on**: v0.17.6.4
+
+**Goal**: Replace v0.17.6.1's manual scope-intersection/handoff with real `biscuit.attenuate()` — cryptographically, not just conventionally, narrower-than-parent for every concurrent sub-goal.
+
+**Items**:
+1. [ ] At the same spawn point identified in v0.17.6.1 (`run_one_swarm_sub_goal`, before `Command::new`), attenuate the parent's biscuit in-process (no network call, no broker round-trip) with an appended block scoping the child to its declared resource glob and a `ttl = min(parent_remaining_ttl, sub_goal_wave_deadline)`.
+2. [ ] The attenuated child biscuit is passed explicitly into the recursive `ta run` invocation via the handoff mechanism built in v0.17.6.1 item 3.
+3. [ ] Nested fan-out (a sub-goal spawning its own sub-sub-goals) repeats the identical attenuation operation recursively — `ta-workflow::concurrent::run_concurrently` itself stays generic and credential-blind, no new component added there.
+4. [ ] Tests: a two-level-deep nested swarm produces a grandchild token that is provably a subset of the grandparent's grant, verified via the authorizer rejecting an out-of-scope request at every hop.
+
+#### Version: `0.17.6-alpha.5`
+
+---
+### v0.17.6.6 — Human Escalation for Credential Scope Elevation
+<!-- status: pending -->
+**Depends on**: v0.17.6.3 (needs a live interception point to trigger from); does not strictly require v0.17.6.4/6.5, since the trigger condition works the same whether the held token is a `SessionToken` or a biscuit.
+
+**Goal**: Wire scope-exceeding requests into TA's existing `ta_human_verify` two-stage confidence-gated escalation instead of building a parallel approval path.
+
+**Items**:
+1. [ ] Trigger condition at the gateway's interception point (v0.17.6.3): `requested_scope ⊄ token.allowed_scopes` — a deterministic, mechanical comparison, not an LLM judgment call.
+2. [ ] Call `ta_human_verify` with a structured (not freeform) question carrying `{requested_scope, current_caveats, target_uri, goal_id, parent_goal_scope}` as context, reusing the existing opinion/validator/gate pipeline unchanged.
+3. [ ] Add one non-bypassable computational pre-check to the validator stage for this workload type: `requested_scope ⊆ parent_goal_scope` asserted before the LLM critique runs — any violation forces `verdict: Block` regardless of model output.
+4. [ ] New `credential_scope_elevation` workload type in `.ta/workflow.toml` with a stricter default `escalate_risk_score` than code-edit workloads.
+5. [ ] On `Commit`: broker mints a fresh, narrowly attenuated token; `.ta/human-verify-audit.jsonl` gets two additive fields, `granted_scope` and `ttl` — no new audit store. On anything else: falls through to the existing blocking `ta_ask_human` UI unchanged.
+6. [ ] Tests: a scope-exceeding request that violates parent-containment is force-blocked even if the opinion/validator LLM passes both signal a favorable verdict; a legitimate elevation within parent scope can still auto-confirm per existing thresholds.
+7. [ ] USAGE.md: document the new escalation trigger alongside the existing `ta_human_verify` docs.
+
+#### Version: `0.17.6-alpha.6`
+
+---
+### v0.17.6.7 — Shell/CLI Credential Isolation (the Dominant Real-World Path)
+<!-- status: pending -->
+**Depends on**: v0.17.6.4 (broker must exist to back the credential shims)
+
+**Goal**: v0.17.6.3 closes the MCP-tool-call leak path, but a Bash-driven coding agent's *majority* credentialed actions — `git push`, `gh pr create`, `npm publish`, `docker login`, a raw `curl` with a bearer header — never touch an MCP tool call at all, and nothing in the earlier stages changes that without this one. Found by adversarial review of the original design draft, which had understated this as a "fallback edge case" rather than the dominant path it actually is for a shell-driven agent.
+
+**Items**:
+1. [ ] `git-credential-helper` backed by the broker (git already supports pluggable credential helpers — no git behavior change needed, just point `credential.helper` at a local broker-backed binary).
+2. [ ] `gh auth` shim for the GitHub CLI (same pattern — `gh` supports external auth token resolution).
+3. [ ] For the general case: evaluate a local loopback HTTPS forward proxy (`HTTPS_PROXY` pointed at it) that injects the `Authorization` header for allow-listed hosts server-side. **This requires the agent's process to trust a local CA for TLS interception on allow-listed hosts — a real trust tradeoff, not a footnote.** Resolve at implementation time whether this is acceptable or whether Stage 7 should stay scoped to helper-binary shims only (git/gh/npm/docker specifically) with the generic proxy case dropped or deferred (see design doc Open Question 4).
+4. [ ] Tests: a shell command using a broker-backed credential helper never has the raw secret in its own process environment; an unlisted host via the proxy path (if built) passes through unmodified with no credential injected.
+5. [ ] USAGE.md: document which CLI tools are covered by a credential shim and which still need the reduced-security fallback.
+
+#### Version: `0.17.6-alpha.7`
+
 
 > **Focus**: Replace three disconnected auto-approval mechanisms (`ta_policy::auto_approve`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine) and a Git-specific PR-merge continuation with one modular, data-wired workflow-graph engine — Trigger/Reviewer/Decision/Action nodes composed via TOML, VCS-adapter-mediated (not platform-specific), culminating in a natural-language advisor entry point ("build phases v0.17.3 through v0.17.8"). Full design: `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`. Governed by new constitution §16 (`docs/TA-CONSTITUTION.md`), red-teamed 2026-07-21 (PM, head-of-engineering, non-technical-user passes). Visual graph authoring/editing is explicitly deferred — see v0.18.4.
 ### v0.17.7.1 — Workflow Graph Engine Core (Node Trait Model + Data-Defined Wiring)
