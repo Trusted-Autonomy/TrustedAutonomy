@@ -133,8 +133,59 @@ Multi-repo only pays off when pieces need independent release cadence or separat
 
 ---
 
-## 5. Where to Go Next
+## 5. Agent Credential & Authorization Model (Current State)
 
+**No biscuit tokens, no cryptographically-enforced least privilege today.** This section is the baseline to verify the code against — if a claim here no longer matches the code, that's a bug in this doc, fix the doc, not the mental model.
+
+### 5.1 Where secrets live
+
+`ta-credentials::FileVault` (`crates/ta-credentials/src/file_vault.rs`) stores credentials as **plaintext JSON** at `.ta/credentials.json`, protected only by `chmod 0600` (Unix; no equivalent on Windows). No at-rest encryption — the module's own doc comment marks this "Future: age encryption layer." No OS keychain integration.
+
+The `CredentialVault` trait (`vault.rs`) does define real capability-token primitives: `issue_token(credential_id, agent_id, scopes, ttl_secs) -> SessionToken` (an opaque UUID carrying `allowed_scopes` and `expires_at`) and `validate_token`, which checks expiry without exposing the underlying secret. This is the closest thing in the codebase to a biscuit-style capability token — but it's a bearer UUID checked against local vault state, not a signed, offline-verifiable, attenuable token.
+
+**This session-token path is dead code.** `issue_token`/`validate_token` are called only from `ta-credentials`'s own tests. The CLI (`apps/ta-cli/src/commands/credentials.rs`) exposes only `add`/`list`/`revoke`. Nothing in `ta-runtime`, `ta-mcp-gateway`, or `ta-daemon` calls into it.
+
+### 5.2 How a secret actually reaches an external call
+
+The real delivery path is `ta-runtime::credential::ScopedCredential { name, value, scopes }` — `value` is the **raw plaintext secret**. `bare_process.rs::apply_credentials_to_env()` writes it directly into the spawned agent process's environment variables. `scopes` is declared but not enforced at this layer; its own doc comment says the agent "sees the credential but TA's policy layer limits what it can do with it to these declared scopes" — nothing in the policy layer (§5.3) actually checks scope against credential use. Once a credential is in the agent's environment, nothing stops it from using e.g. `GITHUB_TOKEN` for a call outside its declared scope.
+
+`ta-runtime::auth_spec.rs` (`AgentAuthSpec`/`detect_auth_mode`) is unrelated to authorization: it's a preflight *availability* check confirming an env var or session file exists before launch.
+
+So there are two disconnected systems: the vault's token/scope/TTL primitives (real, unused) and `ScopedCredential`'s injection path (the one actually used — plaintext, scopes unenforced).
+
+### 5.3 Policy layer governs approval, not credential reachability
+
+`ta-policy::AccessFilter` (glob allow/deny, deny wins, empty-allow = allow-all) and `PolicyCascade` (`cascade.rs`, six layers — built-in → project → workflow → agent profile → goal constitution → CLI flags — strictly tighten-only, a layer may add restrictions but never loosen) decide, via `SchemePolicy`, whether a proposed *action* needs human approval, has a budget/action-count ceiling, or requires some credential to exist for its URI scheme. This governs actions, not which secrets a process can technically read.
+
+`ta-goal::security::SecurityLevel` (Low/Mid/High) is a per-goal posture knob — sandboxing strictness, audit-chain signing, secret-scan blocking threshold, forbidden Bash patterns — not a credential-scope binding.
+
+**There is no team-role → allowed-connector mapping in the code today**: `.ta/team.toml` roles do not constrain which credentials a role's goals can access.
+
+### 5.4 MCP gateway: post-hoc audit, not credential mediation
+
+`ta-mcp-gateway::ToolCallInterceptor` classifies each MCP tool call read-only vs. state-changing by name-pattern heuristics; state-changing calls become a `PendingAction` in the draft package for human review. `ta-mediation::ApiMediator` stages the raw tool call (arguments as-is) for replay after approval. **Neither substitutes credentials server-side.** An agent's tool call carries whatever secret material it embedded, and that payload is visible both in the LLM's own tool-call turn and in the staged JSON a human later reviews. There is no "agent references a named connector, gateway injects the real key" indirection anywhere in the stack.
+
+### 5.5 Advisor / LLM context
+
+No code path was found that pipes `Credential.secret` or `ScopedCredential.value` into an advisor prompt — `ta-advisor::coordinator.rs`/`pipeline.rs`/`classify.rs` operate on `TriggerEvent`/routing data, not credential types. There's no explicit redaction layer for this; the advisor simply never touches credentials today. Read this as an absence of wiring, not a designed, enforced guarantee.
+
+### 5.6 Swarm fan-out: no credential isolation
+
+`ta-workflow::concurrent::run_concurrently` is a bare thread-pool helper with no credential/scope awareness. `swarm.rs` only resolves scheduling conflicts (`api_impact` overlap between sub-goals) — unrelated to security. **Sub-goals inherit whatever `ScopedCredential`s were injected into the parent process's environment; there is no per-sub-goal credential narrowing or cascade-derived scope reduction as work delegates down.** This is a real, currently-unaddressed gap — consistent with true concurrent sub-goal execution itself still being deferred (v0.13.16).
+
+### 5.7 The one robust control: secret-leak scanning at apply time
+
+`ta-changeset::secret_scan::scan_for_secrets_classified` runs when a draft is applied, over all staged artifact text — known-service regex prefixes (Slack, Anthropic, GitHub, AWS, PEM) plus Shannon-entropy scoring for generics, with a doc-placeholder recognizer to cut false positives. Classifies each hit `RealCredential` (blocks apply at `security.level = high`), `Ambiguous` (warns), or `DocExample` (informational). This is a **last-line-of-defense scanner catching secrets that already leaked into a diff/artifact before a human sees it** — not a preventive control on what an agent can access mid-goal.
+
+### 5.8 Bottom line
+
+No biscuit tokens; no cryptographically-enforced least privilege today. The actual chain is: plaintext-JSON local vault → plaintext env-var injection into the agent's process → policy cascade deciding whether an *action* needs approval (not whether a credential is reachable) → post-hoc MCP-call capture for human review → regex/entropy scan of diffs before apply. The vault's capability-token primitives (scoped, expiring, revocable) exist and are a natural on-ramp to real least-privilege enforcement, but are unwired end-to-end today. The two highest-leverage gaps if/when this becomes a priority: §5.2 (`ScopedCredential.scopes` declared but not enforced) and §5.6 (swarm fan-out has zero credential isolation).
+
+---
+
+## 6. Where to Go Next
+
+- **The agent credential & authorization model** (§5 above): what actually gates secret access today, and the two open gaps (unenforced credential scopes, no swarm fan-out isolation).
 - **The action/graph vocabulary** (Write/Review/Decision/Commit/Reject, Consensus, HumanGate, Invoke/Switch/Parallel, Audit/Meter): [`ta-action-reference.md`](../design/ta-action-reference.md).
 - **The wire-format schemas**: [`ta-data-format-spec.md`](../design/ta-data-format-spec.md).
 - **The CLI surface built on top of all of this** (10-verb human-facing layer vs. full automation-facing surface): [`ta-cli-verb-reference.md`](../design/ta-cli-verb-reference.md) and, for how each persona actually uses it, [`ta-user-personas.md`](../design/ta-user-personas.md).
