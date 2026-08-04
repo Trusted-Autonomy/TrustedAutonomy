@@ -6392,7 +6392,7 @@ fn check_drift(workspace_root: &std::path::Path, threshold: u32) -> Result<(), V
 /// Key used for cycle detection: (phase_id, action_kind).
 type VisitedKey = (String, String);
 
-/// Outcome of polling `.ta/drafts/` for a phase's draft package.
+/// Outcome of polling `.ta/pr_packages/` for a phase's draft package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftPollOutcome {
     /// A draft matching the phase is awaiting review — proceed with agent review.
@@ -6406,7 +6406,7 @@ pub enum DraftPollOutcome {
     TimedOut,
 }
 
-/// Poll `.ta/drafts/` for a package whose `plan_phase` matches `phase_id`.
+/// Poll `.ta/pr_packages/` for a package whose `plan_phase` matches `phase_id`.
 ///
 /// Detects not just `PendingReview` but any terminal state the draft may have reached
 /// out-of-band (e.g. a human ran `ta draft apply` or `ta draft deny` while this loop
@@ -6425,7 +6425,7 @@ fn poll_for_phase_draft(
     use ta_changeset::draft_package::{DraftPackage, DraftStatus};
     const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
-    let drafts_dir = workspace_root.join(".ta").join("drafts");
+    let drafts_dir = workspace_root.join(".ta").join("pr_packages");
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout_secs);
     let mut last_heartbeat = start;
@@ -12540,8 +12540,11 @@ More content here that is part of a second paragraph.
             "status": status,
             "plan_phase": phase_id
         });
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
-        let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+        // Real draft storage is `.ta/pr_packages/` (see `ta-mcp-gateway::config::pr_packages_dir`,
+        // `apps/ta-cli/src/commands/draft.rs::save_package`) — this fixture must match, or these
+        // tests validate `poll_for_phase_draft` against a path production code never reads from.
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
+        let pkg_path = root.join(format!(".ta/pr_packages/{}.json", pkg_id));
         std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
     }
 
@@ -12672,7 +12675,7 @@ More content here that is part of a second paragraph.
         let root = dir.path();
 
         // Create minimal directory structure.
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
         std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
 
         // Write a minimal PLAN.md with two pending phases.
@@ -12732,14 +12735,13 @@ More content here that is part of a second paragraph.
                 "status": {"status": "pending_review"},
                 "plan_phase": phase_id
             });
-            let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+            let pkg_path = root.join(format!(".ta/pr_packages/{}.json", pkg_id));
             std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
         }
 
-        // Build a minimal GatewayConfig pointing at temp dir.
-        // The drafts dir is .ta/drafts (where we wrote the seed files).
-        let mut config = GatewayConfig::for_project(root);
-        config.pr_packages_dir = root.join(".ta/drafts");
+        // Build a minimal GatewayConfig pointing at temp dir. GatewayConfig::for_project's
+        // default pr_packages_dir already points at .ta/pr_packages, matching the seed dir above.
+        let config = GatewayConfig::for_project(root);
 
         // Run autonomous loop in dry-run mode with mock advisor = applied.
         std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
@@ -12830,7 +12832,7 @@ More content here that is part of a second paragraph.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
         std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
 
         let plan_content = r#"# Test Plan
@@ -12882,11 +12884,10 @@ More content here that is part of a second paragraph.
             "status": {"status": "pending_review"},
             "plan_phase": "v0.99.3"
         });
-        let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+        let pkg_path = root.join(format!(".ta/pr_packages/{}.json", pkg_id));
         std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
 
-        let mut config = GatewayConfig::for_project(root);
-        config.pr_packages_dir = root.join(".ta/drafts");
+        let config = GatewayConfig::for_project(root);
 
         std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
         std::env::set_var("TA_TEST_MOCK_ADVISOR", "denied");
@@ -12930,7 +12931,7 @@ More content here that is part of a second paragraph.
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
         std::fs::write(
             root.join("PLAN.md"),
             "# Plan\n### v0.99.10 — Test\n<!-- status: pending -->\n",
@@ -12978,7 +12979,7 @@ More content here that is part of a second paragraph.
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
         std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
 
         let plan_content =
@@ -13030,13 +13031,12 @@ persona = "strict-reviewer"
             "plan_phase": "v0.99.11"
         });
         std::fs::write(
-            root.join(format!(".ta/drafts/{}.json", pkg_id)),
+            root.join(format!(".ta/pr_packages/{}.json", pkg_id)),
             serde_json::to_string_pretty(&pkg_json).unwrap(),
         )
         .unwrap();
 
-        let mut config = GatewayConfig::for_project(root);
-        config.pr_packages_dir = root.join(".ta/drafts");
+        let config = GatewayConfig::for_project(root);
 
         std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
         std::env::set_var("TA_TEST_MOCK_ADVISOR", "applied");
@@ -13079,7 +13079,7 @@ persona = "strict-reviewer"
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/pr_packages")).unwrap();
         std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
 
         let plan_content =
@@ -13119,13 +13119,12 @@ persona = "strict-reviewer"
             "plan_phase": "v0.99.12"
         });
         std::fs::write(
-            root.join(format!(".ta/drafts/{}.json", pkg_id)),
+            root.join(format!(".ta/pr_packages/{}.json", pkg_id)),
             serde_json::to_string_pretty(&pkg_json).unwrap(),
         )
         .unwrap();
 
-        let mut config = GatewayConfig::for_project(root);
-        config.pr_packages_dir = root.join(".ta/drafts");
+        let config = GatewayConfig::for_project(root);
 
         std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
         std::env::set_var("TA_TEST_MOCK_ADVISOR", "applied");
