@@ -455,7 +455,7 @@ fn check_draft_terminal(draft_file: &Path, draft_id: Uuid) -> Option<AdvisorOutc
 
 /// Poll the draft status until it reaches a terminal state (Applied or Denied).
 ///
-/// Preferred path: watches `.ta/drafts/<id>.json` with `notify` for modify/create
+/// Preferred path: watches `.ta/pr_packages/<id>.json` with `notify` for modify/create
 /// events — no spin-sleep. Falls back to `poll_interval` (min 500 ms) sleep-polling
 /// when a file watcher cannot be established.
 pub fn poll_draft_outcome(
@@ -464,7 +464,7 @@ pub fn poll_draft_outcome(
     timeout: Duration,
     poll_interval: Duration,
 ) -> AdvisorOutcome {
-    let drafts_dir = workspace_root.join(".ta").join("drafts");
+    let drafts_dir = workspace_root.join(".ta").join("pr_packages");
     let draft_file = drafts_dir.join(format!("{}.json", draft_id));
     let deadline = Instant::now() + timeout;
 
@@ -908,7 +908,7 @@ mod tests {
     fn poll_draft_outcome_applied_status() {
         let tmp = TempDir::new().unwrap();
         let draft_id = Uuid::new_v4();
-        let drafts_dir = tmp.path().join(".ta/drafts");
+        let drafts_dir = tmp.path().join(".ta/pr_packages");
         std::fs::create_dir_all(&drafts_dir).unwrap();
         let draft_file = drafts_dir.join(format!("{}.json", draft_id));
         // Write a draft JSON with "applied" status.
@@ -930,7 +930,7 @@ mod tests {
     fn poll_draft_outcome_denied_status() {
         let tmp = TempDir::new().unwrap();
         let draft_id = Uuid::new_v4();
-        let drafts_dir = tmp.path().join(".ta/drafts");
+        let drafts_dir = tmp.path().join(".ta/pr_packages");
         std::fs::create_dir_all(&drafts_dir).unwrap();
         let draft_file = drafts_dir.join(format!("{}.json", draft_id));
         std::fs::write(
