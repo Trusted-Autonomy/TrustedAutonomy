@@ -156,9 +156,11 @@ trait SubmitAdapter: Send + Sync {
 
 **Trait**: `CredentialVault` (defined in `ta-credentials`)
 
-**Built-in**: `FileVault` (JSON file with restrictive permissions).
+**Built-in**: `FileVault` (plaintext JSON, `chmod 0600` on Unix; no at-rest encryption, no Windows-equivalent permission restriction, no keychain integration).
 
 **How to add a provider**: Implement `CredentialVault` for your secret store (HashiCorp Vault, AWS Secrets Manager, 1Password CLI).
+
+**Known gap — read before assuming this is a least-privilege boundary**: `CredentialVault` defines real scoped/expiring token primitives (`issue_token`/`validate_token`), but nothing outside `ta-credentials`'s own tests calls them — the actual runtime delivery path (`ta-runtime::ScopedCredential`) injects the raw secret as a plaintext env var into the agent process, and its `scopes` field is not enforced by the policy layer. See [`ta-architecture-reference.md` §5](architecture/ta-architecture-reference.md#5-agent-credential--authorization-model-current-state) for the full current-state breakdown, including the swarm fan-out gap (no per-sub-goal credential isolation).
 
 ---
 
