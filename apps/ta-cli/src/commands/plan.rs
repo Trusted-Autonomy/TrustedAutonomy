@@ -7528,7 +7528,7 @@ fn plan_build_autonomous(
 /// Try to find the PR number for a phase from the applied draft's VCS tracking metadata.
 fn find_pr_for_phase(workspace: &std::path::Path, phase_id: &str) -> Option<u64> {
     use ta_changeset::draft_package::{DraftPackage, DraftStatus};
-    let drafts_dir = workspace.join(".ta").join("drafts");
+    let drafts_dir = workspace.join(".ta").join("pr_packages");
     if !drafts_dir.is_dir() {
         return None;
     }
