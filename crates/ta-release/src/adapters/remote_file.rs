@@ -439,10 +439,11 @@ mod tests {
         assert_eq!(manifest.checksums[0].0, "asset.txt");
         assert!(!manifest.checksums[0].1.is_empty());
 
-        assert_eq!(
-            release_ref.external_id,
-            manifest_path.to_string_lossy().to_string()
-        );
+        // external_id is a URL-style, forward-slash-joined string shared across the
+        // file/s3/sftp transports (correct even on Windows for s3://,sftp://, and
+        // functionally equivalent for file://) -- compare as a Path, not raw strings,
+        // so this doesn't fail on Windows where PathBuf::join uses '\' natively.
+        assert_eq!(Path::new(&release_ref.external_id), manifest_path.as_path());
     }
 
     #[test]
