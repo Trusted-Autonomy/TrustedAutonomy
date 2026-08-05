@@ -9942,7 +9942,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4 — Extended Adapters (YouTube, Steam, Homebrew)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Implement the content-delivery and distribution adapters identified in the v0.17.0 design review. Enables content creators to release video outputs to YouTube and game studios to push to Steam — all through the same `ta release run` command.
 
 **Depends on**: v0.17.3 (core adapter trait + `ta release run`)
