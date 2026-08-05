@@ -5220,7 +5220,11 @@ steps:
             temp.path().join(".release.toml"),
             format!(
                 "[release]\npublish_url = \"file://{}\"\n",
-                temp.path().join("out").display()
+                temp.path()
+                    .join("out")
+                    .display()
+                    .to_string()
+                    .replace('\\', "/")
             ),
         )
         .unwrap();
@@ -5286,7 +5290,7 @@ steps:
             temp.path().join(".release.toml"),
             format!(
                 "[release]\npublish_url = \"file://{}\"\ndefault_channel = \"stable\"\n",
-                out_dir.display()
+                out_dir.display().to_string().replace('\\', "/")
             ),
         )
         .unwrap();
@@ -5315,7 +5319,7 @@ steps:
             temp.path().join(".release.toml"),
             format!(
                 "[release]\npublish_url = \"file://{}\"\n",
-                out_dir.display()
+                out_dir.display().to_string().replace('\\', "/")
             ),
         )
         .unwrap();
@@ -5338,7 +5342,7 @@ steps:
             temp.path().join(".release.toml"),
             format!(
                 "[release]\npublish_url = \"file://{}\"\n",
-                out_dir.display()
+                out_dir.display().to_string().replace('\\', "/")
             ),
         )
         .unwrap();
