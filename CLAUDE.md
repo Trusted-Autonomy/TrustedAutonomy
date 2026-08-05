@@ -94,7 +94,7 @@ All outcomes must be **observable** (with details and logging) and **actionable*
 
 ## Current State
 
-**Current version**: `0.17.2-alpha`
+**Current version**: `0.17.3-alpha`
 - See **PLAN.md** for the canonical development roadmap with per-phase status
 - `ta plan list` / `ta plan status` show current progress
 - Goals can link to plan phases: `ta run "title" --phase 4b`
@@ -178,4 +178,3 @@ git push
 - **GoalRunState**: Created → Configured → Running → PrReady → UnderReview → Approved → Applied → Completed
 - **GoalRun.plan_phase**: Optional link to a PLAN.md phase (e.g., "4b")
 - **CLAUDE.md injection**: `ta run` prepends TA context + plan progress, saves backup, restores before diff
-
