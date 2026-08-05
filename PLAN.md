@@ -9901,6 +9901,7 @@ Code releases use semver. Content releases don't. Decide:
 ### v0.17.3 — `ta release` Core + Built-in Adapters
 <!-- status: done -->
 
+**Resolved**: Implemented via PR #567 (goal `81e89b3c`). New `ta-release` workspace crate: `ReleaseAdapter` trait (object-safe, `prepare`/`publish`/`promote`/`status`/`list`), `GitHubReleaseAdapter` (draft-first publish via an injectable `gh` runner) and `RemoteFileReleaseAdapter` (`file://`/`s3://`/`sftp://` via an injectable transport, writes a checksummed `manifest.json`), a URL-scheme/`--adapter`-override registry (`resolve()`), and `ReleaseAdapterConfig` parsed from `.release.toml`. `ta release` gained `promote`/`status`/`list`/`adapters` subcommands; the existing default pipeline is unmodified — publish-via-adapter ships as a new opt-in `publish:` pipeline step (`PublishStepConfig`) rather than replacing the production-critical inline tag/push/dispatch flow, per the signed-off v0.17.2 design doc's migration philosophy. Steam/App Store adapters deferred to v0.17.4 as external plugins (proprietary SDKs, can't vendor in-tree), also per the design doc. 44+ new unit tests. `ta release dispatch` deprecated with a warning, kept as an alias.
 
 1. [x] **`ReleaseAdapter` trait** in `crates/ta-release/src/adapter.rs`: `prepare`, `publish`, `promote`, `status` methods as designed in v0.17.0. URL-scheme registry for adapter discovery.
 

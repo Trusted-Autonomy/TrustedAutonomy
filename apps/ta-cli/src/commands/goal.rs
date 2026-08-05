@@ -1261,6 +1261,16 @@ fn goal_recover(
             1 => {
                 println!();
                 println!("Rebuilding draft from staging...");
+                // `ta draft build` requires the goal to be Running or Finalizing (see
+                // draft.rs's state guard). A goal reaching this recovery path is
+                // typically Failed (e.g. the watchdog transitioned it after the agent
+                // process died) — force it back to Running first, bypassing the normal
+                // state machine, same as the has_valid_draft branch's direct state write.
+                if let Ok(Some(mut g)) = store.get(target.goal_run_id) {
+                    g.state = GoalRunState::Running;
+                    g.updated_at = chrono::Utc::now();
+                    store.save(&g)?;
+                }
                 super::draft::execute(
                     &super::draft::DraftCommands::Build {
                         goal_id: target.goal_run_id.to_string(),
