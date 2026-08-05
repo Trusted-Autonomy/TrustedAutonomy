@@ -9942,21 +9942,21 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4 — Extended Adapters (YouTube, Steam, Homebrew)
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Goal**: Implement the content-delivery and distribution adapters identified in the v0.17.0 design review. Enables content creators to release video outputs to YouTube and game studios to push to Steam — all through the same `ta release run` command.
 
 **Depends on**: v0.17.3 (core adapter trait + `ta release run`)
 
 
-1. [ ] **`YouTubeReleaseAdapter`**: YouTube Data API v3. Uploads video artifact from staging, sets title/description from release notes, maps channel → visibility (`nightly` = unlisted, `stable` = public, `draft` = private). Config: `youtube://channel/<channel-id>` in `publish_url`.
+1. [x] **`YouTubeReleaseAdapter`**: YouTube Data API v3. Uploads video artifact from staging, sets title/description from release notes, maps channel → visibility (`nightly` = unlisted, `stable` = public, `draft` = private). Config: `youtube://channel/<channel-id>` in `publish_url`.
 
-2. [ ] **Homebrew tap auto-update**: On `GitHubReleaseAdapter` stable publish, open a PR in the configured `homebrew-tap` repo updating formula version + SHA-256. Replaces the manual v0.17.1 Homebrew step (absorbs old v0.17.1 Homebrew Tap phase).
+2. [x] **Homebrew tap auto-update**: On `GitHubReleaseAdapter` stable publish, open a PR in the configured `homebrew-tap` repo updating formula version + SHA-256. Replaces the manual v0.17.1 Homebrew step (absorbs old v0.17.1 Homebrew Tap phase).
 
-3. [ ] **Adapter plugin protocol**: Third-party adapters via external process (JSON-over-stdio, same pattern as VCS plugins). Enables custom adapters (`AppStoreReleaseAdapter`, `ItchIoReleaseAdapter`, etc.) without modifying TA core.
+3. [x] **Adapter plugin protocol**: Third-party adapters via external process (JSON-over-stdio, same pattern as VCS plugins). Enables custom adapters (`AppStoreReleaseAdapter`, `ItchIoReleaseAdapter`, etc.) without modifying TA core.
 
-4. [ ] **Tests**: YouTube upload stub. Steam steamcmd mock. Homebrew PR open. Plugin adapter round-trip.
+4. [x] **Tests**: YouTube upload stub. Steam steamcmd mock. Homebrew PR open. Plugin adapter round-trip.
 
-5. [ ] **USAGE.md**: Adapter sections for YouTube, Steam, Homebrew. Plugin adapter authoring guide.
+5. [x] **USAGE.md**: Adapter sections for YouTube, Steam, Homebrew. Plugin adapter authoring guide.
 
 ---
 ### v0.17.5 — Autonomous Team Systems: Persistent Execution + Budget Guardrails + Pluggable Domain Adapters
