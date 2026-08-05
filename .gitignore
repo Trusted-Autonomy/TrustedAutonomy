@@ -77,6 +77,7 @@ result-*
 .ta/workflow-runs/
 .ta/review/
 .ta/advisor-notes/
+.ta/advisor/
 
 # Ephemeral staging-root artifacts — written by agent during goal run, scoped to that run
 # These must NOT be applied back to source (v0.15.14.7 enforces this in the overlay)
