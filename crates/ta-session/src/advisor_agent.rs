@@ -360,6 +360,17 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
         "--no-version-check",
         "--persona",
         persona,
+        // Without this, the advisor's own `ta run` has no explicit --phase, so
+        // auto_detect_phase() falls through to "exactly one phase in_progress"
+        // and tries to claim the SAME phase the draft's implementer goal already
+        // claimed -- a guaranteed "could not be claimed: already in progress"
+        // fatal error on every autonomous-loop review. --follow-up-draft resolves
+        // the phase from the draft (which already correctly identifies it) and
+        // is the one thing in run.rs that suppresses the re-claim attempt
+        // (`if follow_up.is_none() { ...claim... }`), without changing the goal
+        // title we already set above or reusing the implementer's staging.
+        "--follow-up-draft",
+        &config.draft_id.to_string(),
     ]);
     cmd.env("TA_ADVISOR_DRAFT_ID", config.draft_id.to_string());
     // Also set the env var for any future consumer that reads it directly --
