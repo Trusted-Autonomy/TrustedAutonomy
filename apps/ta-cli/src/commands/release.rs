@@ -397,7 +397,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             limit,
             adapter,
         } => list_releases(config, channel.as_deref(), *limit, adapter.as_deref()),
-        ReleaseCommands::Adapters => list_adapters(),
+        ReleaseCommands::Adapters => list_adapters(config),
     }
 }
 
@@ -2237,6 +2237,7 @@ fn execute_publish_step(
         adapter_name,
         release_cfg.publish_url.as_deref(),
         has_remote,
+        root,
     )
     .map_err(|e| {
         anyhow::anyhow!(
@@ -2296,7 +2297,78 @@ fn execute_publish_step(
             .map(|u| format!(" ({u})"))
             .unwrap_or_default()
     );
+
+    maybe_update_homebrew_tap(
+        root,
+        &release_cfg,
+        &channel_str,
+        &release_ref.adapter,
+        version,
+        &assets,
+    );
+
     Ok(())
+}
+
+/// After a stable GitHub publish, open a Homebrew tap PR if `[release.homebrew]` is
+/// configured (PLAN.md v0.17.4 item 2). Non-fatal: a tap-update failure doesn't fail the
+/// release itself — the GitHub release already published successfully — it's printed as
+/// an actionable warning instead, per the Observability Mandate.
+fn maybe_update_homebrew_tap(
+    root: &Path,
+    release_cfg: &ta_release::ReleaseAdapterConfig,
+    channel_str: &str,
+    adapter_name: &str,
+    version: &str,
+    assets: &[ta_release::ReleaseAsset],
+) {
+    if adapter_name != "github" || channel_str != "stable" {
+        return;
+    }
+    let Some(homebrew_cfg) = release_cfg.homebrew.as_ref() else {
+        return;
+    };
+    let Some(asset) = assets.first() else {
+        eprintln!("[homebrew] Skipping tap update — publish step has no assets to checksum.");
+        return;
+    };
+    let sha256 = match std::fs::read(&asset.path) {
+        Ok(bytes) => {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))
+        }
+        Err(e) => {
+            eprintln!(
+                "[homebrew] Skipping tap update — failed to read asset '{}' for checksum: {}",
+                asset.path.display(),
+                e
+            );
+            return;
+        }
+    };
+    let old_version = load_release_history(root)
+        .last()
+        .map(|r| r.version.clone())
+        .unwrap_or_default();
+
+    let updater = ta_release::HomebrewTapUpdater::default();
+    match updater.update_formula(homebrew_cfg, &old_version, version, &sha256) {
+        Ok(pr) => {
+            println!(
+                "  Homebrew tap updated: {}{}",
+                pr.branch,
+                pr.url.map(|u| format!(" ({u})")).unwrap_or_default()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[homebrew] Tap update failed (non-fatal — the GitHub release itself succeeded): {}.\n\
+                 Manually bump '{}' in '{}', or re-run `ta release run {} --channel stable` \
+                 once the issue is fixed.",
+                e, homebrew_cfg.formula_path, homebrew_cfg.tap_repo, version
+            );
+        }
+    }
 }
 
 fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_tag: Option<&str>) {
@@ -3820,6 +3892,7 @@ fn resolve_release_adapter(
         adapter_override,
         release_cfg.publish_url.as_deref(),
         has_remote,
+        root,
     )
     .map_err(|e| {
         anyhow::anyhow!(
@@ -3991,14 +4064,31 @@ fn list_releases(
 }
 
 /// `ta release adapters` — list built-in adapters and the `publish_url` schemes
-/// they claim. Diagnostic: "why did s3://... resolve to X".
-fn list_adapters() -> anyhow::Result<()> {
+/// they claim, plus discovered plugin adapters (v0.17.4 item 3). Diagnostic: "why did
+/// s3://... resolve to X".
+fn list_adapters(config: &GatewayConfig) -> anyhow::Result<()> {
     println!("Built-in release adapters:");
     for (name, schemes) in ta_release::registry::builtin_adapters() {
         println!("  {} — {}", name, schemes.join(", "));
     }
+
+    let plugins = ta_plugin::discovery::discover_plugins("release", &config.workspace_root);
     println!();
-    println!("Third-party plugin adapters are not yet supported (planned v0.17.4).");
+    if plugins.is_empty() {
+        println!(
+            "No plugin release adapters found in .ta/plugins/release/ or \
+             ~/.config/ta/plugins/release/. See docs/community-release-plugin.md to author one \
+             (e.g. for steam:// or an App Store target)."
+        );
+    } else {
+        println!("Plugin release adapters:");
+        for plugin in plugins {
+            println!(
+                "  {} ({}) — {}",
+                plugin.manifest.name, plugin.source, plugin.manifest.command
+            );
+        }
+    }
     Ok(())
 }
 
@@ -5209,7 +5299,28 @@ steps:
 
     #[test]
     fn list_adapters_runs_without_error() {
-        list_adapters().unwrap();
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        list_adapters(&config).unwrap();
+    }
+
+    #[test]
+    fn list_adapters_reports_discovered_plugin() {
+        let temp = TempDir::new().unwrap();
+        let plugin_dir = temp
+            .path()
+            .join(".ta")
+            .join("plugins")
+            .join("release")
+            .join("steam");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            "name = \"steam\"\ntype = \"release\"\ncommand = \"ta-release-steam\"\n",
+        )
+        .unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        list_adapters(&config).unwrap();
     }
 
     #[test]

@@ -1902,6 +1902,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2791,6 +2801,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -3470,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "ta-actions"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3484,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "ta-advisor"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3499,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "ta-agent-ollama"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -3514,7 +3525,7 @@ dependencies = [
 
 [[package]]
 name = "ta-audit"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3530,7 +3541,7 @@ dependencies = [
 
 [[package]]
 name = "ta-brain"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "schemars",
@@ -3550,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "ta-build"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3562,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "ta-changeset"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3583,7 +3594,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3642,7 +3653,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-comfyui"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -3657,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-discord"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3671,7 +3682,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-email"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3685,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-fs"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3702,7 +3713,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-drive"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3711,7 +3722,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-gmail"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3720,7 +3731,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-slack"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3734,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unity"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "serde",
@@ -3747,7 +3758,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unreal"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "serde",
@@ -3761,7 +3772,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-web"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3770,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "ta-credentials"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3784,7 +3795,7 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3834,7 +3845,7 @@ dependencies = [
 
 [[package]]
 name = "ta-data-spec"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "schemars",
  "serde_json",
@@ -3846,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-overlay"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3860,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-proxy"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3878,7 +3889,7 @@ dependencies = [
 
 [[package]]
 name = "ta-decision"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3889,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "ta-events"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3907,7 +3918,7 @@ dependencies = [
 
 [[package]]
 name = "ta-extension"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3924,7 +3935,7 @@ dependencies = [
 
 [[package]]
 name = "ta-goal"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3941,7 +3952,7 @@ dependencies = [
 
 [[package]]
 name = "ta-governed-paths"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3955,7 +3966,7 @@ dependencies = [
 
 [[package]]
 name = "ta-init"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3968,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "ta-intake"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "regex",
@@ -3986,7 +3997,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mcp-gateway"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "regex",
@@ -4022,7 +4033,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mediation"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -4037,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -4055,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "ta-output-schema"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -4067,7 +4078,7 @@ dependencies = [
 
 [[package]]
 name = "ta-plugin"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "libc",
  "serde",
@@ -4081,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "ta-policy"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -4096,11 +4107,14 @@ dependencies = [
 
 [[package]]
 name = "ta-release"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
+ "base64 0.22.1",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
+ "ta-plugin",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
@@ -4109,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "ta-runtime"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4131,7 +4145,7 @@ dependencies = [
 
 [[package]]
 name = "ta-sandbox"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -4144,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "ta-session"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "libc",
@@ -4164,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "ta-submit"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "chrono",
  "libc",
@@ -4184,7 +4198,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workflow"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4203,7 +4217,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workspace"
-version = "0.17.3-alpha"
+version = "0.17.4-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4607,6 +4621,12 @@ name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"

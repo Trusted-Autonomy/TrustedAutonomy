@@ -42,6 +42,12 @@ impl GhRunner for RealGhRunner {
     }
 }
 
+/// A real `gh`-backed `GhRunner`, exposed for reuse by other `gh`-CLI-based helpers that
+/// aren't themselves a `ReleaseAdapter` (e.g. `adapters::homebrew::HomebrewTapUpdater`).
+pub fn default_gh_runner() -> Box<dyn GhRunner> {
+    Box::new(RealGhRunner)
+}
+
 pub struct GitHubReleaseAdapter {
     runner: Box<dyn GhRunner>,
 }
