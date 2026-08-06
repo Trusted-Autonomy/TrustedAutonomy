@@ -6826,7 +6826,7 @@ gh run list --repo Trusted-Autonomy/TrustedAutonomy --workflow release.yml
 
 #### Release Adapters — Channels, Promote, Status, and Publish Targets
 
-Publishing is pluggable via the `ReleaseAdapter` trait (`crates/ta-release`): built-in `github` and `remote-file` (`s3://`, `sftp://`, `file://`) adapters today, with third-party plugin adapters and content/game-platform adapters (YouTube, Steam) planned for a later phase. Design reference: `docs/release-design.md`.
+Publishing is pluggable via the `ReleaseAdapter` trait (`crates/ta-release`): built-in `github`, `remote-file` (`s3://`, `sftp://`, `file://`), and `youtube` (`youtube://channel/<id>`) adapters, plus third-party plugin adapters (Steam, App Store, or anything else) discovered from `.ta/plugins/release/`. Design reference: `docs/release-design.md`.
 
 **Channel model** — one of `draft`, `rc`, `stable`, `lts`, or an adapter-specific custom name (e.g. `nightly` for GitHub):
 
@@ -6855,6 +6855,38 @@ version_files = ["Cargo.toml"]            # empty/omitted for non-semver (conten
 ```
 
 With no `[release]` section at all, `ta release run`/`promote`/`status` resolve to `GitHubReleaseAdapter` as long as a git remote is configured — the zero-config path behaves exactly as before. `RemoteFileReleaseAdapter` doesn't require a semver version — content pipelines can pass an arbitrary label (e.g. `ta release run episode-3 --channel draft`) instead of a version number.
+
+**Publishing a video to YouTube** — content pipelines set `publish_url` to `youtube://channel/<channel-id>` and pass a project-internal label instead of a semver version. Visibility is derived from the channel: `draft` → private, `rc`/`nightly` → unlisted, `stable`/`lts` → public. Title comes from `version_or_label`, description from the release notes/commit log. Set `YOUTUBE_OAUTH_TOKEN` (an OAuth 2.0 access token with the `youtube.upload` scope) in the environment before running:
+
+```toml
+# .release.toml
+[release]
+publish_url = "youtube://channel/UCxxxxxxxxxxxxxxxxxxxxxx"
+default_channel = "draft"
+```
+
+```bash
+YOUTUBE_OAUTH_TOKEN=ya29.xxxx ta release run episode-3 --channel stable
+```
+
+**Homebrew tap auto-update** — when `[release.homebrew]` is configured, a `github` adapter publish to the `stable` channel automatically opens a PR in the tap repo bumping the formula's `version` and `sha256` (computed from the first published asset). This replaces the old manual Homebrew Tap step and needs no local clone — every step goes through `gh api`. A tap-update failure is non-fatal and prints an actionable warning; the GitHub release itself has already succeeded by that point.
+
+```toml
+# .release.toml
+[release.homebrew]
+tap_repo = "trustedautonomy/homebrew-tap"
+formula_path = "Formula/ta.rb"
+# base_branch = "main"   # optional, defaults to "main"
+```
+
+**Third-party publish targets via plugins** — an unrecognized `publish_url` scheme (or `--adapter <name>`) is looked up as a plugin name in `.ta/plugins/release/<name>/` (project-local) or `~/.config/ta/plugins/release/<name>/` (user-global), the same JSON-over-stdio pattern VCS/messaging/social/db plugins use. Steam and App Store publishing ship this way rather than as built-in Rust adapters — both require a proprietary, licensed SDK TA's own binary can't vendor. See `docs/community-release-plugin.md` for the full wire protocol and a worked example authoring a `steam://` adapter.
+
+```toml
+# .release.toml — resolves to a plugin named "steam" in .ta/plugins/release/steam/
+[release]
+publish_url = "steam://app/12345"
+default_channel = "beta"
+```
 
 **Opting a pipeline into adapter-based publish** — add a `publish:` step as the pipeline's last step in `.ta/release.yaml` (this replaces the implicit tag-push-GitHub-Actions ending with an explicit `ReleaseAdapter::publish()` call; nothing existing is removed, this is additive):
 

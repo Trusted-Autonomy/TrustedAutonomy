@@ -15,7 +15,10 @@ pub use adapter::{
     Channel, PreparedRelease, ReleaseAdapter, ReleaseAsset, ReleaseCapabilities, ReleaseContext,
     ReleaseRef, ReleaseStatus,
 };
-pub use adapters::{GitHubReleaseAdapter, RemoteFileReleaseAdapter};
-pub use config::ReleaseAdapterConfig;
+pub use adapters::{
+    GitHubReleaseAdapter, HomebrewTapPr, HomebrewTapUpdater, PluginReleaseAdapter,
+    RemoteFileReleaseAdapter, YouTubeReleaseAdapter,
+};
+pub use config::{HomebrewTapConfig, ReleaseAdapterConfig};
 pub use error::{ReleaseError, Result};
 pub use registry::resolve as resolve_adapter;
