@@ -131,6 +131,19 @@ impl AdvisorConfig {
 pub fn build_advisor_context(config: &AdvisorConfig) -> String {
     let mut ctx = String::new();
 
+    // `ta_ask_human` always blocks; `ta_human_verify` (v0.17.0.12.26) is the
+    // confidence-gated replacement -- a high-confidence/low-risk synthetic
+    // review auto-confirms without blocking, anything uncertain still
+    // escalates to a real human question. Only `AdvisorSecurity::Auto` can
+    // ever take the auto-confirm path, so only its instructions need to
+    // name the confidence-gated tool (v0.17.4.1 item 1); other tiers never
+    // reach that fast path and keep the plain blocking tool name.
+    let verify_tool = if config.security == AdvisorSecurity::Auto {
+        "ta_human_verify"
+    } else {
+        "ta_ask_human"
+    };
+
     ctx.push_str("# Advisor Context\n\n");
     ctx.push_str(&format!(
         "You are the **advisor** for session item: **{}**\n\n",
@@ -171,7 +184,10 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
             ctx.push_str(
                 "Security level: **auto**\n\
                  - At ≥80% intent confidence, you may fire `ta run` directly.\n\
-                 - You MUST call `ta_ask_human` first to confirm before applying.\n\
+                 - You MUST call `ta_human_verify` first to confirm before applying. It is \
+                 confidence-gated: a high-confidence/low-risk synthetic review auto-confirms \
+                 without blocking; anything uncertain escalates to a real human question with \
+                 a bounded timeout instead of waiting forever.\n\
                  - Use `classify_intent()` to assess confidence before acting autonomously.\n\n",
             );
         }
@@ -199,11 +215,11 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
 
     // Conversation protocol — varies depending on whether draft summary is pre-loaded.
     if config.draft_summary.is_some() {
-        ctx.push_str(
+        ctx.push_str(&format!(
             "## Conversation Protocol\n\n\
              The draft summary is pre-loaded above. You can begin presenting to the human immediately.\n\
              1. Present: what changed, key decisions, any risks flagged, questions for the human.\n\
-             2. Call `ta_ask_human(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
+             2. Call `{verify_tool}(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
                 — use `response_hint: freeform`.\n\
              3. Interpret the human's response:\n\
                 - \"apply\" / \"looks good\" → call `ta draft approve`, then `ta draft apply`, then exit.\n\
@@ -212,13 +228,13 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
                 - A question → answer from the decision log and `ta_fs_read`, then loop back to step 1.\n\
              4. Never apply without explicit human approval (unless security = auto and confidence ≥ 80%).\n\
              5. For full file diffs, use `ta_draft_view` or `ta_fs_read` as needed.\n"
-        );
+        ));
     } else {
-        ctx.push_str(
+        ctx.push_str(&format!(
             "## Conversation Protocol\n\n\
              1. Call `ta_draft_view` to load the draft summary.\n\
              2. Present: what changed, key decisions, any risks flagged, questions for the human.\n\
-             3. Call `ta_ask_human(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
+             3. Call `{verify_tool}(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
                 — use `response_hint: freeform`.\n\
              4. Interpret the human's response:\n\
                 - \"apply\" / \"looks good\" → call `ta draft approve`, then `ta draft apply`, then exit.\n\
@@ -226,7 +242,7 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
                 - A modification request → present the `ta run \"...\"` command (or fire it in auto mode).\n\
                 - A question → answer from the decision log and `ta_fs_read`, then loop back to step 2.\n\
              5. Never apply without explicit human approval (unless security = auto and confidence ≥ 80%).\n"
-        );
+        ));
     }
 
     ctx
@@ -330,15 +346,41 @@ pub fn write_advisor_context(config: &AdvisorConfig) -> std::io::Result<PathBuf>
     Ok(context_path)
 }
 
+/// Workload type tag forced onto the advisor's own spawned goal (v0.17.4.1
+/// item 2). Passing `--workload` gives `ta-brain::route()`'s workload
+/// classification `confidence = 1.0` (explicit, not inferred) so the
+/// `security_tier = "auto"` we also pass explicitly is never downgraded to
+/// `"suggest"` by `route()`'s low-confidence guard
+/// (`AUTO_SECURITY_CONFIDENCE_THRESHOLD` in `ta-brain::route`) -- the exact
+/// disagreement `ta_human_verify::resolve_workload_context` would otherwise
+/// see when it reads back `.ta/routing-decisions.jsonl`. Doubles as a
+/// `.ta/workflow.toml` `[human_verify.advisor-review]` config knob.
+const ADVISOR_WORKLOAD_TYPE: &str = "advisor-review";
+
 /// Spawn an advisor agent for the given session item.
 ///
 /// Launches `ta run --headless` as a subprocess with:
 /// - `--objective-file <path>` pointing at the context markdown (the real
 ///   delivery mechanism -- read directly into the spawned agent's objective)
+/// - `--security <config.security>` / `--workload advisor-review` so
+///   `ta-brain::route()` resolves `security_tier` for this goal to exactly
+///   `config.security` instead of independently reclassifying it (v0.17.4.1
+///   item 2) -- otherwise `ta_human_verify`'s `resolve_workload_context()`
+///   reads back a different tier than the one `build_advisor_context()`
+///   told the advisor it had.
 /// - `TA_ADVISOR_DRAFT_ID=<id>` / `TA_ADVISOR_CONTEXT_FILE=<path>` /
 ///   `TA_ADVISOR_SECURITY`/`TA_ADVISOR_SESSION_ID`/`TA_ADVISOR_ITEM_ID`
 ///   environment variables, for any future consumer that reads them directly
 /// - `--persona advisor` (or the configured persona)
+///
+/// The subprocess wait is bounded by `config.timeout` (v0.17.4.1 item 3):
+/// previously this used `Command::output()`, which blocks indefinitely --
+/// a stuck advisor session (e.g. looping on an unanswered confirmation
+/// question) hung the calling `ta plan build --autonomous` process forever
+/// with no timeout, no escalate message, and no crash report. On timeout the
+/// child is killed and this returns a descriptive `Err`, which callers
+/// (`plan_build_autonomous`, `ta session run`) already route through
+/// `AdvisorOutcome::SpawnFailed` to a real `[escalate]`/error path.
 ///
 /// Returns the advisor goal run ID extracted from stdout.
 pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid, String> {
@@ -347,6 +389,7 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
 
     let persona = config.persona.as_deref().unwrap_or("advisor");
     let goal_title = format!("Advisor: review session item '{}'", config.item_title);
+    let security_arg = config.security.to_string();
 
     let mut cmd = std::process::Command::new(ta_bin);
     cmd.args([
@@ -371,6 +414,10 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
         // title we already set above or reusing the implementer's staging.
         "--follow-up-draft",
         &config.draft_id.to_string(),
+        "--security",
+        &security_arg,
+        "--workload",
+        ADVISOR_WORKLOAD_TYPE,
     ]);
     cmd.env("TA_ADVISOR_DRAFT_ID", config.draft_id.to_string());
     // Also set the env var for any future consumer that reads it directly --
@@ -388,24 +435,11 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
         draft_id = %config.draft_id,
         item = %config.item_title,
         security = %config.security,
+        timeout_secs = config.timeout.as_secs(),
         "Spawning advisor agent"
     );
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to spawn ta run: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        return Err(format!(
-            "ta run --headless exited {} for advisor goal.\nstdout: {}\nstderr: {}",
-            output.status.code().unwrap_or(-1),
-            stdout.trim(),
-            stderr.trim()
-        ));
-    }
+    let (stdout, stderr) = run_bounded(cmd, config.timeout, "advisor agent")?;
 
     // Extract goal_id from stdout (emitted by ta run on spawn).
     for line in stdout.lines().chain(stderr.lines()) {
@@ -422,6 +456,133 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
         stdout.trim(),
         stderr.trim()
     ))
+}
+
+/// Run `cmd` to completion, bounded by `timeout`. On success returns
+/// captured (stdout, stderr); on a non-zero exit or a timeout, returns a
+/// descriptive `Err` -- never blocks past `timeout` (v0.17.4.1 item 3).
+///
+/// Uses `spawn()` + `try_wait()` polling (not `Command::output()`, which has
+/// no bound) so a hung child can be killed instead of hanging the calling
+/// process forever. Stdout/stderr are drained on dedicated threads while
+/// polling so a chatty child can't deadlock on a full pipe buffer while we
+/// wait.
+fn run_bounded(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+    what: &str,
+) -> Result<(String, String), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Run the child in its own process group (pgid = its own pid) so a
+    // timeout-kill can take down its whole subtree in one signal below.
+    // Without this, killing only the direct child can leave an orphaned
+    // grandchild (anything the child forks, e.g. a nested subprocess it
+    // spawns) holding the stdout/stderr pipes open, which hangs the reader
+    // threads below forever waiting for an EOF that never arrives.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", what, e))?;
+    let pid = child.id();
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_string(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                return Err(format!("Failed to poll {} subprocess status: {}", what, e));
+            }
+        }
+    };
+
+    let Some(status) = exit_status else {
+        tracing::warn!(
+            what = %what,
+            timeout_secs = timeout.as_secs(),
+            "Subprocess exceeded timeout, killing"
+        );
+        let _ = child.kill();
+        kill_process_group(pid);
+        let _ = child.wait();
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default();
+        return Err(format!(
+            "{} timed out after {}s and was killed. Configure a longer \
+             AdvisorConfig::with_timeout() if this legitimately needs more time. \
+             Partial stdout: {}\nPartial stderr: {}",
+            what,
+            timeout.as_secs(),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if !status.success() {
+        return Err(format!(
+            "{} exited {} for advisor goal.\nstdout: {}\nstderr: {}",
+            what,
+            status.code().unwrap_or(-1),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    Ok((stdout, stderr))
+}
+
+/// Signal `pid`'s whole process group (see `process_group(0)` in
+/// `run_bounded`, which makes this child's pgid equal its own pid) --
+/// kills any subprocess it forked too, not just the direct child, so the
+/// stdout/stderr reader threads in `run_bounded` reliably see EOF instead
+/// of hanging on a pipe an orphaned grandchild still holds open.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // A negative pid targets the process group rather than a single pid.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {
+    // No process-group primitive on this target; `child.kill()` (called by
+    // every caller of this function) already handles the direct child.
 }
 
 /// Check a draft file for a terminal status.
@@ -956,5 +1117,116 @@ mod tests {
             Duration::from_millis(10),
         );
         assert_eq!(outcome, AdvisorOutcome::Denied);
+    }
+
+    // ── v0.17.4.1: confidence-gated ta_human_verify migration ─────────────────
+
+    /// Item 1: only `AdvisorSecurity::Auto` can take the synthetic-review
+    /// auto-confirm path, so only its instructions should name the
+    /// confidence-gated tool -- the deprecated blocking name must not
+    /// appear anywhere in the Auto-security context.
+    #[test]
+    fn build_advisor_context_auto_security_uses_ta_human_verify() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp).with_security(AdvisorSecurity::Auto);
+        let ctx = build_advisor_context(&config);
+        assert!(ctx.contains("ta_human_verify"), "got: {}", ctx);
+        assert!(
+            !ctx.contains("ta_ask_human"),
+            "Auto security context must not instruct the deprecated blocking tool: {}",
+            ctx
+        );
+    }
+
+    /// Non-`Auto` tiers never reach the auto-confirm fast path, so their
+    /// instructions correctly keep naming the plain blocking tool.
+    #[test]
+    fn build_advisor_context_non_auto_security_keeps_ta_ask_human() {
+        let tmp = TempDir::new().unwrap();
+        for security in [AdvisorSecurity::ReadOnly, AdvisorSecurity::Suggest] {
+            let config = make_config(&tmp).with_security(security.clone());
+            let ctx = build_advisor_context(&config);
+            assert!(
+                ctx.contains("ta_ask_human"),
+                "security={:?} got: {}",
+                security,
+                ctx
+            );
+            assert!(
+                !ctx.contains("ta_human_verify"),
+                "security={:?} got: {}",
+                security,
+                ctx
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn make_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    /// Item 2: the advisor's own spawned goal must pass `--security` and
+    /// `--workload` so `ta-brain::route()` resolves `security_tier` to
+    /// exactly `config.security` for this goal, instead of independently
+    /// (and possibly disagreeingly) reclassifying it from the goal title.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_advisor_agent_passes_security_and_workload_args() {
+        let tmp = TempDir::new().unwrap();
+        let captured_args_path = tmp.path().join("captured_args.txt");
+        let fake_ta = tmp.path().join("fake_ta.sh");
+        make_executable_script(
+            &fake_ta,
+            &format!(
+                "#!/bin/sh\necho \"$@\" > {}\necho \"goal_id: 00000000-0000-0000-0000-000000000001\"\n",
+                captured_args_path.display()
+            ),
+        );
+
+        let config = make_config(&tmp).with_security(AdvisorSecurity::Auto);
+        let result = spawn_advisor_agent(&config, &fake_ta);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let captured = std::fs::read_to_string(&captured_args_path).unwrap();
+        assert!(captured.contains("--security auto"), "got: {}", captured);
+        assert!(
+            captured.contains("--workload advisor-review"),
+            "got: {}",
+            captured
+        );
+    }
+
+    /// Item 3: a hung advisor subprocess must be killed and reported as a
+    /// real, bounded error -- not block the caller (and therefore the outer
+    /// `ta plan build --autonomous` loop) indefinitely. Before this fix,
+    /// `spawn_advisor_agent` used `Command::output()`, which has no timeout;
+    /// this test's fixture would have hung for the full `sleep 9999`
+    /// (i.e. never, for practical purposes) rather than returning promptly.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_advisor_agent_times_out_and_is_killed_instead_of_hanging() {
+        let tmp = TempDir::new().unwrap();
+        let hang_script = tmp.path().join("hang_ta.sh");
+        make_executable_script(&hang_script, "#!/bin/sh\nsleep 9999\n");
+
+        let config = make_config(&tmp).with_timeout(Duration::from_millis(300));
+
+        let started = Instant::now();
+        let result = spawn_advisor_agent(&config, &hang_script);
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("expected a timeout error, not Ok");
+        assert!(err.contains("timed out"), "got: {}", err);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "spawn_advisor_agent should return promptly after its configured \
+             timeout instead of blocking on the hung child; took {:?}",
+            elapsed
+        );
     }
 }
