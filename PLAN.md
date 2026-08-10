@@ -9962,23 +9962,23 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4.1 — Advisor: Migrate to Confidence-Gated `ta_human_verify` (Fix Autonomous-Loop Hang)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.26 (`ta_human_verify`)
 
 **Why this exists**: found live 2026-08-04/05 getting v0.17.4's own advisor-review draft through review (confirmed by direct code read, not speculation). `build_advisor_context()` (`crates/ta-session/src/advisor_agent.rs`) hardcodes instructions to call the blocking `ta_ask_human` tool in three places (~lines 174, 206, 221), even for `AdvisorSecurity::Auto`. `ta_human_verify` — the two-stage confidence-gated tool (opinion pass + independent validator pass, auto-confirms at high confidence, only truly escalates when uncertain) — was built in v0.17.0.12.26 specifically to solve "how does autonomous/no-human-present mode handle needing confirmation," but the advisor's own prompt-building code was never migrated to use it. Live symptom: the v0.17.4 advisor's own review session was thorough and positive ("solid and complete... any concerns before I approve and apply it?") but ended in a `"state":"finalizing"` limbo asking a question nobody could answer in headless mode — the outer `ta plan build --autonomous` process then died silently (no escalate message, no crash report) rather than handling the hang gracefully. Blocks resuming `ta plan build --autonomous` for v0.17.5+ until fixed.
 
 **Items**:
-1. [ ] For `AdvisorSecurity::Auto` specifically, replace the `ta_ask_human` instructions in `build_advisor_context()` with `ta_human_verify`.
-2. [ ] Verify the advisor's own spawned goal correctly resolves `security_tier=auto` via `ta-brain::route()`'s routing-decision mechanism (`resolve_workload_context` in `crates/ta-mcp-gateway/src/tools/human_verify.rs` reads `.ta/routing-decisions.jsonl`, a separate mechanism from `AdvisorConfig.security`'s env-var plumbing) — confirm these two don't disagree for advisor goals; wire them together if they do.
-3. [ ] Fix the outer autonomous loop's silent-death failure mode: a stuck/timed-out advisor review should produce a real `[escalate]`/error, not a silently-dead process.
-4. [ ] Tests: an `AdvisorSecurity::Auto` advisor session at high confidence auto-confirms via `ta_human_verify` without hanging; a genuinely uncertain case still escalates to a human, visibly (not a silent death).
-5. [ ] USAGE.md: note `ta_human_verify` as the advisor's confirmation path for `Auto` security, alongside the existing `ta_human_verify` docs.
+1. [x] For `AdvisorSecurity::Auto` specifically, replace the `ta_ask_human` instructions in `build_advisor_context()` with `ta_human_verify`.
+2. [x] Verify the advisor's own spawned goal correctly resolves `security_tier=auto` via `ta-brain::route()`'s routing-decision mechanism (`resolve_workload_context` in `crates/ta-mcp-gateway/src/tools/human_verify.rs` reads `.ta/routing-decisions.jsonl`, a separate mechanism from `AdvisorConfig.security`'s env-var plumbing) — confirm these two don't disagree for advisor goals; wire them together if they do.
+3. [x] Fix the outer autonomous loop's silent-death failure mode: a stuck/timed-out advisor review should produce a real `[escalate]`/error, not a silently-dead process.
+4. [x] Tests: an `AdvisorSecurity::Auto` advisor session at high confidence auto-confirms via `ta_human_verify` without hanging; a genuinely uncertain case still escalates to a human, visibly (not a silent death).
+5. [x] USAGE.md: note `ta_human_verify` as the advisor's confirmation path for `Auto` security, alongside the existing `ta_human_verify` docs.
 
 #### Version: `0.17.4-alpha.1`
 
 ---
 ### v0.17.4.2 — Supervisor Review: Fix Unvalidated Fallback File List
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.4.1
 
 **Why this exists**: found live 2026-08-05 via forked investigation of a `[BLOCK]` verdict on v0.17.4's advisor-review draft that described the wrong changeset entirely. Sibling bug to already-fixed v0.17.0.12.33, **not a regression of it**. `collect_changed_files()` (`apps/ta-cli/src/commands/run.rs`) has two paths: its primary path (validate `.ta/change_summary.json` entries against a real staging-vs-source diff via `path_actually_changed()`) is the correct, already-fixed v0.17.0.12.33 behavior. Its **fallback path** — used whenever `change_summary.json` is missing or every listed entry is stale — calls `collect_source_files(staging_path, staging_path, &mut files, 0); files.truncate(50)` (`run.rs:5318-5348`), a plain recursive directory walk with **zero comparison to source**, taking no `source_root` param at all, just grabbing the first ~50 source files found in traversal order. Live evidence: draft `8540ccee...` (goal `6b014f57...`, the v0.17.4 advisor-review draft) got a `[BLOCK]` verdict describing a ~48-file changeset across crates that sort before `ta-release` in a directory walk and happen to land near the 50-file cap, while the draft's actual `changes.artifacts` list was 13 correctly-scoped files in `ta-release`/docs. **Severity — not just a false-BLOCK annoyance**: this fallback could just as easily hand the supervisor an innocuous file slice and produce a false **PASS**, silently defeating the one review gate meant to catch bad changes before apply — direction-symmetric corruption, not a fail-safe. **Elevated exposure from v0.17.4.1's `--follow-up-draft` fix**: every future autonomous-loop phase's advisor review is now a `--follow-up-draft` goal reusing the parent's staging, which is exactly the case most likely to have a missing/already-consumed `change_summary.json` — this fallback will likely fire on nearly every future review, not just this one, unless fixed first.
