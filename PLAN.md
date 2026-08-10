@@ -9962,17 +9962,17 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4.1 — Advisor: Migrate to Confidence-Gated `ta_human_verify` (Fix Autonomous-Loop Hang)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.26 (`ta_human_verify`)
 
 **Why this exists**: found live 2026-08-04/05 getting v0.17.4's own advisor-review draft through review (confirmed by direct code read, not speculation). `build_advisor_context()` (`crates/ta-session/src/advisor_agent.rs`) hardcodes instructions to call the blocking `ta_ask_human` tool in three places (~lines 174, 206, 221), even for `AdvisorSecurity::Auto`. `ta_human_verify` — the two-stage confidence-gated tool (opinion pass + independent validator pass, auto-confirms at high confidence, only truly escalates when uncertain) — was built in v0.17.0.12.26 specifically to solve "how does autonomous/no-human-present mode handle needing confirmation," but the advisor's own prompt-building code was never migrated to use it. Live symptom: the v0.17.4 advisor's own review session was thorough and positive ("solid and complete... any concerns before I approve and apply it?") but ended in a `"state":"finalizing"` limbo asking a question nobody could answer in headless mode — the outer `ta plan build --autonomous` process then died silently (no escalate message, no crash report) rather than handling the hang gracefully. Blocks resuming `ta plan build --autonomous` for v0.17.5+ until fixed.
 
 **Items**:
-1. [ ] For `AdvisorSecurity::Auto` specifically, replace the `ta_ask_human` instructions in `build_advisor_context()` with `ta_human_verify`.
-2. [ ] Verify the advisor's own spawned goal correctly resolves `security_tier=auto` via `ta-brain::route()`'s routing-decision mechanism (`resolve_workload_context` in `crates/ta-mcp-gateway/src/tools/human_verify.rs` reads `.ta/routing-decisions.jsonl`, a separate mechanism from `AdvisorConfig.security`'s env-var plumbing) — confirm these two don't disagree for advisor goals; wire them together if they do.
-3. [ ] Fix the outer autonomous loop's silent-death failure mode: a stuck/timed-out advisor review should produce a real `[escalate]`/error, not a silently-dead process.
-4. [ ] Tests: an `AdvisorSecurity::Auto` advisor session at high confidence auto-confirms via `ta_human_verify` without hanging; a genuinely uncertain case still escalates to a human, visibly (not a silent death).
-5. [ ] USAGE.md: note `ta_human_verify` as the advisor's confirmation path for `Auto` security, alongside the existing `ta_human_verify` docs.
+1. [x] For `AdvisorSecurity::Auto` specifically, replace the `ta_ask_human` instructions in `build_advisor_context()` with `ta_human_verify`.
+2. [x] Verify the advisor's own spawned goal correctly resolves `security_tier=auto` via `ta-brain::route()`'s routing-decision mechanism (`resolve_workload_context` in `crates/ta-mcp-gateway/src/tools/human_verify.rs` reads `.ta/routing-decisions.jsonl`, a separate mechanism from `AdvisorConfig.security`'s env-var plumbing) — confirm these two don't disagree for advisor goals; wire them together if they do.
+3. [x] Fix the outer autonomous loop's silent-death failure mode: a stuck/timed-out advisor review should produce a real `[escalate]`/error, not a silently-dead process.
+4. [x] Tests: an `AdvisorSecurity::Auto` advisor session at high confidence auto-confirms via `ta_human_verify` without hanging; a genuinely uncertain case still escalates to a human, visibly (not a silent death).
+5. [x] USAGE.md: note `ta_human_verify` as the advisor's confirmation path for `Auto` security, alongside the existing `ta_human_verify` docs.
 
 #### Version: `0.17.4-alpha.1`
 

@@ -14432,6 +14432,8 @@ gate = "agent"
 advisor_security = "read_only"   # read_only | suggest | auto
 ```
 
+**`auto` confirms via `ta_human_verify`, not a blocking question.** At `advisor_security = "auto"`, the advisor's confirmation step ("Here's what changed. Any concerns before I apply?") goes through the confidence-gated [`ta_human_verify`](#confidence-gated-verification-ta_human_verify-and-the-red-team-loop) pipeline instead of the always-blocking `ta_ask_human`: a high-confidence/low-risk synthetic review auto-confirms without ever pausing for you, and anything uncertain still escalates to a real question. `read_only` and `suggest` never reach the auto-confirm path, so they keep using the plain blocking `ta_ask_human`. The advisor's own spawned goal is explicitly tagged `--security <level> --workload advisor-review` so `ta-brain::route()` resolves `security_tier` to match `advisor_security` exactly -- it's never independently reclassified from the goal title, which would otherwise let a low-confidence guess silently downgrade `auto` to a blocking escalation.
+
 #### Multi-phase milestone summary
 
 When a session runs multiple phases back-to-back, the advisor presents a structured summary before asking for final approval:
@@ -14474,6 +14476,8 @@ The advisor waits up to 30 minutes by default. Configure in `.ta/workflow.toml`:
 [session]
 advisor_timeout_mins = 60   # default: 30
 ```
+
+This bounds two things, not just the wait for your answer: the advisor's own subprocess (if it hangs -- e.g. looping on an unanswered question -- it is killed and reported as a real, actionable timeout error instead of blocking the calling process forever) and, separately, how long `ta plan build --autonomous`/`ta session run` then wait for the resulting draft to reach a terminal state. Either way, a stuck advisor review always ends in an observable `[escalate]`/error, never a silently-hung process.
 
 If the advisor times out, the session pauses. Resume with `ta session run <id>`.
 
