@@ -690,10 +690,11 @@ fn strip_uuids(s: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", cut)
     }
 }
 
@@ -868,4 +869,16 @@ fn show_schema(config: &GatewayConfig) -> anyhow::Result<()> {
     println!();
     println!("  Configure: .ta/memory.toml (optional)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate(&s, 18);
+        assert!(result.ends_with("..."));
+    }
 }
