@@ -242,6 +242,8 @@ mod tests {
             b"#!/bin/sh\nread -r line\necho '{\"ok\":true,\"result\":{\"plugin_version\":\"1.0.0\",\"protocol_version\":1,\"adapter_name\":\"steam\",\"capabilities\":[]}}'\n",
         )
         .unwrap();
+        f.sync_all().unwrap();
+        drop(f);
         let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script_path, perms).unwrap();
