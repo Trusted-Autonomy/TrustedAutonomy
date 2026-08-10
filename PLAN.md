@@ -9962,7 +9962,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4.1 — Advisor: Migrate to Confidence-Gated `ta_human_verify` (Fix Autonomous-Loop Hang)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.26 (`ta_human_verify`)
 
 **Why this exists**: found live 2026-08-04/05 getting v0.17.4's own advisor-review draft through review (confirmed by direct code read, not speculation). `build_advisor_context()` (`crates/ta-session/src/advisor_agent.rs`) hardcodes instructions to call the blocking `ta_ask_human` tool in three places (~lines 174, 206, 221), even for `AdvisorSecurity::Auto`. `ta_human_verify` — the two-stage confidence-gated tool (opinion pass + independent validator pass, auto-confirms at high confidence, only truly escalates when uncertain) — was built in v0.17.0.12.26 specifically to solve "how does autonomous/no-human-present mode handle needing confirmation," but the advisor's own prompt-building code was never migrated to use it. Live symptom: the v0.17.4 advisor's own review session was thorough and positive ("solid and complete... any concerns before I approve and apply it?") but ended in a `"state":"finalizing"` limbo asking a question nobody could answer in headless mode — the outer `ta plan build --autonomous` process then died silently (no escalate message, no crash report) rather than handling the hang gracefully. Blocks resuming `ta plan build --autonomous` for v0.17.5+ until fixed.
