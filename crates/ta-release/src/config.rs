@@ -31,6 +31,28 @@ pub struct ReleaseAdapterConfig {
     /// Optional shell command to generate a changelog before publish.
     #[serde(default)]
     pub changelog_cmd: Option<String>,
+
+    /// Homebrew tap auto-update (v0.17.4 item 2) — not a `ReleaseAdapter`, a post-publish
+    /// side effect of `GitHubReleaseAdapter` reaching the `stable` channel. Absent means
+    /// no tap PR is opened. See `docs/release-design.md` §8.
+    #[serde(default)]
+    pub homebrew: Option<HomebrewTapConfig>,
+}
+
+/// `[release.homebrew]` — where to open the formula-bump PR.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomebrewTapConfig {
+    /// `owner/repo` of the tap, e.g. `"trustedautonomy/homebrew-tap"`.
+    pub tap_repo: String,
+    /// Path to the formula file within the tap repo, e.g. `"Formula/ta.rb"`.
+    pub formula_path: String,
+    /// Base branch to open the PR against.
+    #[serde(default = "default_base_branch")]
+    pub base_branch: String,
+}
+
+fn default_base_branch() -> String {
+    "main".to_string()
 }
 
 impl ReleaseAdapterConfig {
@@ -122,5 +144,40 @@ default_channel = "nightly"
     fn invalid_toml_is_reported() {
         let err = ReleaseAdapterConfig::parse("{{not valid toml}}").unwrap_err();
         assert!(matches!(err, ReleaseError::Config(_)));
+    }
+
+    #[test]
+    fn parses_homebrew_table() {
+        let text = r#"
+[release]
+default_channel = "stable"
+
+[release.homebrew]
+tap_repo = "trustedautonomy/homebrew-tap"
+formula_path = "Formula/ta.rb"
+"#;
+        let cfg = ReleaseAdapterConfig::parse(text).unwrap();
+        let homebrew = cfg.homebrew.expect("homebrew config present");
+        assert_eq!(homebrew.tap_repo, "trustedautonomy/homebrew-tap");
+        assert_eq!(homebrew.formula_path, "Formula/ta.rb");
+        assert_eq!(homebrew.base_branch, "main");
+    }
+
+    #[test]
+    fn homebrew_table_absent_by_default() {
+        let cfg = ReleaseAdapterConfig::parse("[release]\ndefault_channel = \"stable\"\n").unwrap();
+        assert!(cfg.homebrew.is_none());
+    }
+
+    #[test]
+    fn homebrew_base_branch_override() {
+        let text = r#"
+[release.homebrew]
+tap_repo = "org/tap"
+formula_path = "Formula/x.rb"
+base_branch = "develop"
+"#;
+        let cfg = ReleaseAdapterConfig::parse(text).unwrap();
+        assert_eq!(cfg.homebrew.unwrap().base_branch, "develop");
     }
 }
