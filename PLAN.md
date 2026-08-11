@@ -10033,7 +10033,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.5.2 — Workflow-Defined Budget Guardrails (Business-Metric Budgets)
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Depends on**: v0.17.5.1, v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain::route()`)
 
 **Goal**: Add a second, distinct budget concept alongside the existing LLM-token budget (`ta-policy::BudgetConfig.max_tokens_per_goal`, which stays exactly as-is — that's resource-consumption tracking, not a business-rule guardrail). This one is an arbitrary-unit business metric a workflow declares (e.g. `metric = "usd", total = 1000.0, per_action_max_pct = 10.0`) against a stated objective (e.g. "generate income > 2x within 6 months after fees"). Hard limits are deterministic pre-gate checks — no confidence score ever overrides one. Soft limits feed the Decision gate as an escalation signal, the exact shape already proven by `route()`'s `AUTO_SECURITY_CONFIDENCE_THRESHOLD` (a low-confidence workload classification downgrades `security_tier = auto` to `suggest` today) — this reuses that same "confidence/proximity-to-limit downgrades autonomy" pattern rather than inventing a new one.
