@@ -46,6 +46,7 @@ pub mod project_context;
 pub mod prompt_optimizer_supervisor;
 pub mod question_registry;
 pub mod router;
+pub mod team_session;
 pub mod transport;
 pub mod watchdog;
 mod web;
@@ -398,6 +399,13 @@ async fn main() -> Result<()> {
                 watchdog::run_watchdog(wd_root, wd_config, Some(pm), wd_shutdown).await;
             });
 
+            // Start the persistent team session supervisor (v0.17.5.1).
+            {
+                let ts_root = project_root.clone();
+                let ts_shutdown = shutdown.clone();
+                team_session::start(ts_root, ts_shutdown);
+            }
+
             // Periodic GC task: run every `gc_interval_hours` (default 6h).
             if gc_interval_hours > 0 {
                 let gc_project_root = project_root.clone();
@@ -489,6 +497,13 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 watchdog::run_watchdog(wd_root, wd_config, Some(pm), wd_shutdown).await;
             });
+        }
+
+        // Start the persistent team session supervisor in MCP mode too (v0.17.5.1).
+        {
+            let ts_root = project_root.clone();
+            let ts_shutdown = shutdown.clone();
+            team_session::start(ts_root, ts_shutdown);
         }
 
         // Serve MCP using the configured transport.

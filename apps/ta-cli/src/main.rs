@@ -1054,6 +1054,15 @@ enum Commands {
         command: commands::connector::ConnectorCommands,
     },
 
+    /// Manage persistent team sessions: a workflow YAML + `.ta/team.toml`
+    /// binding that runs continuously, firing one goal-run per role in
+    /// sequence and carrying prior roles' findings forward as context.
+    #[command(hide = true)]
+    TeamSession {
+        #[command(subcommand)]
+        command: commands::team_session::TeamSessionCommands,
+    },
+
     /// Manage context compression via the headroom proxy (v0.17.0.7).
     ///
     /// Context compression routes agent API calls through a local headroom proxy
@@ -1856,6 +1865,12 @@ fn dispatch_raw(
                 print_deprecation_notice("connector", command);
             }
             commands::connector::execute(command, config)
+        }
+        Commands::TeamSession { command } => {
+            if warn_legacy {
+                print_deprecation_notice("team-session", command);
+            }
+            commands::team_session::execute(command, &config.workspace_root)
         }
         Commands::Compression { command } => commands::compression::execute(command, config),
         Commands::Webhook { command } => commands::webhook::execute(command, config),

@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.0-alpha.12.3
+**Version**: 0.17.5-alpha.1
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -15502,6 +15502,68 @@ Supervised connectors (daemon-managed):
 ### Event queue
 
 The supervisor maintains an in-memory event queue per connector (capacity: 1000 events, TTL: 10 minutes). Events record lifecycle transitions (started, stopped, crashed, suspended, heartbeat\_missed). The queue is bounded — when full, new events are dropped with a log warning rather than growing without limit.
+
+---
+
+## Persistent Team Sessions
+
+A persistent team session gives a team of roles (e.g. analyst, strategist, trader) an
+ongoing execution context that survives across many goal-runs, instead of every
+trigger starting from zero. It binds a workflow YAML's declared roles/stages to your
+`.ta/team.toml` agent assignments, then runs continuously: each role's goal-run
+completes, its findings are carried forward as context for the next role, and the
+cycle repeats through the workflow's stages indefinitely.
+
+Start one:
+
+```bash
+ta team-session start trading-desk \
+  --workflow templates/workflows/trading-desk.yaml \
+  --objective "Generate income > 2x within 6 months after fees"
+```
+
+This resolves the workflow's stage order once and persists it to
+`.ta/team-sessions/trading-desk/state.json`. The daemon's supervisor picks up any
+non-stopped session on startup (or on its next poll) and begins firing one `ta run`
+goal per role in sequence.
+
+Check status:
+
+```bash
+ta team-session status trading-desk
+# trading-desk: active (stage=Some("decide") role=Some("strategist") restarts=0 last_cycle=...)
+
+ta team-session status   # all sessions
+```
+
+Pause and resume without losing state:
+
+```bash
+ta team-session pause trading-desk
+ta team-session resume trading-desk
+```
+
+Stop permanently (state.json history is kept, not deleted):
+
+```bash
+ta team-session stop trading-desk
+```
+
+**Crash recovery**: if a role's goal-run keeps failing, the supervisor retries with
+the same backoff as connector supervision — 1s, 2s, 4s, ... up to a 60s cap. After 5
+failures within 5 minutes, the session is marked `suspended` and the supervisor stops
+attempting new goal-runs until you clear it:
+
+```bash
+# write a restart-signal the same way `ta connector restart` does for connectors
+touch .ta/team-sessions/trading-desk/restart-signal
+```
+
+**Context carry-forward**: each completed role's stdout summary is appended to the
+session's findings list and rendered as markdown context
+(`.ta/team-sessions/<name>/context-<stage>.md`) passed to the next role's `ta run
+--objective-file`, so a "strategist" role can see what the "analyst" role before it
+found, and so on across the whole session's lifetime — not just within one goal-run.
 
 ---
 

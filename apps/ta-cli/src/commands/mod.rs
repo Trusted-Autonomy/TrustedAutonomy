@@ -59,6 +59,7 @@ pub mod status;
 pub mod style;
 pub mod sync;
 pub mod team;
+pub mod team_session;
 pub mod template;
 pub mod terms;
 pub mod token;
