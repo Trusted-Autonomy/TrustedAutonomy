@@ -10016,18 +10016,18 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.5.1 — Persistent Team Session Runtime
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.5
 
 **Goal**: Give a team a persistent execution context that survives across multiple goal-runs, instead of every trigger firing a brand-new goal from zero. Precedent already exists inside `ta-daemon` for exactly this shape of problem — `connector_supervisor.rs` (fault-isolated, heartbeat-monitored, backoff/suspend-managed subprocess supervision) and `watchdog.rs` (a background tokio task for goal liveness) — so this extends that in-process supervision model to a new subject (a team session) rather than standing up a second daemon. A second daemon would either duplicate that supervision machinery or reach across a network boundary into the core daemon for every draft/approval/audit write, reintroducing the cross-process consistency problem TA's staged-review model exists to avoid.
 
 **Items**:
-1. [ ] New `ta-daemon` subsystem module (e.g. `team_session.rs` — deliberately not reusing the `office` name, which already means multi-project daemon config in `office.rs`) modeling a `TeamSession`: a workflow YAML + `team.toml` binding, persistent state at `.ta/team-sessions/<id>/state.json`, and a supervised loop that starts new goal-runs against the shared session state rather than from zero.
-2. [ ] Session state carries context forward between goal-runs within the same session (e.g. a completed "analyst" role's finding is available context for the next "trader" role's goal) — reuse `ta-session::advisor_agent`'s existing context-injection mechanism rather than building a new one.
-3. [ ] Lifecycle commands: `ta team-session start/pause/stop/status <name>`, mirroring the existing `ta connector` command shape.
-4. [ ] Crash recovery: reuse `connector_supervisor.rs`'s backoff/suspend pattern (1s→2s→4s...→60s cap, Suspended after 5 failures in 5 minutes) — a session that crash-loops stops retrying instead of looping forever.
-5. [ ] Tests: session state persists and is readable across two sequential goal-runs; a crash-looping session reaches Suspended and stops; `status` reflects real supervisor state.
-6. [ ] USAGE.md: how to start/monitor/stop a persistent team session.
+1. [x] New `ta-daemon` subsystem module (e.g. `team_session.rs` — deliberately not reusing the `office` name, which already means multi-project daemon config in `office.rs`) modeling a `TeamSession`: a workflow YAML + `team.toml` binding, persistent state at `.ta/team-sessions/<id>/state.json`, and a supervised loop that starts new goal-runs against the shared session state rather than from zero.
+2. [x] Session state carries context forward between goal-runs within the same session (e.g. a completed "analyst" role's finding is available context for the next "trader" role's goal) — reuse `ta-session::advisor_agent`'s existing context-injection mechanism rather than building a new one.
+3. [x] Lifecycle commands: `ta team-session start/pause/stop/status <name>`, mirroring the existing `ta connector` command shape.
+4. [x] Crash recovery: reuse `connector_supervisor.rs`'s backoff/suspend pattern (1s→2s→4s...→60s cap, Suspended after 5 failures in 5 minutes) — a session that crash-loops stops retrying instead of looping forever.
+5. [x] Tests: session state persists and is readable across two sequential goal-runs; a crash-looping session reaches Suspended and stops; `status` reflects real supervisor state.
+6. [x] USAGE.md: how to start/monitor/stop a persistent team session.
 
 #### Version: `0.17.5-alpha.1`
 

@@ -179,6 +179,11 @@ const NOUN_TABLE: &[NounEntry] = &[
         ],
     },
     NounEntry {
+        keys: &["team-session", "team-sessions"],
+        legacy: "team-session",
+        verbs: &[("create", "start"), ("show", "status"), ("remove", "stop")],
+    },
+    NounEntry {
         keys: &["community-resource", "community-resources", "community"],
         legacy: "community",
         verbs: &[("list", "list"), ("show", "get"), ("sync", "sync")],
@@ -548,6 +553,26 @@ mod tests {
     fn resolve_unsupported_verb_for_noun_errors_not_panics() {
         // "team" has no "create" mapping — must be a clear error, not a panic.
         let err = resolve("create", "team", None, &[]).unwrap_err();
+        assert!(err.to_string().contains("isn't mapped"));
+    }
+
+    #[test]
+    fn resolve_team_session_create_maps_to_start() {
+        let argv = resolve("create", "team-session", None, &[]).unwrap();
+        assert_eq!(argv, vec!["ta", "team-session", "start"]);
+    }
+
+    #[test]
+    fn resolve_team_session_show_with_id_maps_to_status() {
+        let argv = resolve("show", "team-session", Some("trading-desk"), &[]).unwrap();
+        assert_eq!(argv, vec!["ta", "team-session", "status", "trading-desk"]);
+    }
+
+    #[test]
+    fn resolve_team_session_pause_is_unmapped() {
+        // "pause" has no verb+noun mapping — only the legacy
+        // `ta team-session pause <name>` spelling works.
+        let err = resolve("update", "team-session", Some("trading-desk"), &[]).unwrap_err();
         assert!(err.to_string().contains("isn't mapped"));
     }
 

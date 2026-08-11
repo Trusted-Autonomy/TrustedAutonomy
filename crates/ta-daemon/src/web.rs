@@ -882,7 +882,7 @@ fn parse_commit_sha(output: &str) -> Option<String> {
 }
 
 /// Locate the `ta` binary. Prefers the one adjacent to the running daemon.
-fn find_ta_binary_web() -> String {
+pub(crate) fn find_ta_binary_web() -> String {
     if let Ok(current) = std::env::current_exe() {
         if let Some(dir) = current.parent() {
             let ta_path = dir.join("ta");

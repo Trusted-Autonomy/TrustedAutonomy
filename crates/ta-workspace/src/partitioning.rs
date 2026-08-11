@@ -49,6 +49,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "heartbeats/",
     "workflow-runs/",
     "advisor-notes/",
+    "team-sessions/", // persistent team session state (v0.17.5.1)
     "draft-build-ctx/",
     "memory/",     // local memory cache (project-memory/ is the VCS-committed counterpart)
     "link-cache/", // cached remote project manifests (v0.16.1.5)
