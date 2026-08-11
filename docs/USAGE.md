@@ -1192,6 +1192,12 @@ After `required_checks` run, an AI supervisor reviews the staged changes for goa
 
 The file-inspection approach scales better than diff injection: a 50-file change doesn't saturate the supervisor's context, and it can follow code rather than scanning a wall of text.
 
+**How the changed-file list is determined**
+
+TA prefers the agent-written `.ta/change_summary.json`, but only after validating every listed path against a real staging-vs-source diff — a path is trusted only if it was actually created, modified, or deleted, never taken on faith. If that file is missing, or none of its entries survive validation, TA falls back to walking the staging directory itself, applying the same real-diff validation to every candidate file before including it. Either way, a file only reaches the supervisor if it genuinely changed; if nothing did, the supervisor sees an explicit "no files changed" rather than a stand-in list of unrelated files.
+
+This matters most for `--follow-up-draft` goals (see [Follow-Up Iterations](#follow-up-iterations)): they reuse the parent goal's staging directory, so `.ta/change_summary.json` is often missing or stale by the time the follow-up's review runs — exactly the case that exercises the fallback path.
+
 **Configuration** (`.ta/workflow.toml`):
 
 ```toml
