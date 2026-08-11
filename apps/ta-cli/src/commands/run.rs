@@ -5248,6 +5248,18 @@ fn shell_quote(s: &str) -> String {
 /// diff before being trusted — entries that don't correspond to an actual change are
 /// dropped, since blindly trusting a stale/unrelated file list can feed the supervisor
 /// review files this goal never touched, producing a false-positive BLOCK.
+///
+/// The fallback directory walk gets the same treatment (v0.17.4.2): every candidate is
+/// checked with `path_actually_changed()` before being included, and `--follow-up-draft`
+/// goals — which reuse a parent goal's staging directory and are therefore the case most
+/// likely to hit this fallback (missing or already-consumed `change_summary.json`) — rely
+/// on this validation to avoid handing the supervisor an arbitrary traversal-order slice
+/// of files this goal never touched. That failure mode is direction-symmetric: it can
+/// produce either a false BLOCK (unrelated files look alarming) or a false PASS (an
+/// innocuous slice hides the real change), silently defeating the review gate either way.
+/// If nothing survives validation, the fallback returns an empty list rather than
+/// substituting a raw, unvalidated slice — an explicit "no changes detected" the
+/// supervisor prompt renders as such, instead of a silent stand-in.
 fn collect_changed_files(
     staging_path: &std::path::Path,
     source_root: &std::path::Path,
@@ -5285,10 +5297,24 @@ fn collect_changed_files(
         }
     }
 
-    // Fallback: collect source files from staging directory.
+    // Fallback: collect source files from staging directory, filtered to only those
+    // that genuinely differ from source_root — the same real-diff discipline as the
+    // primary path above (v0.17.4.2). An unvalidated directory walk can hand the
+    // supervisor an arbitrary ~50-file traversal slice unrelated to what actually
+    // changed, silently defeating the review gate (false BLOCK *or* false PASS).
     let mut files = Vec::new();
-    collect_source_files(staging_path, staging_path, &mut files, 0);
+    collect_source_files(staging_path, staging_path, source_root, &mut files, 0);
     files.truncate(50);
+    if files.is_empty() {
+        tracing::warn!(
+            staging_path = %staging_path.display(),
+            source_root = %source_root.display(),
+            "collect_changed_files: no change_summary.json (or none of its entries \
+             validated) and no source file differs from source_root — surfacing an \
+             explicit empty change list rather than substituting an unvalidated \
+             directory-walk slice"
+        );
+    }
     files
 }
 
@@ -5314,10 +5340,13 @@ fn path_actually_changed(
     }
 }
 
-/// Recursively collect source file paths relative to `root`.
+/// Recursively collect source file paths relative to `root`, keeping only entries that
+/// `path_actually_changed()` confirms differ from their counterpart under `source_root`
+/// (v0.17.4.2) — a raw, unvalidated traversal order must never stand in for a real diff.
 fn collect_source_files(
     root: &std::path::Path,
     dir: &std::path::Path,
+    source_root: &std::path::Path,
     files: &mut Vec<String>,
     depth: usize,
 ) {
@@ -5334,7 +5363,7 @@ fn collect_source_files(
             continue;
         }
         if path.is_dir() {
-            collect_source_files(root, &path, files, depth + 1);
+            collect_source_files(root, &path, source_root, files, depth + 1);
         } else {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if matches!(
@@ -5342,9 +5371,15 @@ fn collect_source_files(
                 "rs" | "toml" | "md" | "json" | "yaml" | "ts" | "js" | "py"
             ) {
                 if let Ok(rel) = path.strip_prefix(root) {
-                    files.push(rel.to_string_lossy().to_string());
+                    let rel_str = rel.to_string_lossy().to_string();
+                    if path_actually_changed(root, source_root, &rel_str) {
+                        files.push(rel_str);
+                    }
                 }
             }
+        }
+        if files.len() >= 50 {
+            return;
         }
     }
 }
@@ -8096,6 +8131,55 @@ mod tests {
         let changed = collect_changed_files(staging.path(), source.path());
 
         assert!(changed.contains(&"only_in_staging.rs".to_string()));
+    }
+
+    // ── v0.17.4.2 collect_changed_files fallback-path tests: the fallback
+    // directory walk must be validated against source_root just like the
+    // primary change_summary.json path, not returned as a raw unvalidated
+    // traversal slice ──
+
+    #[test]
+    fn collect_changed_files_fallback_filters_unchanged_files() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        // Identical in both — must NOT appear in the fallback result, since it
+        // isn't a real change, just something the directory walk happened to see.
+        std::fs::write(staging.path().join("unchanged.rs"), "fn u() {}\n").unwrap();
+        std::fs::write(source.path().join("unchanged.rs"), "fn u() {}\n").unwrap();
+
+        // Genuinely new in staging — the one real, scoped change this goal made.
+        std::fs::write(staging.path().join("scoped_change.rs"), "fn s() {}\n").unwrap();
+
+        // No change_summary.json present — exercises the fallback path directly.
+        let changed = collect_changed_files(staging.path(), source.path());
+
+        assert_eq!(
+            changed,
+            vec!["scoped_change.rs".to_string()],
+            "fallback must validate directory-walk entries against source_root, not return \
+             an arbitrary unvalidated traversal slice, got: {:?}",
+            changed
+        );
+    }
+
+    #[test]
+    fn collect_changed_files_fallback_empty_when_no_real_changes() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+
+        // Identical content in staging and source everywhere — no real change at all.
+        std::fs::write(staging.path().join("same.rs"), "fn s() {}\n").unwrap();
+        std::fs::write(source.path().join("same.rs"), "fn s() {}\n").unwrap();
+
+        let changed = collect_changed_files(staging.path(), source.path());
+
+        assert!(
+            changed.is_empty(),
+            "a staging dir with no actual changes must surface an explicit empty result, \
+             not silently substitute an arbitrary file list, got: {:?}",
+            changed
+        );
     }
 
     // ── v0.17.0.12.34 wave-integration merge tests ──────────────────

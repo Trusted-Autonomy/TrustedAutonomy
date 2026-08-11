@@ -9978,17 +9978,17 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4.2 — Supervisor Review: Fix Unvalidated Fallback File List
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.4.1
 
 **Why this exists**: found live 2026-08-05 via forked investigation of a `[BLOCK]` verdict on v0.17.4's advisor-review draft that described the wrong changeset entirely. Sibling bug to already-fixed v0.17.0.12.33, **not a regression of it**. `collect_changed_files()` (`apps/ta-cli/src/commands/run.rs`) has two paths: its primary path (validate `.ta/change_summary.json` entries against a real staging-vs-source diff via `path_actually_changed()`) is the correct, already-fixed v0.17.0.12.33 behavior. Its **fallback path** — used whenever `change_summary.json` is missing or every listed entry is stale — calls `collect_source_files(staging_path, staging_path, &mut files, 0); files.truncate(50)` (`run.rs:5318-5348`), a plain recursive directory walk with **zero comparison to source**, taking no `source_root` param at all, just grabbing the first ~50 source files found in traversal order. Live evidence: draft `8540ccee...` (goal `6b014f57...`, the v0.17.4 advisor-review draft) got a `[BLOCK]` verdict describing a ~48-file changeset across crates that sort before `ta-release` in a directory walk and happen to land near the 50-file cap, while the draft's actual `changes.artifacts` list was 13 correctly-scoped files in `ta-release`/docs. **Severity — not just a false-BLOCK annoyance**: this fallback could just as easily hand the supervisor an innocuous file slice and produce a false **PASS**, silently defeating the one review gate meant to catch bad changes before apply — direction-symmetric corruption, not a fail-safe. **Elevated exposure from v0.17.4.1's `--follow-up-draft` fix**: every future autonomous-loop phase's advisor review is now a `--follow-up-draft` goal reusing the parent's staging, which is exactly the case most likely to have a missing/already-consumed `change_summary.json` — this fallback will likely fire on nearly every future review, not just this one, unless fixed first.
 
 **Items**:
-1. [ ] Add a `source_root: &Path` param to `collect_source_files`, so the fallback path can compare against source like the primary path does.
-2. [ ] Only include a file in the fallback result if `path_actually_changed()` is true for it — same real-diff discipline as the primary path, not a raw directory walk.
-3. [ ] If the validated fallback set ends up empty, surface that explicitly ("no changes detected") rather than silently substituting an arbitrary file list.
-4. [ ] Tests: a staging dir with a missing `change_summary.json` and a real, scoped change produces the correct file list via the fallback, not an arbitrary directory-walk slice; a staging dir with no actual changes produces an explicit empty result, not a false substitute list.
-5. [ ] USAGE.md / advisor docs: note that `--follow-up-draft` reviews reuse parent staging and rely on this fallback discipline.
+1. [x] Add a `source_root: &Path` param to `collect_source_files`, so the fallback path can compare against source like the primary path does.
+2. [x] Only include a file in the fallback result if `path_actually_changed()` is true for it — same real-diff discipline as the primary path, not a raw directory walk.
+3. [x] If the validated fallback set ends up empty, surface that explicitly ("no changes detected") rather than silently substituting an arbitrary file list.
+4. [x] Tests: a staging dir with a missing `change_summary.json` and a real, scoped change produces the correct file list via the fallback, not an arbitrary directory-walk slice; a staging dir with no actual changes produces an explicit empty result, not a false substitute list.
+5. [x] USAGE.md / advisor docs: note that `--follow-up-draft` reviews reuse parent staging and rely on this fallback discipline.
 
 #### Version: `0.17.4-alpha.2`
 
