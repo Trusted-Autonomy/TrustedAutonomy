@@ -10016,7 +10016,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.5.1 — Persistent Team Session Runtime
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.5
 
 **Goal**: Give a team a persistent execution context that survives across multiple goal-runs, instead of every trigger firing a brand-new goal from zero. Precedent already exists inside `ta-daemon` for exactly this shape of problem — `connector_supervisor.rs` (fault-isolated, heartbeat-monitored, backoff/suspend-managed subprocess supervision) and `watchdog.rs` (a background tokio task for goal liveness) — so this extends that in-process supervision model to a new subject (a team session) rather than standing up a second daemon. A second daemon would either duplicate that supervision machinery or reach across a network boundary into the core daemon for every draft/approval/audit write, reintroducing the cross-process consistency problem TA's staged-review model exists to avoid.
