@@ -1060,8 +1060,9 @@ fn framework_validate(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 fn truncate_desc(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max])
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max).collect();
+        format!("{}...", cut)
     } else {
         s.to_string()
     }
@@ -2324,6 +2325,13 @@ mod tests {
 
     fn test_config(dir: &TempDir) -> GatewayConfig {
         GatewayConfig::for_project(dir.path())
+    }
+
+    #[test]
+    fn truncate_desc_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate_desc(&s, 18);
+        assert!(result.ends_with("..."));
     }
 
     #[test]

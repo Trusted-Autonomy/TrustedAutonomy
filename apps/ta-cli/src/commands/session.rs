@@ -1424,8 +1424,9 @@ fn resolve_workflow_session(
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", cut)
     } else {
         s.to_string()
     }
@@ -1436,6 +1437,13 @@ mod tests {
     use super::*;
     use ta_changeset::InteractiveSession;
     use tempfile::TempDir;
+
+    #[test]
+    fn truncate_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate(&s, 18);
+        assert!(result.ends_with("..."));
+    }
 
     #[test]
     fn list_empty_sessions() {

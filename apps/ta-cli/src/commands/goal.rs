@@ -2564,8 +2564,9 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", cut)
     } else {
         s.to_string()
     }
@@ -3816,6 +3817,38 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn truncate_short_unchanged() {
+        assert_eq!(truncate("short", 60), "short");
+    }
+
+    #[test]
+    fn truncate_long_ascii_gets_ellipsis() {
+        let long = "a".repeat(100);
+        let result = truncate(&long, 20);
+        assert_eq!(result.chars().count(), 20);
+        assert!(result.ends_with("..."));
+    }
+
+    /// Regression test for v0.17.4.3: titles containing multi-byte UTF-8
+    /// characters (e.g. emoji) previously panicked because the old
+    /// implementation sliced by raw byte index, which can land in the
+    /// middle of a multi-byte character.
+    #[test]
+    fn truncate_multi_byte_title_does_not_panic() {
+        let title = "🎉".repeat(30);
+        let result = truncate(&title, 18);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 18);
+    }
+
+    #[test]
+    fn truncate_max_smaller_than_ellipsis_does_not_panic() {
+        let title = "🎉".repeat(10);
+        let result = truncate(&title, 2);
+        assert_eq!(result, "...");
+    }
 
     #[test]
     fn start_goal_creates_overlay_and_goal_run() {

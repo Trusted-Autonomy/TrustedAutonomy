@@ -210,10 +210,23 @@ pub fn read_line<Resp: DeserializeOwned>(reader: &mut impl BufRead) -> Result<Re
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let cut: String = s.chars().take(max).collect();
+        format!("{}...", cut)
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate(&s, 18);
+        assert!(result.ends_with("..."));
     }
 }
 
