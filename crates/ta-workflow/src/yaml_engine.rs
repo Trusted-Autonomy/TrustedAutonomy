@@ -374,6 +374,7 @@ mod tests {
             verdict: None,
             agent_framework: None,
             params: Default::default(),
+            budget: None,
         }
     }
 

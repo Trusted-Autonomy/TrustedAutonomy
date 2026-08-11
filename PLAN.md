@@ -10033,19 +10033,19 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.5.2 — Workflow-Defined Budget Guardrails (Business-Metric Budgets)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.5.1, v0.17.0.12.15 (`ta-decision` gate), v0.17.0.12.20 (`ta-brain::route()`)
 
 **Goal**: Add a second, distinct budget concept alongside the existing LLM-token budget (`ta-policy::BudgetConfig.max_tokens_per_goal`, which stays exactly as-is — that's resource-consumption tracking, not a business-rule guardrail). This one is an arbitrary-unit business metric a workflow declares (e.g. `metric = "usd", total = 1000.0, per_action_max_pct = 10.0`) against a stated objective (e.g. "generate income > 2x within 6 months after fees"). Hard limits are deterministic pre-gate checks — no confidence score ever overrides one. Soft limits feed the Decision gate as an escalation signal, the exact shape already proven by `route()`'s `AUTO_SECURITY_CONFIDENCE_THRESHOLD` (a low-confidence workload classification downgrades `security_tier = auto` to `suggest` today) — this reuses that same "confidence/proximity-to-limit downgrades autonomy" pattern rather than inventing a new one.
 
 **Items**:
-1. [ ] New `WorkflowBudget` config in workflow YAML: `{metric: string, total: f64, per_action_max_pct: Option<f64>, soft_threshold_pct: Option<f64>, objective: Option<string>}` — `metric` is an arbitrary label (`"usd"`, `"trade_count"`, anything), not hardcoded to dollars.
-2. [ ] Running ledger persisted in the team-session state (5.1) — an append-only per-action log (amount, running total, timestamp), same audit-log-JSONL pattern as `.ta/human-verify-audit.jsonl`.
-3. [ ] Hard-limit pre-gate: a new check consulted *before* `ta_human_verify`/`ta-decision::gate::decide()` even runs. Violating it (e.g. a trade exceeding the 10% per-action cap) rejects outright — never reaches the probabilistic verify/approve pipeline at all.
-4. [ ] Soft-limit check: crossing `soft_threshold_pct` of the total forces `Escalate` regardless of what the Decision gate's own verdict would otherwise be — mirrors `route()`'s existing auto→suggest downgrade.
-5. [ ] Observability: the per-session ledger surfaces both budgets (token spend from `BudgetConfig` and business-metric spend from `WorkflowBudget`) side by side — a session can be within its token budget and over its dollar budget, or vice versa; both must be independently visible.
-6. [ ] Tests: an action exceeding the hard per-action cap is rejected before any verify pass runs; crossing the soft threshold forces `Escalate` even with a high-confidence Decision input; the ledger correctly accumulates across multiple sequential actions in one session.
-7. [ ] USAGE.md: document both budget concepts side by side and when each applies.
+1. [x] New `WorkflowBudget` config in workflow YAML: `{metric: string, total: f64, per_action_max_pct: Option<f64>, soft_threshold_pct: Option<f64>, objective: Option<string>}` — `metric` is an arbitrary label (`"usd"`, `"trade_count"`, anything), not hardcoded to dollars.
+2. [x] Running ledger persisted in the team-session state (5.1) — an append-only per-action log (amount, running total, timestamp), same audit-log-JSONL pattern as `.ta/human-verify-audit.jsonl`.
+3. [x] Hard-limit pre-gate: a new check consulted *before* `ta_human_verify`/`ta-decision::gate::decide()` even runs. Violating it (e.g. a trade exceeding the 10% per-action cap) rejects outright — never reaches the probabilistic verify/approve pipeline at all.
+4. [x] Soft-limit check: crossing `soft_threshold_pct` of the total forces `Escalate` regardless of what the Decision gate's own verdict would otherwise be — mirrors `route()`'s existing auto→suggest downgrade.
+5. [x] Observability: the per-session ledger surfaces both budgets (token spend from `BudgetConfig` and business-metric spend from `WorkflowBudget`) side by side — a session can be within its token budget and over its dollar budget, or vice versa; both must be independently visible.
+6. [x] Tests: an action exceeding the hard per-action cap is rejected before any verify pass runs; crossing the soft threshold forces `Escalate` even with a high-confidence Decision input; the ledger correctly accumulates across multiple sequential actions in one session.
+7. [x] USAGE.md: document both budget concepts side by side and when each applies.
 
 #### Version: `0.17.5-alpha.2`
 

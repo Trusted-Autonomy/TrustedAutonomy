@@ -371,6 +371,7 @@ mod tests {
                 verdict: None,
                 agent_framework: None,
                 params: Default::default(),
+                budget: None,
             },
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -403,6 +404,7 @@ mod tests {
             verdict: None,
             agent_framework: None,
             params: Default::default(),
+            budget: None,
         };
         let result = engine.start(&def);
         assert!(matches!(result, Err(WorkflowError::ProcessError { .. })));

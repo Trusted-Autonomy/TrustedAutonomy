@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use ta_policy::business_budget::BudgetGuardrails;
 use ta_session::agent_action::TeamRole;
 use ta_session::team::TeamConfig;
 
@@ -55,6 +56,12 @@ pub struct TeamSessionConfig {
     pub workflow_path: String,
     pub team_toml_path: String,
     pub objective: String,
+    /// The bound workflow's business-metric budget guardrail, resolved by
+    /// the CLI from `WorkflowDefinition.budget` at `start` time (v0.17.5.2)
+    /// — `ta-daemon` never parses the workflow YAML itself, mirroring how
+    /// `stages` is already pre-resolved rather than re-derived here.
+    #[serde(default)]
+    pub budget: Option<BudgetGuardrails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +99,14 @@ impl TeamSessionState {
 
     pub fn state_path(project_root: &Path, id: &str) -> PathBuf {
         Self::state_dir(project_root, id).join("state.json")
+    }
+
+    /// Path to this session's business-metric budget ledger (v0.17.5.2) —
+    /// the same file `.ta_human_verify`'s `budget.ledger_path` param should
+    /// point at, so a role's budgeted actions accumulate into the session's
+    /// own running total.
+    pub fn budget_ledger_path(project_root: &Path, id: &str) -> PathBuf {
+        Self::state_dir(project_root, id).join("budget-ledger.jsonl")
     }
 
     /// Loads `state.json` for `id`, or `Ok(None)` if the session doesn't exist.
@@ -276,10 +291,43 @@ impl FailureTracker {
 /// context" shape as `ta_session::advisor_agent::build_advisor_context`,
 /// applied to a team session's own findings instead of a draft/phase
 /// summary.
-pub fn render_session_context(state: &TeamSessionState) -> String {
+pub fn render_session_context(project_root: &Path, state: &TeamSessionState) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Team session: {}\n\n", state.config.name));
     out.push_str(&format!("**Objective:** {}\n\n", state.config.objective));
+
+    if let Some(budget) = &state.config.budget {
+        let ledger_path = TeamSessionState::budget_ledger_path(project_root, &state.id);
+        let spent = ta_policy::business_budget::ledger_running_total(&ledger_path);
+        let pct = if budget.total > 0.0 {
+            spent / budget.total * 100.0
+        } else {
+            0.0
+        };
+        out.push_str(&format!(
+            "**Budget ({metric}):** {spent:.2} / {total:.2} spent ({pct:.1}%)",
+            metric = budget.metric,
+            total = budget.total,
+        ));
+        if let Some(cap) = budget.per_action_max_pct {
+            out.push_str(&format!(", hard per-action cap {cap:.1}%"));
+        }
+        if let Some(soft) = budget.soft_threshold_pct {
+            out.push_str(&format!(", soft escalation threshold {soft:.1}%"));
+        }
+        out.push_str(".\n\n");
+        out.push_str(&format!(
+            "When performing a budgeted action, call `ta_human_verify` with a `budget` \
+             param: `{{\"metric\": \"{metric}\", \"total\": {total}, \
+             \"per_action_max_pct\": {cap:?}, \"soft_threshold_pct\": {soft:?}}}`, the \
+             action's amount, and `ledger_path: \".ta/team-sessions/{id}/budget-ledger.jsonl\"`.\n\n",
+            metric = budget.metric,
+            total = budget.total,
+            cap = budget.per_action_max_pct,
+            soft = budget.soft_threshold_pct,
+            id = state.id,
+        ));
+    }
 
     if state.findings.is_empty() {
         out.push_str("No prior role findings yet — this is the session's first goal-run.\n");
@@ -313,7 +361,7 @@ pub fn write_session_context(
     let dir = TeamSessionState::state_dir(project_root, &state.id);
     std::fs::create_dir_all(&dir)?;
     let path = session_context_path(project_root, &state.id, stage_name);
-    std::fs::write(&path, render_session_context(state))?;
+    std::fs::write(&path, render_session_context(project_root, state))?;
     Ok(path)
 }
 
@@ -642,6 +690,7 @@ mod tests {
             workflow_path: "templates/workflows/trading-desk.yaml".to_string(),
             team_toml_path: ".ta/team.toml".to_string(),
             objective: "Generate income > 2x within 6 months after fees".to_string(),
+            budget: None,
         }
     }
 
@@ -851,10 +900,34 @@ mod tests {
 
     #[test]
     fn render_context_with_no_findings_says_so() {
+        let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
-        let rendered = render_session_context(&state);
+        let rendered = render_session_context(dir.path(), &state);
         assert!(rendered.contains("No prior role findings yet"));
         assert!(rendered.contains("trading-desk"));
+    }
+
+    #[test]
+    fn render_context_includes_budget_and_running_ledger_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = sample_config();
+        config.budget = Some(BudgetGuardrails {
+            metric: "usd".to_string(),
+            total: 1000.0,
+            per_action_max_pct: Some(10.0),
+            soft_threshold_pct: Some(80.0),
+            objective: Some("generate income > 2x within 6 months after fees".to_string()),
+        });
+        let state = TeamSessionState::new("sess-1".to_string(), config, sample_stages());
+
+        let ledger_path = TeamSessionState::budget_ledger_path(dir.path(), "sess-1");
+        ta_policy::business_budget::record_ledger_spend(&ledger_path, "buy AAPL", 250.0).unwrap();
+
+        let rendered = render_session_context(dir.path(), &state);
+        assert!(rendered.contains("Budget (usd)"), "got: {rendered}");
+        assert!(rendered.contains("250.00 / 1000.00"), "got: {rendered}");
+        assert!(rendered.contains("25.0%"), "got: {rendered}");
+        assert!(rendered.contains("budget-ledger.jsonl"), "got: {rendered}");
     }
 
     #[test]
@@ -873,7 +946,8 @@ mod tests {
             completed_at: Utc::now(),
             summary: "Open a long position.".to_string(),
         });
-        let rendered = render_session_context(&state);
+        let dir = tempfile::tempdir().unwrap();
+        let rendered = render_session_context(dir.path(), &state);
         let analyst_pos = rendered.find("analyst").unwrap();
         let strategist_pos = rendered.find("strategist").unwrap();
         assert!(

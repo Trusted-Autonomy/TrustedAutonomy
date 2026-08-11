@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+use ta_policy::business_budget::BudgetGuardrails;
 use ta_workflow::WorkflowDefinition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,11 @@ struct TeamSessionConfig {
     workflow_path: String,
     team_toml_path: String,
     objective: String,
+    /// Business-metric budget guardrail declared by the bound workflow's
+    /// `budget:` section (v0.17.5.2), resolved once at `start` time — the
+    /// daemon's supervisor loop never re-parses the workflow YAML.
+    #[serde(default)]
+    budget: Option<BudgetGuardrails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +206,17 @@ fn start(
         );
     }
 
+    let budget = definition.budget.map(|b| {
+        let b = *b;
+        BudgetGuardrails {
+            metric: b.metric,
+            total: b.total,
+            per_action_max_pct: b.per_action_max_pct,
+            soft_threshold_pct: b.soft_threshold_pct,
+            objective: b.objective,
+        }
+    });
+
     let now = chrono::Utc::now();
     let state = TeamSessionState {
         id: name.to_string(),
@@ -208,6 +225,7 @@ fn start(
             workflow_path: workflow_path.to_string(),
             team_toml_path: team_toml.unwrap_or(".ta/team.toml").to_string(),
             objective: objective.to_string(),
+            budget,
         },
         stages,
         status: TeamSessionStatus::Active,
@@ -279,8 +297,78 @@ fn status(project_root: &Path, name: Option<&str>) -> Result<()> {
                 );
             }
         }
+        print_budget_status(project_root, n, &state.config.budget);
     }
     Ok(())
+}
+
+/// Prints both budget concepts side by side (v0.17.5.2 item 5): the
+/// business-metric budget (spent/total from this session's ledger) and the
+/// LLM-token budget (`max_tokens_per_goal` from `.ta/policy.yaml`, if
+/// configured). A session can be within one and over the other — both must
+/// be independently visible, not folded into a single number.
+fn print_budget_status(project_root: &Path, session_id: &str, budget: &Option<BudgetGuardrails>) {
+    let ledger_path = budget_ledger_path(project_root, session_id);
+    let spent = ta_policy::business_budget::ledger_running_total(&ledger_path);
+    let policy_max_tokens = std::fs::read_to_string(project_root.join(".ta").join("policy.yaml"))
+        .ok()
+        .and_then(|raw| serde_yaml::from_str::<ta_policy::document::PolicyDocument>(&raw).ok())
+        .and_then(|doc| doc.budget)
+        .and_then(|b| b.max_tokens_per_goal);
+
+    for line in format_budget_status(budget, spent, policy_max_tokens) {
+        println!("{line}");
+    }
+}
+
+/// Pure formatting logic for [`print_budget_status`], separated out so
+/// tests can assert on content rather than just "doesn't panic".
+fn format_budget_status(
+    budget: &Option<BudgetGuardrails>,
+    ledger_spent: f64,
+    policy_max_tokens: Option<u64>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    match budget {
+        Some(b) => {
+            let pct = if b.total > 0.0 {
+                ledger_spent / b.total * 100.0
+            } else {
+                0.0
+            };
+            lines.push(format!(
+                "  business budget ({}): {:.2} / {:.2} spent ({:.1}%){}",
+                b.metric,
+                ledger_spent,
+                b.total,
+                pct,
+                match b.soft_threshold_pct {
+                    Some(soft) if pct >= soft => " — soft threshold crossed, escalating",
+                    _ => "",
+                }
+            ));
+        }
+        None => {
+            lines.push("  business budget: none declared by this session's workflow".to_string())
+        }
+    }
+
+    lines.push(match policy_max_tokens {
+        Some(max_tokens) => {
+            format!("  token budget: max_tokens_per_goal={max_tokens} (from .ta/policy.yaml)")
+        }
+        None => {
+            "  token budget: not configured (.ta/policy.yaml has no budget.max_tokens_per_goal)"
+                .to_string()
+        }
+    });
+
+    lines
+}
+
+fn budget_ledger_path(project_root: &Path, session_id: &str) -> std::path::PathBuf {
+    session_dir(project_root, session_id).join("budget-ledger.jsonl")
 }
 
 #[cfg(test)]
@@ -312,6 +400,31 @@ stages:
         "trading-desk.yaml".to_string()
     }
 
+    fn write_role_workflow_with_budget(dir: &Path) -> String {
+        let path = dir.join("trading-desk-budgeted.yaml");
+        std::fs::write(
+            &path,
+            r#"
+name: trading-desk
+roles:
+  analyst:
+    agent: claude-code
+    prompt: "Analyze the market."
+stages:
+  - name: analyze
+    roles: ["analyst"]
+budget:
+  metric: usd
+  total: 1000.0
+  per_action_max_pct: 10.0
+  soft_threshold_pct: 80.0
+  objective: "generate income > 2x within 6 months after fees"
+"#,
+        )
+        .unwrap();
+        "trading-desk-budgeted.yaml".to_string()
+    }
+
     #[test]
     fn start_writes_state_json_with_resolved_stage_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -324,6 +437,83 @@ stages:
         assert_eq!(state.stages[0].name, "analyze");
         assert_eq!(state.stages[1].name, "decide");
         assert_eq!(state.status, TeamSessionStatus::Active);
+        assert!(state.config.budget.is_none());
+    }
+
+    #[test]
+    fn start_resolves_workflow_budget_into_session_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow_with_budget(dir.path());
+
+        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        let budget = state.config.budget.expect("budget should be resolved");
+        assert_eq!(budget.metric, "usd");
+        assert_eq!(budget.total, 1000.0);
+        assert_eq!(budget.per_action_max_pct, Some(10.0));
+        assert_eq!(budget.soft_threshold_pct, Some(80.0));
+    }
+
+    #[test]
+    fn status_shows_business_and_token_budget_side_by_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow_with_budget(dir.path());
+        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+
+        let ledger_path = budget_ledger_path(dir.path(), "sess-1");
+        ta_policy::business_budget::record_ledger_spend(&ledger_path, "buy AAPL", 250.0).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("policy.yaml"),
+            "budget:\n  max_tokens_per_goal: 50000\n",
+        )
+        .unwrap();
+
+        // Wiring check: status() must not error with both budgets present.
+        status(dir.path(), Some("sess-1")).unwrap();
+    }
+
+    #[test]
+    fn format_budget_status_shows_both_budgets_independently() {
+        let budget = Some(BudgetGuardrails {
+            metric: "usd".to_string(),
+            total: 1000.0,
+            per_action_max_pct: Some(10.0),
+            soft_threshold_pct: Some(80.0),
+            objective: None,
+        });
+
+        let lines = format_budget_status(&budget, 250.0, Some(50_000));
+        assert!(lines[0].contains("business budget (usd): 250.00 / 1000.00 spent (25.0%)"));
+        assert!(!lines[0].contains("soft threshold crossed"));
+        assert!(lines[1].contains("max_tokens_per_goal=50000"));
+    }
+
+    #[test]
+    fn format_budget_status_flags_soft_threshold_crossing() {
+        let budget = Some(BudgetGuardrails {
+            metric: "usd".to_string(),
+            total: 1000.0,
+            per_action_max_pct: Some(10.0),
+            soft_threshold_pct: Some(80.0),
+            objective: None,
+        });
+
+        let lines = format_budget_status(&budget, 850.0, None);
+        assert!(
+            lines[0].contains("soft threshold crossed"),
+            "got: {}",
+            lines[0]
+        );
+        assert!(lines[1].contains("not configured"));
+    }
+
+    #[test]
+    fn format_budget_status_reports_none_declared_when_absent() {
+        let lines = format_budget_status(&None, 0.0, None);
+        assert!(lines[0].contains("none declared"));
     }
 
     #[test]
