@@ -3350,10 +3350,11 @@ fn plan_add(
 
 /// Truncate a title string to max_len characters, adding "..." if truncated.
 fn truncate_title(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let cut: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", cut)
     }
 }
 
@@ -10391,6 +10392,13 @@ Build it.
         let long = "a".repeat(100);
         let result = truncate_title(&long, 20);
         assert_eq!(result.len(), 20);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_title_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate_title(&s, 18);
         assert!(result.ends_with("..."));
     }
 

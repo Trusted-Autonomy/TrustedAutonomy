@@ -882,7 +882,11 @@ fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
     } else {
-        &s[..max]
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 }
 
@@ -921,6 +925,13 @@ pub fn execute_governed_paths(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn truncate_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate(&s, 18);
+        assert!(result.chars().count() <= 18);
+    }
 
     #[test]
     fn gc_status_prints_table() {

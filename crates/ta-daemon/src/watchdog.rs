@@ -1185,10 +1185,11 @@ fn is_process_alive(pid: u32) -> bool {
 
 /// Truncate a string for display in events/logs.
 fn truncate_preview(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let cut: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", cut)
     }
 }
 
@@ -1539,6 +1540,13 @@ mod tests {
     fn truncate_preview_long() {
         let result = truncate_preview("hello world, this is a test", 15);
         assert!(result.len() <= 15);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_preview_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate_preview(&s, 18);
         assert!(result.ends_with("..."));
     }
 

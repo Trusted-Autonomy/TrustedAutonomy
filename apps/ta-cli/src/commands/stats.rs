@@ -522,8 +522,9 @@ fn fmt_duration(seconds: i64) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", cut)
     } else {
         s.to_string()
     }
@@ -534,5 +535,17 @@ fn csv_escape(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate(&s, 18);
+        assert!(result.ends_with("..."));
     }
 }

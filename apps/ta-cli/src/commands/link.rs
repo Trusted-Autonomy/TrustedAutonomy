@@ -368,10 +368,11 @@ fn parse_relationship(s: Option<&str>) -> anyhow::Result<Relationship> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", cut)
     }
 }
 
@@ -380,6 +381,13 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_multi_byte_does_not_panic() {
+        let s = "🎉".repeat(20);
+        let result = truncate(&s, 18);
+        assert!(result.ends_with('…'));
+    }
 
     #[test]
     fn normalize_github_url_variants() {

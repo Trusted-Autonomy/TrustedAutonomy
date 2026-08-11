@@ -9994,15 +9994,15 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.4.3 — `ta list goal` Panics on Multi-Byte Title Truncation
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Why this exists**: found live 2026-08-10 checking v0.17.4/PR #569 status. `ta list goal --all` (and likely plain `ta list goal`) panics: `apps/ta-cli/src/commands/goal.rs:2568:28: end byte index 11 is not a char boundary; it is inside '—' (bytes 9..12 of string)`. A title/column-width truncation uses a raw byte-index slice (e.g. `&s[..N]`) instead of a char-boundary-aware truncation, and panics whenever the cut point lands inside a multi-byte UTF-8 character — an em dash (—) in a goal title triggered it here, but any multi-byte char near the truncation width would do it.
 
 **Items**:
-1. [ ] Replace the raw byte-index slice in `goal.rs`'s title-truncation logic with a char-boundary-aware truncation (`s.char_indices()`, or the `unicode-width`/`unicode-segmentation` crate if already in use elsewhere for table formatting).
-2. [ ] Audit other table-formatting truncation call sites in `apps/ta-cli/src/commands/` for the same raw byte-index pattern.
-3. [ ] Tests: a goal title containing an em dash (or other multi-byte char) at/near the truncation width does not panic and renders correctly.
+1. [x] Replace the raw byte-index slice in `goal.rs`'s title-truncation logic with a char-boundary-aware truncation (`s.char_indices()`, or the `unicode-width`/`unicode-segmentation` crate if already in use elsewhere for table formatting).
+2. [x] Audit other table-formatting truncation call sites in `apps/ta-cli/src/commands/` for the same raw byte-index pattern.
+3. [x] Tests: a goal title containing an em dash (or other multi-byte char) at/near the truncation width does not panic and renders correctly.
 
 #### Version: `0.17.4-alpha.3`
 
