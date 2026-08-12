@@ -31,6 +31,32 @@ pub enum ActionError {
     MissingField(String),
 }
 
+// ── Risk assessment ──────────────────────────────────────────────────────────
+
+/// The result of scoring a payload before dispatch (v0.17.5.3).
+///
+/// `risk_score` is 0-100 (higher is riskier), `confidence` is 0.0-1.0 — the
+/// same shape `ta_decision::gate::DecisionInput` expects, so a caller can
+/// build one directly from this without any unit conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RiskAssessment {
+    pub risk_score: u32,
+    pub confidence: f64,
+}
+
+impl Default for RiskAssessment {
+    /// The zero-risk, fully-confident default used by every built-in stub.
+    /// A registered plugin overrides `risk_score()` to compute a real value
+    /// instead of relying on this default (see the module doc: built-in
+    /// stubs are schema-only, not risk-aware).
+    fn default() -> Self {
+        Self {
+            risk_score: 0,
+            confidence: 1.0,
+        }
+    }
+}
+
 // ── Trait ────────────────────────────────────────────────────────────────────
 
 /// The contract every external action plugin must implement.
@@ -49,6 +75,16 @@ pub trait ExternalAction: Send + Sync {
     /// Validate a payload against this action's schema.
     /// Returns `Ok(())` if the payload is structurally valid.
     fn validate(&self, payload: &Value) -> Result<(), ActionError>;
+
+    /// Score a payload's risk before it is dispatched (v0.17.5.3).
+    ///
+    /// Defaults to [`RiskAssessment::default`] (zero risk, full confidence)
+    /// so the four built-in stubs keep their existing auto-approvable
+    /// behavior unchanged. A domain-action plugin overrides this with a
+    /// real, subprocess-computed score — never a hardcoded value.
+    fn risk_score(&self, _payload: &Value) -> Result<RiskAssessment, ActionError> {
+        Ok(RiskAssessment::default())
+    }
 
     /// Execute the action with the given payload.
     /// Built-in stubs return `Err(ActionError::StubOnly(...))`.
@@ -401,5 +437,14 @@ mod tests {
         let registry = ActionRegistry::new();
         assert!(registry.get("email").is_some());
         assert!(registry.get("unknown_type").is_none());
+    }
+
+    #[test]
+    fn built_in_actions_default_to_zero_risk_full_confidence() {
+        let payload = json!({"to": "a@b.com", "subject": "s", "body": "b"});
+        let assessment = EmailAction.risk_score(&payload).unwrap();
+        assert_eq!(assessment, RiskAssessment::default());
+        assert_eq!(assessment.risk_score, 0);
+        assert_eq!(assessment.confidence, 1.0);
     }
 }

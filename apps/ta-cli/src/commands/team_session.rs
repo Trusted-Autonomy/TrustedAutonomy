@@ -584,4 +584,56 @@ budget:
         // must not error, must fall back to persisted state.json.
         status(dir.path(), Some("sess-1")).unwrap();
     }
+
+    /// v0.17.5.3's reference implementation — proves
+    /// `templates/workflows/trading-desk.yaml` (the file this module's own
+    /// `Start` doc comment tells users to pass to `--workflow`) is real,
+    /// loadable, and resolves to the analyst -> strategist -> trader stage
+    /// chain with the declared business-metric budget, not just prose.
+    #[test]
+    fn real_trading_desk_template_parses_and_resolves_analyst_strategist_trader_chain() {
+        let yaml = include_str!("../../../../templates/workflows/trading-desk.yaml");
+        let definition = WorkflowDefinition::from_yaml(yaml)
+            .expect("templates/workflows/trading-desk.yaml must be valid workflow YAML");
+
+        assert_eq!(definition.name, "trading-desk");
+        let stage_order = definition.stage_order().unwrap();
+        assert_eq!(stage_order, vec!["analyze", "decide", "execute"]);
+
+        for role in ["analyst", "strategist", "trader"] {
+            assert!(
+                definition.roles.contains_key(role),
+                "expected a '{role}' role definition"
+            );
+        }
+
+        let budget = definition
+            .budget
+            .as_ref()
+            .expect("trading-desk.yaml must declare a budget guardrail");
+        assert_eq!(budget.metric, "usd");
+        assert_eq!(budget.total, 1000.0);
+    }
+
+    #[test]
+    fn real_trading_desk_template_starts_a_team_session_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = dir.path().join("trading-desk.yaml");
+        std::fs::write(
+            &workflow_path,
+            include_str!("../../../../templates/workflows/trading-desk.yaml"),
+        )
+        .unwrap();
+
+        start(
+            dir.path(),
+            "trading-desk",
+            "trading-desk.yaml",
+            None,
+            "Generate income > 2x within 6 months after fees",
+        )
+        .unwrap();
+
+        status(dir.path(), Some("trading-desk")).unwrap();
+    }
 }

@@ -10051,20 +10051,20 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.5.3 — Pluggable Domain-Action Adapters (User-Authored Plugins, Not Just Built-In)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.5.2, `StepAction::external_adapter()` (existing hook, currently zero production callers), v0.17.4 item 3 (release adapter plugin protocol — reuse its transport, don't invent a second one)
 
 **Goal**: Today, adding a new domain action (e.g. "execute a stock trade via a brokerage API") requires a TA core code change — every existing connector (Slack/Discord/email/social) is built into `ta-daemon`'s own crates, and the one generic hook meant for this (`StepAction::external_adapter()`) has never been dispatched to in production. Make it genuinely user-authorable, reusing the exact same external-subprocess-plugin transport already proven twice in this codebase (`[[connectors.managed]]` in `connector_supervisor.rs`, and v0.17.4 item 3's release-adapter "JSON-over-stdio, same pattern as VCS plugins") rather than inventing a third plugin protocol.
 
 **Items**:
-1. [ ] Plugin manifest format (`.ta/adapters/<name>/manifest.toml`): declares the action verb(s) it handles (e.g. `"trade.execute"`), a risk-scoring subprocess hook that must return a real computed `risk_score` (not the hardcoded `0` the social adapter uses today), and its commit/publish subprocess entrypoint.
-2. [ ] Wire `StepAction::external_adapter()` to actually dispatch to a registered plugin's subprocess — its first real production caller.
-3. [ ] Approval-gate integration: a dispatched action's risk_score/verdict flows through the same `ta-decision::gate::decide()` used by code drafts and `ta_human_verify` — one uniform `Commit`/`Reject`/`Rework`/`Escalate` contract regardless of domain (per the existing "one uniform contract, policy decides caution" design principle), and consults `security_tier` directly to close the gap found this session where `check_advisor_auto_approve()` is unwired and the real draft-apply path never checks `security_tier` at all.
-4. [ ] Budget guardrail (5.2) consulted as part of the same dispatch path for any adapter action carrying a cost/quantity field.
-5. [ ] Reference implementation: a mock/paper-trading adapter (not a real brokerage integration — no live external API dependency in TA's own test suite) proving the full loop end-to-end: analyst/strategist/trader roles from a persistent session (5.1), a `"trade.execute"` action, hard/soft budget enforcement (5.2), and real non-zero risk scoring.
-6. [ ] Docs: `docs/community-adapter-plugin.md` — how to author a new domain adapter, modeled on the existing `docs/community-ide-plugin.md` pattern.
-7. [ ] Tests: a registered mock adapter's action round-trips through the full gate (approve and reject cases); an unregistered action verb is rejected with a clear "no adapter registered for this verb" error, not a silent no-op.
-8. [ ] USAGE.md: adapter authoring guide, linked from the new community-adapter-plugin.md doc.
+1. [x] Plugin manifest format (`.ta/adapters/<name>/manifest.toml`): declares the action verb(s) it handles (e.g. `"trade.execute"`), a risk-scoring subprocess hook that must return a real computed `risk_score` (not the hardcoded `0` the social adapter uses today), and its commit/publish subprocess entrypoint.
+2. [x] Wire `StepAction::external_adapter()` to actually dispatch to a registered plugin's subprocess — its first real production caller.
+3. [x] Approval-gate integration: a dispatched action's risk_score/verdict flows through the same `ta-decision::gate::decide()` used by code drafts and `ta_human_verify` — one uniform `Commit`/`Reject`/`Rework`/`Escalate` contract regardless of domain (per the existing "one uniform contract, policy decides caution" design principle), and consults `security_tier` directly to close the gap found this session where `check_advisor_auto_approve()` is unwired and the real draft-apply path never checks `security_tier` at all.
+4. [x] Budget guardrail (5.2) consulted as part of the same dispatch path for any adapter action carrying a cost/quantity field.
+5. [x] Reference implementation: a mock/paper-trading adapter (not a real brokerage integration — no live external API dependency in TA's own test suite) proving the full loop end-to-end: analyst/strategist/trader roles from a persistent session (5.1), a `"trade.execute"` action, hard/soft budget enforcement (5.2), and real non-zero risk scoring.
+6. [x] Docs: `docs/community-adapter-plugin.md` — how to author a new domain adapter, modeled on the existing `docs/community-ide-plugin.md` pattern.
+7. [x] Tests: a registered mock adapter's action round-trips through the full gate (approve and reject cases); an unregistered action verb is rejected with a clear "no adapter registered for this verb" error, not a silent no-op.
+8. [x] USAGE.md: adapter authoring guide, linked from the new community-adapter-plugin.md doc.
 
 #### Version: `0.17.5-alpha.3`
 

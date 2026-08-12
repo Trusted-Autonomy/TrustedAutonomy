@@ -1,0 +1,8 @@
+name = "paper-trading"
+version = "0.1.0"
+type = "adapter"
+command = "python3"
+args = ["paper_trading_adapter.py"]
+capabilities = ["verb:trade.execute"]
+description = "Reference domain-action adapter (v0.17.5.3) — paper-trading only, no live brokerage API. Computes a real risk score from trade notional size and simulates a fill; pairs with templates/workflows/trading-desk.yaml."
+timeout_secs = 30
