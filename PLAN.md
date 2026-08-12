@@ -10096,7 +10096,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.2 — Live Token Issuance + Encryption at Rest
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.1
 
 **Goal**: Wire up the vault's existing, fully-tested, currently-uncalled `CredentialVault::issue_token`/`validate_token` as the real credential-delivery path (opaque `SessionToken` UUID, `allowed_scopes`, `expires_at`) — ship real value now, before the biscuit migration in v0.17.6.4. Close `FileVault`'s plaintext-at-rest gap in the same pass since it's already touching `vault.rs`.
