@@ -845,17 +845,26 @@ fn handle_human_verify_with_pipeline(
 /// than reinvented, adapted to allow the legitimate multi-segment relative
 /// paths this parameter needs (e.g. `.ta/team-sessions/<id>/budget-ledger.jsonl`).
 fn validate_ledger_path(path: &str) -> Result<(), McpError> {
+    // `Path::is_absolute()` alone isn't platform-parity-safe here: a
+    // Unix-style absolute path like "/etc/evil.jsonl" has no drive letter,
+    // so on Windows `is_absolute()` returns false for it (it reads as
+    // "root of the current drive", not absolute) — confirmed failing in CI
+    // (Windows Build) on exactly this input. A leading '/' or '\\' is
+    // rejected explicitly, on every platform, regardless of what
+    // `is_absolute()` reports for it locally.
+    let starts_with_root_separator = path.starts_with('/') || path.starts_with('\\');
     if path.is_empty()
         || path.contains("..")
         || path.contains("%2e%2e")
         || path.contains("%2E%2E")
+        || starts_with_root_separator
         || Path::new(path).is_absolute()
     {
         return Err(McpError::invalid_params(
             format!(
                 "invalid_parameter: 'budget.ledger_path' must be a relative path within the \
-                 workspace, with no '..' traversal segments. Got: {:?}. Use a path like \
-                 '.ta/team-sessions/<id>/budget-ledger.jsonl'.",
+                 workspace, with no '..' traversal segments and no leading path separator. \
+                 Got: {:?}. Use a path like '.ta/team-sessions/<id>/budget-ledger.jsonl'.",
                 path
             ),
             None,
