@@ -516,6 +516,7 @@ mod tests {
             verdict: None,
             agent_framework: None,
             params: Default::default(),
+            budget: None,
         }
     }
 
@@ -598,6 +599,7 @@ mod tests {
             verdict: None,
             agent_framework: None,
             params: Default::default(),
+            budget: None,
         };
         let result = validate_workflow(&wf, None);
         assert!(result.has_errors());

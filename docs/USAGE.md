@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.5-alpha.1
+**Version**: 0.17.5-alpha.2
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -15564,6 +15564,90 @@ session's findings list and rendered as markdown context
 (`.ta/team-sessions/<name>/context-<stage>.md`) passed to the next role's `ta run
 --objective-file`, so a "strategist" role can see what the "analyst" role before it
 found, and so on across the whole session's lifetime — not just within one goal-run.
+
+### Budget Guardrails: Two Distinct Budgets
+
+TA tracks two independent budget concepts. A team session can be within one and over
+the other at the same time — they are never folded into a single number.
+
+| | **Token budget** | **Business-metric budget** |
+|---|---|---|
+| Tracks | LLM token consumption per goal | An arbitrary business metric (dollars, trade count, anything domain-specific) |
+| Configured in | `.ta/policy.yaml` → `budget.max_tokens_per_goal` | The workflow YAML's `budget:` section |
+| Enforcement | Warns at `warn_at_percent`, denies over the cap | Hard per-action cap rejects outright; soft threshold forces escalation |
+| Applies to | Every goal-run | Only workflows that declare a `budget:` section (e.g. a persistent team session) |
+
+**Declaring a business-metric budget** — add a `budget:` section to a workflow YAML:
+
+```yaml
+name: trading-desk
+budget:
+  metric: usd                # arbitrary label — "usd", "trade_count", anything
+  total: 1000.0               # total budget for the session's lifetime
+  per_action_max_pct: 10.0    # hard limit: no single action may exceed 10% of total
+  soft_threshold_pct: 80.0    # soft limit: crossing 80% forces every subsequent
+                               # action to escalate, regardless of confidence
+  objective: "generate income > 2x within 6 months after fees"
+roles:
+  trader:
+    agent: claude-code
+    prompt: "Execute trades within budget."
+stages:
+  - name: trade
+    roles: ["trader"]
+```
+
+`ta team-session start` resolves this once at start time and persists it into the
+session's `state.json` — the daemon never re-parses the workflow YAML for it, the same
+pattern already used for the resolved stage order.
+
+**Hard vs soft limits**:
+- **Hard limit** (`per_action_max_pct`, and the total itself): a deterministic
+  pre-gate check. A violating action is rejected *before* any opinion/validator pass
+  or human escalation runs — no confidence score ever overrides it.
+- **Soft limit** (`soft_threshold_pct`): once cumulative spend crosses this
+  percentage of the total, every subsequent action is forced to escalate to a real
+  human, even if the Decision gate's own verdict would otherwise auto-approve it —
+  the same "proximity-to-limit downgrades autonomy" pattern used elsewhere for
+  low-confidence workload routing.
+
+**Spending against the budget** — a role performs a budgeted action by calling
+`ta_human_verify` with a `budget` parameter:
+
+```json
+{
+  "question": "Buy 10 shares of AAPL at $180?",
+  "budget": {
+    "guardrails": {
+      "metric": "usd",
+      "total": 1000.0,
+      "per_action_max_pct": 10.0,
+      "soft_threshold_pct": 80.0
+    },
+    "action_amount": 80.0,
+    "ledger_path": ".ta/team-sessions/trading-desk/budget-ledger.jsonl",
+    "action_label": "buy 10 AAPL @ 180"
+  }
+}
+```
+
+The session's rendered context (`context-<stage>.md`) already includes the
+guardrails and the exact `ledger_path` to use, so a role doesn't need to look them up
+separately.
+
+**The ledger** — every auto-approved budgeted action is appended to
+`.ta/team-sessions/<name>/budget-ledger.jsonl`, an append-only JSONL log (amount,
+running total, timestamp) in the same format as `.ta/human-verify-audit.jsonl`.
+Rejected (hard-limit) and escalated (soft-limit) actions are never recorded as spend.
+
+**Checking both budgets side by side**:
+
+```bash
+ta team-session status trading-desk
+# trading-desk: active (stage=Some("trade") role=Some("trader") restarts=0 ...)
+#   business budget (usd): 650.00 / 1000.00 spent (65.0%)
+#   token budget: max_tokens_per_goal=50000 (from .ta/policy.yaml)
+```
 
 ---
 

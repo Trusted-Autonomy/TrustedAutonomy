@@ -24,6 +24,7 @@
 //! - **Path traversal blocked**: URIs containing ".." are always denied.
 
 pub mod alignment;
+pub mod business_budget;
 pub mod capability;
 pub mod cascade;
 pub mod compiler;
@@ -37,6 +38,10 @@ pub mod exemption;
 pub use alignment::{
     AgentSetupProposal, AlignmentProfile, AutonomyEnvelope, CoordinationConfig, Milestone,
     ProposedAgent,
+};
+pub use business_budget::{
+    append_ledger_entry, check_budget, ledger_running_total, read_ledger_entries,
+    record_ledger_spend, BudgetCheckResult, BudgetGuardrails, BudgetLedgerEntry,
 };
 pub use capability::{CapabilityGrant, CapabilityManifest};
 pub use cascade::{CliOverrides, PolicyCascade};

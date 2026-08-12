@@ -95,6 +95,52 @@ pub struct WorkflowDefinition {
     /// All stage/role string fields support `{{params.name}}` substitution.
     #[serde(default)]
     pub params: HashMap<String, ParamDecl>,
+    /// Business-metric budget guardrail for this workflow (v0.17.5.2).
+    ///
+    /// Distinct from the LLM-token budget (`ta-policy::BudgetConfig`, unchanged),
+    /// this declares an arbitrary-unit business metric (e.g. dollars, trade
+    /// count) against a stated objective, enforced by hard/soft limit checks
+    /// wherever the workflow's roles call `ta_human_verify`.
+    ///
+    /// Example in workflow YAML:
+    ///   budget:
+    ///     metric: usd
+    ///     total: 1000.0
+    ///     per_action_max_pct: 10.0
+    ///     soft_threshold_pct: 80.0
+    ///     objective: "generate income > 2x within 6 months after fees"
+    ///
+    /// Boxed (rather than inline `Option<WorkflowBudget>`) to keep
+    /// `WorkflowDefinition` from tipping `EngineRequest::Start` over
+    /// clippy's `large_enum_variant` threshold — this field is optional and
+    /// rarely present, so the indirection cost is paid only when it's used.
+    #[serde(default)]
+    pub budget: Option<Box<WorkflowBudget>>,
+}
+
+/// A workflow-declared business-metric budget guardrail (v0.17.5.2).
+///
+/// `metric` is an arbitrary label, not hardcoded to dollars — a workflow can
+/// declare `"usd"`, `"trade_count"`, or any other domain-specific unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowBudget {
+    /// Arbitrary label for the unit being budgeted (e.g. "usd", "trade_count").
+    pub metric: String,
+    /// Total budget available for the session's lifetime, in `metric` units.
+    pub total: f64,
+    /// Hard limit: no single action may exceed this percentage of `total`.
+    /// Violating this rejects the action before any verify/approve pass runs.
+    #[serde(default)]
+    pub per_action_max_pct: Option<f64>,
+    /// Soft limit: once cumulative spend crosses this percentage of `total`,
+    /// every subsequent action is forced to `Escalate` regardless of the
+    /// Decision gate's own verdict.
+    #[serde(default)]
+    pub soft_threshold_pct: Option<f64>,
+    /// Human-readable objective this budget serves (e.g. "generate income
+    /// > 2x within 6 months after fees") — carried into role context.
+    #[serde(default)]
+    pub objective: Option<String>,
 }
 
 /// A single stage in the workflow.
@@ -307,6 +353,61 @@ roles:
         assert_eq!(def.name, "simple-review");
         assert_eq!(def.stages.len(), 2);
         assert_eq!(def.roles.len(), 2);
+        assert!(def.budget.is_none());
+    }
+
+    #[test]
+    fn parse_workflow_yaml_with_business_budget() {
+        let yaml = r#"
+name: trading-desk
+stages:
+  - name: trade
+    roles: [trader]
+roles:
+  trader:
+    agent: claude-code
+    prompt: "Execute trades"
+budget:
+  metric: usd
+  total: 1000.0
+  per_action_max_pct: 10.0
+  soft_threshold_pct: 80.0
+  objective: "generate income > 2x within 6 months after fees"
+"#;
+        let def = WorkflowDefinition::from_yaml(yaml).unwrap();
+        let budget = def.budget.expect("budget should be parsed");
+        assert_eq!(budget.metric, "usd");
+        assert_eq!(budget.total, 1000.0);
+        assert_eq!(budget.per_action_max_pct, Some(10.0));
+        assert_eq!(budget.soft_threshold_pct, Some(80.0));
+        assert_eq!(
+            budget.objective.as_deref(),
+            Some("generate income > 2x within 6 months after fees")
+        );
+    }
+
+    #[test]
+    fn parse_workflow_yaml_with_minimal_budget() {
+        let yaml = r#"
+name: trading-desk
+stages:
+  - name: trade
+    roles: [trader]
+roles:
+  trader:
+    agent: claude-code
+    prompt: "Execute trades"
+budget:
+  metric: usd
+  total: 500.0
+"#;
+        let def = WorkflowDefinition::from_yaml(yaml).unwrap();
+        let budget = def.budget.expect("budget should be parsed");
+        assert_eq!(budget.metric, "usd");
+        assert_eq!(budget.total, 500.0);
+        assert_eq!(budget.per_action_max_pct, None);
+        assert_eq!(budget.soft_threshold_pct, None);
+        assert_eq!(budget.objective, None);
     }
 
     #[test]
@@ -341,6 +442,7 @@ roles:
             verdict: None,
             agent_framework: None,
             params: Default::default(),
+            budget: None,
         };
         let order = def.stage_order().unwrap();
         assert_eq!(order, vec!["build", "review"]);
@@ -378,6 +480,7 @@ roles:
             verdict: None,
             agent_framework: None,
             params: Default::default(),
+            budget: None,
         };
         let result = def.stage_order();
         assert!(matches!(

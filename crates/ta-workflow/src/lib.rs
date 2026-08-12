@@ -46,7 +46,7 @@ pub use consensus::{
     run_consensus, ConsensusAlgorithm, ConsensusInput, ConsensusResult, ReviewerVote,
 };
 pub use definition::{
-    FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowCatalog,
+    FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowBudget, WorkflowCatalog,
     WorkflowDefinition,
 };
 pub use dependency_wave::{api_impact_overlaps, plan_waves, WaveError, WaveNode};
