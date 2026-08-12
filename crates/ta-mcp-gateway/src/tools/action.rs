@@ -1035,13 +1035,28 @@ else:
 "#,
         )
         .unwrap();
+        // Serialize via toml::Table rather than hand-formatting the string:
+        // `script_path.display()` on Windows renders backslashes
+        // (`C:\Users\...`), and TOML string literals treat `\` as an
+        // escape-sequence introducer — `format!`-ing it in raw produced
+        // "invalid unicode 8-digit hex code" parse errors in Windows CI.
+        // toml::Table's Serialize impl escapes the path correctly for
+        // every platform.
+        let mut manifest = toml::Table::new();
+        manifest.insert("name".into(), "paper-trading".into());
+        manifest.insert("type".into(), "adapter".into());
+        manifest.insert("command".into(), "python3".into());
+        manifest.insert(
+            "args".into(),
+            toml::Value::Array(vec![script_path.to_string_lossy().to_string().into()]),
+        );
+        manifest.insert(
+            "capabilities".into(),
+            toml::Value::Array(vec!["verb:trade.execute".into()]),
+        );
         std::fs::write(
             plugin_dir.join("plugin.toml"),
-            format!(
-                "name = \"paper-trading\"\ntype = \"adapter\"\ncommand = \"python3\"\n\
-                 args = [\"{}\"]\ncapabilities = [\"verb:trade.execute\"]\n",
-                script_path.display()
-            ),
+            toml::to_string_pretty(&manifest).unwrap(),
         )
         .unwrap();
     }

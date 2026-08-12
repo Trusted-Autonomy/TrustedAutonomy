@@ -218,12 +218,31 @@ mod tests {
         fs::write(&script_path, script).unwrap();
 
         let capabilities: Vec<String> = verbs.iter().map(|v| format!("verb:{v}")).collect();
-        let manifest = format!(
-            "name = \"{name}\"\ntype = \"adapter\"\ncommand = \"python3\"\nargs = [\"{}\"]\ncapabilities = {:?}\n",
-            script_path.display(),
+        // Serialize via serde/toml rather than hand-formatting the TOML
+        // string: `script_path.display()` on Windows renders backslashes
+        // (`C:\Users\...`), and TOML string literals treat `\` as an
+        // escape-sequence introducer — `format!`-ing it in raw produced
+        // "invalid unicode 8-digit hex code" parse errors in Windows CI.
+        // `toml::to_string` escapes the path correctly for every platform.
+        let manifest = PluginManifest {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            kind: "adapter".to_string(),
+            command: "python3".to_string(),
+            args: vec![script_path.to_string_lossy().to_string()],
             capabilities,
-        );
-        fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+            description: None,
+            timeout_secs: None,
+            protocol_version: None,
+            min_daemon_version: None,
+            source_url: None,
+            staging_env: Default::default(),
+        };
+        fs::write(
+            plugin_dir.join("plugin.toml"),
+            toml::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
         plugin_dir
     }
 
