@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.6-alpha.1
+**Version**: 0.17.6-alpha.2
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -7262,9 +7262,13 @@ ta credentials list
 
 # Revoke a credential
 ta credentials revoke <credential-id>
+
+# Issue a scoped, time-limited session token for a specific agent
+ta credentials grant <credential-id> --agent <goal-id> --scope "read" --ttl 3600
 ```
 
-Credentials are stored in `.ta/credentials.json`. The `FileVault` issues session tokens with configurable TTL:
+Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. The
+`FileVault` issues session tokens with configurable TTL:
 
 ```
 Agent requests: "I need gmail read access for goal abc123"
@@ -7272,6 +7276,44 @@ TA issues:      SessionToken { ttl: 3600s, scopes: ["read"], agent: "claude-code
 Agent uses:     The token (never the raw credential)
 TA proxies:     Token → real credential on each API call
 ```
+
+`ta credentials grant` mints a token directly for inspection or manual use;
+`ta run --credential-scopes` (below) does the same thing internally for
+every credential it hands to an agent process -- each one is only injected
+after its own token has been issued and validated, so a credential that
+fails either step (for example, an already-expired TTL) is withheld rather
+than handed over.
+
+#### Encryption at Rest
+
+`.ta/credentials.json` is encrypted with [age](https://age-encryption.org)
+(X25519). The encryption key is held in the OS-native keychain when one is
+available -- macOS Keychain, Windows Credential Manager, or a Secret Service
+daemon on Linux -- so the raw key never touches disk. When no keychain
+backend is reachable (common on headless Linux hosts with no Secret Service
+daemon running), TA falls back to a chmod-0600 key file next to the vault
+(`.ta/credentials.key`) and logs a warning. `ta doctor` reports which mode is
+active:
+
+```
+[ok]   Credential vault     encrypted at rest; key held in the OS keychain
+```
+
+or, in fallback mode:
+
+```
+[warn] Credential vault     encrypted at rest, but the encryption key is a fallback
+       file at .ta/credentials.key (the OS keychain was unavailable when the
+       vault was created)
+       Fix: Back up this file separately from the vault (losing it makes
+       existing credentials unrecoverable) ...
+```
+
+If the key is lost or corrupted, TA refuses to silently drop your
+credentials -- opening the vault fails with an actionable error instead of
+returning an empty vault or overwriting the encrypted file. Vaults created by
+pre-v0.17.6.2 builds (plaintext JSON) are transparently migrated to
+encrypted-at-rest the first time they're opened.
 
 #### Enforcing Declared Credential Scopes
 

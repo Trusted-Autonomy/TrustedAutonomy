@@ -220,6 +220,10 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 25. ProjFS availability — fast virtual staging on Windows (v0.16.4.1).
     results.push(check_projfs(config));
 
+    // 26. Credential vault key custody — loud warning when the encryption
+    // key fell back to a file instead of the OS keychain (v0.17.6.2).
+    results.push(check_credential_vault_key_custody(config));
+
     results
 }
 
@@ -2081,6 +2085,50 @@ fn check_appcontainer(_config: &GatewayConfig) -> CheckResult {
             "AppContainer",
             "n/a (Windows-only; macOS uses sandbox-exec, Linux uses bwrap)",
         )
+    }
+}
+
+// ── Credential vault key custody check (v0.17.6.2) ─────────────────────────────
+
+fn check_credential_vault_key_custody(config: &GatewayConfig) -> CheckResult {
+    let cred_config = ta_credentials::CredentialsConfig::for_project(&config.workspace_root);
+    if !cred_config.vault_path.exists() {
+        return CheckResult::ok(
+            "Credential vault",
+            "no vault created yet (no credentials added)",
+        );
+    }
+    let vault_dir = cred_config
+        .vault_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+
+    match ta_credentials::encryption::probe_key_custody(&vault_dir) {
+        Some(ta_credentials::KeyCustody::Keychain) => CheckResult::ok(
+            "Credential vault",
+            "encrypted at rest; key held in the OS keychain",
+        ),
+        Some(ta_credentials::KeyCustody::FallbackFile(path)) => CheckResult::warn(
+            "Credential vault",
+            format!(
+                "encrypted at rest, but the encryption key is a fallback file at {} \
+                 (the OS keychain was unavailable when the vault was created)",
+                path.display()
+            ),
+            "Back up this file separately from the vault (losing it makes existing \
+             credentials unrecoverable) and confirm it is chmod 0600. If this host \
+             should have a keychain (e.g. a Secret Service daemon), investigate why \
+             it wasn't reachable — future vault opens will keep using this file \
+             unless the entry is migrated manually.",
+        ),
+        None => CheckResult::warn(
+            "Credential vault",
+            "vault file exists but no encryption key was found (no keychain entry, \
+             no fallback file)",
+            "This is unexpected — run `ta credentials list` to trigger key \
+             creation/diagnosis, then re-run `ta doctor`.",
+        ),
     }
 }
 

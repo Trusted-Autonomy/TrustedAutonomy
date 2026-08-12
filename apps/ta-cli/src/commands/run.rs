@@ -1653,6 +1653,7 @@ fn build_swarm_sub_goal_command(
     objective: &str,
     quiet: bool,
     credential_scopes: &[String],
+    use_keychain: bool,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(ta_bin);
     cmd.arg("run").arg(sub_goal_title).arg("--agent").arg(agent);
@@ -1668,7 +1669,18 @@ fn build_swarm_sub_goal_command(
     // invocation's `GatewayConfig::workspace_root`), not a per-goal staging
     // path — unlike `launch_agent_via_runtime`, no `project_root_from_staging`
     // derivation is needed.
-    let available = load_vault_credentials(workspace_root);
+    // No goal_id exists yet for this sub-goal (its `ta run` child mints its
+    // own), so the title stands in as the token's `agent_id` for now — good
+    // enough for audit-trail purposes ahead of v0.17.6.5's cryptographic
+    // swarm attenuation, which replaces this whole handoff with a real
+    // attenuated biscuit.
+    let available = load_vault_credentials(
+        workspace_root,
+        &format!("swarm:{sub_goal_title}"),
+        credential_scopes,
+        CREDENTIAL_TOKEN_TTL_SECS,
+        use_keychain,
+    );
     let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let sub_goal_env = scoped_credential_env(&current_env, &available, credential_scopes);
 
@@ -1714,6 +1726,7 @@ fn run_one_swarm_sub_goal(
         objective,
         quiet,
         credential_scopes,
+        true,
     );
 
     let status = match cmd.status() {
@@ -4885,18 +4898,47 @@ fn scoped_credential_env(
     env
 }
 
+/// Default TTL for the session tokens minted by [`load_vault_credentials`]
+/// (v0.17.6.2). Generous enough to cover a typical single goal run without
+/// being unbounded; a real per-goal deadline arrives with the biscuit
+/// migration in v0.17.6.4/6.5.
+const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
+
 /// Load every credential currently registered in `<project_root>/.ta/credentials.json`
 /// (via `ta credentials add`) as a `ScopedCredential`, secret value included.
+///
+/// v0.17.6.2: this is the real credential-delivery path, not a direct vault
+/// read. For each credential eligible for `required_scopes` (same
+/// eligibility rule `apply_credentials_to_env` enforces: unscoped credentials
+/// are always eligible, scoped ones need at least one overlapping scope), a
+/// `SessionToken` is minted via `CredentialVault::issue_token` and
+/// immediately checked via `CredentialVault::validate_token` *before* the
+/// secret is ever read. A credential that fails either step (e.g. the vault
+/// rejects the mint, or — once TTLs shorter than a spawn are used — the
+/// token is already expired) is withheld, not silently granted. This makes
+/// every credential handed to an agent process correspond to a recorded,
+/// time-boxed grant in the vault rather than an unconditional `vault.get`.
 ///
 /// Returns an empty list (not an error) when the vault doesn't exist or is
 /// unreadable — an unpopulated vault is the common case today, and callers
 /// treat "no available credentials" as "only the baseline survives", which
 /// is the correct, secure outcome, not a failure.
-fn load_vault_credentials(project_root: &Path) -> Vec<ta_runtime::ScopedCredential> {
+///
+/// `use_keychain` should be `true` for every real invocation; it exists so
+/// tests can force file-based key custody instead of touching the real,
+/// process-global OS keychain (see `CredentialsConfig::use_keychain`).
+fn load_vault_credentials(
+    project_root: &Path,
+    agent_id: &str,
+    required_scopes: &[String],
+    ttl_secs: u64,
+    use_keychain: bool,
+) -> Vec<ta_runtime::ScopedCredential> {
     use ta_credentials::CredentialVault;
 
-    let cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
-    let Ok(vault) = ta_credentials::FileVault::open(&cred_config) else {
+    let mut cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
+    cred_config.use_keychain = use_keychain;
+    let Ok(mut vault) = ta_credentials::FileVault::open(&cred_config) else {
         return Vec::new();
     };
     let Ok(summaries) = vault.list() else {
@@ -4905,6 +4947,42 @@ fn load_vault_credentials(project_root: &Path) -> Vec<ta_runtime::ScopedCredenti
     summaries
         .into_iter()
         .filter_map(|summary| {
+            // Same eligibility rule as `apply_credentials_to_env`: unscoped
+            // credentials are unrestricted, scoped ones need an overlap.
+            let granted_scopes: Vec<String> = if summary.scopes.is_empty() {
+                required_scopes.to_vec()
+            } else {
+                summary
+                    .scopes
+                    .iter()
+                    .filter(|s| required_scopes.contains(s))
+                    .cloned()
+                    .collect()
+            };
+            if !summary.scopes.is_empty() && granted_scopes.is_empty() {
+                return None;
+            }
+
+            let token = match vault.issue_token(summary.id, agent_id, granted_scopes, ttl_secs) {
+                Ok(token) => token,
+                Err(e) => {
+                    tracing::warn!(
+                        credential = %summary.name,
+                        error = %e,
+                        "failed to issue session token; credential withheld"
+                    );
+                    return None;
+                }
+            };
+            if let Err(e) = vault.validate_token(token.token_id) {
+                tracing::warn!(
+                    credential = %summary.name,
+                    error = %e,
+                    "issued session token failed validation; credential withheld"
+                );
+                return None;
+            }
+
             vault.get(summary.id).ok().map(|full| {
                 ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes)
             })
@@ -4967,7 +5045,15 @@ fn launch_agent_via_runtime(
             let project_root = project_root_from_staging(staging_path);
             let available = project_root
                 .as_deref()
-                .map(load_vault_credentials)
+                .map(|root| {
+                    load_vault_credentials(
+                        root,
+                        &goal_id.to_string(),
+                        scopes,
+                        CREDENTIAL_TOKEN_TTL_SECS,
+                        true,
+                    )
+                })
                 .unwrap_or_default();
             let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             scoped_credential_env(&current_env, &available, scopes)
@@ -11028,19 +11114,27 @@ plan_pending_window = 7
         assert!(!env.contains_key("AWS_KEY"));
     }
 
+    /// Test-only vault config: file-based key custody, never the real OS
+    /// keychain (see `CredentialsConfig::use_keychain` doc comment).
+    fn test_cred_config(dir: &Path) -> ta_credentials::CredentialsConfig {
+        let mut config = ta_credentials::CredentialsConfig::for_project(dir);
+        config.use_keychain = false;
+        config
+    }
+
     #[test]
     fn load_vault_credentials_returns_empty_for_unpopulated_vault() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_vault_credentials(dir.path()).is_empty());
+        assert!(load_vault_credentials(dir.path(), "agent-1", &[], 3600, false).is_empty());
     }
 
     #[test]
     fn load_vault_credentials_includes_secret_and_scopes() {
-        use ta_credentials::{CredentialVault, CredentialsConfig, FileVault};
+        use ta_credentials::{CredentialVault, FileVault};
 
         let dir = tempfile::tempdir().unwrap();
         {
-            let mut vault = FileVault::open(&CredentialsConfig::for_project(dir.path())).unwrap();
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
             vault
                 .add(
                     "GITHUB_TOKEN",
@@ -11051,11 +11145,61 @@ plan_pending_window = 7
                 .unwrap();
         }
 
-        let creds = load_vault_credentials(dir.path());
+        let creds = load_vault_credentials(
+            dir.path(),
+            "agent-1",
+            &["repo.read".to_string()],
+            3600,
+            false,
+        );
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0].name, "GITHUB_TOKEN");
         assert_eq!(creds[0].value, "ghp_secret");
         assert_eq!(creds[0].scopes, vec!["repo.read".to_string()]);
+    }
+
+    #[test]
+    fn load_vault_credentials_withholds_scoped_credential_outside_required_scopes() {
+        use ta_credentials::{CredentialVault, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
+            vault
+                .add("AWS_KEY", "aws", "aws_secret", vec!["deploy.prod".into()])
+                .unwrap();
+        }
+
+        // Required scopes don't overlap the credential's declared scope —
+        // no token should be issued, and the secret must never be returned.
+        let creds = load_vault_credentials(
+            dir.path(),
+            "agent-1",
+            &["repo.read".to_string()],
+            3600,
+            false,
+        );
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn load_vault_credentials_withholds_credential_when_token_already_expired() {
+        // v0.17.6.2 regression guard: issue_token/validate_token must be
+        // load-bearing here, not decorative. A 0-second TTL means the minted
+        // token is expired the instant `validate_token` checks it, so the
+        // credential must be withheld even though it's otherwise eligible.
+        use ta_credentials::{CredentialVault, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
+            vault
+                .add("GITHUB_TOKEN", "github", "ghp_secret", vec![])
+                .unwrap();
+        }
+
+        let creds = load_vault_credentials(dir.path(), "agent-1", &[], 0, false);
+        assert!(creds.is_empty());
     }
 
     #[test]
@@ -11069,6 +11213,7 @@ plan_pending_window = 7
             "",
             true,
             &["repo.read".to_string(), "ci.trigger".to_string()],
+            false,
         );
 
         let args: Vec<String> = cmd
@@ -11094,6 +11239,7 @@ plan_pending_window = 7
             "",
             true,
             &[],
+            false,
         );
 
         let args: Vec<String> = cmd
@@ -11126,6 +11272,7 @@ plan_pending_window = 7
             "",
             true,
             &[],
+            false,
         );
 
         let envs: HashMap<String, Option<String>> = cmd
