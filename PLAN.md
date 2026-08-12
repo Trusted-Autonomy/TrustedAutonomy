@@ -10080,7 +10080,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.1 — Enforce Declared Credential Scopes + Real Swarm Handoff
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6
 
 **Goal**: Close the two loudest, cheapest-to-fix gaps first: `ScopedCredential.scopes` is declared but never checked anywhere, and `run_one_swarm_sub_goal` hands every sub-goal a full-environment clone of the parent with no narrowing. No new crates, no new token format yet — this stage is pure enforcement of concepts that already exist in the type system.
