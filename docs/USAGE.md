@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.5-alpha.3
+**Version**: 0.17.6-alpha.1
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -7272,6 +7272,49 @@ TA issues:      SessionToken { ttl: 3600s, scopes: ["read"], agent: "claude-code
 Agent uses:     The token (never the raw credential)
 TA proxies:     Token → real credential on each API call
 ```
+
+#### Enforcing Declared Credential Scopes
+
+`ta run` accepts `--credential-scopes` (comma-separated) to declare which
+scopes the launched agent is allowed to use:
+
+```bash
+ta run "Sync gmail labels" --credential-scopes "read,labels"
+```
+
+When set, the agent process no longer inherits your shell's full
+environment. It receives an explicit, narrow environment instead: a small
+non-secret baseline (`PATH`, `HOME`, and similar), plus only the credentials
+registered via `ta credentials add` whose declared `--scope` overlaps the
+list you passed. A credential registered with no scopes at all (`ta
+credentials add` without `--scope`) is treated as unrestricted and is always
+included. Everything else -- including credentials whose scope doesn't
+overlap, and any other environment variable your shell happened to have set
+-- is simply absent, not present with an empty value. Pass
+`--credential-scopes ""` for "no scopes at all" (baseline + unrestricted
+credentials only) -- the flag requires a value token, even an empty one.
+Omitting `--credential-scopes` entirely keeps the previous behavior of full
+environment inheritance, so existing scripts are unaffected.
+
+**Swarm sub-goals are always scope-narrowed.** `--workflow swarm` sub-goals
+never receive a full clone of the parent's environment, whether or not
+`--credential-scopes` was passed to the parent run -- omitting it narrows
+sub-goals down to just the baseline and unrestricted credentials. If your
+swarm sub-goals need a specific credential (e.g. a `GITHUB_TOKEN` for `gh pr
+create`), register it in the vault with a matching scope and pass
+`--credential-scopes` on the parent `ta run --workflow swarm ...` command:
+
+```bash
+ta credentials add --name GITHUB_TOKEN --service github --secret "ghp_..." --scope "ci.push"
+ta run "Ship the release" --workflow swarm --sub-goals "Build" "Test" \
+  --credential-scopes "ci.push"
+```
+
+This is a real fix at both ends of the fan-out, not just an outer wrapper:
+the nested `ta run` process each sub-goal spawns receives the same
+`--credential-scopes` value explicitly and applies the identical scope
+filter to its own eventual agent spawn -- clearing the environment there too
+-- rather than relying solely on what the parent process happened to strip.
 
 ### Context Memory
 

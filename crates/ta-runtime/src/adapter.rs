@@ -112,6 +112,16 @@ pub struct SpawnRequest {
 
     /// How to handle stdout.
     pub stdout_mode: StdoutMode,
+
+    /// Spawn with a cleared environment — the child inherits nothing from
+    /// the current process, only what's explicitly set in `env` (v0.17.6.1).
+    ///
+    /// Set this when `env` was built by scope-narrowing credentials (see
+    /// `ta_runtime::apply_credentials_to_env`): without it, the OS process
+    /// still inherits the *full* parent environment and `env` only adds to
+    /// that, defeating the narrowing. `false` preserves the historical
+    /// default of full inheritance.
+    pub clear_env: bool,
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
@@ -271,9 +281,11 @@ mod tests {
             working_dir: PathBuf::from("/tmp"),
             stdin_mode: StdinMode::Inherited,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
         assert_eq!(req.command, "claude");
         assert_eq!(req.args.len(), 2);
         assert_eq!(req.env.get("KEY"), Some(&"val".to_string()));
+        assert!(!req.clear_env);
     }
 }

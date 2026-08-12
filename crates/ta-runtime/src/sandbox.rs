@@ -436,6 +436,7 @@ mod tests {
             working_dir: working_dir.to_path_buf(),
             stdin_mode: crate::adapter::StdinMode::Null,
             stdout_mode: crate::adapter::StdoutMode::Inherited,
+            clear_env: false,
         }
     }
 

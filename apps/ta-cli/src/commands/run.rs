@@ -1354,7 +1354,13 @@ pub fn execute_swarm(
     per_agent_gates: &[String],
     integrate: bool,
     quiet: bool,
+    credential_scopes: Option<&[String]>,
 ) -> anyhow::Result<()> {
+    // v0.17.6.1: swarm sub-goals never receive a full clone of the parent's
+    // environment, regardless of whether `--credential-scopes` was declared
+    // for this run — `None` here narrows sub-goals to the baseline plus
+    // unscoped vault credentials only, not to "no narrowing at all".
+    let credential_scopes: Vec<String> = credential_scopes.unwrap_or(&[]).to_vec();
     if sub_goals.is_empty() {
         anyhow::bail!(
             "swarm workflow requires at least one sub-goal. \
@@ -1446,6 +1452,7 @@ pub fn execute_swarm(
                 let agent = agent.to_string();
                 let objective = objective.to_string();
                 let gate_specs = gate_specs.clone();
+                let credential_scopes = credential_scopes.clone();
                 let task: Box<dyn FnOnce() -> ta_workflow::SubGoalStatus + Send> =
                     Box::new(move || {
                         run_one_swarm_sub_goal(
@@ -1457,6 +1464,7 @@ pub fn execute_swarm(
                             &objective,
                             &gate_specs,
                             quiet,
+                            &credential_scopes,
                         )
                     });
                 (i, task)
@@ -1615,6 +1623,73 @@ pub fn execute_swarm(
     Ok(())
 }
 
+/// Build the `ta run` respawn `Command` for one swarm sub-goal.
+///
+/// v0.17.6.1: this is a real fix, not just an env-clearing wrapper. Two
+/// things happen together, both required:
+///
+/// 1. `.env_clear()` plus an explicit non-secret baseline + scope-filtered
+///    vault credentials (`scoped_credential_env`) — the sub-goal process no
+///    longer inherits every credential the parent process could see.
+/// 2. `--credential-scopes` is passed explicitly to the nested `ta run`
+///    invocation. `.env_clear()` alone doesn't narrow what that child
+///    resolves: the nested process reads `.ta/credentials.json` directly
+///    from the filesystem (not from its environment), so without an
+///    explicit scope handoff its own credential resolution — once wired up
+///    in a later phase — would re-admit everything the vault has, regardless
+///    of what this wrapper narrowed its env to. The flag is what lets the
+///    child's own resolution (see `launch_agent_via_runtime`) honor the same
+///    narrower scope, not just this outer wrapper's env.
+///
+/// Pure and side-effect-free (builds but does not spawn) so the resulting
+/// `Command`'s args/env are directly inspectable in tests via
+/// `Command::get_args`/`get_envs`.
+#[allow(clippy::too_many_arguments)]
+fn build_swarm_sub_goal_command(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    sub_goal_title: &str,
+    agent: &str,
+    objective: &str,
+    quiet: bool,
+    credential_scopes: &[String],
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(ta_bin);
+    cmd.arg("run").arg(sub_goal_title).arg("--agent").arg(agent);
+    if !objective.is_empty() {
+        cmd.arg("--objective").arg(objective);
+    }
+    if quiet {
+        cmd.arg("--quiet");
+    }
+    cmd.current_dir(workspace_root);
+
+    // `workspace_root` here is already the project root (the top-level `ta`
+    // invocation's `GatewayConfig::workspace_root`), not a per-goal staging
+    // path — unlike `launch_agent_via_runtime`, no `project_root_from_staging`
+    // derivation is needed.
+    let available = load_vault_credentials(workspace_root);
+    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let sub_goal_env = scoped_credential_env(&current_env, &available, credential_scopes);
+
+    cmd.env_clear();
+    for (k, v) in &sub_goal_env {
+        cmd.env(k, v);
+    }
+
+    // Always present for a swarm respawn — even an empty scope list is an
+    // explicit "enforcement on, zero scopes" declaration, distinct from the
+    // flag being absent entirely (which would mean legacy full inheritance).
+    cmd.arg("--credential-scopes")
+        .arg(if credential_scopes.is_empty() {
+            String::new()
+        } else {
+            credential_scopes.join(",")
+        });
+
+    cmd
+}
+
 /// Run a single swarm sub-goal to completion: launch the agent subprocess,
 /// find its resulting goal record, and evaluate gates. Synchronous — a wave
 /// member runs one of these on its own OS thread via
@@ -1629,16 +1704,17 @@ fn run_one_swarm_sub_goal(
     objective: &str,
     gate_specs: &[ta_workflow::WorkflowGate],
     quiet: bool,
+    credential_scopes: &[String],
 ) -> ta_workflow::SubGoalStatus {
-    let mut cmd = std::process::Command::new(ta_bin);
-    cmd.arg("run").arg(sub_goal_title).arg("--agent").arg(agent);
-    if !objective.is_empty() {
-        cmd.arg("--objective").arg(objective);
-    }
-    if quiet {
-        cmd.arg("--quiet");
-    }
-    cmd.current_dir(workspace_root);
+    let mut cmd = build_swarm_sub_goal_command(
+        ta_bin,
+        workspace_root,
+        sub_goal_title,
+        agent,
+        objective,
+        quiet,
+        credential_scopes,
+    );
 
     let status = match cmd.status() {
         Ok(s) => s,
@@ -1952,6 +2028,7 @@ pub fn execute(
     workflow: Option<&str>,
     persona_name: Option<&str>,
     context_path: Option<&Path>,
+    credential_scopes: Option<&[String]>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -3209,6 +3286,7 @@ pub fn execute(
             Some(&save_pid),
             goal.goal_run_id,
             &events_dir_for_launch,
+            credential_scopes,
         )
         .map(|(exit, tokens)| {
             agent_tokens_out = tokens;
@@ -3239,6 +3317,7 @@ pub fn execute(
                 Some(&save_pid),
                 goal.goal_run_id,
                 &events_dir_for_launch,
+                credential_scopes,
             )
             .map(|(exit, tokens)| {
                 agent_tokens_out = tokens;
@@ -3254,6 +3333,7 @@ pub fn execute(
             Some(&save_pid),
             goal.goal_run_id,
             &events_dir_for_launch,
+            credential_scopes,
         )
         .map(|(exit, tokens)| {
             agent_tokens_out = tokens;
@@ -4741,6 +4821,110 @@ fn accumulate_tokens(line: &str, tokens: &mut AgentTokens) {
     }
 }
 
+// ── Credential scope enforcement (v0.17.6.1) ──────────────────────────────────
+//
+// `ScopedCredential.scopes` was declared in the type system since v0.17.6 but
+// never checked anywhere, and swarm sub-goals received a full clone of the
+// parent's environment (every credential the parent process could see).
+// These helpers close both gaps: a scope-narrowed spawn starts from nothing
+// but a small non-secret baseline plus whichever `.ta/credentials.json`
+// entries the caller's declared scopes actually cover.
+
+/// Non-secret environment variables that survive a scope-narrowed
+/// (`clear_env`) spawn — enough for common dev tooling (shells, cargo,
+/// git-over-ssh) to keep working without also carrying arbitrary secrets
+/// through implicit inheritance.
+const BASELINE_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "PWD",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "SSH_AUTH_SOCK",
+];
+
+/// Build the environment for a scope-narrowed spawn: the non-secret
+/// baseline, any `TA_`-prefixed operational/control-plane variables (never
+/// secrets — TA's own inter-process handoff channel, e.g. `TA_PROJECT_ROOT`),
+/// and only the credentials from `available_credentials` whose declared
+/// scope intersects `required_scopes` (via `ta_runtime::apply_credentials_to_env`).
+///
+/// Pure function — `current_env` and `available_credentials` are inputs, not
+/// read from global state, so this is safely unit-testable without mutating
+/// the real process environment.
+fn scoped_credential_env(
+    current_env: &std::collections::HashMap<String, String>,
+    available_credentials: &[ta_runtime::ScopedCredential],
+    required_scopes: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    for key in BASELINE_ENV_KEYS {
+        if let Some(v) = current_env.get(*key) {
+            env.insert((*key).to_string(), v.clone());
+        }
+    }
+    for (k, v) in current_env {
+        if k.starts_with("TA_") {
+            env.insert(k.clone(), v.clone());
+        }
+    }
+    ta_runtime::apply_credentials_to_env(&mut env, available_credentials, required_scopes);
+    env
+}
+
+/// Load every credential currently registered in `<project_root>/.ta/credentials.json`
+/// (via `ta credentials add`) as a `ScopedCredential`, secret value included.
+///
+/// Returns an empty list (not an error) when the vault doesn't exist or is
+/// unreadable — an unpopulated vault is the common case today, and callers
+/// treat "no available credentials" as "only the baseline survives", which
+/// is the correct, secure outcome, not a failure.
+fn load_vault_credentials(project_root: &Path) -> Vec<ta_runtime::ScopedCredential> {
+    use ta_credentials::CredentialVault;
+
+    let cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
+    let Ok(vault) = ta_credentials::FileVault::open(&cred_config) else {
+        return Vec::new();
+    };
+    let Ok(summaries) = vault.list() else {
+        return Vec::new();
+    };
+    summaries
+        .into_iter()
+        .filter_map(|summary| {
+            vault.get(summary.id).ok().map(|full| {
+                ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes)
+            })
+        })
+        .collect()
+}
+
+/// Derive the project root from a goal's staging path.
+///
+/// `staging_path = project_root/.ta/staging/<uuid>` — three parents up is
+/// `project_root`. Same derivation `launch_agent_via_runtime` already used
+/// inline for the claude-code stable MCP config path.
+fn project_root_from_staging(staging_path: &Path) -> Option<std::path::PathBuf> {
+    staging_path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+}
+
 /// Launch an agent via the RuntimeAdapter and wait for it to exit (v0.13.3).
 ///
 /// This is the non-interactive, non-PTY path.  It replaces `launch_agent` and
@@ -4752,6 +4936,7 @@ fn accumulate_tokens(line: &str, tokens: &mut AgentTokens) {
 /// - `AgentExited` after the process exits (carries exit code, duration)
 /// - `RuntimeError` (instead of returning Err) on spawn failure, so callers
 ///   always get a structured event even when the agent never starts.
+#[allow(clippy::too_many_arguments)]
 fn launch_agent_via_runtime(
     config: &AgentLaunchConfig,
     staging_path: &std::path::Path,
@@ -4760,13 +4945,36 @@ fn launch_agent_via_runtime(
     pid_callback: Option<&dyn Fn(u32)>,
     goal_id: uuid::Uuid,
     events_dir: &std::path::Path,
+    credential_scopes: Option<&[String]>,
 ) -> std::io::Result<(std::process::ExitStatus, AgentTokens)> {
     use std::io::{BufRead, BufReader};
     use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
     use ta_runtime::{RuntimeRegistry, SpawnRequest, StdinMode, StdoutMode};
 
     // Build the environment map with template variables already applied.
-    let mut env = config.env.clone();
+    //
+    // v0.17.6.1: when `credential_scopes` is declared, this spawn does not
+    // inherit the current process's full environment — it starts from an
+    // explicit non-secret baseline plus only the vault credentials whose
+    // declared scope intersects `credential_scopes` (see
+    // `scoped_credential_env`). `SpawnRequest.clear_env` below is what makes
+    // this a real replacement rather than an addition on top of full
+    // inheritance. `None` (the flag was never passed) keeps the historical
+    // behavior of full environment inheritance, unchanged.
+    let clear_env = credential_scopes.is_some();
+    let mut env: std::collections::HashMap<String, String> = match credential_scopes {
+        Some(scopes) => {
+            let project_root = project_root_from_staging(staging_path);
+            let available = project_root
+                .as_deref()
+                .map(load_vault_credentials)
+                .unwrap_or_default();
+            let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+            scoped_credential_env(&current_env, &available, scopes)
+        }
+        None => std::collections::HashMap::new(),
+    };
+    env.extend(config.env.clone());
     if headless {
         env.extend(config.non_interactive_env.clone());
     }
@@ -4825,6 +5033,7 @@ fn launch_agent_via_runtime(
         working_dir: staging_path.to_path_buf(),
         stdin_mode,
         stdout_mode,
+        clear_env,
     };
 
     // Apply sandbox policy from workflow.toml [sandbox] section (v0.14.0).
@@ -8329,6 +8538,7 @@ mod tests {
             None,  // workflow = default (single-agent)
             None,  // persona_name = None
             None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
         )
         .unwrap();
 
@@ -10309,6 +10519,7 @@ plan_pending_window = 7
             None,
             None,
             None,
+            None, // credential_scopes = None (v0.17.6.1)
         )
         .unwrap();
 
@@ -10343,6 +10554,7 @@ plan_pending_window = 7
             None,
             None,
             None,
+            None, // credential_scopes = None (v0.17.6.1)
         )
         .unwrap();
 
@@ -10765,5 +10977,175 @@ plan_pending_window = 7
         let dir = tempfile::tempdir().unwrap();
         let rec = recommend_agent(dir.path(), "test-tier", None, None, None);
         assert_eq!(rec.agent, "claude-code");
+    }
+
+    // ── v0.17.6.1: declared credential scope enforcement ────────────────────
+
+    #[test]
+    fn scoped_credential_env_keeps_only_baseline_and_ta_prefixed_vars() {
+        let mut current_env = HashMap::new();
+        current_env.insert("PATH".to_string(), "/usr/bin".to_string());
+        current_env.insert("HOME".to_string(), "/home/agent".to_string());
+        current_env.insert("TA_PROJECT_ROOT".to_string(), "/proj".to_string());
+        // Not a baseline key, not TA_-prefixed — must not survive.
+        current_env.insert("AWS_SECRET_ACCESS_KEY".to_string(), "leaked".to_string());
+
+        let env = scoped_credential_env(&current_env, &[], &[]);
+
+        assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
+        assert_eq!(env.get("HOME"), Some(&"/home/agent".to_string()));
+        assert_eq!(env.get("TA_PROJECT_ROOT"), Some(&"/proj".to_string()));
+        assert!(!env.contains_key("AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn scoped_credential_env_includes_only_intersected_credentials() {
+        let current_env = HashMap::new();
+        let available = vec![
+            ta_runtime::ScopedCredential::with_scopes(
+                "GITHUB_TOKEN",
+                "ghp_real",
+                vec!["repo.read".into()],
+            ),
+            ta_runtime::ScopedCredential::with_scopes(
+                "AWS_KEY",
+                "aws_real",
+                vec!["deploy.prod".into()],
+            ),
+            ta_runtime::ScopedCredential::new("ANTHROPIC_API_KEY", "anthropic_real"),
+        ];
+
+        let env = scoped_credential_env(&current_env, &available, &["repo.read".to_string()]);
+
+        // In the required scope — present, not a placeholder.
+        assert_eq!(env.get("GITHUB_TOKEN"), Some(&"ghp_real".to_string()));
+        // Unscoped — always present regardless of required scopes.
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY"),
+            Some(&"anthropic_real".to_string())
+        );
+        // Scope excluded — absent entirely, not present-but-empty.
+        assert!(!env.contains_key("AWS_KEY"));
+    }
+
+    #[test]
+    fn load_vault_credentials_returns_empty_for_unpopulated_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_vault_credentials(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn load_vault_credentials_includes_secret_and_scopes() {
+        use ta_credentials::{CredentialVault, CredentialsConfig, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut vault = FileVault::open(&CredentialsConfig::for_project(dir.path())).unwrap();
+            vault
+                .add(
+                    "GITHUB_TOKEN",
+                    "github",
+                    "ghp_secret",
+                    vec!["repo.read".into()],
+                )
+                .unwrap();
+        }
+
+        let creds = load_vault_credentials(dir.path());
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].name, "GITHUB_TOKEN");
+        assert_eq!(creds[0].value, "ghp_secret");
+        assert_eq!(creds[0].scopes, vec!["repo.read".to_string()]);
+    }
+
+    #[test]
+    fn swarm_sub_goal_command_declares_credential_scopes_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = build_swarm_sub_goal_command(
+            Path::new("/usr/local/bin/ta"),
+            dir.path(),
+            "Add auth endpoint",
+            "claude-code",
+            "",
+            true,
+            &["repo.read".to_string(), "ci.trigger".to_string()],
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--credential-scopes".to_string()));
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--credential-scopes")
+            .unwrap();
+        assert_eq!(args[flag_pos + 1], "repo.read,ci.trigger");
+    }
+
+    #[test]
+    fn swarm_sub_goal_command_passes_empty_credential_scopes_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = build_swarm_sub_goal_command(
+            Path::new("/usr/local/bin/ta"),
+            dir.path(),
+            "Add auth endpoint",
+            "claude-code",
+            "",
+            true,
+            &[],
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--credential-scopes")
+            .unwrap();
+        // Present but empty — "enforcement on, zero scopes", not the flag
+        // being omitted entirely (which would mean legacy full inheritance).
+        assert_eq!(args[flag_pos + 1], "");
+    }
+
+    #[test]
+    fn swarm_sub_goal_command_env_does_not_contain_full_parent_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        // A var that's set in *this test process* but not in the vault and
+        // not a baseline key (and NOT TA_-prefixed) — must not leak into the
+        // sub-goal's env.
+        std::env::set_var("SWARM_LEAK_CANARY_XYZ", "leaked");
+        std::env::set_var("TA_PREFIXED_CANARY_SHOULD_SURVIVE", "kept");
+
+        let cmd = build_swarm_sub_goal_command(
+            Path::new("/usr/local/bin/ta"),
+            dir.path(),
+            "Add auth endpoint",
+            "claude-code",
+            "",
+            true,
+            &[],
+        );
+
+        let envs: HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+
+        std::env::remove_var("SWARM_LEAK_CANARY_XYZ");
+        std::env::remove_var("TA_PREFIXED_CANARY_SHOULD_SURVIVE");
+
+        assert!(!envs.contains_key("SWARM_LEAK_CANARY_XYZ"));
+        // TA_-prefixed control-plane vars are the one deliberate exception.
+        assert_eq!(
+            envs.get("TA_PREFIXED_CANARY_SHOULD_SURVIVE"),
+            Some(&Some("kept".to_string()))
+        );
     }
 }

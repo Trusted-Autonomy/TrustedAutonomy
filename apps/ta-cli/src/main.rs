@@ -388,6 +388,25 @@ enum Commands {
         /// `.ta/workflow.toml` config or is detected from the goal title.
         #[arg(long)]
         priority: Option<String>,
+        /// Declared credential scopes for this goal run, comma-separated
+        /// (v0.17.6.1, e.g. `--credential-scopes repo.read,ci.trigger`).
+        ///
+        /// When set, the agent process (and, for `--workflow swarm`, every
+        /// sub-goal it spawns) receives a narrowed environment: an explicit
+        /// non-secret baseline plus only the vault credentials
+        /// (`ta credentials add --scope ...`) whose declared scope
+        /// intersects this list — no full-environment inheritance.
+        /// Credentials with no declared scope are always included.
+        /// Pass `--credential-scopes ""` (an explicit empty value) for "no
+        /// scopes" (baseline + unscoped credentials only) — clap requires a
+        /// value token for this flag. Omit the flag entirely to keep the
+        /// legacy behavior of full environment inheritance.
+        ///
+        /// `--workflow swarm` sub-goals always run scope-narrowed — this flag
+        /// declares which scopes they get; omitting it narrows them to
+        /// nothing but the baseline and unscoped credentials.
+        #[arg(long, value_delimiter = ',')]
+        credential_scopes: Option<Vec<String>>,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1572,9 +1591,19 @@ fn dispatch_raw(
             team,
             security,
             priority,
+            credential_scopes,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
+
+            // Normalize `--credential-scopes` (v0.17.6.1): `Some(vec![])` (flag
+            // given with no value, or clap's empty-string split) means "scope
+            // enforcement on, zero scopes" — distinct from `None` ("flag never
+            // given, legacy full-inheritance behavior"). Filtering empty
+            // strings out of a `Some(...)` must not turn it into `None`.
+            let credential_scopes: Option<Vec<String>> = credential_scopes
+                .as_ref()
+                .map(|scopes| scopes.iter().filter(|s| !s.is_empty()).cloned().collect());
 
             // Phase-aware title resolution: if the positional title looks like
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
@@ -1648,6 +1677,7 @@ fn dispatch_raw(
                     gates,
                     *integrate,
                     *quiet,
+                    credential_scopes.as_deref(),
                 );
             }
 
@@ -1674,6 +1704,7 @@ fn dispatch_raw(
                 workflow.as_deref(),
                 persona.as_deref(),
                 context.as_deref(),
+                credential_scopes.as_deref(),
             )
         }
         Commands::Events { command } => {
