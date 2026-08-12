@@ -10112,7 +10112,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.3 — Gateway Live Interception + Secret-Substitution Broker (MCP Path)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.2
 
 **Goal**: Build the gateway's actual live pre-dispatch interception/substitution point. **This is new middleware, not an extension of something already running**: `ta-mcp-gateway::ToolCallInterceptor` is constructed and stored today but its `.classify()` is never invoked outside its own tests — it's dead code, same category as `CredentialVault` was before v0.17.6.2. Sized accordingly (larger than a typical single-crate phase) — split into sub-items below rather than one undifferentiated block, and re-split into further sub-phases at execution time if a single goal-run can't carry the whole thing.
