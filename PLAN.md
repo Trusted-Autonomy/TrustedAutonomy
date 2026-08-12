@@ -10080,17 +10080,17 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.1 — Enforce Declared Credential Scopes + Real Swarm Handoff
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.6
 
 **Goal**: Close the two loudest, cheapest-to-fix gaps first: `ScopedCredential.scopes` is declared but never checked anywhere, and `run_one_swarm_sub_goal` hands every sub-goal a full-environment clone of the parent with no narrowing. No new crates, no new token format yet — this stage is pure enforcement of concepts that already exist in the type system.
 
 **Items**:
-1. [ ] `apply_credentials_to_env` (`crates/ta-runtime/src/bare_process.rs`) gains a required-scope input and filters `ScopedCredential`s by `.scopes`/`security_tier` before injecting — today it takes a credential list with nothing to compare scopes against; this is new plumbing, not a conditional bolted onto the existing loop.
-2. [ ] `run_one_swarm_sub_goal` (`apps/ta-cli/src/commands/run.rs`) gets `cmd.env_clear()` plus explicit re-injection of a non-secret baseline (`PATH`, `HOME`, etc.) and an intersected credential/scope set for the sub-goal.
-3. [ ] **The real fix, not just the wrapper**: `run_one_swarm_sub_goal` spawns a *nested `ta run` CLI respawn*, which independently resolves its own credentials deep inside the child process. `.env_clear()` alone doesn't narrow what that child resolves from `.ta/credentials.json`. Add an explicit scope handoff into the recursive `ta run` invocation (new CLI flag or env var carrying the intersected scope set) so the child's own credential resolution actually respects the narrower scope.
-4. [ ] Tests: a sub-goal's spawned process environment contains only the intersected credential set, not the parent's full environment; a credential whose scope excludes the sub-goal's declared need is absent from its env entirely; the nested `ta run` child genuinely resolves the narrowed scope, not just the outer wrapper's env.
-5. [ ] USAGE.md: note that swarm sub-goals now receive scope-narrowed credentials, not full inheritance.
+1. [x] `apply_credentials_to_env` (`crates/ta-runtime/src/bare_process.rs`) gains a required-scope input and filters `ScopedCredential`s by `.scopes`/`security_tier` before injecting — today it takes a credential list with nothing to compare scopes against; this is new plumbing, not a conditional bolted onto the existing loop.
+2. [x] `run_one_swarm_sub_goal` (`apps/ta-cli/src/commands/run.rs`) gets `cmd.env_clear()` plus explicit re-injection of a non-secret baseline (`PATH`, `HOME`, etc.) and an intersected credential/scope set for the sub-goal.
+3. [x] **The real fix, not just the wrapper**: `run_one_swarm_sub_goal` spawns a *nested `ta run` CLI respawn*, which independently resolves its own credentials deep inside the child process. `.env_clear()` alone doesn't narrow what that child resolves from `.ta/credentials.json`. Add an explicit scope handoff into the recursive `ta run` invocation (new CLI flag or env var carrying the intersected scope set) so the child's own credential resolution actually respects the narrower scope.
+4. [x] Tests: a sub-goal's spawned process environment contains only the intersected credential set, not the parent's full environment; a credential whose scope excludes the sub-goal's declared need is absent from its env entirely; the nested `ta run` child genuinely resolves the narrowed scope, not just the outer wrapper's env.
+5. [x] USAGE.md: note that swarm sub-goals now receive scope-narrowed credentials, not full inheritance.
 
 #### Version: `0.17.6-alpha.1`
 

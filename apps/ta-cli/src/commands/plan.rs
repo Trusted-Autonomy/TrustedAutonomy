@@ -3345,6 +3345,7 @@ fn plan_add(
         None,  // workflow = default (single-agent)
         None,  // persona_name = None
         None,  // context_path = None
+        None,  // credential_scopes = None (v0.17.6.1)
     )
 }
 
@@ -3599,6 +3600,7 @@ fn plan_from(
         None,  // workflow = default (single-agent)
         None,  // persona_name = None
         None,  // context_path = None
+        None,  // credential_scopes = None (v0.17.6.1)
     )
 }
 
@@ -3710,6 +3712,7 @@ fn plan_new(
         None,  // workflow
         None,  // persona_name
         None,  // context_path = None
+        None,  // credential_scopes = None (v0.17.6.1)
     )
 }
 
@@ -6262,6 +6265,7 @@ fn plan_build(
             None,  // workflow
             None,  // persona_name
             None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
         )?;
 
         phases_built += 1;
@@ -7019,6 +7023,7 @@ fn plan_build_autonomous(
                     None,
                     None,
                     None,
+                    None, // credential_scopes = None (v0.17.6.1)
                 ) {
                     let msg = format!("Goal launch failed for phase {}: {}", phase_id, e);
                     eprintln!("[escalate] {}", msg);
@@ -9014,6 +9019,7 @@ fn plan_pragma(config: &GatewayConfig, no_scan: bool) -> anyhow::Result<()> {
                     None,
                     None,
                     None, // context_path = None
+                    None, // credential_scopes = None (v0.17.6.1)
                 )?;
             }
         } else {

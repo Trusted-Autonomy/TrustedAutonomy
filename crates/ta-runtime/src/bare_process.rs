@@ -135,6 +135,14 @@ impl RuntimeAdapter for BareProcessRuntime {
         let mut cmd = build_command(&request.command, &request.args);
         cmd.current_dir(&request.working_dir);
 
+        // Scope-narrowed spawns (v0.17.6.1) start from nothing rather than
+        // the full parent environment — `request.env` is the complete,
+        // already-narrowed environment for this child, not an addition to
+        // whatever this process happened to inherit.
+        if request.clear_env {
+            cmd.env_clear();
+        }
+
         // Strip dynamic-linker preload variables before merging any env overrides.
         // These can be injected into the parent process environment by a PATH-masquerade
         // attack and would be inherited by the agent subprocess, allowing arbitrary
@@ -230,13 +238,32 @@ fn build_command(command: &str, args: &[String]) -> Command {
 
 // ── Helper: build env map with credentials ───────────────────────────────────
 
-/// Merge scoped credentials into an existing env map.
+/// Merge scoped credentials into an existing env map, enforcing declared
+/// scopes (v0.17.6.1).
 ///
-/// Each credential becomes an environment variable: `cred.name = cred.value`.
-/// Call this before building a `SpawnRequest` to include credentials.
-pub fn apply_credentials_to_env(env: &mut HashMap<String, String>, creds: &[ScopedCredential]) {
+/// A credential is only injected if it is eligible for `required_scopes`:
+/// - A credential with **no** declared scopes (`cred.scopes.is_empty()`) is
+///   unrestricted — per `ScopedCredential`'s own contract ("no scope
+///   restrictions") it is always injected.
+/// - A credential with declared scopes is injected only if at least one of
+///   them appears in `required_scopes`. A credential whose scopes don't
+///   intersect `required_scopes` at all is silently omitted — the caller
+///   never sees it, not even as an unusable placeholder.
+///
+/// Each injected credential becomes an environment variable:
+/// `cred.name = cred.value`. Call this before building a `SpawnRequest` to
+/// include credentials.
+pub fn apply_credentials_to_env(
+    env: &mut HashMap<String, String>,
+    creds: &[ScopedCredential],
+    required_scopes: &[String],
+) {
     for cred in creds {
-        env.insert(cred.name.clone(), cred.value.clone());
+        let in_scope =
+            cred.scopes.is_empty() || cred.scopes.iter().any(|s| required_scopes.contains(s));
+        if in_scope {
+            env.insert(cred.name.clone(), cred.value.clone());
+        }
     }
 }
 
@@ -260,6 +287,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
         let mut handle = rt.spawn(req).expect("spawn should succeed");
         let status = handle.wait().expect("wait should succeed");
@@ -280,6 +308,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
         let mut handle = rt.spawn(req).expect("spawn should succeed");
         let status = handle.wait().expect("wait should succeed");
@@ -298,6 +327,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Piped,
+            clear_env: false,
         };
         let mut handle = rt.spawn(req).expect("spawn should succeed");
         let mut output = String::new();
@@ -318,6 +348,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
         let mut handle = rt.spawn(req).expect("spawn should succeed");
         assert_eq!(handle.transport_info(), TransportInfo::Stdio);
@@ -335,6 +366,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
         let mut handle = rt.spawn(req).expect("spawn should succeed");
         // Wait for the child, then check status.
@@ -347,19 +379,108 @@ mod tests {
     }
 
     #[test]
-    fn apply_credentials_to_env_merges() {
+    fn apply_credentials_to_env_merges_unscoped_credentials() {
         let mut env = HashMap::new();
         env.insert("EXISTING".into(), "yes".into());
 
-        let creds = vec![
-            ScopedCredential::new("API_KEY", "secret-key"),
-            ScopedCredential::with_scopes("GITHUB", "ghp_token", vec!["repo.read".into()]),
-        ];
-        apply_credentials_to_env(&mut env, &creds);
+        // Unscoped credentials ("no scope restrictions") are always injected,
+        // regardless of what's required.
+        let creds = vec![ScopedCredential::new("API_KEY", "secret-key")];
+        apply_credentials_to_env(&mut env, &creds, &[]);
 
         assert_eq!(env.get("EXISTING"), Some(&"yes".to_string()));
         assert_eq!(env.get("API_KEY"), Some(&"secret-key".to_string()));
+    }
+
+    #[test]
+    fn apply_credentials_to_env_includes_credential_with_matching_scope() {
+        let mut env = HashMap::new();
+        let creds = vec![ScopedCredential::with_scopes(
+            "GITHUB",
+            "ghp_token",
+            vec!["repo.read".into()],
+        )];
+        apply_credentials_to_env(&mut env, &creds, &["repo.read".into()]);
+
         assert_eq!(env.get("GITHUB"), Some(&"ghp_token".to_string()));
+    }
+
+    #[test]
+    fn apply_credentials_to_env_excludes_credential_out_of_required_scope() {
+        let mut env = HashMap::new();
+        let creds = vec![ScopedCredential::with_scopes(
+            "GITHUB",
+            "ghp_token",
+            vec!["repo.write".into()],
+        )];
+        // Required scope doesn't overlap the credential's declared scope —
+        // it must be entirely absent from the resulting env, not merely
+        // present-but-empty.
+        apply_credentials_to_env(&mut env, &creds, &["repo.read".into()]);
+
+        assert!(!env.contains_key("GITHUB"));
+    }
+
+    #[test]
+    fn apply_credentials_to_env_excludes_scoped_credential_when_no_scopes_required() {
+        let mut env = HashMap::new();
+        let creds = vec![ScopedCredential::with_scopes(
+            "GITHUB",
+            "ghp_token",
+            vec!["repo.read".into()],
+        )];
+        apply_credentials_to_env(&mut env, &creds, &[]);
+
+        assert!(!env.contains_key("GITHUB"));
+    }
+
+    #[test]
+    fn apply_credentials_to_env_includes_credential_matching_any_of_several_scopes() {
+        let mut env = HashMap::new();
+        let creds = vec![ScopedCredential::with_scopes(
+            "GITHUB",
+            "ghp_token",
+            vec!["repo.read".into(), "issues.write".into()],
+        )];
+        apply_credentials_to_env(
+            &mut env,
+            &creds,
+            &["issues.write".into(), "ci.trigger".into()],
+        );
+
+        assert_eq!(env.get("GITHUB"), Some(&"ghp_token".to_string()));
+    }
+
+    #[test]
+    fn spawn_with_clear_env_does_not_inherit_parent_environment() {
+        let rt = BareProcessRuntime::new();
+        let mut env = HashMap::new();
+        env.insert("SCOPED_ONLY".into(), "present".into());
+
+        // A var that's set in *this test process* but must NOT leak through
+        // when clear_env is set — only what's explicitly in `env` survives.
+        std::env::set_var("TA_TEST_LEAK_CANARY", "should-not-be-inherited");
+
+        let req = SpawnRequest {
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "test \"$SCOPED_ONLY\" = present && [ -z \"$TA_TEST_LEAK_CANARY\" ]".into(),
+            ],
+            env,
+            working_dir: std::env::temp_dir(),
+            stdin_mode: StdinMode::Null,
+            stdout_mode: StdoutMode::Inherited,
+            clear_env: true,
+        };
+        let mut handle = rt.spawn(req).expect("spawn should succeed");
+        let status = handle.wait().expect("wait should succeed");
+        std::env::remove_var("TA_TEST_LEAK_CANARY");
+
+        assert!(
+            status.success(),
+            "clear_env spawn must see only the explicit env, not the parent's"
+        );
     }
 
     #[test]
@@ -372,6 +493,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
         let mut handle = rt.spawn(req).expect("spawn should succeed");
         let creds = vec![ScopedCredential::new("K", "v")];

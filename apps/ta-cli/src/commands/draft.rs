@@ -9352,6 +9352,7 @@ fn fix_package(
         None,  // workflow = default (single-agent)
         None,  // persona_name = None
         None,  // context_path = None
+        None,  // credential_scopes = None (v0.17.6.1)
     )?;
 
     if no_launch {

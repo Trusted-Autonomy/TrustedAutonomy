@@ -1492,6 +1492,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
 
         match spawn_in_appcontainer(&request, &guard) {
@@ -1552,6 +1553,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
 
         match spawn_in_appcontainer(&request, &guard) {
@@ -1614,6 +1616,7 @@ mod tests {
             working_dir: std::path::PathBuf::from("C:\\staging\\workspace"),
             stdin_mode: StdinMode::Null,
             stdout_mode: StdoutMode::Inherited,
+            clear_env: false,
         };
 
         let wrapped = policy.apply(req.clone());
