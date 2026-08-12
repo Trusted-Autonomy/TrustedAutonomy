@@ -10051,7 +10051,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.5.3 — Pluggable Domain-Action Adapters (User-Authored Plugins, Not Just Built-In)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.5.2, `StepAction::external_adapter()` (existing hook, currently zero production callers), v0.17.4 item 3 (release adapter plugin protocol — reuse its transport, don't invent a second one)
 
 **Goal**: Today, adding a new domain action (e.g. "execute a stock trade via a brokerage API") requires a TA core code change — every existing connector (Slack/Discord/email/social) is built into `ta-daemon`'s own crates, and the one generic hook meant for this (`StepAction::external_adapter()`) has never been dispatched to in production. Make it genuinely user-authorable, reusing the exact same external-subprocess-plugin transport already proven twice in this codebase (`[[connectors.managed]]` in `connector_supervisor.rs`, and v0.17.4 item 3's release-adapter "JSON-over-stdio, same pattern as VCS plugins") rather than inventing a third plugin protocol.
