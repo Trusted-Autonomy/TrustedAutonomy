@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.5-alpha.2
+**Version**: 0.17.5-alpha.3
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -10019,6 +10019,7 @@ This section covers the **Plugin** category, unified onto one shared transport/m
 | `tool` | `.ta/plugins/tool/<name>/` | (community-defined; see `plugins/tool/*/plugin.toml` for examples) |
 | `db` | `.ta/plugins/db/<name>/` | (community-defined DB proxy adapter) |
 | `release` | `.ta/plugins/release/<name>/` | (community-defined release adapter) |
+| `adapter` | `.ta/plugins/adapter/<name>/` | `plugins/adapter/paper-trading/paper_trading_adapter.py` |
 
 **Discovery order:** project-local (`.ta/plugins/<kind>/<name>/plugin.toml`) is checked first, then user-global (`~/.config/ta/plugins/<kind>/<name>/plugin.toml`).
 
@@ -10083,6 +10084,45 @@ For `db`-kind plugins specifically — the full method list (`start_capture`/`st
 change-capture lifecycle, `apply_mutation` replay), the `db-overlay.jsonl` wire shape, and the
 network-policy/credential-vault guarantee a plugin author relies on — see
 [`docs/community-db-plugin.md`](community-db-plugin.md) and [Database Proxy](#database-proxy).
+
+**Domain-Action Adapters (`adapter` kind, v0.17.5.3).** Any external side effect an agent
+wants to take that isn't already one of the four built-in `ta_external_action` types
+(`email`/`social_post`/`api_call`/`db_query`) — placing a trade, filing a support ticket,
+triggering a CI pipeline, anything — is a user-authored `adapter`-kind plugin, not a TA core
+change. A plugin declares the verb(s) it handles as `capabilities` entries prefixed `verb:`
+(e.g. `capabilities = ["verb:trade.execute"]`), and implements two methods over the same
+canonical envelope every other Plugin-category kind uses:
+
+```toml
+# .ta/plugins/adapter/paper-trading/plugin.toml
+name = "paper-trading"
+type = "adapter"
+command = "python3"
+args = ["paper_trading_adapter.py"]
+capabilities = ["verb:trade.execute"]
+```
+
+```
+→ {"method":"risk_score","params":{"verb":"trade.execute","payload":{"symbol":"ACME","amount":500}}}
+← {"ok":true,"result":{"risk_score":25,"confidence":0.9}}
+
+→ {"method":"execute","params":{"verb":"trade.execute","payload":{"symbol":"ACME","amount":500}}}
+← {"ok":true,"result":{"status":"filled", ...}}
+```
+
+An agent calls `ta_external_action` with `action_type: "trade.execute"` exactly as it would
+for a built-in type; TA scores the trade's real, plugin-computed risk (never a hardcoded `0`),
+runs it through the same `ta_decision::gate::decide()` used by `ta_human_verify` and code
+drafts, consults the calling goal's `security_tier`, and checks any declared budget guardrail
+— only committing to the plugin's `execute` method when every gate passes. Anything else is
+captured for human review, never silently dropped. Calling `ta_external_action` with a verb no
+plugin has registered returns a clear "no adapter registered for this verb" error.
+
+See [`docs/community-adapter-plugin.md`](community-adapter-plugin.md) for the full authoring
+guide (the wire protocol in detail, the gating pipeline, and how to test a new adapter without
+a live external dependency) and `templates/workflows/trading-desk.yaml` for a worked
+end-to-end reference (an analyst/strategist/trader persistent team session dispatching through
+the shipped `plugins/adapter/paper-trading/` mock adapter).
 
 #### Channel Access Control
 

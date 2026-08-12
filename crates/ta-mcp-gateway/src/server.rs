@@ -301,6 +301,12 @@ pub struct ExternalActionParams {
     /// Use this to test workflow definitions without side effects.
     #[serde(default)]
     pub dry_run: bool,
+    /// A business-metric budget guardrail check to run against this action
+    /// before it may auto-execute (v0.17.5.3, reusing `ta_human_verify`'s
+    /// v0.17.5.2 budget mechanism). Only consulted for `ActionPolicy::Auto`
+    /// dispatch — absent for actions with no cost/quantity dimension.
+    #[serde(default)]
+    pub budget: Option<tools::human_verify::BudgetActionParams>,
 }
 
 /// Tracks an active agent session within the gateway (v0.9.6).

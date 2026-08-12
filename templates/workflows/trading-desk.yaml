@@ -1,0 +1,85 @@
+# trading-desk.yaml — Reference persistent team session (v0.17.5.3).
+#
+# Proves the full pluggable-domain-action-adapter loop end-to-end: an
+# analyst/strategist/trader role chain (v0.17.5.1's persistent team-session
+# runtime) where the trader role calls `ta_external_action` with
+# action_type="trade.execute" — a verb handled entirely by the mock
+# `paper-trading` adapter plugin (`plugins/adapter/paper-trading/`,
+# installed at `.ta/plugins/adapter/paper-trading/` for this project), not a
+# live brokerage integration. Every trade is gated by the same
+# risk-score/security_tier/budget pipeline `ta_human_verify` uses.
+#
+# Usage:
+#   ta team-session start trading-desk \
+#     --workflow templates/workflows/trading-desk.yaml \
+#     --objective "Generate income > 2x within 6 months after fees"
+#
+# See docs/community-adapter-plugin.md for how to author your own domain
+# adapter, and docs/USAGE.md's "Domain-Action Adapters" section for the
+# `ta_external_action` gating pipeline this workflow exercises.
+
+name: trading-desk
+
+stages:
+  - name: analyze
+    roles: [analyst]
+    await_human: never
+
+  - name: decide
+    depends_on: [analyze]
+    roles: [strategist]
+    await_human: never
+
+  - name: execute
+    depends_on: [decide]
+    roles: [trader]
+    await_human: never
+
+roles:
+  analyst:
+    agent: claude-code
+    prompt: |
+      You are a market analyst. Review the session objective and current
+      market data available to you, then produce a short written analysis
+      of candidate trade opportunities with your reasoning. You never place
+      trades yourself — that is the trader role's job, two stages later.
+
+  strategist:
+    agent: claude-code
+    prompt: |
+      You are a trading strategist. Given the analyst's findings, decide
+      which candidate trades (if any) are worth acting on this cycle, and
+      size each one (symbol, side, dollar amount). Write your decision for
+      the trader role to execute. You never place trades yourself.
+
+  trader:
+    agent: claude-code
+    prompt: |
+      You are a trader. For each trade the strategist decided on, call the
+      `ta_external_action` MCP tool with:
+
+        action_type: "trade.execute"
+        payload: {"symbol": <symbol>, "side": <"buy"|"sell">, "amount": <usd>}
+        budget: {
+          guardrails: {metric: "usd", total: <session total>, ...},
+          action_amount: <usd>,
+          ledger_path: ".ta/team-sessions/trading-desk/budget-ledger.jsonl",
+          action_label: "<symbol> <side> <usd>"
+        }
+
+      TA scores the trade's real risk (via the paper-trading adapter's
+      risk_score method), checks it against the session's budget guardrail,
+      and only auto-executes when both the risk gate and your session's
+      security_tier allow it. A trade TA declines to auto-execute is
+      captured for human review instead — it is never silently dropped.
+      Never attempt to bypass this by calling a brokerage API directly.
+
+# Business-metric budget guardrail (v0.17.5.2) — enforced on every
+# `ta_external_action` call the trader role makes that supplies a
+# `budget` block referencing this session's ledger.
+budget:
+  metric: usd
+  total: 1000.0
+  per_action_max_pct: 10.0
+  soft_threshold_pct: 80.0
+  objective: "Generate income > 2x within 6 months after fees"

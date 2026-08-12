@@ -535,7 +535,7 @@ pub(crate) fn load_thresholds(workspace_root: &Path, workload_type: &str) -> Dec
 /// `("general", Suggest)` when no routing decision has ever been logged —
 /// deliberately *not* `Auto`, so an unclassified workload never silently
 /// gets the auto-confirm fast path.
-fn resolve_workload_context(workspace_root: &Path) -> (String, AdvisorSecurity) {
+pub(crate) fn resolve_workload_context(workspace_root: &Path) -> (String, AdvisorSecurity) {
     #[derive(Deserialize)]
     struct LoggedDecision {
         workload_type: String,
@@ -844,7 +844,7 @@ fn handle_human_verify_with_pipeline(
 /// check and `unity.rs`'s path-component validator — reused here rather
 /// than reinvented, adapted to allow the legitimate multi-segment relative
 /// paths this parameter needs (e.g. `.ta/team-sessions/<id>/budget-ledger.jsonl`).
-fn validate_ledger_path(path: &str) -> Result<(), McpError> {
+pub(crate) fn validate_ledger_path(path: &str) -> Result<(), McpError> {
     // `Path::is_absolute()` alone isn't platform-parity-safe here: a
     // Unix-style absolute path like "/etc/evil.jsonl" has no drive letter,
     // so on Windows `is_absolute()` returns false for it (it reads as

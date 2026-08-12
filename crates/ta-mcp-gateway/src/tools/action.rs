@@ -19,6 +19,7 @@
 // Dry-run mode overrides all policies: action is logged but never executed
 // or captured for review. Useful for testing workflow definitions.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -27,12 +28,17 @@ use rmcp::ErrorData as McpError;
 use uuid::Uuid;
 
 use ta_actions::{
-    ActionCapture, ActionOutcome, ActionPolicies, ActionPolicy, ActionRegistry, CapturedAction,
-    DispatchResult, EmailDispatchGuard, RateLimitResult, SessionRateLimiter,
+    discover_adapter_actions, ActionCapture, ActionOutcome, ActionPolicies, ActionPolicy,
+    ActionRegistry, CapturedAction, DispatchResult, EmailDispatchGuard, RateLimitResult,
+    RiskAssessment, SessionRateLimiter,
 };
 use ta_changeset::draft_package::{ActionKind, ArtifactDisposition, PendingAction};
+use ta_decision::{decide, Decision, DecisionInput, Verdict};
+use ta_policy::business_budget::{self, BudgetCheckResult};
+use ta_session::workflow_session::AdvisorSecurity;
 
 use crate::server::GatewayState;
+use crate::tools::human_verify::{load_thresholds, resolve_workload_context, validate_ledger_path};
 use crate::validation::parse_uuid;
 
 // ── Handler ──────────────────────────────────────────────────────────────────
@@ -48,19 +54,32 @@ pub fn handle_external_action(
 
     let goal_run_id = params.goal_run_id.as_deref().map(parse_uuid).transpose()?;
 
-    // Validate the action type against the registry.
-    let registry = ActionRegistry::new();
+    // Validate the action type against the registry: the four built-in
+    // stubs plus every verb declared by a discovered adapter plugin under
+    // `.ta/plugins/adapter/<name>/plugin.toml` (v0.17.5.3) — this is the
+    // registry's first real production caller of plugin-backed actions.
+    // Discovery only reads manifests, it never spawns a subprocess, so this
+    // stays cheap even for calls targeting an unrelated built-in type.
+    let mut registry = ActionRegistry::new();
+    for plugin_action in discover_adapter_actions(&state.config.workspace_root) {
+        registry.register(plugin_action);
+    }
     let action_impl = registry.get(&params.action_type).ok_or_else(|| {
         McpError::invalid_params(
             format!(
-                "unknown action type '{}'. Registered types: {}",
+                "unknown action type '{}' — no adapter registered for this verb. \
+                 Registered types: {}. Author a plugin under \
+                 .ta/plugins/adapter/<name>/plugin.toml declaring \
+                 `capabilities = [\"verb:{}\"]` to handle it (see \
+                 docs/community-adapter-plugin.md).",
                 params.action_type,
                 registry
                     .list()
                     .iter()
                     .map(|t| t.action_type.as_str())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                params.action_type,
             ),
             None,
         )
@@ -301,29 +320,7 @@ pub fn handle_external_action(
             }
 
             ActionPolicy::Auto => {
-                // Execute via plugin. Stubs return StubOnly error.
-                match action_impl.execute(&params.payload) {
-                    Ok(result) => (ActionOutcome::Executed { result }, None),
-                    Err(ta_actions::ActionError::StubOnly(_)) => {
-                        // Stub: log as executed with a clear placeholder result.
-                        let result = serde_json::json!({
-                            "status": "stub_executed",
-                            "message": format!(
-                                "Action type '{}' has no registered plugin executor. \
-                                 Register a plugin via the ActionRegistry to provide \
-                                 real execution. The action has been logged.",
-                                params.action_type
-                            )
-                        });
-                        (ActionOutcome::Executed { result }, None)
-                    }
-                    Err(e) => {
-                        return Err(McpError::internal_error(
-                            format!("action execution failed: {}", e),
-                            None,
-                        ));
-                    }
-                }
+                dispatch_auto_action(&state.config.workspace_root, &params, action_impl)?
             }
         }
     };
@@ -389,6 +386,170 @@ pub fn handle_external_action(
         .map_err(|e| {
             McpError::internal_error(e.to_string(), None)
         })?]))
+}
+
+/// Dispatch an `ActionPolicy::Auto` action through the risk/budget/security
+/// gate (v0.17.5.3 item 3): a plugin-computed risk score is scored via the
+/// same `ta_decision::gate::decide()` used by code drafts and
+/// `ta_human_verify` — one uniform `Commit`/`Reject`/`Rework`/`Escalate`
+/// contract regardless of domain — a business-metric budget guardrail
+/// (v0.17.5.2, item 4) is consulted when the caller supplies one, and
+/// `security_tier` gates whether the gate's own verdict is even allowed to
+/// auto-commit (item 3's "consults `security_tier` directly" requirement):
+/// this mirrors `check_advisor_auto_approve`'s Auto-only rule as this
+/// path's own live caller, rather than leaving that logic unwired like the
+/// real draft-apply path does today.
+fn dispatch_auto_action(
+    workspace_root: &Path,
+    params: &ExternalActionParams,
+    action_impl: &dyn ta_actions::ExternalAction,
+) -> Result<(ActionOutcome, Option<PendingAction>), McpError> {
+    // Business-metric budget hard-limit pre-gate — deterministic, runs
+    // before any risk scoring (mirrors `ta_human_verify`'s ordering: a
+    // hard limit is a workflow-declared rule with no confidence override).
+    let mut budget_soft_limit_reason: Option<String> = None;
+    if let Some(budget_params) = &params.budget {
+        validate_ledger_path(&budget_params.ledger_path)?;
+        let guardrails = budget_params.guardrails.clone().into();
+        let ledger_path = workspace_root.join(&budget_params.ledger_path);
+        let ledger_total_before = business_budget::ledger_running_total(&ledger_path);
+        match business_budget::check_budget(
+            &guardrails,
+            ledger_total_before,
+            budget_params.action_amount,
+        ) {
+            BudgetCheckResult::HardLimitExceeded(reason) => {
+                tracing::warn!(
+                    action_type = %params.action_type,
+                    amount = budget_params.action_amount,
+                    reason = %reason,
+                    "ta_external_action: business-metric budget hard limit exceeded, \
+                     blocking before risk scoring"
+                );
+                return Ok((ActionOutcome::Blocked { reason }, None));
+            }
+            BudgetCheckResult::SoftLimitCrossed(reason) => {
+                budget_soft_limit_reason = Some(reason);
+            }
+            BudgetCheckResult::Ok => {}
+        }
+    }
+
+    let RiskAssessment {
+        risk_score,
+        confidence,
+    } = action_impl.risk_score(&params.payload).map_err(|e| {
+        McpError::internal_error(
+            format!(
+                "risk scoring failed for action '{}': {e}",
+                params.action_type
+            ),
+            None,
+        )
+    })?;
+
+    let thresholds = load_thresholds(workspace_root, &params.action_type);
+    let input = DecisionInput {
+        verdict: Verdict::Pass,
+        risk_score,
+        confidence,
+    };
+    let mut decision = decide(&input, &thresholds);
+
+    if let Some(reason) = &budget_soft_limit_reason {
+        if decision != Decision::Escalate {
+            tracing::info!(
+                action_type = %params.action_type,
+                reason = %reason,
+                original_decision = ?decision,
+                "ta_external_action: forcing Escalate — business-metric budget soft \
+                 threshold crossed"
+            );
+        }
+        decision = Decision::Escalate;
+    }
+
+    // security_tier only ever downgrades autonomy, never upgrades it — same
+    // rule `ta-brain::route()`'s confidence-downgrade uses. An
+    // inferred/non-autonomous workload never gets to auto-commit an
+    // external side effect, no matter how low-risk the gate scored it.
+    let (_, security_tier) = resolve_workload_context(workspace_root);
+    if security_tier != AdvisorSecurity::Auto && decision == Decision::Commit {
+        tracing::info!(
+            action_type = %params.action_type,
+            security_tier = %security_tier,
+            "ta_external_action: security_tier != auto, downgrading Commit to Escalate"
+        );
+        decision = Decision::Escalate;
+    }
+
+    tracing::info!(
+        action_type = %params.action_type,
+        decision = ?decision,
+        risk_score,
+        confidence,
+        "ta_external_action: gate decision for auto-policy dispatch"
+    );
+
+    if !decision.is_auto_approvable() {
+        let action_id = Uuid::new_v4();
+        let description = format!(
+            "{} [gate: {decision:?}, risk_score={risk_score}, confidence={:.0}%]",
+            build_description(params),
+            confidence * 100.0,
+        );
+        let pending = PendingAction {
+            action_id,
+            tool_name: format!("ta_external_action:{}", params.action_type),
+            parameters: params.payload.clone(),
+            kind: ActionKind::StateChanging,
+            intercepted_at: Utc::now(),
+            description,
+            target_uri: params.target_uri.clone(),
+            disposition: ArtifactDisposition::Pending,
+        };
+        return Ok((ActionOutcome::CapturedForReview, Some(pending)));
+    }
+
+    match action_impl.execute(&params.payload) {
+        Ok(result) => {
+            if let Some(budget_params) = &params.budget {
+                let ledger_path = workspace_root.join(&budget_params.ledger_path);
+                if let Err(e) = business_budget::record_ledger_spend(
+                    &ledger_path,
+                    &budget_params.action_label,
+                    budget_params.action_amount,
+                ) {
+                    tracing::warn!(
+                        path = %ledger_path.display(),
+                        error = %e,
+                        "ta_external_action: failed to record business-metric budget \
+                         ledger entry"
+                    );
+                }
+            }
+            Ok((ActionOutcome::Executed { result }, None))
+        }
+        // Built-in stubs have no risk-scoring gate to fail (default is
+        // zero-risk/full-confidence, always `Commit`) so this is only
+        // reachable for the four built-ins, never a plugin-backed verb.
+        Err(ta_actions::ActionError::StubOnly(_)) => {
+            let result = serde_json::json!({
+                "status": "stub_executed",
+                "message": format!(
+                    "Action type '{}' has no registered plugin executor. \
+                     Register a plugin via the ActionRegistry to provide \
+                     real execution. The action has been logged.",
+                    params.action_type
+                )
+            });
+            Ok((ActionOutcome::Executed { result }, None))
+        }
+        Err(e) => Err(McpError::internal_error(
+            format!("action execution failed: {}", e),
+            None,
+        )),
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -557,6 +718,28 @@ mod tests {
         Arc::new(Mutex::new(state))
     }
 
+    /// Logs a `RoutingDecision` with the given `security_tier`, the same
+    /// `.ta/routing-decisions.jsonl` fixture `human_verify.rs`'s tests use —
+    /// `dispatch_auto_action` resolves `security_tier` from this same log.
+    fn write_routing_decision(workspace_root: &std::path::Path, security_tier: &str) {
+        let log_path = workspace_root.join(".ta").join("routing-decisions.jsonl");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let line = serde_json::json!({
+            "timestamp": "2026-07-10T00:00:00Z",
+            "goal_title": "test goal",
+            "decision": {
+                "team": "implementer",
+                "agent": "claude-code",
+                "security_tier": security_tier,
+                "priority": "normal",
+                "workload_type": "general",
+                "workload_confidence": 0.9,
+                "rationale": ["test"],
+            }
+        });
+        std::fs::write(&log_path, format!("{}\n", line)).unwrap();
+    }
+
     #[test]
     fn unknown_action_type_returns_error() {
         let dir = tempdir().unwrap();
@@ -568,6 +751,7 @@ mod tests {
             goal_run_id: None,
             target_uri: None,
             dry_run: false,
+            budget: None,
         };
 
         let result = handle_external_action(&state, params);
@@ -585,6 +769,7 @@ mod tests {
             goal_run_id: None,
             target_uri: None,
             dry_run: false,
+            budget: None,
         };
 
         let result = handle_external_action(&state, params);
@@ -602,6 +787,7 @@ mod tests {
             goal_run_id: None,
             target_uri: None,
             dry_run: true,
+            budget: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -636,6 +822,7 @@ mod tests {
             goal_run_id: Some(goal_id.to_string()),
             target_uri: None,
             dry_run: false,
+            budget: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -673,6 +860,7 @@ mod tests {
             goal_run_id: None,
             target_uri: None,
             dry_run: false,
+            budget: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -705,6 +893,7 @@ mod tests {
             goal_run_id: Some(goal_id.to_string()),
             target_uri: None,
             dry_run: false,
+            budget: None,
         };
 
         // First two should succeed (review).
@@ -724,8 +913,11 @@ mod tests {
         );
     }
 
+    /// With `security_tier: auto` logged, the gate's default zero-risk
+    /// score commits and the built-in stub's placeholder executes — same
+    /// observable behavior as before v0.17.5.3's gate existed.
     #[test]
-    fn auto_policy_stub_returns_stub_executed() {
+    fn auto_policy_stub_returns_stub_executed_when_security_tier_is_auto() {
         let dir = tempdir().unwrap();
 
         let ta_dir = dir.path().join(".ta");
@@ -735,6 +927,7 @@ mod tests {
             b"[actions.api_call]\npolicy = \"auto\"\n",
         )
         .unwrap();
+        write_routing_decision(dir.path(), "auto");
 
         let state = make_state(dir.path());
 
@@ -744,6 +937,7 @@ mod tests {
             goal_run_id: None,
             target_uri: None,
             dry_run: false,
+            budget: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -759,6 +953,199 @@ mod tests {
             text.contains("stub_executed"),
             "expected stub_executed status: {}",
             text
+        );
+    }
+
+    /// Without a logged `security_tier: auto` routing decision (the
+    /// unclassified-workload default, `Suggest`), `dispatch_auto_action`
+    /// never lets the gate's `Commit` verdict auto-execute — even a
+    /// zero-risk built-in stub is captured for review instead (v0.17.5.3
+    /// item 3: security_tier only ever downgrades autonomy).
+    #[test]
+    fn auto_policy_without_auto_security_tier_is_captured_for_review() {
+        let dir = tempdir().unwrap();
+
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.api_call]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        // No routing decision logged -- resolve_workload_context defaults
+        // to Suggest, not Auto.
+
+        let state = make_state(dir.path());
+
+        let params = ExternalActionParams {
+            action_type: "api_call".into(),
+            payload: json!({"method": "GET", "url": "https://api.example.com/status"}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+        };
+
+        let result = handle_external_action(&state, params).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+        assert!(
+            text.contains("captured_for_review"),
+            "expected captured_for_review outcome: {}",
+            text
+        );
+    }
+
+    // ── v0.17.5.3: adapter plugin end-to-end gate round-trip ──────────────
+
+    /// Writes a mock `trade.execute` adapter plugin under
+    /// `.ta/plugins/adapter/paper-trading/` whose risk score scales with the
+    /// trade's dollar `amount` -- a small Python script, no live brokerage
+    /// dependency (item 5/7's "no live external API dependency in TA's own
+    /// test suite" requirement).
+    fn write_paper_trading_plugin(workspace_root: &std::path::Path) {
+        let plugin_dir = workspace_root
+            .join(".ta")
+            .join("plugins")
+            .join("adapter")
+            .join("paper-trading");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let script_path = plugin_dir.join("mock_plugin.py");
+        std::fs::write(
+            &script_path,
+            r#"
+import json
+import sys
+
+req = json.loads(sys.stdin.readline())
+method = req["method"]
+payload = req["params"]["payload"]
+amount = payload.get("amount", 0)
+
+if method == "risk_score":
+    # Real, non-hardcoded score: scales with trade notional size.
+    result = {"risk_score": min(100, int(amount / 10)), "confidence": 0.95}
+    print(json.dumps({"ok": True, "result": result}))
+elif method == "execute":
+    result = {"status": "filled", "amount": amount}
+    print(json.dumps({"ok": True, "result": result}))
+else:
+    print(json.dumps({"ok": False, "error": f"unknown method {method}"}))
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            format!(
+                "name = \"paper-trading\"\ntype = \"adapter\"\ncommand = \"python3\"\n\
+                 args = [\"{}\"]\ncapabilities = [\"verb:trade.execute\"]\n",
+                script_path.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn adapter_plugin_low_risk_trade_auto_executes() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("workflow.toml"),
+            b"[actions.\"trade.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        write_paper_trading_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "trade.execute".into(),
+            // amount=100 -> risk_score=10, well under the default
+            // max_risk_score=40 threshold -> Commit.
+            payload: json!({"symbol": "ACME", "amount": 100}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+        };
+
+        let result = handle_external_action(&state, params).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+        assert!(
+            text.contains("executed") && !text.contains("captured_for_review"),
+            "expected executed outcome: {}",
+            text
+        );
+        assert!(
+            text.contains("filled"),
+            "expected the plugin's real execute() result: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn adapter_plugin_high_risk_trade_is_captured_for_review_not_executed() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("workflow.toml"),
+            b"[actions.\"trade.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        write_paper_trading_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "trade.execute".into(),
+            // amount=1000 -> risk_score=100, well over max_risk_score=40
+            // and escalate_risk_score=75 -> Escalate, never executed.
+            payload: json!({"symbol": "ACME", "amount": 1000}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+        };
+
+        let result = handle_external_action(&state, params).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+        assert!(
+            text.contains("captured_for_review"),
+            "expected captured_for_review outcome, not an executed trade: {}",
+            text
+        );
+        assert!(
+            !text.contains("filled"),
+            "the risky trade must not have actually executed: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn unregistered_verb_returns_clear_no_adapter_error() {
+        let dir = tempdir().unwrap();
+        let state = make_state(dir.path());
+
+        let params = ExternalActionParams {
+            action_type: "trade.execute".into(),
+            payload: json!({"symbol": "ACME", "amount": 100}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+        };
+
+        // No plugin registered under .ta/plugins/adapter/ -- must be a
+        // clear, actionable error, not a silent no-op.
+        let err = handle_external_action(&state, params).unwrap_err();
+        let message = err.message.to_string();
+        assert!(
+            message.contains("no adapter registered for this verb"),
+            "expected a clear 'no adapter registered' error, got: {}",
+            message
         );
     }
 }
