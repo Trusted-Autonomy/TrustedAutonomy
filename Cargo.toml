@@ -59,7 +59,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.17.6-alpha.1"
+version = "0.17.6-alpha.2"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -157,6 +157,13 @@ ring = "0.17"
 
 # Base64 encoding — for attestation signature encoding (v0.14.1).
 base64 = "0.22"
+
+# Encryption-at-rest for FileVault's `.ta/credentials.json` (v0.17.6.2).
+age = "0.12"
+
+# OS keychain access for the FileVault age key — falls back to a chmod-0600
+# file when no platform backend is available (v0.17.6.2).
+keyring = "4"
 
 # Clipboard access — synchronous OS clipboard read/write without external tools (v0.14.9.3).
 # Replaces the subprocess approach (pbpaste/xclip/xsel) which raced against terminal events.

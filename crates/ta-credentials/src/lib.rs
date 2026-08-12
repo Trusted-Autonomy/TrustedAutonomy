@@ -20,11 +20,13 @@
 //! ```
 
 pub mod config;
+pub mod encryption;
 pub mod error;
 pub mod file_vault;
 pub mod vault;
 
 pub use config::CredentialsConfig;
+pub use encryption::KeyCustody;
 pub use error::VaultError;
 pub use file_vault::FileVault;
 pub use vault::{Credential, CredentialSummary, CredentialVault, SessionToken};

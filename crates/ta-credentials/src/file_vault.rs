@@ -1,8 +1,11 @@
 // file_vault.rs — Filesystem-backed credential vault.
 //
-// Stores credentials as JSON at the configured vault path.
-// File permissions are set to owner-only (0600) for basic protection.
-// Future: age encryption layer for at-rest encryption.
+// Stores credentials as an age-encrypted blob at the configured vault path
+// (v0.17.6.2). The age identity is held in the OS keychain where available,
+// falling back to a chmod-0600 key file (see `encryption::load_or_create_identity`).
+// File permissions on the vault itself remain owner-only (0600) as a second
+// layer of protection. Vaults written by pre-v0.17.6.2 builds (plaintext
+// JSON) are transparently migrated to encrypted-at-rest on first open.
 
 use std::fs;
 use std::path::PathBuf;
@@ -13,6 +16,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::config::CredentialsConfig;
+use crate::encryption::{self, KeyCustody};
 use crate::error::VaultError;
 use crate::vault::{Credential, CredentialSummary, CredentialVault, SessionToken};
 
@@ -25,39 +29,83 @@ struct VaultData {
 
 /// Filesystem-backed credential vault.
 ///
-/// Credentials are stored as JSON. File permissions restrict access to the
-/// current user. Session tokens are stored alongside credentials and cleaned
-/// up on validation.
+/// Credentials are stored as an age-encrypted blob (v0.17.6.2). File
+/// permissions on the vault file additionally restrict access to the current
+/// user. Session tokens are stored alongside credentials and cleaned up on
+/// validation.
 pub struct FileVault {
     vault_path: PathBuf,
     data: VaultData,
+    identity: age::x25519::Identity,
+    key_custody: KeyCustody,
 }
 
 impl FileVault {
     /// Open or create a vault at the configured path.
+    ///
+    /// A pre-v0.17.6.2 plaintext-JSON vault is transparently decoded and
+    /// re-saved as encrypted-at-rest on this call.
     pub fn open(config: &CredentialsConfig) -> Result<Self, VaultError> {
         let vault_path = config.vault_path.clone();
-        let data = if vault_path.exists() {
+        let vault_dir = vault_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let (identity, key_custody) =
+            encryption::load_or_create_identity(&vault_dir, config.use_keychain)?;
+
+        let (data, needs_migration) = if vault_path.exists() {
             debug!(?vault_path, "loading existing vault");
-            let content = fs::read_to_string(&vault_path)?;
-            serde_json::from_str(&content)?
+            let raw = fs::read(&vault_path)?;
+            if encryption::looks_like_plaintext_json(&raw) {
+                info!(
+                    ?vault_path,
+                    "migrating legacy plaintext vault to encrypted-at-rest"
+                );
+                let content = String::from_utf8(raw).map_err(|e| {
+                    VaultError::Other(format!(
+                        "legacy plaintext vault at {} is not valid UTF-8: {e}",
+                        vault_path.display()
+                    ))
+                })?;
+                (serde_json::from_str(&content)?, true)
+            } else {
+                let plaintext = encryption::decrypt(&identity, &vault_path, &raw)?;
+                (serde_json::from_slice(&plaintext)?, false)
+            }
         } else {
             debug!(?vault_path, "creating new empty vault");
-            VaultData::default()
+            (VaultData::default(), false)
         };
 
-        Ok(Self { vault_path, data })
+        let vault = Self {
+            vault_path,
+            data,
+            identity,
+            key_custody,
+        };
+        if needs_migration {
+            vault.save()?;
+        }
+        Ok(vault)
     }
 
-    /// Persist vault state to disk.
+    /// Which key custody backend is protecting this vault's encryption key.
+    pub fn key_custody(&self) -> &KeyCustody {
+        &self.key_custody
+    }
+
+    /// Persist vault state to disk, encrypted to the vault's age identity.
     fn save(&self) -> Result<(), VaultError> {
         if let Some(parent) = self.vault_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(&self.data)?;
-        fs::write(&self.vault_path, &content)?;
+        let plaintext = serde_json::to_vec(&self.data)?;
+        let ciphertext = encryption::encrypt(&self.identity, &plaintext)?;
+        fs::write(&self.vault_path, &ciphertext)?;
 
-        // Set restrictive permissions (Unix only).
+        // Set restrictive permissions (Unix only) — defense in depth on top
+        // of the encryption itself.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -194,6 +242,12 @@ mod tests {
     fn test_config(dir: &TempDir) -> CredentialsConfig {
         CredentialsConfig {
             vault_path: dir.path().join("vault.json"),
+            // Never touch the real OS keychain from tests — it's a
+            // process/OS-global resource, not scoped to this tempdir, so
+            // using it here would make tests interfere with each other and
+            // with the developer's real keychain (and can hang on macOS
+            // waiting for a permission prompt in a headless run).
+            use_keychain: false,
         }
     }
 
@@ -314,6 +368,135 @@ mod tests {
         let list = vault.list().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "persist-test");
+    }
+
+    #[test]
+    fn vault_file_is_encrypted_at_rest() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        let mut vault = FileVault::open(&config).unwrap();
+        vault
+            .add("test", "svc", "super-secret-value", vec![])
+            .unwrap();
+
+        let raw = fs::read(&config.vault_path).unwrap();
+        assert!(!encryption::looks_like_plaintext_json(&raw));
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(!raw_str.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn encrypted_vault_round_trips_across_opens() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault
+                .add("test", "svc", "super-secret-value", vec!["read".into()])
+                .unwrap();
+        }
+
+        let vault = FileVault::open(&config).unwrap();
+        let creds = vault.list().unwrap();
+        assert_eq!(creds.len(), 1);
+        let full = vault.get(creds[0].id).unwrap();
+        assert_eq!(full.secret, "super-secret-value");
+        assert_eq!(
+            *vault.key_custody(),
+            KeyCustody::FallbackFile(dir.path().join(encryption::FALLBACK_KEY_FILENAME))
+        );
+    }
+
+    #[test]
+    fn legacy_plaintext_vault_is_migrated_to_encrypted() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        // Simulate a pre-v0.17.6.2 plaintext vault written directly to disk.
+        let legacy = VaultData {
+            credentials: vec![Credential {
+                id: Uuid::new_v4(),
+                name: "legacy".to_string(),
+                service: "svc".to_string(),
+                secret: "legacy-secret".to_string(),
+                scopes: vec![],
+                created_at: Utc::now(),
+                expires_at: None,
+            }],
+            tokens: vec![],
+        };
+        fs::write(
+            &config.vault_path,
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(encryption::looks_like_plaintext_json(
+            &fs::read(&config.vault_path).unwrap()
+        ));
+
+        // Opening migrates it in place.
+        let vault = FileVault::open(&config).unwrap();
+        let creds = vault.list().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(vault.get(creds[0].id).unwrap().secret, "legacy-secret");
+
+        let raw_after = fs::read(&config.vault_path).unwrap();
+        assert!(!encryption::looks_like_plaintext_json(&raw_after));
+
+        // And it's still readable (and still encrypted) on a subsequent open.
+        let vault2 = FileVault::open(&config).unwrap();
+        assert_eq!(vault2.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn missing_key_with_existing_encrypted_vault_produces_actionable_error_not_data_loss() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault.add("test", "svc", "secret", vec![]).unwrap();
+        }
+        let encrypted_bytes_before = fs::read(&config.vault_path).unwrap();
+
+        // Simulate the key being lost (e.g. fallback key file deleted).
+        let key_path = dir.path().join(encryption::FALLBACK_KEY_FILENAME);
+        assert!(key_path.exists());
+        fs::remove_file(&key_path).unwrap();
+
+        // Re-opening generates a *new* key (file custody has no way to know
+        // the old one is "missing" vs "never created"), which cannot decrypt
+        // the existing ciphertext — this must fail loudly, not silently
+        // return an empty vault or overwrite the encrypted file.
+        let result = FileVault::open(&config);
+        assert!(matches!(result, Err(VaultError::DecryptionFailed { .. })));
+
+        // The original encrypted vault file must be untouched.
+        let encrypted_bytes_after = fs::read(&config.vault_path).unwrap();
+        assert_eq!(encrypted_bytes_before, encrypted_bytes_after);
+    }
+
+    #[test]
+    fn corrupt_key_file_produces_actionable_error_not_data_loss() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault.add("test", "svc", "secret", vec![]).unwrap();
+        }
+        let encrypted_bytes_before = fs::read(&config.vault_path).unwrap();
+
+        let key_path = dir.path().join(encryption::FALLBACK_KEY_FILENAME);
+        fs::write(&key_path, "not-a-valid-age-identity").unwrap();
+
+        let result = FileVault::open(&config);
+        assert!(matches!(result, Err(VaultError::KeyUnreadable { .. })));
+
+        let encrypted_bytes_after = fs::read(&config.vault_path).unwrap();
+        assert_eq!(encrypted_bytes_before, encrypted_bytes_after);
     }
 
     #[test]

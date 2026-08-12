@@ -17,6 +17,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
+age = { workspace = true }
+keyring = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

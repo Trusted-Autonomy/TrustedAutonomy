@@ -10096,17 +10096,17 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.2 — Live Token Issuance + Encryption at Rest
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.6.1
 
 **Goal**: Wire up the vault's existing, fully-tested, currently-uncalled `CredentialVault::issue_token`/`validate_token` as the real credential-delivery path (opaque `SessionToken` UUID, `allowed_scopes`, `expires_at`) — ship real value now, before the biscuit migration in v0.17.6.4. Close `FileVault`'s plaintext-at-rest gap in the same pass since it's already touching `vault.rs`.
 
 **Items**:
-1. [ ] `issue_token`/`validate_token` become load-bearing: called from the goal-setup path instead of only from `ta-credentials`'s own tests.
-2. [ ] `ta credential grant <id> --agent <goal_id> --scope <s> --ttl <n>` CLI subcommand.
-3. [ ] `FileVault` gains age-based encryption at rest for `.ta/credentials.json`. Key custody: OS keychain where available, falling back to a chmod-0600 file with a loud `ta doctor` warning on platforms without one (resolve final custody approach at implementation time — see design doc Open Question 3).
-4. [ ] Tests: an issued token expires and fails validation past its TTL; encrypted-at-rest credentials round-trip correctly; a missing/corrupt age key produces an actionable error, not a silent data-loss.
-5. [ ] USAGE.md: document `ta credential grant` and the new encryption-at-rest behavior.
+1. [x] `issue_token`/`validate_token` become load-bearing: called from the goal-setup path instead of only from `ta-credentials`'s own tests.
+2. [x] `ta credential grant <id> --agent <goal_id> --scope <s> --ttl <n>` CLI subcommand.
+3. [x] `FileVault` gains age-based encryption at rest for `.ta/credentials.json`. Key custody: OS keychain where available, falling back to a chmod-0600 file with a loud `ta doctor` warning on platforms without one (resolve final custody approach at implementation time — see design doc Open Question 3).
+4. [x] Tests: an issued token expires and fails validation past its TTL; encrypted-at-rest credentials round-trip correctly; a missing/corrupt age key produces an actionable error, not a silent data-loss.
+5. [x] USAGE.md: document `ta credential grant` and the new encryption-at-rest behavior.
 
 #### Version: `0.17.6-alpha.2`
 

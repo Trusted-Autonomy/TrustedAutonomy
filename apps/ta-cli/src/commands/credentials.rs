@@ -31,6 +31,28 @@ pub enum CredentialsCommands {
         /// Credential ID (UUID) or prefix.
         id: String,
     },
+    /// Issue a scoped, time-limited session token for an agent (v0.17.6.2).
+    ///
+    /// This is the real credential-delivery path: the token records who it
+    /// was issued to, which scopes it authorizes, and when it expires. It
+    /// does not itself hand back the underlying secret — `ta run` uses the
+    /// same `issue_token`/`validate_token` path internally to gate secret
+    /// delivery into an agent's environment.
+    Grant {
+        /// Credential ID (UUID) or prefix.
+        id: String,
+        /// Agent identifier the token is issued to (e.g. a goal ID).
+        #[arg(long)]
+        agent: String,
+        /// Scopes to grant (repeatable). Must be a subset of the
+        /// credential's own declared scopes; an unscoped credential grants
+        /// whatever scopes are requested here.
+        #[arg(long)]
+        scope: Vec<String>,
+        /// Time-to-live in seconds before the token expires.
+        #[arg(long)]
+        ttl: u64,
+    },
 }
 
 pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -43,6 +65,12 @@ pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Res
         } => add_credential(config, name, service, secret, scope),
         CredentialsCommands::List => list_credentials(config),
         CredentialsCommands::Revoke { id } => revoke_credential(config, id),
+        CredentialsCommands::Grant {
+            id,
+            agent,
+            scope,
+            ttl,
+        } => grant_token(config, id, agent, scope, *ttl),
     }
 }
 
@@ -91,6 +119,47 @@ fn list_credentials(config: &GatewayConfig) -> anyhow::Result<()> {
         println!("    Created: {}", c.created_at.format("%Y-%m-%d %H:%M UTC"));
         println!();
     }
+    Ok(())
+}
+
+fn grant_token(
+    config: &GatewayConfig,
+    id_str: &str,
+    agent: &str,
+    scopes: &[String],
+    ttl_secs: u64,
+) -> anyhow::Result<()> {
+    let mut vault = FileVault::open(&cred_config(config))?;
+
+    // Support prefix matching, same as `revoke`.
+    let creds = vault.list()?;
+    let matches: Vec<_> = creds
+        .iter()
+        .filter(|c| c.id.to_string().starts_with(id_str))
+        .collect();
+
+    let cred = match matches.len() {
+        0 => anyhow::bail!("No credential found matching '{}'", id_str),
+        1 => matches[0].clone(),
+        n => anyhow::bail!(
+            "Ambiguous prefix '{}' matches {} credentials. Use a longer prefix.",
+            id_str,
+            n
+        ),
+    };
+
+    let token = vault.issue_token(cred.id, agent, scopes.to_vec(), ttl_secs)?;
+    println!("Session token issued:");
+    println!("  Token ID:   {}", token.token_id);
+    println!("  Credential: {} ({})", cred.name, cred.id);
+    println!("  Agent:      {}", token.agent_id);
+    if !token.allowed_scopes.is_empty() {
+        println!("  Scopes:     {}", token.allowed_scopes.join(", "));
+    }
+    println!(
+        "  Expires:    {}",
+        token.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
     Ok(())
 }
 
