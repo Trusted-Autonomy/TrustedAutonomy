@@ -10070,7 +10070,8 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6 — Least-Privilege Agent Authorization: Biscuit Tokens + Secret Isolation + Swarm Attenuation
-<!-- status: pending -->
+<!-- status: done -->
+> Umbrella phase — no items of its own; work is carried entirely by v0.17.6.1-7 below. Marked done directly (not via `ta run`/draft) since its own depends_on is "none", so its sub-phases could be claimed (`ta run` hard-enforces `depends_on`, unlike the softer plan-wide dependency warnings elsewhere).
 **Depends on**: none — independent of the release-management (v0.17.3/v0.17.4) and autonomous-team (v0.17.5.x) tracks; can be sequenced in parallel with either, or interleaved, per team capacity. Numbered v0.17.6 (the one open slot between v0.17.5.x and v0.17.7.x) rather than a new v0.19.x track — this is a deliberate placement choice made when this phase was added; renumber if a different sequencing is preferred, nothing below hard-depends on the number itself.
 
 **Why this exists**: `docs/architecture/ta-architecture-reference.md` §5 documents TA's actual current-state agent credential/authorization model, and it has real gaps: credentials are plaintext from mint to use (`FileVault` stores `.ta/credentials.json` unencrypted; `bare_process.rs::apply_credentials_to_env` injects the raw secret into the agent's process env, visible to the agent and the LLM driving it); the one real capability-token abstraction that exists (`CredentialVault::issue_token`/`validate_token`) is dead code nothing calls; `ScopedCredential.scopes` is declared but never enforced; and swarm fan-out (`run_one_swarm_sub_goal`) gives every concurrent sub-goal a full-environment clone of the parent with zero credential narrowing.
