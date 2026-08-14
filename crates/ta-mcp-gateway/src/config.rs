@@ -53,6 +53,21 @@ pub struct GatewayConfig {
     /// Set via the `TA_IS_STAGING` environment variable.
     #[serde(default)]
     pub is_staging: bool,
+
+    /// Whether the credential vault (opened by the v0.17.6.3 connector
+    /// broker to resolve broker-mediated secrets) should try the OS
+    /// keychain for its encryption key before falling back to a
+    /// chmod-0600 file. Defaults to `true` for real deployments; test
+    /// fixtures set this `false` for the same reason
+    /// `ta_credentials::CredentialsConfig::use_keychain` documents — the
+    /// keychain is a process/OS-global resource that must not leak between
+    /// tests or interfere with the developer's real keychain.
+    #[serde(default = "default_credential_vault_use_keychain")]
+    pub credential_vault_use_keychain: bool,
+}
+
+fn default_credential_vault_use_keychain() -> bool {
+    true
 }
 
 impl GatewayConfig {
@@ -72,6 +87,7 @@ impl GatewayConfig {
             review_channel: ReviewChannelConfig::default(),
             web_ui_port: None,
             is_staging: std::env::var("TA_IS_STAGING").is_ok(),
+            credential_vault_use_keychain: true,
         }
     }
 }

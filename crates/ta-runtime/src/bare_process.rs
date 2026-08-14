@@ -250,9 +250,25 @@ fn build_command(command: &str, args: &[String]) -> Command {
 ///   intersect `required_scopes` at all is silently omitted — the caller
 ///   never sees it, not even as an unusable placeholder.
 ///
-/// Each injected credential becomes an environment variable:
-/// `cred.name = cred.value`. Call this before building a `SpawnRequest` to
-/// include credentials.
+/// For an eligible credential, what actually lands in `env` depends on
+/// `cred.broker_mediated` (v0.17.6.3, PLAN item 5):
+/// - `false` (default): the **reduced-security fallback** — `cred.value`
+///   (the raw secret) is injected directly as `cred.name = cred.value`,
+///   exactly as before v0.17.6.3. This path is explicitly flagged via a
+///   `tracing::warn!` so it shows up in normal operation, not just an audit
+///   grep — it remains the only delivery path until a per-tool credential
+///   shim (v0.17.6.7) or an explicit `ConnectorRegistry` opt-in closes it
+///   for a given connector.
+/// - `true`: the raw secret is withheld entirely. Instead
+///   `TA_SESSION_TOKEN_<cred.name> = cred.session_token_id` is injected —
+///   an opaque reference the agent can present to `ta_external_action`,
+///   which the gateway broker independently validates and resolves the
+///   real secret for server-side. A `broker_mediated` credential with no
+///   `session_token_id` is a caller bug (nothing to hand the agent) and is
+///   skipped with a `tracing::warn!` rather than silently leaking nothing
+///   useful or crashing the spawn.
+///
+/// Call this before building a `SpawnRequest` to include credentials.
 pub fn apply_credentials_to_env(
     env: &mut HashMap<String, String>,
     creds: &[ScopedCredential],
@@ -261,7 +277,38 @@ pub fn apply_credentials_to_env(
     for cred in creds {
         let in_scope =
             cred.scopes.is_empty() || cred.scopes.iter().any(|s| required_scopes.contains(s));
-        if in_scope {
+        if !in_scope {
+            continue;
+        }
+        if cred.broker_mediated {
+            match &cred.session_token_id {
+                Some(token_id) => {
+                    env.insert(format!("TA_SESSION_TOKEN_{}", cred.name), token_id.clone());
+                }
+                None => {
+                    tracing::warn!(
+                        credential = %cred.name,
+                        "credential is broker_mediated but carries no session_token_id; \
+                         withheld from agent env entirely (neither raw secret nor token)"
+                    );
+                }
+            }
+        } else {
+            // debug, not warn: this is still the default path for every
+            // credential that has no `.ta/connectors.toml` entry opting it
+            // into broker mediation, so warning here would fire on every
+            // spawn for the common case rather than flagging something
+            // unusual. It is still explicitly flagged (a distinct,
+            // greppable message), just at a level that doesn't page anyone
+            // for expected behavior — `ta doctor` is the surfaced,
+            // human-facing flag for "N credentials use the reduced-security
+            // fallback" (see docs/USAGE.md).
+            tracing::debug!(
+                credential = %cred.name,
+                "injecting raw secret directly into agent environment: reduced-security \
+                 fallback for a non-broker-mediated connector (see ConnectorRegistry / \
+                 .ta/connectors.toml to migrate this credential to broker mediation)"
+            );
             env.insert(cred.name.clone(), cred.value.clone());
         }
     }
@@ -449,6 +496,43 @@ mod tests {
         );
 
         assert_eq!(env.get("GITHUB"), Some(&"ghp_token".to_string()));
+    }
+
+    #[test]
+    fn apply_credentials_to_env_withholds_raw_secret_for_broker_mediated_credential() {
+        let mut env = HashMap::new();
+        let creds = vec![ScopedCredential::new("GITHUB_TOKEN", "ghp_real_secret")
+            .with_broker_mediation("22222222-2222-2222-2222-222222222222")];
+        apply_credentials_to_env(&mut env, &creds, &[]);
+
+        assert!(
+            !env.values().any(|v| v == "ghp_real_secret"),
+            "the raw secret must never reach the agent env for a broker-mediated credential"
+        );
+        assert!(
+            !env.contains_key("GITHUB_TOKEN"),
+            "broker-mediated credentials are not injected under their own name"
+        );
+        assert_eq!(
+            env.get("TA_SESSION_TOKEN_GITHUB_TOKEN"),
+            Some(&"22222222-2222-2222-2222-222222222222".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_credentials_to_env_broker_mediated_without_token_id_injects_nothing() {
+        let mut env = HashMap::new();
+        // Constructed directly (not via `with_broker_mediation`) to model a
+        // caller bug: `broker_mediated = true` but no token was ever minted.
+        let cred = ScopedCredential::new("GITHUB_TOKEN", "ghp_real_secret");
+        let mut cred = cred;
+        cred.broker_mediated = true;
+        apply_credentials_to_env(&mut env, &[cred], &[]);
+
+        assert!(
+            env.is_empty(),
+            "must withhold entirely, not fall back to the raw secret"
+        );
     }
 
     #[test]

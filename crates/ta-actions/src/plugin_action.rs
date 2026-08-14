@@ -92,6 +92,19 @@ impl AdapterPluginAction {
     }
 
     fn call(&self, method: &str, payload: &Value) -> Result<Value, ActionError> {
+        self.call_with_env(method, payload, &[])
+    }
+
+    /// Same as `call`, plus extra environment variables set only on this
+    /// one subprocess invocation (v0.17.6.3) — used to attach a
+    /// broker-resolved secret without it ever entering `payload` or the
+    /// `PluginResponse` relayed back to the agent.
+    fn call_with_env(
+        &self,
+        method: &str,
+        payload: &Value,
+        extra_env: &[(String, String)],
+    ) -> Result<Value, ActionError> {
         let request = PluginRequest::new(
             method,
             json!(VerbParams {
@@ -99,7 +112,7 @@ impl AdapterPluginAction {
                 payload,
             }),
         );
-        let response: PluginResponse = ta_plugin::transport::call_json(
+        let response: PluginResponse = ta_plugin::transport::call_json_with_env(
             &self.plugin_name,
             method,
             &self.command,
@@ -107,6 +120,7 @@ impl AdapterPluginAction {
             &self.work_dir,
             &request,
             self.timeout,
+            extra_env,
         )
         .map_err(|e| {
             ActionError::Execution(format!(
@@ -155,6 +169,26 @@ impl ExternalAction for AdapterPluginAction {
 
     fn execute(&self, payload: &Value) -> Result<Value, ActionError> {
         self.call("execute", payload)
+    }
+
+    /// Attach a broker-resolved connector secret (v0.17.6.3) to this one
+    /// subprocess call as `TA_CONNECTOR_SECRET`, never touching `payload`
+    /// or the plugin's `PluginResponse` — the plugin script reads it from
+    /// its own environment for the outbound call it makes, and that's the
+    /// only place it exists outside the vault.
+    fn execute_with_secret(
+        &self,
+        payload: &Value,
+        secret: Option<&str>,
+    ) -> Result<Value, ActionError> {
+        match secret {
+            Some(s) => self.call_with_env(
+                "execute",
+                payload,
+                &[("TA_CONNECTOR_SECRET".to_string(), s.to_string())],
+            ),
+            None => self.call("execute", payload),
+        }
     }
 }
 
@@ -367,6 +401,68 @@ else:
             .unwrap();
         assert_eq!(fill["status"], "filled");
         assert_eq!(fill["venue"], "paper-trading-mock");
+    }
+
+    /// v0.17.6.3: `execute_with_secret` must attach the secret only as an
+    /// env var on the plugin's own subprocess call — never as part of the
+    /// request payload, and the plugin's response (echoed back verbatim by
+    /// this fixture) must never be assumed safe by the caller either, but
+    /// this test focuses on proving the *transport* mechanism actually
+    /// delivers `TA_CONNECTOR_SECRET` into the subprocess environment.
+    const ENV_ECHO_PLUGIN: &str = r#"
+import json
+import os
+import sys
+
+line = sys.stdin.readline()
+req = json.loads(line)
+method = req["method"]
+
+if method == "execute":
+    secret = os.environ.get("TA_CONNECTOR_SECRET", "")
+    result = {"saw_secret": secret == "s3cr3t-value"}
+    print(json.dumps({"ok": True, "result": result}))
+else:
+    print(json.dumps({"ok": False, "error": f"unknown method {method}"}))
+"#;
+
+    #[test]
+    fn execute_with_secret_passes_secret_via_subprocess_env_not_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = write_mock_plugin(
+            dir.path(),
+            "broker-test",
+            &["trade.execute"],
+            ENV_ECHO_PLUGIN,
+        );
+        let manifest = PluginManifest::load(&plugin_dir.join("plugin.toml")).unwrap();
+        let action = AdapterPluginAction::new("trade.execute", &manifest, &plugin_dir);
+
+        let payload = json!({"symbol": "ACME"});
+        let result = action
+            .execute_with_secret(&payload, Some("s3cr3t-value"))
+            .unwrap();
+        assert_eq!(result["saw_secret"], json!(true));
+
+        // The payload sent to the plugin never carried the secret itself --
+        // only the env var did (asserted above via the plugin's own check).
+        assert!(!payload.to_string().contains("s3cr3t-value"));
+    }
+
+    #[test]
+    fn execute_with_secret_none_behaves_like_plain_execute() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = write_mock_plugin(
+            dir.path(),
+            "broker-test",
+            &["trade.execute"],
+            ENV_ECHO_PLUGIN,
+        );
+        let manifest = PluginManifest::load(&plugin_dir.join("plugin.toml")).unwrap();
+        let action = AdapterPluginAction::new("trade.execute", &manifest, &plugin_dir);
+
+        let result = action.execute_with_secret(&json!({}), None).unwrap();
+        assert_eq!(result["saw_secret"], json!(false));
     }
 
     #[test]

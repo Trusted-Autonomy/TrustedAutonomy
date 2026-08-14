@@ -307,6 +307,21 @@ pub struct ExternalActionParams {
     /// dispatch — absent for actions with no cost/quantity dimension.
     #[serde(default)]
     pub budget: Option<tools::human_verify::BudgetActionParams>,
+    /// Symbolic connector id (e.g. `"github"`, `"slack-ops"`) declared in
+    /// `.ta/connectors.toml` (v0.17.6.3). This — never a raw credential
+    /// value — is the only credential-shaped thing this schema exposes to
+    /// the calling agent/LLM. When the connector is `broker_mediated`, the
+    /// gateway resolves and attaches the real secret itself, only to its
+    /// own outbound call, and never returns it here.
+    #[serde(default)]
+    pub connector: Option<String>,
+    /// Session token id minted for a broker-mediated `connector` (the
+    /// `TA_SESSION_TOKEN_<name>` value the agent received in its own
+    /// environment at spawn time — see `ta_runtime::apply_credentials_to_env`).
+    /// Required, and independently re-validated against the credential
+    /// vault, whenever `connector` names a `broker_mediated` entry.
+    #[serde(default)]
+    pub session_token: Option<String>,
 }
 
 /// Tracks an active agent session within the gateway (v0.9.6).

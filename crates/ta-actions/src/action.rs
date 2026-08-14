@@ -90,6 +90,28 @@ pub trait ExternalAction: Send + Sync {
     /// Built-in stubs return `Err(ActionError::StubOnly(...))`.
     /// Plugin implementations perform the real I/O here.
     fn execute(&self, payload: &Value) -> Result<Value, ActionError>;
+
+    /// Execute the action with an optional broker-resolved secret attached
+    /// (v0.17.6.3, gateway secret-substitution broker).
+    ///
+    /// `secret` is `Some(..)` only when the caller (`ta_external_action`'s
+    /// dispatch path) resolved a `broker_mediated` connector's real secret
+    /// via the credential vault after authorizing the request's session
+    /// token — never sourced from the agent-supplied `payload`. An
+    /// implementation that needs the secret to make its own outbound call
+    /// (e.g. `AdapterPluginAction` attaching it to its subprocess's
+    /// environment for that one call) overrides this method; every other
+    /// implementation keeps using plain `execute()` via this default,
+    /// which discards `secret` entirely — the secret must never appear in
+    /// the returned `Value`, since that value is relayed straight back to
+    /// the agent.
+    fn execute_with_secret(
+        &self,
+        payload: &Value,
+        _secret: Option<&str>,
+    ) -> Result<Value, ActionError> {
+        self.execute(payload)
+    }
 }
 
 // ── Built-in stubs ───────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.6-alpha.2
+**Version**: 0.17.6-alpha.3
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -7357,6 +7357,86 @@ the nested `ta run` process each sub-goal spawns receives the same
 `--credential-scopes` value explicitly and applies the identical scope
 filter to its own eventual agent spawn -- clearing the environment there too
 -- rather than relying solely on what the parent process happened to strip.
+
+#### Broker-Mediated Connectors
+
+Even with `--credential-scopes` narrowing which credentials an agent
+process's environment can see, every credential that *is* injected still
+lands there as a **raw secret value** -- the agent, and the LLM driving it,
+can read it directly and can embed it verbatim in any MCP tool call, where
+it's visible again in the staged JSON a human later reviews. Broker
+mediation (v0.17.6.3) closes that specific leak for connectors used through
+`ta_external_action`: the agent never holds the real secret at all, only a
+symbolic connector id and an opaque session token.
+
+Declare a connector in `.ta/connectors.toml`:
+
+```toml
+[connectors.github]
+credential_name = "GITHUB_TOKEN"   # matches the `--name` used in `ta credentials add`
+broker_mediated = true
+required_scope = "repo.write"      # checked against the session token's allowed_scopes
+
+[connectors.slack-ops]
+credential_name = "SLACK_BOT_TOKEN"
+# broker_mediated omitted -> defaults to false: the reduced-security
+# fallback below, unchanged from pre-v0.17.6.3 behavior.
+```
+
+`broker_mediated` defaults to `false` -- adding a `[connectors.*]` entry at
+all does not change a credential's delivery path by itself. Migration is
+connector-by-connector: only credentials backing a connector explicitly
+marked `broker_mediated = true` are withheld from the agent's environment.
+
+**How the two paths differ:**
+
+| | `broker_mediated = false` (default) | `broker_mediated = true` |
+|---|---|---|
+| What the agent's env contains | `GITHUB_TOKEN=ghp_...` (the raw secret) | `TA_SESSION_TOKEN_GITHUB_TOKEN=<token-id>` (opaque) |
+| What `ta_external_action` needs | Nothing connector-specific | `connector: "github"`, `session_token: "<token-id>"` |
+| Where the real secret is attached | Wherever the agent's own process/plugin script chooses to use the env var | Only to the gateway's own outbound call to the connector's plugin, as `TA_CONNECTOR_SECRET` on that one subprocess invocation |
+| Does the secret ever appear in the agent-visible request or response? | Potentially -- nothing stops the agent from echoing it | Never |
+
+The `broker_mediated = false` path is the same env-injection behavior TA
+has always had -- kept as an explicitly-flagged reduced-security fallback
+(logged at `debug`) until a per-tool credential shim (v0.17.6.7, for the
+dominant `git push`/`gh pr create`/`curl` shell-command case that never
+touches `ta_external_action` at all) closes it more broadly.
+
+**End-to-end flow for a broker-mediated connector:**
+
+1. `ta run` mints a session token for the credential as usual (see above),
+   but because `.ta/connectors.toml` marks it `broker_mediated`, the agent's
+   environment receives `TA_SESSION_TOKEN_GITHUB_TOKEN=<token-id>` instead
+   of the raw `GITHUB_TOKEN` value.
+2. The agent calls `ta_external_action` with `connector: "github"` and
+   `session_token: "<token-id>"` (read from its own environment) alongside
+   the normal `action_type`/`payload`.
+3. The gateway independently re-validates the token against the credential
+   vault (expiry, and that it was issued to this same agent), confirms it
+   backs the `github` connector's declared credential, and checks
+   `required_scope` against the token's `allowed_scopes`.
+4. On success, the gateway resolves the real secret and attaches it only to
+   its own call into the connector's adapter plugin (as `TA_CONNECTOR_SECRET`
+   on that one subprocess invocation) -- never into the request payload, and
+   never back into the response relayed to the agent.
+5. If the requested scope exceeds what the token allows, the action is
+   **captured for human review** rather than hard-denied -- the same
+   `ta draft view` pending-actions surface other auto-policy actions use.
+   Full structured escalation through `ta_human_verify` lands in v0.17.6.6;
+   until then, a reviewer re-grants a wider-scoped token via
+   `ta credentials grant` to unblock it.
+6. Calling `ta_external_action` with an undeclared `connector`, or a
+   `broker_mediated` connector missing/lacking a valid `session_token`,
+   returns a clear, actionable error rather than silently falling back to
+   the raw-secret path.
+
+Adapter plugins (v0.17.5.3, `.ta/plugins/adapter/<name>/plugin.toml`) read
+the broker-resolved secret from their own subprocess environment as
+`TA_CONNECTOR_SECRET` -- it is never part of the JSON payload/result
+exchanged with TA, so it cannot end up logged to `.ta/action-log.jsonl` or
+echoed into a plugin's own response by accident (a well-behaved plugin
+should not echo it either way).
 
 ### Context Memory
 

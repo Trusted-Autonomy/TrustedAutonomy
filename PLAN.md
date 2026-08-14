@@ -10112,20 +10112,20 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.3 — Gateway Live Interception + Secret-Substitution Broker (MCP Path)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.6.2
 
 **Goal**: Build the gateway's actual live pre-dispatch interception/substitution point. **This is new middleware, not an extension of something already running**: `ta-mcp-gateway::ToolCallInterceptor` is constructed and stored today but its `.classify()` is never invoked outside its own tests — it's dead code, same category as `CredentialVault` was before v0.17.6.2. Sized accordingly (larger than a typical single-crate phase) — split into sub-items below rather than one undifferentiated block, and re-split into further sub-phases at execution time if a single goal-run can't carry the whole thing.
 
 **Items**:
-1. [ ] Build the live synchronous interception path: parse the tool call before dispatch, hold/block on an authorization decision, rewrite the outbound payload, relay the response — the actual missing piece, not a wrapper around an existing hook.
-2. [ ] Tool schemas exposed to agents/LLMs carry only symbolic connector ids ("github", "slack-ops"), never `ScopedCredential.value`.
-3. [ ] `ConnectorRegistry` (`.ta/connectors.toml`) with a per-connector `broker_mediated: bool` flag, so migration is connector-by-connector, not a flag day.
-4. [ ] On authorization success, the real secret is attached only to the gateway's own outbound call — never returned to the agent. On a scope deficit, hand off to v0.17.6.6's escalation path instead of a hard failure.
-5. [ ] `bare_process.rs`'s direct env injection becomes an explicitly-flagged reduced-security fallback for non-gateway-mediated connectors, pending v0.17.6.7.
-6. [ ] While this code is being touched: `ta-mediation::ApiMediator` has its own separate, also-unwired `classify()` duplicating `ToolCallInterceptor`'s heuristics — dedupe into one implementation rather than leaving two.
-7. [ ] Tests: a gateway-mediated tool call never contains the raw secret in the agent-visible request or response; an unmediated connector still uses the flagged fallback path without silently failing.
-8. [ ] USAGE.md: document which connectors are broker-mediated and the migration path for adding more.
+1. [x] Build the live synchronous interception path: parse the tool call before dispatch, hold/block on an authorization decision, rewrite the outbound payload, relay the response — the actual missing piece, not a wrapper around an existing hook.
+2. [x] Tool schemas exposed to agents/LLMs carry only symbolic connector ids ("github", "slack-ops"), never `ScopedCredential.value`.
+3. [x] `ConnectorRegistry` (`.ta/connectors.toml`) with a per-connector `broker_mediated: bool` flag, so migration is connector-by-connector, not a flag day.
+4. [x] On authorization success, the real secret is attached only to the gateway's own outbound call — never returned to the agent. On a scope deficit, hand off to v0.17.6.6's escalation path instead of a hard failure.
+5. [x] `bare_process.rs`'s direct env injection becomes an explicitly-flagged reduced-security fallback for non-gateway-mediated connectors, pending v0.17.6.7.
+6. [x] While this code is being touched: `ta-mediation::ApiMediator` has its own separate, also-unwired `classify()` duplicating `ToolCallInterceptor`'s heuristics — dedupe into one implementation rather than leaving two.
+7. [x] Tests: a gateway-mediated tool call never contains the raw secret in the agent-visible request or response; an unmediated connector still uses the flagged fallback path without silently failing.
+8. [x] USAGE.md: document which connectors are broker-mediated and the migration path for adding more.
 
 #### Version: `0.17.6-alpha.3`
 

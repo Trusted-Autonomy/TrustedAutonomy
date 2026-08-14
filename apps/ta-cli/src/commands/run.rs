@@ -4944,6 +4944,12 @@ fn load_vault_credentials(
     let Ok(summaries) = vault.list() else {
         return Vec::new();
     };
+    // v0.17.6.3: connectors declared `broker_mediated = true` in
+    // `.ta/connectors.toml` withhold the raw secret from the agent's env
+    // entirely (see `ta_runtime::apply_credentials_to_env`) — the agent
+    // presents the minted session token to `ta_external_action` instead,
+    // and the gateway broker resolves the real secret server-side.
+    let connector_registry = ta_credentials::ConnectorRegistry::load(&project_root.join(".ta"));
     summaries
         .into_iter()
         .filter_map(|summary| {
@@ -4983,8 +4989,15 @@ fn load_vault_credentials(
                 return None;
             }
 
+            let broker_mediated = connector_registry.is_broker_mediated_credential(&summary.name);
             vault.get(summary.id).ok().map(|full| {
-                ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes)
+                let cred =
+                    ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes);
+                if broker_mediated {
+                    cred.with_broker_mediation(token.token_id.to_string())
+                } else {
+                    cred
+                }
             })
         })
         .collect()
