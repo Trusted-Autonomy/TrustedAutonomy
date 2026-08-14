@@ -10,6 +10,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ta_changeset::draft_package::{ActionKind, PendingAction};
+use ta_changeset::tool_classify::{classify_tool_name, ToolCallCategory};
 
 /// Classifies MCP tool calls and produces PendingAction records for
 /// state-changing calls.
@@ -72,29 +73,18 @@ impl ToolCallInterceptor {
     }
 
     /// Determine the action kind for a tool call.
+    ///
+    /// Delegates the name-pattern heuristic to `ta_changeset::tool_classify`
+    /// (v0.17.6.3) — shared with `ta-mediation::ApiMediator`, which used to
+    /// carry its own independently-drifting copy of the same patterns.
     fn classify_kind(&self, tool_name: &str) -> ActionKind {
-        // Tools with common read-only patterns.
-        let read_patterns = [
-            "_read", "_get", "_list", "_search", "_find", "_query", "_fetch",
-        ];
-        for pattern in &read_patterns {
-            if tool_name.ends_with(pattern) || tool_name.contains(pattern) {
-                return ActionKind::ReadOnly;
-            }
+        match classify_tool_name(tool_name) {
+            ToolCallCategory::ReadOnly => ActionKind::ReadOnly,
+            ToolCallCategory::Irreversible
+            | ToolCallCategory::ExternalSideEffect
+            | ToolCallCategory::StateChanging => ActionKind::StateChanging,
+            ToolCallCategory::Unclassified => ActionKind::Unclassified,
         }
-
-        // Tools with common write patterns.
-        let write_patterns = [
-            "_send", "_post", "_create", "_update", "_delete", "_write", "_put", "_patch",
-            "_publish", "_tweet", "_upload",
-        ];
-        for pattern in &write_patterns {
-            if tool_name.ends_with(pattern) || tool_name.contains(pattern) {
-                return ActionKind::StateChanging;
-            }
-        }
-
-        ActionKind::Unclassified
     }
 
     /// Generate a human-readable description of the tool call.

@@ -16,10 +16,18 @@ use std::time::Duration;
 
 const ETXTBSY_BACKOFF_MS: [u64; 4] = [0, 20, 80, 200];
 
-fn spawn_with_retry(
+/// Spawn `command` with `extra_args`, retrying on `ETXTBSY` (transient
+/// "text file busy" errors from spawning a script that's mid-write on some
+/// platforms), plus extra environment variables merged
+/// into the child's inherited environment (v0.17.6.3) — used to attach a
+/// broker-resolved secret to a single plugin subprocess call without it
+/// ever appearing in the request/response JSON that's relayed back to the
+/// caller.
+fn spawn_with_retry_env(
     command: &str,
     extra_args: &[String],
     work_dir: &Path,
+    extra_env: &[(String, String)],
 ) -> Result<Child, PluginError> {
     let mut parts = command.split_whitespace();
     let program = parts.next().ok_or_else(|| PluginError::SpawnFailed {
@@ -40,6 +48,9 @@ fn spawn_with_retry(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         match cmd.spawn() {
             Ok(child) => return Ok(child),
             Err(e) if e.raw_os_error() == Some(26) => {
@@ -105,7 +116,35 @@ pub fn call_raw(
     request_line: &str,
     timeout: Duration,
 ) -> Result<String, PluginError> {
-    let mut child = spawn_with_retry(command, extra_args, work_dir)?;
+    call_raw_with_env(
+        name,
+        method,
+        command,
+        extra_args,
+        work_dir,
+        request_line,
+        timeout,
+        &[],
+    )
+}
+
+/// Same as [`call_raw`], plus extra environment variables set only on this
+/// one subprocess invocation (v0.17.6.3) — the caller's own process
+/// environment, and the request/response JSON exchanged over stdio, are
+/// both untouched, so a secret passed via `extra_env` never appears in
+/// anything relayed back to whoever invoked `call_raw_with_env`.
+#[allow(clippy::too_many_arguments)]
+pub fn call_raw_with_env(
+    name: &str,
+    method: &str,
+    command: &str,
+    extra_args: &[String],
+    work_dir: &Path,
+    request_line: &str,
+    timeout: Duration,
+    extra_env: &[(String, String)],
+) -> Result<String, PluginError> {
+    let mut child = spawn_with_retry_env(command, extra_args, work_dir, extra_env)?;
     {
         let stdin = child
             .stdin
@@ -174,8 +213,35 @@ pub fn call_json<Req: Serialize, Resp: DeserializeOwned>(
     request: &Req,
     timeout: Duration,
 ) -> Result<Resp, PluginError> {
+    call_json_with_env(
+        name,
+        method,
+        command,
+        extra_args,
+        work_dir,
+        request,
+        timeout,
+        &[],
+    )
+}
+
+/// Same as [`call_json`], plus extra environment variables set only on this
+/// one subprocess invocation (v0.17.6.3) — see [`call_raw_with_env`].
+#[allow(clippy::too_many_arguments)]
+pub fn call_json_with_env<Req: Serialize, Resp: DeserializeOwned>(
+    name: &str,
+    method: &str,
+    command: &str,
+    extra_args: &[String],
+    work_dir: &Path,
+    request: &Req,
+    timeout: Duration,
+    extra_env: &[(String, String)],
+) -> Result<Resp, PluginError> {
     let line = serde_json::to_string(request)?;
-    let response_line = call_raw(name, method, command, extra_args, work_dir, &line, timeout)?;
+    let response_line = call_raw_with_env(
+        name, method, command, extra_args, work_dir, &line, timeout, extra_env,
+    )?;
     serde_json::from_str(&response_line).map_err(|e| PluginError::InvalidResponse {
         name: name.to_string(),
         method: method.to_string(),

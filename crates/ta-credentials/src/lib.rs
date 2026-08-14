@@ -20,12 +20,14 @@
 //! ```
 
 pub mod config;
+pub mod connector_registry;
 pub mod encryption;
 pub mod error;
 pub mod file_vault;
 pub mod vault;
 
 pub use config::CredentialsConfig;
+pub use connector_registry::{ConnectorEntry, ConnectorRegistry};
 pub use encryption::KeyCustody;
 pub use error::VaultError;
 pub use file_vault::FileVault;

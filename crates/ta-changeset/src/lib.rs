@@ -42,6 +42,7 @@ pub mod sources;
 pub mod supervisor;
 pub mod supervisor_review;
 pub mod terminal_channel;
+pub mod tool_classify;
 pub mod uri_pattern;
 pub mod webhook_channel;
 
@@ -96,6 +97,7 @@ pub use supervisor_review::{
     load_constitution, SupervisorReview, SupervisorRunConfig, SupervisorVerdict,
 };
 pub use terminal_channel::{AutoApproveChannel, TerminalChannel, TerminalSessionChannel};
+pub use tool_classify::{classify_tool_name, ToolCallCategory};
 pub use uri_pattern::{filter_uris, matches_uri};
 pub use webhook_channel::WebhookChannel;
 

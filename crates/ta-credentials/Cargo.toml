@@ -19,6 +19,7 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 age = { workspace = true }
 keyring = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

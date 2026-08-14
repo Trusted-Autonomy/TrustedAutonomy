@@ -69,32 +69,19 @@ impl ApiMediator {
 
     /// Classify a tool call based on name patterns.
     ///
-    /// Uses the same heuristics as ToolCallInterceptor.
+    /// Delegates to `ta_changeset::tool_classify` (v0.17.6.3) — the same
+    /// heuristic `ToolCallInterceptor` uses, previously duplicated here with
+    /// its own independently-maintained pattern lists.
     fn classify_tool(tool_name: &str) -> ActionClassification {
-        let read_patterns = [
-            "_read", "_get", "_list", "_search", "_find", "_query", "_fetch",
-        ];
-        for pattern in &read_patterns {
-            if tool_name.ends_with(pattern) || tool_name.contains(pattern) {
-                return ActionClassification::ReadOnly;
+        match ta_changeset::tool_classify::classify_tool_name(tool_name) {
+            ta_changeset::ToolCallCategory::ReadOnly => ActionClassification::ReadOnly,
+            ta_changeset::ToolCallCategory::Irreversible => ActionClassification::Irreversible,
+            ta_changeset::ToolCallCategory::ExternalSideEffect => {
+                ActionClassification::ExternalSideEffect
             }
+            ta_changeset::ToolCallCategory::StateChanging
+            | ta_changeset::ToolCallCategory::Unclassified => ActionClassification::StateChanging,
         }
-
-        let irreversible_patterns = ["_send", "_publish", "_tweet", "_delete", "_drop"];
-        for pattern in &irreversible_patterns {
-            if tool_name.ends_with(pattern) || tool_name.contains(pattern) {
-                return ActionClassification::Irreversible;
-            }
-        }
-
-        let external_patterns = ["_post", "_create", "_update", "_put", "_patch", "_upload"];
-        for pattern in &external_patterns {
-            if tool_name.ends_with(pattern) || tool_name.contains(pattern) {
-                return ActionClassification::ExternalSideEffect;
-            }
-        }
-
-        ActionClassification::StateChanging
     }
 
     /// Generate a human-readable description of what a tool call would do.

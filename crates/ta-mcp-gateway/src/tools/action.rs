@@ -320,7 +320,14 @@ pub fn handle_external_action(
             }
 
             ActionPolicy::Auto => {
-                dispatch_auto_action(&state.config.workspace_root, &params, action_impl)?
+                let requesting_agent_id = goal_run_id.and_then(|id| state.agent_for_goal(id).ok());
+                dispatch_auto_action(
+                    &state.config.workspace_root,
+                    &params,
+                    action_impl,
+                    requesting_agent_id.as_deref(),
+                    state.config.credential_vault_use_keychain,
+                )?
             }
         }
     };
@@ -403,6 +410,8 @@ fn dispatch_auto_action(
     workspace_root: &Path,
     params: &ExternalActionParams,
     action_impl: &dyn ta_actions::ExternalAction,
+    requesting_agent_id: Option<&str>,
+    credential_vault_use_keychain: bool,
 ) -> Result<(ActionOutcome, Option<PendingAction>), McpError> {
     // Business-metric budget hard-limit pre-gate — deterministic, runs
     // before any risk scoring (mirrors `ta_human_verify`'s ordering: a
@@ -434,6 +443,36 @@ fn dispatch_auto_action(
             BudgetCheckResult::Ok => {}
         }
     }
+
+    // Gateway live interception / secret-substitution broker (v0.17.6.3):
+    // deterministic pre-gate, same "runs before any risk scoring" ordering
+    // as the budget hard limit above — a connector authorization decision
+    // is a mechanical scope comparison, not something an LLM judgment call
+    // (the risk gate below) should be able to override.
+    let secret_for_execute = match resolve_connector_authorization(
+        workspace_root,
+        params,
+        requesting_agent_id,
+        credential_vault_use_keychain,
+    ) {
+        ConnectorAuthorization::Error(e) => return Err(e),
+        ConnectorAuthorization::ScopeDeficit { description } => {
+            let action_id = Uuid::new_v4();
+            let pending = PendingAction {
+                action_id,
+                tool_name: format!("ta_external_action:{}", params.action_type),
+                parameters: params.payload.clone(),
+                kind: ActionKind::StateChanging,
+                intercepted_at: Utc::now(),
+                description,
+                target_uri: params.target_uri.clone(),
+                disposition: ArtifactDisposition::Pending,
+            };
+            return Ok((ActionOutcome::CapturedForReview, Some(pending)));
+        }
+        ConnectorAuthorization::NotBrokered => None,
+        ConnectorAuthorization::Authorized { secret } => Some(secret),
+    };
 
     let RiskAssessment {
         risk_score,
@@ -511,7 +550,7 @@ fn dispatch_auto_action(
         return Ok((ActionOutcome::CapturedForReview, Some(pending)));
     }
 
-    match action_impl.execute(&params.payload) {
+    match action_impl.execute_with_secret(&params.payload, secret_for_execute.as_deref()) {
         Ok(result) => {
             if let Some(budget_params) = &params.budget {
                 let ledger_path = workspace_root.join(&budget_params.ledger_path);
@@ -549,6 +588,173 @@ fn dispatch_auto_action(
             format!("action execution failed: {}", e),
             None,
         )),
+    }
+}
+
+// ── Gateway live interception / secret-substitution broker (v0.17.6.3) ───────
+
+/// Outcome of authorizing `params.connector` against the credential vault
+/// and `ConnectorRegistry` before an auto-policy action is dispatched.
+enum ConnectorAuthorization {
+    /// No `connector` was declared, or the declared connector exists but is
+    /// not `broker_mediated` — dispatch proceeds via the existing
+    /// `bare_process.rs` env-injection fallback (v0.17.6.3 item 5), not the
+    /// broker.
+    NotBrokered,
+    /// The connector is `broker_mediated`, the presented `session_token`
+    /// validated, and its scope covers the connector's `required_scope`.
+    /// `secret` is the resolved `Credential.secret` — attach it only to the
+    /// gateway's own outbound call, never return it to the agent.
+    Authorized { secret: String },
+    /// The session token is valid but its `allowed_scopes` don't cover the
+    /// connector's `required_scope`. Per PLAN item 4 ("hand off to
+    /// v0.17.6.6's escalation path instead of a hard failure"): captured
+    /// for human review rather than denied outright. Full `ta_human_verify`
+    /// integration lands with v0.17.6.6 — until then this is the same
+    /// captured-for-review fallback the risk gate itself uses below.
+    ScopeDeficit { description: String },
+    /// A hard, actionable failure: unknown connector, missing/invalid/
+    /// expired/mismatched session token, or an unreadable vault. Unlike a
+    /// scope deficit, none of these represent "the agent knows what it's
+    /// doing but needs more privilege" — they're malformed requests.
+    Error(McpError),
+}
+
+/// Authorize `params.connector` for an auto-policy dispatch and, on
+/// success, resolve the real secret to attach to the gateway's own
+/// outbound call (v0.17.6.3 items 1/2/4).
+///
+/// A request that doesn't declare `connector` at all is unaffected —
+/// `ConnectorAuthorization::NotBrokered` — so this is purely additive for
+/// callers that don't opt into broker mediation yet.
+fn resolve_connector_authorization(
+    workspace_root: &Path,
+    params: &ExternalActionParams,
+    requesting_agent_id: Option<&str>,
+    credential_vault_use_keychain: bool,
+) -> ConnectorAuthorization {
+    use ta_credentials::CredentialVault;
+
+    let Some(connector_id) = params.connector.as_deref() else {
+        return ConnectorAuthorization::NotBrokered;
+    };
+
+    let registry = ta_credentials::ConnectorRegistry::load(&workspace_root.join(".ta"));
+    let Some(entry) = registry.get(connector_id) else {
+        return ConnectorAuthorization::Error(McpError::invalid_params(
+            format!(
+                "unknown connector '{connector_id}' — declare it under \
+                 [connectors.{connector_id}] in .ta/connectors.toml before referencing it \
+                 from ta_external_action (see docs/USAGE.md 'Broker-Mediated Connectors')"
+            ),
+            None,
+        ));
+    };
+
+    if !entry.broker_mediated {
+        tracing::debug!(
+            connector = connector_id,
+            "connector is not broker_mediated; dispatch falls through to the \
+             non-gateway-mediated reduced-security fallback (pending v0.17.6.7)"
+        );
+        return ConnectorAuthorization::NotBrokered;
+    }
+
+    let Some(session_token) = params.session_token.as_deref() else {
+        return ConnectorAuthorization::Error(McpError::invalid_params(
+            format!(
+                "connector '{connector_id}' is broker_mediated — a session_token is \
+                 required (the agent receives one via TA_SESSION_TOKEN_<credential> in its \
+                 own environment; see docs/USAGE.md 'Broker-Mediated Connectors')"
+            ),
+            None,
+        ));
+    };
+    let Ok(token_id) = Uuid::parse_str(session_token) else {
+        return ConnectorAuthorization::Error(McpError::invalid_params(
+            format!("session_token '{session_token}' is not a valid token id"),
+            None,
+        ));
+    };
+
+    let mut cred_config = ta_credentials::CredentialsConfig::for_project(workspace_root);
+    cred_config.use_keychain = credential_vault_use_keychain;
+    let Ok(vault) = ta_credentials::FileVault::open(&cred_config) else {
+        return ConnectorAuthorization::Error(McpError::internal_error(
+            format!(
+                "connector '{connector_id}' is broker_mediated but the credential vault at \
+                 {} could not be opened",
+                cred_config.vault_path.display()
+            ),
+            None,
+        ));
+    };
+
+    let token = match vault.validate_token(token_id) {
+        Ok(t) => t,
+        Err(e) => {
+            return ConnectorAuthorization::Error(McpError::invalid_params(
+                format!(
+                    "session_token for connector '{connector_id}' failed validation: {e} \
+                     (tokens expire — mint a fresh one via `ta credentials grant`)"
+                ),
+                None,
+            ));
+        }
+    };
+
+    if let Some(agent_id) = requesting_agent_id {
+        if token.agent_id != agent_id {
+            return ConnectorAuthorization::Error(McpError::invalid_params(
+                format!(
+                    "session_token for connector '{connector_id}' was issued to a different \
+                     agent ('{}') than the requesting goal's agent ('{agent_id}')",
+                    token.agent_id
+                ),
+                None,
+            ));
+        }
+    }
+
+    let credential = match vault.get(token.credential_id) {
+        Ok(c) => c,
+        Err(e) => {
+            return ConnectorAuthorization::Error(McpError::internal_error(
+                format!("failed to resolve credential for connector '{connector_id}': {e}"),
+                None,
+            ));
+        }
+    };
+    if credential.name != entry.credential_name {
+        return ConnectorAuthorization::Error(McpError::invalid_params(
+            format!(
+                "session_token for connector '{connector_id}' does not back the credential \
+                 that connector declares ('{}' expected, token backs '{}') — this connector's \
+                 session_token cannot be used for a different connector's credential",
+                entry.credential_name, credential.name
+            ),
+            None,
+        ));
+    }
+
+    if let Some(required_scope) = &entry.required_scope {
+        if !token.allowed_scopes.iter().any(|s| s == required_scope) {
+            return ConnectorAuthorization::ScopeDeficit {
+                description: format!(
+                    "ta_external_action:{} via connector '{connector_id}' requires scope \
+                     '{required_scope}', but the presented session token only allows {:?} — \
+                     requires credential scope elevation. Captured for manual review rather \
+                     than auto-denied (structured human escalation via ta_human_verify lands \
+                     in v0.17.6.6); a reviewer can re-grant a wider-scoped token via \
+                     `ta credentials grant`.",
+                    params.action_type, token.allowed_scopes
+                ),
+            };
+        }
+    }
+
+    ConnectorAuthorization::Authorized {
+        secret: credential.secret,
     }
 }
 
@@ -713,7 +919,13 @@ mod tests {
     use crate::server::GatewayState;
 
     fn make_state(root: &std::path::Path) -> Arc<Mutex<GatewayState>> {
-        let config = GatewayConfig::for_project(root);
+        let mut config = GatewayConfig::for_project(root);
+        // Force file-based key custody for the credential vault: the OS
+        // keychain is a process/OS-global resource (see
+        // `ta_credentials::CredentialsConfig::use_keychain`'s own doc
+        // comment) that must not leak between tests or interfere with the
+        // developer's real keychain.
+        config.credential_vault_use_keychain = false;
         let state = GatewayState::new(config).expect("state init failed");
         Arc::new(Mutex::new(state))
     }
@@ -752,6 +964,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params);
@@ -770,6 +984,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params);
@@ -788,6 +1004,8 @@ mod tests {
             target_uri: None,
             dry_run: true,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -823,6 +1041,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -861,6 +1081,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -894,6 +1116,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         // First two should succeed (review).
@@ -938,6 +1162,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -984,6 +1210,8 @@ mod tests {
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -1083,6 +1311,8 @@ else:
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -1122,6 +1352,8 @@ else:
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -1151,6 +1383,8 @@ else:
             target_uri: None,
             dry_run: false,
             budget: None,
+            connector: None,
+            session_token: None,
         };
 
         // No plugin registered under .ta/plugins/adapter/ -- must be a
@@ -1161,6 +1395,321 @@ else:
             message.contains("no adapter registered for this verb"),
             "expected a clear 'no adapter registered' error, got: {}",
             message
+        );
+    }
+
+    // ── v0.17.6.3: gateway live interception / secret-substitution broker ──
+
+    /// A `connector.execute` adapter plugin whose `execute` method reports
+    /// whether it saw a secret via `TA_CONNECTOR_SECRET` -- never echoing
+    /// the secret itself back in its result, matching how a real connector
+    /// plugin (e.g. calling GitHub with the resolved token) would behave.
+    fn write_broker_test_plugin(workspace_root: &std::path::Path) {
+        let plugin_dir = workspace_root
+            .join(".ta")
+            .join("plugins")
+            .join("adapter")
+            .join("broker-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let script_path = plugin_dir.join("mock_plugin.py");
+        std::fs::write(
+            &script_path,
+            r#"
+import json
+import os
+import sys
+
+req = json.loads(sys.stdin.readline())
+method = req["method"]
+
+if method == "risk_score":
+    print(json.dumps({"ok": True, "result": {"risk_score": 0, "confidence": 1.0}}))
+elif method == "execute":
+    secret = os.environ.get("TA_CONNECTOR_SECRET", "")
+    result = {"saw_secret": len(secret) > 0, "secret_len": len(secret)}
+    print(json.dumps({"ok": True, "result": result}))
+else:
+    print(json.dumps({"ok": False, "error": f"unknown method {method}"}))
+"#,
+        )
+        .unwrap();
+        let mut manifest = toml::Table::new();
+        manifest.insert("name".into(), "broker-test".into());
+        manifest.insert("type".into(), "adapter".into());
+        manifest.insert("command".into(), "python3".into());
+        manifest.insert(
+            "args".into(),
+            toml::Value::Array(vec![script_path.to_string_lossy().to_string().into()]),
+        );
+        manifest.insert(
+            "capabilities".into(),
+            toml::Value::Array(vec!["verb:connector.execute".into()]),
+        );
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            toml::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Opens (creating if needed) a file-key-custody vault for a test
+    /// workspace -- `use_keychain: false` keeps tests off the real, process-
+    /// global OS keychain.
+    fn open_test_vault(workspace_root: &std::path::Path) -> ta_credentials::FileVault {
+        let mut cred_config = ta_credentials::CredentialsConfig::for_project(workspace_root);
+        cred_config.use_keychain = false;
+        ta_credentials::FileVault::open(&cred_config).unwrap()
+    }
+
+    #[test]
+    fn broker_mediated_connector_never_returns_raw_secret_to_agent() {
+        use ta_credentials::CredentialVault;
+
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            b"[connectors.paper-trading]\n\
+              credential_name = \"PAPER_API_KEY\"\n\
+              broker_mediated = true\n\
+              required_scope = \"trade.write\"\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let mut vault = open_test_vault(dir.path());
+        let cred = vault
+            .add(
+                "PAPER_API_KEY",
+                "paper-trading",
+                "sk-live-supersecret-do-not-leak",
+                vec!["trade.write".into()],
+            )
+            .unwrap();
+        let token = vault
+            .issue_token(cred.id, "test-agent", vec!["trade.write".into()], 3600)
+            .unwrap();
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("paper-trading".into()),
+            session_token: Some(token.token_id.to_string()),
+        };
+
+        let result = handle_external_action(&state, params).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+
+        assert!(
+            !text.contains("sk-live-supersecret-do-not-leak"),
+            "the raw secret must never appear in the agent-visible response: {}",
+            text
+        );
+        assert!(
+            text.contains("executed") && text.contains(r#"\"saw_secret\":true"#),
+            "expected the plugin to have received the secret server-side and executed: {}",
+            text
+        );
+
+        // The action log (which the agent can also read back via other
+        // tools) must not carry the raw secret either -- only the request
+        // payload TA actually captured, which never contained it.
+        let log = std::fs::read_to_string(ta_dir.join("action-log.jsonl")).unwrap();
+        assert!(!log.contains("sk-live-supersecret-do-not-leak"));
+    }
+
+    #[test]
+    fn broker_mediated_connector_with_missing_token_is_a_clear_actionable_error() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            b"[connectors.paper-trading]\n\
+              credential_name = \"PAPER_API_KEY\"\n\
+              broker_mediated = true\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("paper-trading".into()),
+            session_token: None,
+        };
+
+        let err = handle_external_action(&state, params).unwrap_err();
+        assert!(
+            err.message
+                .to_string()
+                .contains("session_token is required"),
+            "expected an actionable 'session_token is required' error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn broker_mediated_connector_scope_deficit_is_captured_for_review_not_denied() {
+        use ta_credentials::CredentialVault;
+
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            b"[connectors.paper-trading]\n\
+              credential_name = \"PAPER_API_KEY\"\n\
+              broker_mediated = true\n\
+              required_scope = \"trade.write\"\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let mut vault = open_test_vault(dir.path());
+        // Credential/token exist, but the token was only granted a narrower
+        // scope than the connector requires.
+        let cred = vault
+            .add(
+                "PAPER_API_KEY",
+                "paper-trading",
+                "sk-live-supersecret-do-not-leak",
+                vec!["trade.read".into(), "trade.write".into()],
+            )
+            .unwrap();
+        let token = vault
+            .issue_token(cred.id, "test-agent", vec!["trade.read".into()], 3600)
+            .unwrap();
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("paper-trading".into()),
+            session_token: Some(token.token_id.to_string()),
+        };
+
+        let result = handle_external_action(&state, params).unwrap();
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "a scope deficit is not a hard failure"
+        );
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+        assert!(
+            text.contains("captured_for_review"),
+            "expected captured_for_review, not a hard denial: {}",
+            text
+        );
+        assert!(!text.contains("sk-live-supersecret-do-not-leak"));
+    }
+
+    #[test]
+    fn undeclared_connector_returns_clear_actionable_error() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("never-declared".into()),
+            session_token: None,
+        };
+
+        let err = handle_external_action(&state, params).unwrap_err();
+        assert!(
+            err.message.to_string().contains("unknown connector"),
+            "expected an actionable 'unknown connector' error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn non_broker_mediated_connector_falls_through_to_existing_dispatch_unchanged() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        // Declared, but not broker_mediated -- the reduced-security
+        // fallback (item 5): no session_token required, dispatch proceeds
+        // exactly as it did before this connector existed.
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            b"[connectors.slack-ops]\ncredential_name = \"SLACK_BOT_TOKEN\"\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("slack-ops".into()),
+            session_token: None,
+        };
+
+        let result = handle_external_action(&state, params).unwrap();
+        assert!(!result.is_error.unwrap_or(false), "must not silently fail");
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+        assert!(
+            text.contains("executed") && text.contains(r#"\"saw_secret\":false"#),
+            "expected a normal, secret-less execution: {}",
+            text
         );
     }
 }
