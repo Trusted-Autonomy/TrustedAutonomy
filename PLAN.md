@@ -10200,7 +10200,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.6 — Human Escalation for Credential Scope Elevation
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.3 (needs a live interception point to trigger from); does not strictly require v0.17.6.4/6.5, since the trigger condition works the same whether the held token is a `SessionToken` or a biscuit.
 
 **Goal**: Wire scope-exceeding requests into TA's existing `ta_human_verify` two-stage confidence-gated escalation instead of building a parallel approval path.
