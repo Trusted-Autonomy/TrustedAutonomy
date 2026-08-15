@@ -354,6 +354,17 @@ mod tests {
         assert!(targets.contains(&"/trunk".to_string()));
     }
 
+    /// v0.17.7.2 item 5: a non-CI adapter (SVN has no "CI check" concept)
+    /// must stay on `SourceAdapter::check_failures()`'s empty-vec default —
+    /// verified against the real `SvnAdapter`, not just a mock, since
+    /// `CiFailureTrigger` degrades based on this exact return value.
+    #[test]
+    fn test_svn_adapter_check_failures_uses_default_empty_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = SvnAdapter::new(dir.path());
+        assert_eq!(adapter.check_failures("1234").unwrap(), Vec::new());
+    }
+
     #[test]
     fn test_svn_adapter_verify_degrades_without_svn() {
         // Without svn CLI or a real working copy, verify should degrade gracefully.

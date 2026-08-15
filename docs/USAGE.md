@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.7-alpha.1
+**Version**: 0.17.7-alpha.2
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -501,8 +501,8 @@ Workflow graphs are a separate, lower-level engine (`ta-workflow::graph`) from t
 | `[[worker]]` | Dispatches new work (starts a goal) | `goal_dispatch` |
 | `[[reviewer]]` | Produces one scored vote on a draft/decision | `policy`, `advisor_confidence` |
 | `[decision]` | Fans in every reviewer vote, applies weights/threshold/algorithm | `weighted` |
-| `[action]` | Acts on the decision | `recommend`, `auto_approve` |
-| `[[trigger]]` | Fires the graph on an external event (parses today; execution wiring lands in a later release) | `vcs_task_completion` |
+| `[action]` | Acts on the decision | `recommend`, `auto_approve`, `corrective_goal` |
+| `[[trigger]]` | Fires on an external event — parses and is runnable standalone via `ta workflow watch-ci` today; full `ta workflow graph-run` wiring lands in a later release | `vcs_task_completion`, `ci_failure` |
 
 **Recommendation vs. auto-approval is the same decision, different wiring.** A `[decision]` node never encodes whether its output is binding or advisory — that's purely which `[action] kind` the graph is wired to. Swap `kind = "recommend"` for `kind = "auto_approve"` in an otherwise identical graph, and the exact same decision goes from "surfaced to a human" to "applied automatically." **New graphs default to `recommend`** — a human must explicitly edit a graph to `auto_approve` before it can act on its own.
 
@@ -575,6 +575,32 @@ ta workflow graph-run dispatch-and-review --title "New logo" --verb create --wor
 ```
 
 `ta workflow graph-run <name>` is a synchronous "run now" entry point for testing and debugging a graph definition — it does not yet wait on `[[trigger]]` sources or replace `ta draft apply`'s real approval gate (that wiring lands in a later phase). Flags: `--title`, `--objective`, `--verb` (default `implement`), `--workload-hint`, `--phase`.
+
+### CI-Failure Watch & Corrective Goals
+
+`ta workflow watch-ci <review-id>` generalizes the "watch CI, read the failing job log, diagnose, fix, push, repeat" loop into two graph nodes:
+
+- **`CiFailureTrigger`** polls your configured VCS adapter's review status and fires the moment CI status flips from passing (or unknown) to failing — not on every poll while it stays red.
+- **`CorrectiveGoalAction`** responds to that failure by launching a follow-up fix goal (via the same dispatch path `[[worker]] kind = "goal_dispatch"` uses) with the failing check's name and a log excerpt injected directly into the goal's objective.
+
+```bash
+ta workflow watch-ci 123 --retry-cap 2
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--retry-cap` | `1` | Max consecutive auto-fix attempts before escalating to a human. |
+| `--poll-interval-secs` | `30` | Seconds between CI status polls. |
+| `--max-polls` | `120` | Max polls per wait cycle before giving up on that review. |
+
+Both triggers go through `SourceAdapter` only — never a platform-specific API call directly, per the constitution's VCS-adapter invariant (§16.4). This has two consequences:
+
+- Any adapter that implements `check_review()` (Git today; a future Perforce/SVN CI integration tomorrow) gets `VcsTaskCompletionTrigger`/`CiFailureTrigger` support automatically, with no trigger-side code change.
+- An adapter with no per-check failure detail (Perforce, SVN, "none" — or Git without the `gh` CLI installed) is fully compliant, not a gap: `SourceAdapter::check_failures()` defaults to an empty list, and `CiFailureTrigger` degrades to `"CI failure detail unavailable for this VCS adapter, investigate manually"` instead of guessing or erroring.
+
+**Retry cap and escalation** reuse the exact same auto-fix mechanism as `ta workflow build-milestone --on-gate-failure=auto-fix` (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second, parallel retry mechanism. Each new CI failure on the same review counts as one attempt; once the attempt count exceeds `--retry-cap`, the watch stops launching fixes and reports an escalation instead of retrying forever.
+
+`ta workflow watch-ci` doesn't yet know which goal originally opened the review it's watching, so each corrective fix lands as its own new goal rather than continuing the original goal's branch. A future release (chaining this into the advisor's multi-phase entry point) will seed that link automatically so fixes land on the same PR.
 
 ---
 
