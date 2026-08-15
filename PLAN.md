@@ -10166,6 +10166,10 @@ Code releases use semver. Content releases don't. Decide:
 <!-- status: pending -->
 **Depends on**: v0.17.6.3
 
+**Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
+- **Q7 (`biscuit-auth` dependency sign-off)**: approved. Apache-2.0 (confirmed), v6.0.0 (mature major version), maintained by Geoffroy Couprie (also the author of the widely-used `nom` parser-combinator crate) and Clément Delafargue, official Eclipse Biscuit project backing, real ecosystem adoption (`biscuit-cli`, `tower-biscuit-auth`). No concerns.
+- **Q6 (revocation TTL default)**: default token TTL set to **1 hour** (long enough to cover a typical goal run observed this session — builds/tests taking minutes, full phase implementations often 10-30+ minutes end to end — without mid-goal re-issuance friction, short enough to keep the denylist bounded), per-connector override via `.ta/connectors.toml` (extends the per-connector entry format `v0.17.6.3` already established, rather than a second config surface). Denylist entries auto-prune once their parent token's TTL has elapsed — an expired token needs no separate revocation entry.
+
 **Goal**: Replace the UUID `SessionToken` with real biscuit tokens (`biscuit-auth` crate, Apache-2.0 licensed — confirm dependency sign-off per design doc Open Question 7 before starting), giving TA offline, no-round-trip attenuation — the prerequisite for cryptographic swarm narrowing in v0.17.6.5.
 
 **Items**:
