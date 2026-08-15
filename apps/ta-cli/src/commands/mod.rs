@@ -70,3 +70,4 @@ pub mod verify;
 pub mod version_guard;
 pub mod webhook;
 pub mod workflow;
+pub mod workflow_graph;

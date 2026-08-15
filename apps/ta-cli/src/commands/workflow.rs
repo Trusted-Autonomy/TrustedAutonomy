@@ -145,6 +145,40 @@ pub enum WorkflowCommands {
         #[arg(long)]
         dot: bool,
     },
+    /// Execute a workflow graph engine definition end-to-end (v0.17.7.1).
+    ///
+    /// Loads `.ta/workflows/graphs/<name>.toml`, runs its worker (if any),
+    /// fans its reviewers out, applies the configured decision algorithm,
+    /// then runs the wired action node (`recommend` or `auto_approve`).
+    /// For testing/debugging a graph definition before it's wired into an
+    /// event-driven flow (`ta draft apply`'s real gate — v0.17.7.3).
+    ///
+    /// Named `graph-run` (not `graph run`) to avoid colliding with the
+    /// existing `ta workflow graph <path.yaml>` artifact-DAG command above.
+    ///
+    /// Example:
+    ///   ta workflow graph-run phase-review-panel --title "My draft" --verb implement
+    GraphRun {
+        /// Graph name (resolved under `.ta/workflows/graphs/<name>.toml`) or
+        /// a direct path to a `.toml` file.
+        name: String,
+        /// Title used to seed the `[[worker]]`/`[[reviewer]]` node inputs.
+        #[arg(long, default_value = "")]
+        title: String,
+        /// Objective used to seed the `[[worker]]` node input.
+        #[arg(long, default_value = "")]
+        objective: String,
+        /// `WorkItem.verb` — data, not an enum (e.g. "implement", "create", "fix").
+        #[arg(long, default_value = "implement")]
+        verb: String,
+        /// `WorkItem.workload_hint` — explicit `ta-brain::route()` workload
+        /// type override. Defaults to `--verb` when omitted.
+        #[arg(long)]
+        workload_hint: Option<String>,
+        /// Plan phase to associate with any dispatched work.
+        #[arg(long)]
+        phase: Option<String>,
+    },
     /// Resume a paused or interrupted workflow run from the artifact store (v0.14.10).
     ///
     /// Reads the session artifact store, checks which stage outputs are already
@@ -473,6 +507,22 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             }
         }
         WorkflowCommands::Graph { path, dot } => graph_workflow(path, *dot),
+        WorkflowCommands::GraphRun {
+            name,
+            title,
+            objective,
+            verb,
+            workload_hint,
+            phase,
+        } => crate::commands::workflow_graph::run_named_graph(
+            name,
+            title,
+            objective,
+            verb,
+            workload_hint.as_deref(),
+            phase.as_deref(),
+            config,
+        ),
         WorkflowCommands::Resume { run_id } => resume_workflow(run_id, config),
         WorkflowCommands::List {
             templates,

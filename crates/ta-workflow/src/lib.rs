@@ -18,6 +18,7 @@ pub mod consensus;
 pub mod definition;
 pub mod dependency_wave;
 pub mod error;
+pub mod graph;
 pub mod intent;
 pub mod interaction;
 pub mod params;

@@ -1,0 +1,32 @@
+# phase-review-panel.toml — Workflow Graph Engine reference graph (v0.17.7.1).
+#
+# Copy this file to .ta/workflows/graphs/phase-review-panel.toml (or any
+# other name) then run:
+#   ta workflow graph-run phase-review-panel --title "My draft" --verb implement
+#
+# This graph expresses today's existing single-reviewer approval flow as
+# data: a policy check feeds a weighted decision, which surfaces to a human
+# via RecommendAction. Per constitution §16.2, every new graph defaults to
+# `recommend` — a human must explicitly change `[action] kind` to
+# "auto_approve" to let this graph apply drafts on its own.
+#
+# See docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md §3
+# for the full design this schema implements, and docs/USAGE.md's
+# "Workflow Graphs" section for a walkthrough of all five node kinds.
+
+[[reviewer]]
+id = "policy_check"
+kind = "policy"
+
+[decision]
+id = "panel_verdict"
+kind = "weighted"
+algorithm = "weighted"   # "raft" | "paxos" | "weighted" — closed enum per §16.5
+threshold = 0.75
+inputs = ["policy_check"]
+weights = { policy_check = 1.0 }
+
+[action]
+id = "outcome"
+kind = "recommend"       # swap to "auto_approve" once a human upgrades this graph
+decision = "panel_verdict"

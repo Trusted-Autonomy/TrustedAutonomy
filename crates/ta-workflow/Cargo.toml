@@ -15,13 +15,21 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.17.6-alpha.6" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.7-alpha.1" }
+# Reused by graph::nodes::PolicyReviewer (v0.17.7.1) — wraps the existing
+# should_auto_approve_draft rule evaluation as one ReviewerNode, per
+# constitution §1.7 (reuse before reinventing). Leaf crate, no cycle risk.
+ta-policy = { path = "../ta-policy", version = "0.17.7-alpha.1" }
+# Reused by graph::nodes::AdvisorConfidenceReviewer (v0.17.7.1) — wraps the
+# existing gate::decide() confidence check as one ReviewerNode. Leaf crate,
+# no cycle risk.
+ta-decision = { path = "../ta-decision", version = "0.17.7-alpha.1" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-toml = { workspace = true }
