@@ -7521,9 +7521,10 @@ marked `broker_mediated = true` are withheld from the agent's environment.
 
 The `broker_mediated = false` path is the same env-injection behavior TA
 has always had -- kept as an explicitly-flagged reduced-security fallback
-(logged at `debug`) until a per-tool credential shim (v0.17.6.7, for the
-dominant `git push`/`gh pr create`/`curl` shell-command case that never
-touches `ta_external_action` at all) closes it more broadly.
+(logged at `debug`). For the dominant `git push`/`gh pr create` shell-command
+case that never touches `ta_external_action` at all, see [Shell/CLI
+Credential Isolation](#shellcli-credential-isolation) below; `npm`/`docker`/
+raw `curl` remain on this fallback.
 
 **End-to-end flow for a broker-mediated connector:**
 
@@ -7565,6 +7566,48 @@ the broker-resolved secret from their own subprocess environment as
 exchanged with TA, so it cannot end up logged to `.ta/action-log.jsonl` or
 echoed into a plugin's own response by accident (a well-behaved plugin
 should not echo it either way).
+
+#### Shell/CLI Credential Isolation
+
+Broker mediation above closes the leak path for connectors used through
+`ta_external_action` -- but a Bash-driven coding agent's *majority*
+credentialed actions never touch an MCP tool call at all: `git push`,
+`gh pr create`, `npm publish`, `docker login`, a raw `curl` with a bearer
+header all read a raw secret straight out of the agent's own shell
+environment. Two concrete shims close this for the tools that support it;
+everything else stays on the reduced-security env-injection fallback below,
+same as before this section existed.
+
+Declare which hostnames a broker-mediated connector's credential shims
+should match by adding a `hosts` list to its `.ta/connectors.toml` entry:
+
+```toml
+[connectors.github]
+credential_name = "GITHUB_TOKEN"
+broker_mediated = true
+required_scope = "repo.write"
+hosts = ["github.com"]   # enables the git-credential-helper and gh shims below
+```
+
+A connector with no `hosts` entry is invisible to both shims -- only the
+`ta_external_action` broker path (above) applies to it, unchanged.
+
+**Covered today:**
+
+| Tool | Mechanism |
+|---|---|
+| `git` (`git push`, `git pull`, `git clone` over HTTPS) | `ta run` writes a repo-local `credential.helper = "!<ta binary> credential-helper"` into `.git/config` whenever a broker-mediated connector declares a matching `hosts` entry. git already supports pluggable credential helpers (`gitcredentials(7)`) -- no change to git's own behavior. On each auth request, `ta credential-helper get` reads git's `host=`/`protocol=` request from stdin, resolves the real secret via the broker/vault (the same lookup the `ta_external_action` path uses), and prints `username=`/`password=` back to git. The raw secret exists only in this short-lived helper process and in git's own pipe to it -- never in the agent's persistent shell environment or the LLM's context. A host no broker-mediated connector declares produces no output and no error, so git falls through to its own prompt/other configured helpers exactly as if this helper were never installed. |
+| `gh` (GitHub CLI) | The GitHub CLI has no external-auth-token-resolution hook the way git does, so this is a different mechanism: `ta run` stages a small `gh`-named wrapper binary at `<project root>/.ta/bin/gh` and prepends that directory onto the agent's `PATH`, so a bare `gh ...` invocation resolves to the wrapper before the real CLI. Each invocation resolves the real secret the same way the git helper does, finds the real `gh` binary by searching `PATH` with the wrapper's own directory excluded, and execs it with `GH_TOKEN` set only on that one child process -- never on the wrapper's own environment, and never on the agent's own long-lived shell environment. No matching connector, no session token, or no real `gh` found on `PATH` all fail open: the wrapper runs the real `gh` unmodified wherever it can still be found, the same behavior as if the shim had never been installed. |
+
+**Not covered yet** (stays on the `broker_mediated = false` reduced-security
+env-injection fallback, `bare_process.rs`, logged at `debug`): `npm`,
+`docker`, and any raw `curl`/HTTP client usage. Closing the general case
+would need a local loopback forward proxy that injects the `Authorization`
+header for allow-listed hosts server-side -- which requires the agent's
+process to trust a local CA for TLS interception on those hosts, a real,
+separate trust decision. That trust boundary is deliberately not bundled
+into the git/gh shims above; it's tracked as a future phase requiring its
+own explicit sign-off rather than an implicit rider on this one.
 
 #### Human Escalation for Credential Scope Elevation
 

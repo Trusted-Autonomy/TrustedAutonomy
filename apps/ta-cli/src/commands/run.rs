@@ -4898,6 +4898,164 @@ fn scoped_credential_env(
     env
 }
 
+// ── Shell/CLI credential shims (v0.17.6.7) ────────────────────────────────
+//
+// v0.17.6.3 built the gateway's live interception point for MCP tool calls,
+// but a Bash-driven coding agent's *majority* credentialed actions — `git
+// push`, `gh pr create`, `npm publish`, a raw `curl` with a bearer header —
+// never touch an MCP tool call at all. These helpers wire the two concrete
+// shims that close this for git and the GitHub CLI (`docs/superpowers/specs/
+// 2026-08-03-agent-credential-security-design.md`, Stage 7 items 1-2):
+// git's pluggable `credential.helper` protocol (`apps/ta-cli/src/commands/
+// credential_helper.rs`), and a `gh` PATH-shadow wrapper binary
+// (`apps/ta-cli/src/bin/gh_shim.rs`). The general case (arbitrary
+// `curl`/`npm`/`docker` calls via a local TLS-intercepting forward proxy,
+// PLAN item 3) is deliberately out of scope — see `docs/USAGE.md` "Shell/CLI
+// Credential Isolation" for the resolved trust-model tradeoff (design doc
+// Open Question 4: a MITM-capable local CA is a real, separate trust
+// decision that deserves its own phase, not a rider on this one).
+
+/// Filename of the `gh` wrapper binary this process was built alongside —
+/// same binary name on every platform except the `.exe` suffix on Windows.
+fn gh_wrapper_filename() -> &'static str {
+    if cfg!(windows) {
+        "gh.exe"
+    } else {
+        "gh"
+    }
+}
+
+/// Minimal POSIX-shell quoting for a path that may contain spaces — git
+/// invokes a `!`-prefixed `credential.helper` value through `sh -c`, so an
+/// unquoted space in the `ta` binary's own path would break the command.
+/// Not a general-purpose shell-quoting utility, just enough for this one
+/// call site.
+fn shell_quote_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))
+    {
+        s
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// The `credential.helper` value to write into a repo's local git config.
+/// The leading `!` tells git to run the rest as a shell command rather than
+/// searching `PATH` for `git-credential-<value>` — needed because `ta`'s
+/// own binary name doesn't follow that convention. Pure string formatting;
+/// the actual git-config mutation happens in `install_credential_shims`.
+fn git_credential_helper_value(ta_bin: &Path) -> String {
+    format!("!{} credential-helper", shell_quote_path(ta_bin))
+}
+
+/// Prepend `dir` to an existing `PATH` value (or start fresh if there was
+/// none) using the platform path-list separator.
+fn prepend_path(existing: Option<&str>, dir: &Path) -> String {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    match existing {
+        Some(existing) if !existing.is_empty() => format!("{}{sep}{existing}", dir.display()),
+        _ => dir.display().to_string(),
+    }
+}
+
+/// Wire up Stage 7 shell/CLI credential shims for one agent spawn.
+///
+/// No-op (env untouched) unless `registry` declares at least one
+/// broker-mediated connector with `hosts` set — see
+/// `ConnectorRegistry::has_shell_shim_connector`. Both individual shims
+/// fail open: any error staging them (missing sibling `gh` binary,
+/// unwritable git config, `working_dir` not a git repo) is logged at `warn`
+/// and skipped, never blocks agent launch — narrowing how a credential
+/// already withheld from `env` (broker-mediated credentials never appear
+/// there; see `ta_runtime::apply_credentials_to_env`) is strictly additive,
+/// not something agent launch should ever depend on succeeding.
+fn install_credential_shims(
+    env: &mut std::collections::HashMap<String, String>,
+    project_root: &Path,
+    working_dir: &Path,
+    registry: &ta_credentials::ConnectorRegistry,
+) {
+    if !registry.has_shell_shim_connector() {
+        return;
+    }
+
+    // git: point this repo's local credential.helper at `ta credential-helper`.
+    if working_dir.join(".git").exists() {
+        match std::env::current_exe() {
+            Ok(ta_bin) => {
+                let helper_value = git_credential_helper_value(&ta_bin);
+                let status = std::process::Command::new("git")
+                    .args(["config", "--local", "credential.helper", &helper_value])
+                    .current_dir(working_dir)
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        tracing::debug!(
+                            working_dir = %working_dir.display(),
+                            "installed broker-backed git credential.helper"
+                        );
+                    }
+                    Ok(s) => tracing::warn!(
+                        code = ?s.code(),
+                        "git config credential.helper failed; git push/pull for broker-mediated \
+                         connectors will fall back to git's own credential resolution"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "could not run `git config` to install the credential helper"
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not resolve the running ta binary's path; skipping git credential.helper setup"
+            ),
+        }
+    }
+
+    // gh: stage the wrapper binary next to it and prepend its directory to PATH.
+    if let Ok(ta_bin) = std::env::current_exe() {
+        if let Some(bin_dir) = ta_bin.parent() {
+            let src = bin_dir.join(gh_wrapper_filename());
+            if src.is_file() {
+                let shim_dir = project_root.join(".ta").join("bin");
+                if let Err(e) = std::fs::create_dir_all(&shim_dir) {
+                    tracing::warn!(error = %e, "could not create .ta/bin for the gh credential shim");
+                } else {
+                    let dest = shim_dir.join(gh_wrapper_filename());
+                    match std::fs::copy(&src, &dest) {
+                        Ok(_) => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &dest,
+                                    std::fs::Permissions::from_mode(0o755),
+                                );
+                            }
+                            let existing = env.get("PATH").map(String::as_str);
+                            env.insert("PATH".to_string(), prepend_path(existing, &shim_dir));
+                            tracing::debug!(dest = %dest.display(), "installed gh credential shim");
+                        }
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "could not stage the gh credential shim binary"
+                        ),
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    src = %src.display(),
+                    "no gh wrapper binary found next to ta; gh calls use the reduced-security \
+                     env-injection fallback"
+                );
+            }
+        }
+    }
+}
+
 /// Default TTL for the session grants minted by [`load_vault_credentials`]
 /// (v0.17.6.2). Generous enough to cover a typical single goal run without
 /// being unbounded; a real per-goal deadline arrives with swarm attenuation
@@ -5090,6 +5248,21 @@ fn launch_agent_via_runtime(
     // Inject ANTHROPIC_BASE_URL when context compression is enabled (v0.17.0.7).
     // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
     inject_compression_url(&mut env, config, staging_path);
+
+    // Stage 7 shell/CLI credential shims (v0.17.6.7): TA_PROJECT_ROOT lets
+    // `ta credential-helper` / the `gh` wrapper find `.ta/` regardless of the
+    // agent's own working directory (which is `staging_path`, not
+    // necessarily where `.ta/` lives), the same convention `ta serve`
+    // already uses. `install_credential_shims` is itself a no-op unless a
+    // broker-mediated connector declares `hosts` in `.ta/connectors.toml`.
+    if let Some(project_root) = project_root_from_staging(staging_path) {
+        env.insert(
+            "TA_PROJECT_ROOT".to_string(),
+            project_root.display().to_string(),
+        );
+        let registry = ta_credentials::ConnectorRegistry::load(&project_root.join(".ta"));
+        install_credential_shims(&mut env, &project_root, staging_path, &registry);
+    }
 
     // Expand args (replace {prompt} template variable).
     let mut args: Vec<String> = config
@@ -11263,6 +11436,129 @@ plan_pending_window = 7
         let verified = broker.verify(session_token).unwrap();
         assert_eq!(verified.credential_id, cred_id);
         assert_eq!(verified.agent_id, "agent-1");
+    }
+
+    // ── Shell/CLI credential shims (v0.17.6.7) ────────────────────────────
+
+    #[test]
+    fn shell_quote_path_leaves_simple_paths_unquoted() {
+        assert_eq!(
+            shell_quote_path(Path::new("/usr/local/bin/ta")),
+            "/usr/local/bin/ta"
+        );
+    }
+
+    #[test]
+    fn shell_quote_path_quotes_and_escapes_paths_with_spaces() {
+        let quoted = shell_quote_path(Path::new("/Users/me/My Apps/ta"));
+        assert_eq!(quoted, "'/Users/me/My Apps/ta'");
+    }
+
+    #[test]
+    fn git_credential_helper_value_uses_bang_prefix_and_subcommand() {
+        let value = git_credential_helper_value(Path::new("/usr/local/bin/ta"));
+        assert_eq!(value, "!/usr/local/bin/ta credential-helper");
+    }
+
+    #[test]
+    fn prepend_path_adds_separator_when_path_already_set() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let result = prepend_path(Some("/usr/bin"), Path::new("/proj/.ta/bin"));
+        assert_eq!(result, format!("/proj/.ta/bin{sep}/usr/bin"));
+    }
+
+    #[test]
+    fn prepend_path_with_no_existing_path_is_just_the_dir() {
+        assert_eq!(
+            prepend_path(None, Path::new("/proj/.ta/bin")),
+            "/proj/.ta/bin"
+        );
+        assert_eq!(
+            prepend_path(Some(""), Path::new("/proj/.ta/bin")),
+            "/proj/.ta/bin"
+        );
+    }
+
+    #[test]
+    fn install_credential_shims_is_a_no_op_without_a_shell_shim_connector() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ta_credentials::ConnectorRegistry::default();
+        let mut env = std::collections::HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+
+        install_credential_shims(&mut env, dir.path(), dir.path(), &registry);
+
+        // Untouched: no PATH mutation, and no .ta/bin directory materialized.
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert!(!dir.path().join(".ta/bin").exists());
+    }
+
+    #[test]
+    fn install_credential_shims_writes_git_config_when_working_dir_is_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status();
+        if !matches!(init, Ok(s) if s.success()) {
+            eprintln!("skipping: `git init` unavailable in this environment");
+            return;
+        }
+        // `git init` runs as a real subprocess; on some sandboxed
+        // filesystems the new `.git` directory isn't immediately visible to
+        // this process's own `Path::exists()` calls. Poll briefly rather
+        // than assume synchronous visibility -- bounded to 500ms, a no-op
+        // on any normal filesystem where the first check already succeeds.
+        for _ in 0..50 {
+            if repo.join(".git").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\n\
+             broker_mediated = true\nhosts = [\"github.com\"]\n",
+        )
+        .unwrap();
+        let registry = ta_credentials::ConnectorRegistry::load(&dir.path().join(".ta"));
+        let mut env = std::collections::HashMap::new();
+        install_credential_shims(&mut env, dir.path(), &repo, &registry);
+
+        let helper = std::process::Command::new("git")
+            .args(["config", "--local", "--get", "credential.helper"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let value = String::from_utf8_lossy(&helper.stdout);
+        assert!(
+            value.contains("credential-helper"),
+            "expected credential.helper to be set, got: {value:?}"
+        );
+    }
+
+    #[test]
+    fn install_credential_shims_does_not_touch_git_config_outside_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_repo = dir.path().join("not-a-repo");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\n\
+             broker_mediated = true\nhosts = [\"github.com\"]\n",
+        )
+        .unwrap();
+        let registry = ta_credentials::ConnectorRegistry::load(&dir.path().join(".ta"));
+        let mut env = std::collections::HashMap::new();
+        // Must not panic or attempt a git-config write with no `.git` present.
+        install_credential_shims(&mut env, dir.path(), &not_a_repo, &registry);
+        assert!(!not_a_repo.join(".git").exists());
     }
 
     #[test]

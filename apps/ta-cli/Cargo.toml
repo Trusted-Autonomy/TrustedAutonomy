@@ -13,6 +13,14 @@ categories = ["command-line-utilities", "development-tools"]
 name = "ta"
 path = "src/main.rs"
 
+# `gh` PATH-shadow wrapper for broker-mediated GitHub credentials
+# (v0.17.6.7) — see src/bin/gh_shim.rs for the full design. Built as a
+# sibling binary of `ta` so `ta run` can stage a copy at
+# `<project_root>/.ta/bin/gh` from right next to the running `ta` binary.
+[[bin]]
+name = "gh"
+path = "src/bin/gh_shim.rs"
+
 [features]
 default = ["ruvector"]
 ruvector = ["ta-memory/ruvector"]

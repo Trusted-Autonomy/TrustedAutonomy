@@ -8,6 +8,8 @@
 
 pub mod broker;
 pub mod error;
+pub mod shim;
 
 pub use broker::{CredentialBroker, GrantedToken, VerifiedGrant};
 pub use error::BrokerError;
+pub use shim::{resolve_for_host, ShimError, ShimResolution};

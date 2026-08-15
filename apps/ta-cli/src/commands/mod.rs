@@ -12,6 +12,7 @@ pub mod consent;
 pub mod constitution;
 pub mod context;
 pub mod conversation;
+pub mod credential_helper;
 pub mod credentials;
 pub mod daemon;
 pub mod dev;
