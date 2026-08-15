@@ -285,6 +285,23 @@ pub trait SourceAdapter: Send + Sync {
         })
     }
 
+    /// Fetch per-check failure detail for a review, if the adapter's platform
+    /// exposes it (v0.17.7.2). `check_review()` only reports an opaque
+    /// `checks_passing: Option<bool>` — this method fills in *what* failed so
+    /// a `CiFailureTrigger`/`CorrectiveGoalAction` can diagnose without any
+    /// Git-specific code outside this adapter (constitution §16.4).
+    ///
+    /// Git: shells `gh run view --log-failed` for the PR's failing checks.
+    /// Perforce/SVN/"none": no CI concept — default applies unchanged.
+    ///
+    /// Default: empty vec. Not an error — a platform lacking this concept
+    /// (e.g. Perforce has no "CI check") is compliant, not a gap. Callers
+    /// must degrade gracefully (e.g. "investigate manually") on an empty
+    /// result rather than treating it as a failure to fetch.
+    fn check_failures(&self, _review_id: &str) -> Result<Vec<CheckFailure>> {
+        Ok(vec![])
+    }
+
     /// Auto-detect whether this adapter applies to the given project root.
     ///
     /// Git: checks for .git/ directory
@@ -467,6 +484,17 @@ pub struct CommitSummary {
     pub subject: String,
 }
 
+/// One failing check on a review, returned by `SourceAdapter::check_failures()`
+/// (v0.17.7.2). `log_excerpt` is adapter-specific: a truncated tail of the
+/// real failure log where available, or a hint for how to fetch it manually.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckFailure {
+    /// Name of the failing check (e.g. a GitHub Actions job name).
+    pub check_name: String,
+    /// Excerpt of the failure log, or guidance for fetching it manually.
+    pub log_excerpt: String,
+}
+
 /// Backward-compatible alias: `SubmitAdapter` is the old name for `SourceAdapter`.
 ///
 /// Deprecated in v0.11.1. Use `SourceAdapter` instead.
@@ -553,5 +581,11 @@ mod tests {
     fn commit_diff_default_returns_none() {
         let adapter = MockAdapter;
         assert_eq!(adapter.commit_diff(), None);
+    }
+
+    #[test]
+    fn check_failures_default_returns_empty_vec() {
+        let adapter = MockAdapter;
+        assert_eq!(adapter.check_failures("123").unwrap(), Vec::new());
     }
 }
