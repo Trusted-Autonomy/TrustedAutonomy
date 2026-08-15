@@ -10333,6 +10333,22 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 #### Version: `0.17.8-alpha`
 
 ---
+### v0.17.9 — One-Command Project Onboarding (`ta init`)
+<!-- status: pending -->
+**Depends on**: none
+
+**Why this exists**: found live 2026-08-14 onboarding two brand-new repos (`agentic-pm`, `MLAppInstaller`) onto TA. Confirmed by direct code read: `.ta/` directory creation is wired into `run.rs`/`goal.rs` only — it does not exist after `ta status` or `ta setup vcs` (verified live: ran both against a fresh repo, `.ta/` still absent afterward). There is no single command that fully onboards a new project; "adding TA to a project" today is an undocumented multi-step sequence (`ta setup vcs` for gitignore, then your first `ta run`/`ta create goal` implicitly bootstraps everything else), with no command telling you the project isn't yet initialized or what to do about it. Explicit user requirement: "I need adding TA to a project and using it to be dead simple, one click/one line."
+
+**Items**:
+1. [ ] `ta init` (or `ta create project`, consistent with the existing 10-verb surface) — one command that: verifies a VCS is present, runs the equivalent of `ta setup vcs`, creates the `.ta/` skeleton eagerly (not lazily deferred to first goal run), and accepts terms (interactive prompt by default, `--accept-terms` for scripted use, matching the existing flag already used elsewhere).
+2. [ ] `ta status` (and any other read-only command) should detect an uninitialized project and say so explicitly — e.g. "This project hasn't been set up for TA yet. Run `ta init` to get started." — instead of silently showing an empty dashboard that looks identical to a fully-set-up, zero-goal project.
+3. [ ] Idempotent: running `ta init` again on an already-initialized project is a safe no-op (reports current state, doesn't reset anything) — same spirit as `ta setup vcs --force` being the explicit opt-in for a destructive rewrite.
+4. [ ] Tests: `ta init` on a fresh git repo produces a working `.ta/` directory and gitignore entries in one call; `ta status` before `ta init` clearly reports the uninitialized state; `ta init` run twice is a no-op the second time.
+5. [ ] USAGE.md: replace the current implicit "it bootstraps on first `ta run`" story with `ta init` as the documented first step for onboarding any new project.
+
+#### Version: `0.17.9-alpha`
+
+---
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
