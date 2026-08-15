@@ -41,6 +41,7 @@ ta-actions = { path = "../ta-actions", version = "0.17.7-alpha.2" }
 ta-submit = { path = "../ta-submit", version = "0.17.7-alpha.2" }
 ta-decision = { path = "../ta-decision", version = "0.17.7-alpha.2" }
 ta-credentials = { path = "../ta-credentials", version = "0.17.7-alpha.2" }
+ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.7-alpha.2" }
 ta-session = { path = "../ta-session", version = "0.17.7-alpha.2" }
 
 
