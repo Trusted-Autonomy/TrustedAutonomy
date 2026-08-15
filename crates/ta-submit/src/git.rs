@@ -6,8 +6,8 @@ use ta_changeset::DraftPackage;
 use ta_goal::CommitContext;
 
 use crate::adapter::{
-    CommitResult, CommitSummary, MergeResult, PushResult, Result, ReviewResult, ReviewStatus,
-    SavedVcsState, SourceAdapter, SubmitError, SyncResult,
+    CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult, Result, ReviewResult,
+    ReviewStatus, SavedVcsState, SourceAdapter, SubmitError, SyncResult,
 };
 use crate::config::SubmitConfig;
 use crate::config::SyncConfig;
@@ -75,6 +75,43 @@ fn strip_ansi_controls(s: &str) -> String {
         }
     }
     out
+}
+
+/// Extract the numeric Actions run ID from a `gh pr checks --json link`
+/// URL, e.g. `https://github.com/OWNER/REPO/actions/runs/1234567890/job/999`.
+/// Kept as a pure function (no `Command` dependency) so it's unit-testable
+/// without `gh` installed.
+fn extract_run_id(link: &str) -> Option<String> {
+    let idx = link.find("/runs/")?;
+    let rest = &link[idx + "/runs/".len()..];
+    let run_id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if run_id.is_empty() {
+        None
+    } else {
+        Some(run_id)
+    }
+}
+
+/// Cap on how many trailing lines of a failed-run log to keep — `gh run view
+/// --log-failed` can return megabytes for a busy job, and this excerpt gets
+/// injected directly into a follow-up goal's objective (`CorrectiveGoalAction`,
+/// v0.17.7.2).
+const MAX_LOG_EXCERPT_LINES: usize = 200;
+
+/// Keep only the last `MAX_LOG_EXCERPT_LINES` lines of `full`, noting how
+/// many were dropped. Pure function, unit-testable without `gh`.
+fn truncate_log_excerpt(full: &str) -> String {
+    let lines: Vec<&str> = full.lines().collect();
+    if lines.len() <= MAX_LOG_EXCERPT_LINES {
+        full.to_string()
+    } else {
+        let start = lines.len() - MAX_LOG_EXCERPT_LINES;
+        format!(
+            "... ({} earlier line(s) truncated) ...\n{}",
+            start,
+            lines[start..].join("\n")
+        )
+    }
 }
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values.
@@ -176,6 +213,23 @@ impl GitAdapter {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// Fetch and truncate the failed-step log for one Actions run, used by
+    /// `check_failures()`. Returns `None` on any failure — the caller
+    /// degrades to a manual-lookup hint rather than propagating an error.
+    fn fetch_failed_run_log(&self, run_id: &str) -> Option<String> {
+        let output = Command::new("gh")
+            .args(["run", "view", run_id, "--log-failed"])
+            .current_dir(&self.work_dir)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(truncate_log_excerpt(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     }
 
     /// Get current branch name
@@ -1444,6 +1498,64 @@ impl SourceAdapter for GitAdapter {
         }
     }
 
+    fn check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>> {
+        if !self.has_gh_cli() {
+            return Ok(vec![]);
+        }
+
+        // Step 1: list this PR's checks with their pass/fail bucket + a link
+        // we can pull an Actions run ID out of. Degrades to an empty vec on
+        // any failure here (best-effort, matching check_review's style) —
+        // check_failures is read-only diagnostic detail, never a hard error.
+        let output = Command::new("gh")
+            .args(["pr", "checks", review_id, "--json", "name,bucket,link"])
+            .current_dir(&self.work_dir)
+            .output();
+        let checks: Vec<serde_json::Value> = match output {
+            Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
+                Ok(v) => v,
+                Err(_) => return Ok(vec![]),
+            },
+            _ => return Ok(vec![]),
+        };
+
+        let mut failures = Vec::new();
+        for check in checks
+            .iter()
+            .filter(|c| c.get("bucket").and_then(|v| v.as_str()) == Some("fail"))
+        {
+            let check_name = check
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Step 2: pull the failing job's log via the run ID embedded in
+            // its link. Falls back to a manual-lookup hint if the link can't
+            // be parsed or `gh run view` itself fails — never blocks the
+            // overall check_failures() call on one bad check.
+            let log_excerpt = check
+                .get("link")
+                .and_then(|v| v.as_str())
+                .and_then(extract_run_id)
+                .and_then(|run_id| self.fetch_failed_run_log(&run_id))
+                .unwrap_or_else(|| {
+                    format!(
+                        "Log unavailable — run `gh run view --log-failed` for the failing \
+                         run, or `gh pr checks {} --web` to inspect in the browser.",
+                        review_id
+                    )
+                });
+
+            failures.push(CheckFailure {
+                check_name,
+                log_excerpt,
+            });
+        }
+
+        Ok(failures)
+    }
+
     fn file_at_head(&self, repo_root: &Path, rel_path: &str) -> Option<Vec<u8>> {
         let out = Command::new("git")
             .args(["show", &format!("HEAD:{}", rel_path)])
@@ -2632,5 +2744,64 @@ mod tests {
             current, feature_branch,
             "second prepare() must switch to existing branch, not create a new one"
         );
+    }
+
+    // ── check_failures() (v0.17.7.2) ────────────────────────────────
+
+    #[test]
+    fn extract_run_id_parses_actions_run_url() {
+        let link = "https://github.com/acme/widgets/actions/runs/1234567890/job/999";
+        assert_eq!(extract_run_id(link), Some("1234567890".to_string()));
+    }
+
+    #[test]
+    fn extract_run_id_returns_none_for_non_run_url() {
+        assert_eq!(
+            extract_run_id("https://github.com/acme/widgets/pull/42"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_run_id_returns_none_for_empty_run_segment() {
+        assert_eq!(
+            extract_run_id("https://github.com/acme/widgets/actions/runs/"),
+            None
+        );
+    }
+
+    #[test]
+    fn truncate_log_excerpt_leaves_short_logs_untouched() {
+        let log = "line one\nline two\nline three";
+        assert_eq!(truncate_log_excerpt(log), log);
+    }
+
+    #[test]
+    fn truncate_log_excerpt_keeps_only_the_tail_of_long_logs() {
+        let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
+        let log = lines.join("\n");
+
+        let excerpt = truncate_log_excerpt(&log);
+
+        assert!(excerpt.contains("100 earlier line(s) truncated"));
+        assert!(excerpt.contains("line 299"), "must keep the final line");
+        assert!(
+            !excerpt.contains("line 0\n"),
+            "must drop the earliest lines, not the latest"
+        );
+        assert_eq!(excerpt.lines().count(), MAX_LOG_EXCERPT_LINES + 1);
+    }
+
+    #[test]
+    fn check_failures_degrades_to_empty_vec_without_gh_cli() {
+        // The sandboxed test environment may or may not have `gh` on PATH;
+        // either way check_failures() must never error — it degrades to an
+        // empty vec for any review ID that doesn't correspond to a real,
+        // authenticated PR (constitution §1.4: never a hard failure for a
+        // read-only diagnostic path).
+        let dir = tempdir().unwrap();
+        let adapter = GitAdapter::new(dir.path());
+        let result = adapter.check_failures("not-a-real-review-id");
+        assert!(result.is_ok());
     }
 }

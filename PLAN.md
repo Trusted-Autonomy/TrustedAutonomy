@@ -10268,19 +10268,19 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.7-alpha.1`
 ### v0.17.7.2 — VCS-Adapter CI-Status Generalization + Corrective-Goal Trigger
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.7.1
 
 **Goal**: Generalize CI/review-completion triggering off Git specifically, per constitution §16.4 — add a defaulted `SourceAdapter::check_failures()` method (empty-vec default, following the exact pattern `check_review()`/`merge_review()` already use), implement it for the Git adapter, and add the two trigger/action nodes that replace this session's manual "watch CI, read failing log, diagnose, fix, push, repeat" loop.
 
 **Items**:
-1. [ ] `SourceAdapter::check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>>` (default `Ok(vec![])`) in `crates/ta-submit/src/adapter.rs`; `CheckFailure { check_name, log_excerpt }`.
-2. [ ] Git adapter implementation: shells `gh run view --log-failed` for the PR's failing checks, parses into `CheckFailure` entries.
-3. [ ] `VcsTaskCompletionTrigger` (fires on `SourceAdapter::check_review()` reaching a terminal state) and `CiFailureTrigger` (fires specifically when `checks_passing` transitions to `Some(false)`) — both go through `SourceAdapter` only, per §16.4; no direct `gh`/platform calls in trigger code.
-4. [ ] `CorrectiveGoalAction` — on a `CiFailureTrigger` payload, launches `ta run --follow-up` with the `CheckFailure` detail injected as the goal objective. Reuses v0.17.0.12.31's existing auto-fix-retry cap/escalate logic (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second retry mechanism.
-5. [ ] Non-Git adapter behavior: Perforce/SVN/"none" adapters return the `check_failures()` default; `CiFailureTrigger` degrades to "CI failure detail unavailable for this VCS adapter, investigate manually" per §16.4/§1.4 — verified with a test against the SVN or Perforce adapter stub, not just Git.
-6. [ ] Tests: a mock adapter with a scripted failing check drives `CiFailureTrigger` → `CorrectiveGoalAction` end-to-end; the retry cap escalates to human after N consecutive corrective-goal failures (reusing 12.31's existing cap, not a new counter).
-7. [ ] USAGE.md: document `check_failures()`'s adapter-optional contract and the corrective-goal flow.
+1. [x] `SourceAdapter::check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>>` (default `Ok(vec![])`) in `crates/ta-submit/src/adapter.rs`; `CheckFailure { check_name, log_excerpt }`.
+2. [x] Git adapter implementation: shells `gh run view --log-failed` for the PR's failing checks, parses into `CheckFailure` entries.
+3. [x] `VcsTaskCompletionTrigger` (fires on `SourceAdapter::check_review()` reaching a terminal state) and `CiFailureTrigger` (fires specifically when `checks_passing` transitions to `Some(false)`) — both go through `SourceAdapter` only, per §16.4; no direct `gh`/platform calls in trigger code.
+4. [x] `CorrectiveGoalAction` — on a `CiFailureTrigger` payload, launches a follow-up goal with the `CheckFailure` detail injected as the goal objective. **Deviation from literal spec, documented**: the plan text said `ta run --follow-up`, but no existing auto-fix code path uses that flag — matched the actual precedent instead (in-process dispatch via the existing `GoalDispatchAction`, extended to follow up on `ctx.vars["draft_id"]`). Reuses v0.17.0.12.31's existing auto-fix-retry cap/escalate logic (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second retry mechanism.
+5. [x] Non-Git adapter behavior: Perforce/SVN/"none" adapters return the `check_failures()` default; `CiFailureTrigger` degrades to "CI failure detail unavailable for this VCS adapter, investigate manually" per §16.4/§1.4 — verified with a test against the SVN or Perforce adapter stub, not just Git.
+6. [x] Tests: a mock adapter with a scripted failing check drives `CiFailureTrigger` → `CorrectiveGoalAction` end-to-end; the retry cap escalates to human after N consecutive corrective-goal failures (reusing 12.31's existing cap, not a new counter).
+7. [x] USAGE.md: document `check_failures()`'s adapter-optional contract and the corrective-goal flow.
 
 #### Version: `0.17.7-alpha.2`
 ### v0.17.7.3 — Multi-Role Review Panels + Single Approval-Gate Unification
