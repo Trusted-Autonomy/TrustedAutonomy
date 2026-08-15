@@ -187,6 +187,12 @@ fn default_template(event: &EventEnvelope) -> NotificationTemplate {
             "[TA] Agent waiting for input".into(),
             "An agent is waiting for your response. Check `ta shell` or the TA Studio.".into(),
         ),
+        "graph_decision_escalated" => (
+            "[TA] Review panel escalated a decision".into(),
+            "A workflow graph decision did not clear its threshold and was escalated for \
+             human review. Run `ta workflow graph-run` output or check the draft directly."
+                .into(),
+        ),
         _ => (
             "[TA] {event_type}".into(),
             "Event `{event_type}` at {timestamp}.".into(),

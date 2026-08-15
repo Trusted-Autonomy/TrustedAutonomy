@@ -437,6 +437,17 @@ pub enum SessionEvent {
         conflicts: usize,
         coverage_gaps: usize,
     },
+
+    /// A workflow graph's `DecisionNode` did not clear its threshold and was
+    /// routed to `EscalateAction` (v0.17.7.3, constitution §16.1/§16.2) —
+    /// the graph halts at this node rather than auto-approving or silently
+    /// recommending.
+    GraphDecisionEscalated {
+        run_id: String,
+        draft_id: Option<Uuid>,
+        score: f64,
+        summary: String,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -493,6 +504,7 @@ impl SessionEvent {
             Self::VcsChangelistSubmitted { .. } => "vcs.changelist_submitted",
             Self::PrCheckFailed { .. } => "pr_check_failed",
             Self::ReviewCompleted { .. } => "review_completed",
+            Self::GraphDecisionEscalated { .. } => "graph_decision_escalated",
         }
     }
 

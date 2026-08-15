@@ -6038,13 +6038,43 @@ fn apply_package(
             // not bypass the shared Decision gate when a supervisor review is present.
             // Elevated risk or a non-Commit verdict still requires a human even in the
             // single-author flow (v0.17.0.12.15).
+            //
+            // v0.17.7.3 (constitution §16.3): this is the one graph instance `ta draft
+            // apply`'s approval check calls — no other code path may call
+            // `should_auto_approve_draft`/`check_advisor_auto_approve`/`run_consensus`
+            // directly to gate an apply. `ta_decision::decide()` is still called
+            // separately below purely to compute the richer telemetry `Decision`
+            // variant (Commit/Reject/Rework/Escalate) — it does not gate anything;
+            // the graph's `proceed` is the sole authority for whether the apply
+            // continues.
             if let Some(review) = &pkg.supervisor_review {
                 let verdict = match review.verdict {
                     ta_changeset::SupervisorVerdict::Pass => ta_decision::Verdict::Pass,
                     ta_changeset::SupervisorVerdict::Warn => ta_decision::Verdict::Warn,
                     ta_changeset::SupervisorVerdict::Block => ta_decision::Verdict::Block,
                 };
-                let decision = ta_decision::decide(
+                let review_input = ta_workflow::graph::ReviewInput {
+                    draft_id: Some(id.to_string()),
+                    changed_paths: pkg
+                        .changes
+                        .artifacts
+                        .iter()
+                        .map(|a| a.resource_uri.clone())
+                        .collect(),
+                    lines_changed: 0,
+                    plan_phase: pkg.plan_phase.clone(),
+                    agent_id: pkg.agent_identity.agent_id.clone(),
+                    risk_score: pkg.risk.risk_score,
+                    confidence: review.confidence,
+                    verdict,
+                };
+                let gate_decision = crate::commands::workflow_graph::run_apply_gate(
+                    config,
+                    &review_input,
+                    auto_approval_thresholds,
+                )?;
+
+                let telemetry_decision = ta_decision::decide(
                     &ta_decision::DecisionInput {
                         verdict,
                         risk_score: pkg.risk.risk_score,
@@ -6052,19 +6082,24 @@ fn apply_package(
                     },
                     &auto_approval_thresholds,
                 );
-                record_decision_telemetry(config, &pkg, decision, review.confidence);
-                if !decision.is_auto_approvable() {
+                record_decision_telemetry(config, &pkg, telemetry_decision, review.confidence);
+
+                if !gate_decision.proceed {
                     anyhow::bail!(
                         "Draft \"{}\" cannot be auto-approved on apply: the Decision gate \
-                         returned {:?} (supervisor verdict {:?}, confidence {:.2}, risk score {}).\n\
+                         (approval-gate graph) returned proceed=false (score={:.2}, supervisor \
+                         verdict {:?}, confidence {:.2}, risk score {}).\n\
+                         {}\n\
                          \n\
                          Run `ta draft approve {}` after review, then re-run `ta draft apply {}`.\n\
-                         (Adjust `[draft.auto_approval]` thresholds in workflow.toml to change this.)",
+                         (Adjust `[draft.auto_approval]` thresholds in workflow.toml, or author \
+                         `.ta/workflows/graphs/draft-apply-gate.toml`, to change this.)",
                         pkg.goal.title,
-                        decision,
+                        gate_decision.score,
                         review.verdict,
                         review.confidence,
                         pkg.risk.risk_score,
+                        gate_decision.summary,
                         id,
                         id
                     );
