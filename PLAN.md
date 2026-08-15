@@ -10163,7 +10163,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.4 — Migrate Session Tokens to Biscuit
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.3
 
 **Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
@@ -10235,7 +10235,7 @@ Code releases use semver. Content releases don't. Decide:
 
 > **Focus**: Replace three disconnected auto-approval mechanisms (`ta_policy::auto_approve`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine) and a Git-specific PR-merge continuation with one modular, data-wired workflow-graph engine — Trigger/Reviewer/Decision/Action nodes composed via TOML, VCS-adapter-mediated (not platform-specific), culminating in a natural-language advisor entry point ("build phases v0.17.3 through v0.17.8"). Full design: `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`. Governed by new constitution §16 (`docs/TA-CONSTITUTION.md`), red-teamed 2026-07-21 (PM, head-of-engineering, non-technical-user passes). Visual graph authoring/editing is explicitly deferred — see v0.18.4.
 ### v0.17.7.1 — Workflow Graph Engine Core (Node Trait Model + Data-Defined Wiring)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.34 (dependency-wave planning — reused for parallel dispatch), v0.15.15/v0.15.15.1 (`ta-workflow::consensus` — reused as the `WeightedDecisionNode` engine)
 
 **Goal**: Define five node kinds — `TriggerSource`, `WorkerNode`, `ReviewerNode`, `DecisionNode`, `ActionNode` — a TOML graph-definition schema, and a `ta-workflow::graph` execution engine that loads a graph and runs it node-by-node with typed data on edges. Ship enough to express today's existing single-reviewer approval flow as a graph, plus a real work-dispatching worker — proving both halves of the abstraction — without yet adding multi-role panels or CI triggers (those are 7.7.2/7.7.3). Per constitution §16.2, every new graph produced by this phase's tooling defaults to `RecommendAction`; a human must explicitly rewire a graph to `AutoApproveAction`.
@@ -10259,12 +10259,12 @@ pub struct WorkItem {
 One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start` and passes `verb`/`workload_hint` straight into `ta-brain::route()`'s **already data-defined** `workload_type` classification (`[workload_types.<type>]` in `workflow.toml`, confirmed free-text since v0.17.0.12.12 — not a closed enum) — which already resolves team/persona/agent/security_tier. A new domain (art, docs, whatever) is a `workflow.toml` binding, zero new Rust code — satisfying constitution §1.6/§1.7 (data-defined, reuse before reinventing) the same way the other four node kinds do. A second `WorkerNode` implementation is only justified when a genuinely different dispatch *transport* is needed (not just a new domain) — e.g. bypassing `ta run` entirely for a raw external pipeline call — and should reuse `StepAction::external_adapter()` (v0.17.5.3) rather than invent a third transport.
 
 **Items**:
-1. [ ] `crates/ta-workflow/src/graph/` — `TriggerSource`/`WorkerNode`/`ReviewerNode`/`DecisionNode`/`ActionNode` traits, `GraphContext`, `TriggerPayload`, `WorkItem`/`WorkResult`, reusing `ReviewerVote`/`Decision` types from `ta-workflow::consensus` rather than redefining them.
-2. [ ] TOML schema + loader: `.ta/workflows/graphs/<name>.toml` → in-memory graph (see spec §3 for the canonical example; a `[worker]` block is new).
-3. [ ] `GoalDispatchAction` (`WorkerNode`, wraps `ta run`/`ta goal start` via `ta-brain::route()`), `PolicyReviewer` (wraps `ta_policy::auto_approve::should_auto_approve_draft`), `AdvisorConfidenceReviewer` (wraps `ta-decision::gate::decide()`), `WeightedDecisionNode` (wraps `ta-workflow::consensus::run_consensus`, config-driven threshold/algorithm/weights — not hardcoded), `AutoApproveAction` (calls existing `ta draft apply`), `RecommendAction` (surfaces to Studio's existing Attention queue).
-4. [ ] `ta workflow graph run <name>` — CLI entry point to execute a graph definition end-to-end, for testing/debugging before it's wired into `ta draft apply` (that wiring is 7.7.3).
-5. [ ] Tests: a graph round-trips a real draft through `PolicyReviewer` → `WeightedDecisionNode` → `RecommendAction`; swapping only the `ActionNode` to `AutoApproveAction` (same graph, same decision) actually calls `ta draft apply` — proving §16.2's "same decision, different wiring" property in a real test, not just in prose. Separately: a `GoalDispatchAction` with `verb = "implement"` vs `verb = "create"` produces two different `ta-brain::route()` decisions against the same `workflow.toml` fixture (no new Rust per verb, just config) — proving the `WorkerNode` design's data-only extensibility claim.
-6. [ ] USAGE.md: new "Workflow Graphs" section documenting the TOML format and all five node kinds, incl. a worked "implement vs. create" `[worker]` example.
+1. [x] `crates/ta-workflow/src/graph/` — `TriggerSource`/`WorkerNode`/`ReviewerNode`/`DecisionNode`/`ActionNode` traits, `GraphContext`, `TriggerPayload`, `WorkItem`/`WorkResult`, reusing `ReviewerVote`/`Decision` types from `ta-workflow::consensus` rather than redefining them.
+2. [x] TOML schema + loader: `.ta/workflows/graphs/<name>.toml` → in-memory graph (see spec §3 for the canonical example; a `[worker]` block is new).
+3. [x] `GoalDispatchAction` (`WorkerNode`, wraps `ta run`/`ta goal start` via `ta-brain::route()`), `PolicyReviewer` (wraps `ta_policy::auto_approve::should_auto_approve_draft`), `AdvisorConfidenceReviewer` (wraps `ta-decision::gate::decide()`), `WeightedDecisionNode` (wraps `ta-workflow::consensus::run_consensus`, config-driven threshold/algorithm/weights — not hardcoded), `AutoApproveAction` (calls existing `ta draft apply`), `RecommendAction` (surfaces to Studio's existing Attention queue).
+4. [x] `ta workflow graph run <name>` — CLI entry point to execute a graph definition end-to-end, for testing/debugging before it's wired into `ta draft apply` (that wiring is 7.7.3).
+5. [x] Tests: a graph round-trips a real draft through `PolicyReviewer` → `WeightedDecisionNode` → `RecommendAction`; swapping only the `ActionNode` to `AutoApproveAction` (same graph, same decision) actually calls `ta draft apply` — proving §16.2's "same decision, different wiring" property in a real test, not just in prose. Separately: a `GoalDispatchAction` with `verb = "implement"` vs `verb = "create"` produces two different `ta-brain::route()` decisions against the same `workflow.toml` fixture (no new Rust per verb, just config) — proving the `WorkerNode` design's data-only extensibility claim.
+6. [x] USAGE.md: new "Workflow Graphs" section documenting the TOML format and all five node kinds, incl. a worked "implement vs. create" `[worker]` example.
 
 #### Version: `0.17.7-alpha.1`
 ### v0.17.7.2 — VCS-Adapter CI-Status Generalization + Corrective-Goal Trigger
