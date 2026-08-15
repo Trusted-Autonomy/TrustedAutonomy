@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.6-alpha.3
+**Version**: 0.17.8-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -1999,6 +1999,8 @@ This is **read-only analysis** — it doesn't launch anything. It partitions the
   Two phases with no `Depends on` relationship between them, but overlapping `API impact` tokens, are still downgraded to separate (sequential) waves — file-overlap alone misses this conflict class, since two phases touching *different* files can still collide if one changes a signature the other's work assumes is unchanged. This is a cheap, conservative, upfront heuristic: it only catches conflicts someone actually declared. Real, undeclared drift between concurrently-run phases is caught later, for real, by the integration-time gate below — declaring `API impact` is optional but recommended for any phase whose scope touches shared internals.
 
 Parallel execution stays **opt-in and conservative**: `ta plan waves` only tells you what's safe; a human (or an automation script) still explicitly chooses to run a wave's members concurrently, e.g. by building a swarm from that wave's phase IDs (`ta run ... --workflow swarm --sub-goals ...`).
+
+**The underlying planner is a standalone crate.** As of v0.17.8, the topological-sort-plus-conflict-pass algorithm above lives in [`Trusted-Autonomy/task-graph`](https://github.com/Trusted-Autonomy/task-graph), a public, offline, dependency-free (besides `thiserror`) Rust crate — TA's own `ta-workflow` depends on it rather than carrying an in-tree copy. Reach for it directly if you need the same wave-planning logic outside TA (a non-Rust runner can shell out to a small CLI wrapper or bind to it via WASM — see the crate's README for the integration shapes).
 
 #### Integration-time conflict resolution
 

@@ -4692,7 +4692,7 @@ pub fn candidate_waves(phases: &[PlanPhase]) -> Result<Vec<Vec<String>>, String>
                 .collect();
             ta_workflow::WaveNode::new(p.id.clone())
                 .with_deps(deps)
-                .with_api_impact(p.api_impact.clone())
+                .with_impact_tags(p.api_impact.clone())
         })
         .collect();
 

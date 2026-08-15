@@ -44,7 +44,7 @@ pub struct SubGoalSpec {
     ///
     /// Two sub-goals with overlapping `api_impact` tokens are downgraded to
     /// sequential waves by [`SwarmState::compute_waves`] even without an
-    /// explicit `depends_on` entry between them — see `dependency_wave`.
+    /// explicit `depends_on` entry between them — see the `task_graph` crate.
     #[serde(default)]
     pub api_impact: Vec<String>,
 }
@@ -455,17 +455,17 @@ impl SwarmState {
         Ok(())
     }
 
-    // ── Dependency-wave planning (v0.17.0.12.34) ────────────────────────────
+    // ── Dependency-wave planning (v0.17.0.12.34, extracted to `task-graph` v0.17.8) ──
 
     /// Partition this swarm's `Pending` sub-goals into ordered waves using
-    /// [`crate::dependency_wave::plan_waves`] over `depends_on`/`api_impact`.
+    /// [`task_graph::plan_waves`] over `depends_on`/`api_impact`.
     ///
     /// Returns waves of sub-goal *indices* (not titles) so the caller can
     /// index directly into `sub_goals`/`sub_goal_states`. Sub-goals that are
     /// already complete (passed/failed/skipped) are excluded — they've
     /// already been scheduled in an earlier round.
-    pub fn compute_waves(&self) -> Result<Vec<Vec<usize>>, crate::dependency_wave::WaveError> {
-        use crate::dependency_wave::WaveNode;
+    pub fn compute_waves(&self) -> Result<Vec<Vec<usize>>, task_graph::WaveError> {
+        use task_graph::WaveNode;
 
         let pending_indices: Vec<usize> = (0..self.sub_goals.len())
             .filter(|&i| matches!(self.sub_goal_states[i], SubGoalStatus::Pending))
@@ -486,11 +486,11 @@ impl SwarmState {
                             .filter(|d| pending_titles.contains(d.as_str()))
                             .cloned(),
                     )
-                    .with_api_impact(spec.api_impact.clone())
+                    .with_impact_tags(spec.api_impact.clone())
             })
             .collect();
 
-        let title_waves = crate::dependency_wave::plan_waves(&nodes)?;
+        let title_waves = task_graph::plan_waves(&nodes)?;
 
         let title_to_index: std::collections::HashMap<&str, usize> = pending_indices
             .iter()
