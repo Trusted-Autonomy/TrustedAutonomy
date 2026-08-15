@@ -10163,7 +10163,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.4 — Migrate Session Tokens to Biscuit
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.3
 
 **Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
