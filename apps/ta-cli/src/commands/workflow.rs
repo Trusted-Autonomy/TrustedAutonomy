@@ -179,6 +179,37 @@ pub enum WorkflowCommands {
         #[arg(long)]
         phase: Option<String>,
     },
+    /// Watch a review's CI status and auto-launch corrective fix goals on
+    /// failure (v0.17.7.2).
+    ///
+    /// Generalizes this project's own "watch CI, read failing job log,
+    /// diagnose, fix, push, repeat" loop into `CiFailureTrigger` +
+    /// `CorrectiveGoalAction`: polls the configured `SourceAdapter` (Git,
+    /// Perforce, SVN, ...) for the review's CI status, and on each new
+    /// failure launches a follow-up fix goal on the *same* branch/PR with
+    /// the failing check's log excerpt as the objective. Reuses
+    /// v0.17.0.12.31's auto-fix-retry cap — a failure past `--retry-cap`
+    /// escalates to a human instead of retrying forever.
+    ///
+    /// Non-Git adapters (or Git without the `gh` CLI) degrade to "CI
+    /// failure detail unavailable for this VCS adapter, investigate
+    /// manually" per constitution §16.4 rather than erroring.
+    ///
+    /// Example:
+    ///   ta workflow watch-ci 123 --retry-cap 2
+    WatchCi {
+        /// Review ID to watch (e.g. a GitHub PR number).
+        review_id: String,
+        /// Max consecutive auto-fix attempts before escalating to a human.
+        #[arg(long, default_value = "1")]
+        retry_cap: u32,
+        /// Seconds between CI status polls.
+        #[arg(long, default_value = "30")]
+        poll_interval_secs: u64,
+        /// Max polls per wait cycle before giving up on this review.
+        #[arg(long, default_value = "120")]
+        max_polls: u32,
+    },
     /// Resume a paused or interrupted workflow run from the artifact store (v0.14.10).
     ///
     /// Reads the session artifact store, checks which stage outputs are already
@@ -523,6 +554,37 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             phase.as_deref(),
             config,
         ),
+        WorkflowCommands::WatchCi {
+            review_id,
+            retry_cap,
+            poll_interval_secs,
+            max_polls,
+        } => {
+            let adapter = crate::commands::workflow_graph::source_adapter_for_project(config);
+            let outcomes = crate::commands::workflow_graph::run_ci_failure_watch(
+                adapter,
+                review_id,
+                None,
+                *retry_cap,
+                std::time::Duration::from_secs(*poll_interval_secs),
+                *max_polls,
+                config,
+            )?;
+            if outcomes.is_empty() {
+                println!(
+                    "[watch-ci] review {} reached a terminal state (or the poll budget was \
+                     exhausted) with no CI failure detected — nothing to fix.",
+                    review_id
+                );
+            }
+            for outcome in &outcomes {
+                println!(
+                    "[watch-ci] {}: applied={} — {}",
+                    outcome.kind, outcome.applied, outcome.message
+                );
+            }
+            Ok(())
+        }
         WorkflowCommands::Resume { run_id } => resume_workflow(run_id, config),
         WorkflowCommands::List {
             templates,
