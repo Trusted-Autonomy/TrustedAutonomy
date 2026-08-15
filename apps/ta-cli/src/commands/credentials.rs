@@ -78,7 +78,9 @@ pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Res
 }
 
 fn cred_config(config: &GatewayConfig) -> CredentialsConfig {
-    CredentialsConfig::for_project(&config.workspace_root)
+    let mut cred_config = CredentialsConfig::for_project(&config.workspace_root);
+    cred_config.use_keychain = config.credential_vault_use_keychain;
+    cred_config
 }
 
 fn add_credential(
