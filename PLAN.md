@@ -10185,16 +10185,16 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.5 — Swarm Fan-Out Cryptographic Attenuation
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.6.4
 
 **Goal**: Replace v0.17.6.1's manual scope-intersection/handoff with real `biscuit.attenuate()` — cryptographically, not just conventionally, narrower-than-parent for every concurrent sub-goal.
 
 **Items**:
-1. [ ] At the same spawn point identified in v0.17.6.1 (`run_one_swarm_sub_goal`, before `Command::new`), attenuate the parent's biscuit in-process (no network call, no broker round-trip) with an appended block scoping the child to its declared resource glob and a `ttl = min(parent_remaining_ttl, sub_goal_wave_deadline)`.
-2. [ ] The attenuated child biscuit is passed explicitly into the recursive `ta run` invocation via the handoff mechanism built in v0.17.6.1 item 3.
-3. [ ] Nested fan-out (a sub-goal spawning its own sub-sub-goals) repeats the identical attenuation operation recursively — `ta-workflow::concurrent::run_concurrently` itself stays generic and credential-blind, no new component added there.
-4. [ ] Tests: a two-level-deep nested swarm produces a grandchild token that is provably a subset of the grandparent's grant, verified via the authorizer rejecting an out-of-scope request at every hop.
+1. [x] At the same spawn point identified in v0.17.6.1 (`run_one_swarm_sub_goal`, before `Command::new`), attenuate the parent's biscuit in-process (no network call, no broker round-trip) with an appended block scoping the child to its declared resource glob and a `ttl = min(parent_remaining_ttl, sub_goal_wave_deadline)`.
+2. [x] The attenuated child biscuit is passed explicitly into the recursive `ta run` invocation via the handoff mechanism built in v0.17.6.1 item 3.
+3. [x] Nested fan-out (a sub-goal spawning its own sub-sub-goals) repeats the identical attenuation operation recursively — `ta-workflow::concurrent::run_concurrently` itself stays generic and credential-blind, no new component added there.
+4. [x] Tests: a two-level-deep nested swarm produces a grandchild token that is provably a subset of the grandparent's grant, verified via the authorizer rejecting an out-of-scope request at every hop.
 
 #### Version: `0.17.6-alpha.5`
 
