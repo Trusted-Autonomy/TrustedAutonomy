@@ -10315,6 +10315,24 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.7-alpha.4`
 
+---
+### v0.17.8 — Extract Dependency-Wave Planner as Standalone OSS Crate (`task-graph`)
+<!-- status: in_progress -->
+**Depends on**: v0.17.0.12.34 (the logic being extracted)
+
+**Goal**: Per explicit user request (2026-08-14, following `~/Downloads/task-graph-brief.pdf` — a technical brief proposing exactly this extraction, addressed to an external contact "Scott" for use in his own agent-runner task graph): pull `crates/ta-workflow/src/dependency_wave.rs`'s dependency-wave planner out of TA's own dependency tree into a standalone, public OSS Rust crate/repo, then wire TA back onto it as a dependency rather than the in-tree copy. Confirmed by direct code read to already match the brief's spec exactly: `WaveNode { id, depends_on, api_impact }` (brief calls the third field `impact_tags` — same concept, renamed in the extracted library to match the brief's own terminology), `plan_waves()` (Kahn's-algorithm topological sort + same-wave tag-conflict split), `WaveError::{UnknownDependency, Cycle}`. Confirmed genuinely self-contained: the module's only import is `std::collections`, with `thiserror` as its one external dependency — despite living inside a crate (`ta-workflow`) with much heavier dependencies (`tokio`, `ta-changeset`, `serde_yaml`) that this specific module never touches. 326 lines, 11 existing unit tests (linear chains, diamond dependencies, cycles, tag-conflict downgrades) migrate with it essentially unchanged.
+
+**Items**:
+1. [ ] New public repo `Trusted-Autonomy/task-graph` — Rust crate, Apache-2.0 licensed (matches TA's own license and the brief's stated license), README documenting input (`WaveNode` fields), output (`Vec<Vec<String>>` ordered waves), and the algorithm (topological sort + conflict pass) in enough detail to be usable by an external reader with zero TA context — this is being sent externally, not just dogfooded internally.
+2. [ ] Port `dependency_wave.rs`'s content into the new repo's `src/lib.rs`, renaming `api_impact` → `impact_tags` to match the brief's own field name (the spec Scott already has), all 11 existing tests carried over and passing standalone with zero TA dependencies in `Cargo.toml` beyond `thiserror`.
+3. [ ] Tag an initial release (`v0.1.0`) so TA (and any other consumer) can pin to a stable git/crates.io reference rather than a moving branch.
+4. [ ] TA-side integration: `crates/ta-workflow/Cargo.toml` depends on `task-graph` (git dependency pinned to the `v0.1.0` tag), `dependency_wave.rs` becomes a thin re-export (or is removed in favor of direct `task_graph::` imports at the 3 call sites: `lib.rs`, `swarm.rs`, `apps/ta-cli/src/commands/plan.rs`), field rename (`api_impact` → `impact_tags`) propagated to all call sites.
+5. [ ] Tests: TA's full workspace test suite still passes post-integration (regression guard — the wave-planning behavior itself must not change, only its location); a fresh `cargo test` inside the standalone `task-graph` repo (no TA checkout present) passes on its own.
+6. [ ] USAGE.md: note the extraction and link to the standalone repo, for anyone who wants the wave planner outside TA (e.g. a non-Rust runner, per the brief's own §6 integration guidance — CLI/JSON-in-out or a WASM binding).
+
+#### Version: `0.17.8-alpha`
+
+---
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
