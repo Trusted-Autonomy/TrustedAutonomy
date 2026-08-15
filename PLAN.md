@@ -10163,7 +10163,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.4 — Migrate Session Tokens to Biscuit
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.3
 
 **Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
@@ -10235,7 +10235,7 @@ Code releases use semver. Content releases don't. Decide:
 
 > **Focus**: Replace three disconnected auto-approval mechanisms (`ta_policy::auto_approve`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine) and a Git-specific PR-merge continuation with one modular, data-wired workflow-graph engine — Trigger/Reviewer/Decision/Action nodes composed via TOML, VCS-adapter-mediated (not platform-specific), culminating in a natural-language advisor entry point ("build phases v0.17.3 through v0.17.8"). Full design: `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`. Governed by new constitution §16 (`docs/TA-CONSTITUTION.md`), red-teamed 2026-07-21 (PM, head-of-engineering, non-technical-user passes). Visual graph authoring/editing is explicitly deferred — see v0.18.4.
 ### v0.17.7.1 — Workflow Graph Engine Core (Node Trait Model + Data-Defined Wiring)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.34 (dependency-wave planning — reused for parallel dispatch), v0.15.15/v0.15.15.1 (`ta-workflow::consensus` — reused as the `WeightedDecisionNode` engine)
 
 **Goal**: Define five node kinds — `TriggerSource`, `WorkerNode`, `ReviewerNode`, `DecisionNode`, `ActionNode` — a TOML graph-definition schema, and a `ta-workflow::graph` execution engine that loads a graph and runs it node-by-node with typed data on edges. Ship enough to express today's existing single-reviewer approval flow as a graph, plus a real work-dispatching worker — proving both halves of the abstraction — without yet adding multi-role panels or CI triggers (those are 7.7.2/7.7.3). Per constitution §16.2, every new graph produced by this phase's tooling defaults to `RecommendAction`; a human must explicitly rewire a graph to `AutoApproveAction`.
