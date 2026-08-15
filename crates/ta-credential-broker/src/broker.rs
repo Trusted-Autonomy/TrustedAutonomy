@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use biscuit_auth::{Algorithm, AuthorizerBuilder, Biscuit, KeyPair, PrivateKey};
+use biscuit_auth::{Algorithm, AuthorizerBuilder, AuthorizerLimits, Biscuit, KeyPair, PrivateKey};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -145,8 +145,20 @@ impl CredentialBroker {
             return Err(BrokerError::Revoked);
         }
 
+        // biscuit-auth's default `RunLimits::max_time` is 1ms — tuned for a
+        // quiet machine, not a loaded CI runner. A trivial authorization
+        // (a couple of facts, one query) can exceed that under scheduling
+        // jitter alone, producing a spurious "Reached Datalog execution
+        // limits" failure that has nothing to do with the grant itself.
+        // biscuit-auth's own test suite works around the identical issue
+        // ("cheap worker on GitHub Actions") by widening the budget; do the
+        // same here rather than let the 1ms default flake on Windows CI.
         let mut authorizer = AuthorizerBuilder::new()
             .time()
+            .set_limits(AuthorizerLimits {
+                max_time: std::time::Duration::from_secs(1),
+                ..Default::default()
+            })
             .policy("allow if true")
             .map_err(|e| BrokerError::InvalidGrant(e.to_string()))?
             .build(&biscuit)
