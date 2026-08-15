@@ -19,7 +19,7 @@
 // Dry-run mode overrides all policies: action is logged but never executed
 // or captured for review. Useful for testing workflow definitions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -38,17 +38,21 @@ use ta_policy::business_budget::{self, BudgetCheckResult};
 use ta_session::workflow_session::AdvisorSecurity;
 
 use crate::server::GatewayState;
-use crate::tools::human_verify::{load_thresholds, resolve_workload_context, validate_ledger_path};
+use crate::tools::human_verify::{
+    handle_credential_scope_elevation, load_thresholds, resolve_workload_context,
+    validate_ledger_path, HeadlessSyntheticPipeline, ScopeElevationRequest, SyntheticPipeline,
+    CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE,
+};
 use crate::validation::parse_uuid;
 
 // ── Handler ──────────────────────────────────────────────────────────────────
 
 /// Handle a `ta_external_action` call from an agent.
 pub fn handle_external_action(
-    state: &Arc<Mutex<GatewayState>>,
+    state_arc: &Arc<Mutex<GatewayState>>,
     params: ExternalActionParams,
 ) -> Result<CallToolResult, McpError> {
-    let mut state = state
+    let mut state = state_arc
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
 
@@ -321,13 +325,27 @@ pub fn handle_external_action(
 
             ActionPolicy::Auto => {
                 let requesting_agent_id = goal_run_id.and_then(|id| state.agent_for_goal(id).ok());
-                dispatch_auto_action(
-                    &state.config.workspace_root,
+                let workspace_root = state.config.workspace_root.clone();
+                let use_keychain = state.config.credential_vault_use_keychain;
+                // Release the gateway-wide lock before dispatching: a scope
+                // deficit now escalates through ta_human_verify's synthetic
+                // pipeline and, on anything but an auto-confirmed Commit,
+                // blocks on a real human response (up to its configured
+                // timeout) -- holding this mutex for that long would stall
+                // every other in-flight gateway call (v0.17.6.6).
+                drop(state);
+                let dispatch_result = dispatch_auto_action(
+                    state_arc,
+                    &workspace_root,
                     &params,
                     action_impl,
                     requesting_agent_id.as_deref(),
-                    state.config.credential_vault_use_keychain,
-                )?
+                    use_keychain,
+                );
+                state = state_arc
+                    .lock()
+                    .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
+                dispatch_result?
             }
         }
     };
@@ -407,11 +425,49 @@ pub fn handle_external_action(
 /// path's own live caller, rather than leaving that logic unwired like the
 /// real draft-apply path does today.
 fn dispatch_auto_action(
+    state: &Arc<Mutex<GatewayState>>,
     workspace_root: &Path,
     params: &ExternalActionParams,
     action_impl: &dyn ta_actions::ExternalAction,
     requesting_agent_id: Option<&str>,
     credential_vault_use_keychain: bool,
+) -> Result<(ActionOutcome, Option<PendingAction>), McpError> {
+    // The real, subprocess-backed synthetic pipeline (v0.17.6.6) -- only
+    // constructed lazily inside the ScopeDeficit branch below, since most
+    // dispatches never hit a scope deficit at all.
+    let ta_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ta"));
+    let recent_misses = crate::verify_audit::load_recent_misses(
+        workspace_root,
+        CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE,
+        5,
+    );
+    let pipeline =
+        HeadlessSyntheticPipeline::new(workspace_root.to_path_buf(), ta_bin, recent_misses);
+
+    dispatch_auto_action_with_pipeline(
+        state,
+        workspace_root,
+        params,
+        action_impl,
+        requesting_agent_id,
+        credential_vault_use_keychain,
+        &pipeline,
+    )
+}
+
+/// Same as `dispatch_auto_action`, but takes an explicit `pipeline` for the
+/// credential-scope-elevation escalation (mirrors
+/// `human_verify::handle_human_verify_with_pipeline`'s test seam) so tests
+/// can exercise the elevation flow deterministically without spawning a
+/// real subprocess.
+fn dispatch_auto_action_with_pipeline(
+    state: &Arc<Mutex<GatewayState>>,
+    workspace_root: &Path,
+    params: &ExternalActionParams,
+    action_impl: &dyn ta_actions::ExternalAction,
+    requesting_agent_id: Option<&str>,
+    credential_vault_use_keychain: bool,
+    pipeline: &dyn SyntheticPipeline,
 ) -> Result<(ActionOutcome, Option<PendingAction>), McpError> {
     // Business-metric budget hard-limit pre-gate — deterministic, runs
     // before any risk scoring (mirrors `ta_human_verify`'s ordering: a
@@ -456,19 +512,67 @@ fn dispatch_auto_action(
         credential_vault_use_keychain,
     ) {
         ConnectorAuthorization::Error(e) => return Err(e),
-        ConnectorAuthorization::ScopeDeficit { description } => {
-            let action_id = Uuid::new_v4();
-            let pending = PendingAction {
-                action_id,
-                tool_name: format!("ta_external_action:{}", params.action_type),
-                parameters: params.payload.clone(),
-                kind: ActionKind::StateChanging,
-                intercepted_at: Utc::now(),
-                description,
+        ConnectorAuthorization::ScopeDeficit {
+            connector_id,
+            credential_id,
+            agent_id,
+            requested_scope,
+            current_caveats,
+            parent_goal_scope,
+            secret,
+            description,
+        } => {
+            tracing::info!(
+                connector = %connector_id,
+                requested_scope = %requested_scope,
+                "ta_external_action: scope deficit detected, escalating via ta_human_verify \
+                 credential-scope-elevation pipeline (v0.17.6.6) instead of a hard failure"
+            );
+
+            let request = ScopeElevationRequest {
+                connector_id,
+                credential_id,
+                agent_id,
+                requested_scope,
+                current_caveats,
                 target_uri: params.target_uri.clone(),
-                disposition: ArtifactDisposition::Pending,
+                goal_id: requesting_agent_id.map(|s| s.to_string()),
+                parent_goal_scope,
             };
-            return Ok((ActionOutcome::CapturedForReview, Some(pending)));
+
+            let elevation_result = handle_credential_scope_elevation(
+                state,
+                request,
+                credential_vault_use_keychain,
+                pipeline,
+            )?;
+
+            let auto_confirmed = elevation_result
+                .content
+                .first()
+                .and_then(|c| match &c.raw {
+                    RawContent::Text(t) => serde_json::from_str::<serde_json::Value>(&t.text).ok(),
+                    _ => None,
+                })
+                .and_then(|v| v.get("auto_confirmed").and_then(|b| b.as_bool()))
+                .unwrap_or(false);
+
+            if auto_confirmed {
+                Some(secret)
+            } else {
+                let action_id = Uuid::new_v4();
+                let pending = PendingAction {
+                    action_id,
+                    tool_name: format!("ta_external_action:{}", params.action_type),
+                    parameters: params.payload.clone(),
+                    kind: ActionKind::StateChanging,
+                    intercepted_at: Utc::now(),
+                    description,
+                    target_uri: params.target_uri.clone(),
+                    disposition: ArtifactDisposition::Pending,
+                };
+                return Ok((ActionOutcome::CapturedForReview, Some(pending)));
+            }
         }
         ConnectorAuthorization::NotBrokered => None,
         ConnectorAuthorization::Authorized { secret } => Some(secret),
@@ -608,11 +712,28 @@ enum ConnectorAuthorization {
     Authorized { secret: String },
     /// The session token is valid but its `allowed_scopes` don't cover the
     /// connector's `required_scope`. Per PLAN item 4 ("hand off to
-    /// v0.17.6.6's escalation path instead of a hard failure"): captured
-    /// for human review rather than denied outright. Full `ta_human_verify`
-    /// integration lands with v0.17.6.6 — until then this is the same
-    /// captured-for-review fallback the risk gate itself uses below.
-    ScopeDeficit { description: String },
+    /// v0.17.6.6's escalation path instead of a hard failure"): wired into
+    /// `ta_human_verify`'s confidence-gated credential-scope-elevation
+    /// pipeline (v0.17.6.6) rather than denied outright or deferred to an
+    /// async review queue.
+    ScopeDeficit {
+        connector_id: String,
+        credential_id: Uuid,
+        agent_id: String,
+        requested_scope: String,
+        /// Scopes already present on the presented (deficient) token.
+        current_caveats: Vec<String>,
+        /// The full scope set declared on the underlying vault credential —
+        /// the ceiling the elevation may not exceed (v0.17.6.6 item 3).
+        parent_goal_scope: Vec<String>,
+        /// The resolved secret, ready to attach to the gateway's own
+        /// outbound call if the elevation is approved — never returned to
+        /// the agent.
+        secret: String,
+        /// Human-readable fallback description, used only if the elevation
+        /// doesn't auto-confirm and the action is captured for review.
+        description: String,
+    },
     /// A hard, actionable failure: unknown connector, missing/invalid/
     /// expired/mismatched session token, or an unreadable vault. Unlike a
     /// scope deficit, none of these represent "the agent knows what it's
@@ -740,15 +861,21 @@ fn resolve_connector_authorization(
     if let Some(required_scope) = &entry.required_scope {
         if !token.allowed_scopes.iter().any(|s| s == required_scope) {
             return ConnectorAuthorization::ScopeDeficit {
+                connector_id: connector_id.to_string(),
+                credential_id: credential.id,
+                agent_id: token.agent_id.clone(),
+                requested_scope: required_scope.clone(),
+                current_caveats: token.allowed_scopes.clone(),
+                parent_goal_scope: credential.scopes.clone(),
                 description: format!(
                     "ta_external_action:{} via connector '{connector_id}' requires scope \
                      '{required_scope}', but the presented session token only allows {:?} — \
-                     requires credential scope elevation. Captured for manual review rather \
-                     than auto-denied (structured human escalation via ta_human_verify lands \
-                     in v0.17.6.6); a reviewer can re-grant a wider-scoped token via \
+                     escalated for credential scope elevation via ta_human_verify (v0.17.6.6); \
+                     a reviewer can also re-grant a wider-scoped token via \
                      `ta credentials grant`.",
                     params.action_type, token.allowed_scopes
                 ),
+                secret: credential.secret,
             };
         }
     }
@@ -917,6 +1044,7 @@ mod tests {
 
     use crate::config::GatewayConfig;
     use crate::server::GatewayState;
+    use crate::tools::human_verify::{OpinionResult, ValidatorResult};
 
     fn make_state(root: &std::path::Path) -> Arc<Mutex<GatewayState>> {
         let mut config = GatewayConfig::for_project(root);
@@ -1573,12 +1701,33 @@ else:
         );
     }
 
-    #[test]
-    fn broker_mediated_connector_scope_deficit_is_captured_for_review_not_denied() {
+    /// A deterministic `SyntheticPipeline` double for scope-elevation tests
+    /// (v0.17.6.6) -- mirrors `human_verify.rs`'s own `FakePipeline`, kept
+    /// as a local copy since that one lives in a private test module and
+    /// isn't reachable from here.
+    struct FakeElevationPipeline {
+        opinion: OpinionResult,
+        validator: ValidatorResult,
+    }
+
+    impl SyntheticPipeline for FakeElevationPipeline {
+        fn opinion(&self, _q: &str, _c: Option<&str>) -> Result<OpinionResult, String> {
+            Ok(self.opinion.clone())
+        }
+        fn validate(
+            &self,
+            _q: &str,
+            _c: Option<&str>,
+            _o: &OpinionResult,
+        ) -> Result<ValidatorResult, String> {
+            Ok(self.validator.clone())
+        }
+    }
+
+    fn setup_scope_deficit_fixture(dir: &std::path::Path) -> Uuid {
         use ta_credentials::CredentialVault;
 
-        let dir = tempdir().unwrap();
-        let ta_dir = dir.path().join(".ta");
+        let ta_dir = dir.join(".ta");
         std::fs::create_dir_all(&ta_dir).unwrap();
         std::fs::write(
             ta_dir.join("workflow.toml"),
@@ -1593,10 +1742,10 @@ else:
               required_scope = \"trade.write\"\n",
         )
         .unwrap();
-        write_broker_test_plugin(dir.path());
-        write_routing_decision(dir.path(), "auto");
+        write_broker_test_plugin(dir);
+        write_routing_decision(dir, "auto");
 
-        let mut vault = open_test_vault(dir.path());
+        let mut vault = open_test_vault(dir);
         // Credential/token exist, but the token was only granted a narrower
         // scope than the connector requires.
         let cred = vault
@@ -1610,9 +1759,11 @@ else:
         let token = vault
             .issue_token(cred.id, "test-agent", vec!["trade.read".into()], 3600)
             .unwrap();
+        token.token_id
+    }
 
-        let state = make_state(dir.path());
-        let params = ExternalActionParams {
+    fn scope_deficit_params(token_id: Uuid) -> ExternalActionParams {
+        ExternalActionParams {
             action_type: "connector.execute".into(),
             payload: json!({}),
             goal_run_id: None,
@@ -1620,21 +1771,280 @@ else:
             dry_run: false,
             budget: None,
             connector: Some("paper-trading".into()),
-            session_token: Some(token.token_id.to_string()),
+            session_token: Some(token_id.to_string()),
+        }
+    }
+
+    /// Registry with the broker-test plugin (written by
+    /// `write_broker_test_plugin`) discovered and registered.
+    fn test_registry(workspace_root: &std::path::Path) -> ActionRegistry {
+        let mut registry = ActionRegistry::new();
+        for action in discover_adapter_actions(workspace_root) {
+            registry.register(action);
+        }
+        registry
+    }
+
+    /// Answers the next pending `ta_ask_human` interaction with `answer_text`
+    /// (mirrors `human_verify.rs`'s own private `spawn_answer_thread`, kept
+    /// as a local copy since that one isn't reachable from here).
+    fn spawn_answer_thread(dir: &std::path::Path, answer_text: &str) {
+        let pending_dir = dir.join(".ta").join("interactions").join("pending");
+        let answers_dir = dir.join(".ta").join("interactions").join("answers");
+        let answer_text = answer_text.to_string();
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if let Ok(entries) = std::fs::read_dir(&pending_dir) {
+                    let files: Vec<_> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                        .collect();
+                    if let Some(entry) = files.first() {
+                        let stem = entry
+                            .path()
+                            .file_stem()
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string();
+                        std::fs::create_dir_all(&answers_dir).unwrap();
+                        let answer_path = answers_dir.join(format!("{}.json", stem));
+                        let answer = json!({
+                            "text": answer_text,
+                            "responder_id": "test-human",
+                            "answered_at": chrono::Utc::now().to_rfc3339(),
+                        });
+                        std::fs::write(&answer_path, serde_json::to_string(&answer).unwrap())
+                            .unwrap();
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn broker_mediated_connector_scope_deficit_auto_commits_mints_token_and_executes() {
+        let dir = tempdir().unwrap();
+        let token_id = setup_scope_deficit_fixture(dir.path());
+        let state = make_state(dir.path());
+        let registry = test_registry(dir.path());
+        let action_impl = registry.get("connector.execute").unwrap();
+
+        let pipeline = FakeElevationPipeline {
+            opinion: OpinionResult {
+                answer: "Approve".to_string(),
+                reasoning: "Within parent scope, low risk trade action.".to_string(),
+                confidence: 0.99,
+            },
+            validator: ValidatorResult {
+                verdict: Verdict::Pass,
+                risk_score: 1,
+                confidence: 0.99,
+                reasoning: "Contained within parent scope.".to_string(),
+            },
         };
 
-        let result = handle_external_action(&state, params).unwrap();
+        let (outcome, pending) = dispatch_auto_action_with_pipeline(
+            &state,
+            dir.path(),
+            &scope_deficit_params(token_id),
+            action_impl,
+            Some("test-agent"),
+            false,
+            &pipeline,
+        )
+        .unwrap();
+
         assert!(
-            !result.is_error.unwrap_or(false),
-            "a scope deficit is not a hard failure"
+            pending.is_none(),
+            "an auto-confirmed elevation must execute, not be captured"
         );
-        let text = serde_json::to_string(&result.content[0]).unwrap();
+        let ActionOutcome::Executed { result } = outcome else {
+            panic!(
+                "expected Executed after an auto-confirmed elevation, got: {:?}",
+                outcome
+            );
+        };
         assert!(
-            text.contains("captured_for_review"),
-            "expected captured_for_review, not a hard denial: {}",
-            text
+            result["saw_secret"] == json!(true),
+            "the plugin should have received the resolved secret server-side: {:?}",
+            result
         );
-        assert!(!text.contains("sk-live-supersecret-do-not-leak"));
+
+        let audit_path = dir.path().join(".ta").join("human-verify-audit.jsonl");
+        let audit = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(
+            audit.contains("\"granted_scope\":[\"trade.write\"]"),
+            "got: {}",
+            audit
+        );
+    }
+
+    #[test]
+    fn broker_mediated_connector_scope_deficit_non_commit_is_captured_for_review_not_denied() {
+        let dir = tempdir().unwrap();
+        let token_id = setup_scope_deficit_fixture(dir.path());
+        let state = make_state(dir.path());
+        let registry = test_registry(dir.path());
+        let action_impl = registry.get("connector.execute").unwrap();
+
+        // Low confidence -> the gate escalates rather than commits.
+        let pipeline = FakeElevationPipeline {
+            opinion: OpinionResult {
+                answer: "Unsure".to_string(),
+                reasoning: "Ambiguous signal.".to_string(),
+                confidence: 0.3,
+            },
+            validator: ValidatorResult {
+                verdict: Verdict::Warn,
+                risk_score: 20,
+                confidence: 0.3,
+                reasoning: "Not confident in this elevation.".to_string(),
+            },
+        };
+
+        spawn_answer_thread(dir.path(), "deny");
+
+        let (outcome, pending) = dispatch_auto_action_with_pipeline(
+            &state,
+            dir.path(),
+            &scope_deficit_params(token_id),
+            action_impl,
+            Some("test-agent"),
+            false,
+            &pipeline,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, ActionOutcome::CapturedForReview),
+            "a non-committed elevation must be captured for review, not denied: {:?}",
+            outcome
+        );
+        assert!(pending.is_some());
+
+        let audit_path = dir.path().join(".ta").join("human-verify-audit.jsonl");
+        assert!(
+            !audit_path.exists(),
+            "a non-committed elevation must never mint or audit a grant"
+        );
+    }
+
+    #[test]
+    fn broker_mediated_connector_scope_deficit_never_leaks_secret_when_not_committed() {
+        let dir = tempdir().unwrap();
+        let token_id = setup_scope_deficit_fixture(dir.path());
+        let state = make_state(dir.path());
+        let registry = test_registry(dir.path());
+        let action_impl = registry.get("connector.execute").unwrap();
+
+        spawn_answer_thread(dir.path(), "deny");
+        let pipeline = FakeElevationPipeline {
+            opinion: OpinionResult {
+                answer: "Unsure".to_string(),
+                reasoning: "Ambiguous.".to_string(),
+                confidence: 0.3,
+            },
+            validator: ValidatorResult {
+                verdict: Verdict::Warn,
+                risk_score: 20,
+                confidence: 0.3,
+                reasoning: "Not confident.".to_string(),
+            },
+        };
+
+        let (outcome, pending) = dispatch_auto_action_with_pipeline(
+            &state,
+            dir.path(),
+            &scope_deficit_params(token_id),
+            action_impl,
+            Some("test-agent"),
+            false,
+            &pipeline,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, ActionOutcome::CapturedForReview));
+        let pending = pending.unwrap();
+        let serialized = serde_json::to_string(&pending).unwrap();
+        assert!(!serialized.contains("sk-live-supersecret-do-not-leak"));
+    }
+
+    #[test]
+    fn broker_mediated_connector_scope_deficit_forces_block_when_scope_exceeds_parent() {
+        // item 6: a scope-exceeding request that violates parent-containment
+        // is force-blocked even when the opinion/validator LLM signals a
+        // favorable verdict.
+        let dir = tempdir().unwrap();
+        let token_id = setup_scope_deficit_fixture(dir.path());
+        let state = make_state(dir.path());
+        let registry = test_registry(dir.path());
+        let action_impl = registry.get("connector.execute").unwrap();
+
+        // The fixture's credential only declares [trade.read, trade.write]
+        // (parent_goal_scope). Point the connector's required_scope at a
+        // scope the credential never declared at all, so the elevation
+        // request itself is unsatisfiable regardless of what the
+        // opinion/validator pipeline concludes -- exercising the
+        // non-bypassable pre-check (item 3).
+        let mut params = scope_deficit_params(token_id);
+        params.connector = Some("paper-trading".into());
+        std::fs::write(
+            dir.path().join(".ta").join("connectors.toml"),
+            b"[connectors.paper-trading]\n\
+              credential_name = \"PAPER_API_KEY\"\n\
+              broker_mediated = true\n\
+              required_scope = \"trade.admin\"\n",
+        )
+        .unwrap();
+
+        struct FavorableOpinionOnlyPipeline;
+        impl SyntheticPipeline for FavorableOpinionOnlyPipeline {
+            fn opinion(&self, _q: &str, _c: Option<&str>) -> Result<OpinionResult, String> {
+                Ok(OpinionResult {
+                    answer: "Approve".to_string(),
+                    reasoning: "Looks fine to me.".to_string(),
+                    confidence: 0.99,
+                })
+            }
+            fn validate(
+                &self,
+                _q: &str,
+                _c: Option<&str>,
+                _o: &OpinionResult,
+            ) -> Result<ValidatorResult, String> {
+                panic!(
+                    "the validator's LLM critique must never run once the parent-containment \
+                     pre-check has already failed"
+                );
+            }
+        }
+
+        spawn_answer_thread(dir.path(), "deny");
+        let (outcome, pending) = dispatch_auto_action_with_pipeline(
+            &state,
+            dir.path(),
+            &params,
+            action_impl,
+            Some("test-agent"),
+            false,
+            &FavorableOpinionOnlyPipeline,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, ActionOutcome::CapturedForReview),
+            "a force-blocked (out-of-parent-scope) elevation must never execute: {:?}",
+            outcome
+        );
+        assert!(pending.is_some());
+
+        let audit_path = dir.path().join(".ta").join("human-verify-audit.jsonl");
+        assert!(
+            !audit_path.exists(),
+            "a force-blocked elevation must never mint a token"
+        );
     }
 
     #[test]

@@ -61,6 +61,20 @@ fn default_budget_action_label() -> String {
     "unlabeled action".to_string()
 }
 
+/// Workload type used to gate a credential-scope-elevation escalation
+/// (v0.17.6.6 item 4), forced regardless of the calling goal's most recent
+/// `ta-brain::RoutingDecision` — see `handle_credential_scope_elevation`.
+pub(crate) const CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE: &str = "credential_scope_elevation";
+
+/// TTL for a token minted via credential-scope-elevation escalation
+/// (v0.17.6.6 item 5): shorter than the 1-hour baseline goal-run grant
+/// (`CREDENTIAL_TOKEN_TTL_SECS` in `apps/ta-cli/src/commands/run.rs`) since
+/// this token is a narrow, ad hoc widening for one specific scope rather
+/// than a whole goal run's credential set — 15 minutes covers the
+/// triggering action and any immediate retry without leaving a long-lived
+/// elevated grant sitting in the vault.
+pub(crate) const SCOPE_ELEVATION_TOKEN_TTL_SECS: u64 = 900;
+
 /// A workflow's declared business-metric budget guardrail, as passed by an
 /// MCP tool caller (v0.17.5.2). Field-identical to
 /// `ta_policy::business_budget::BudgetGuardrails`, kept as a local mirror
@@ -506,15 +520,47 @@ fn load_workflow_toml(workspace_root: &Path) -> HumanVerifyWorkflowToml {
         .unwrap_or_default()
 }
 
+/// Built-in baseline for the `credential_scope_elevation` workload
+/// (v0.17.6.6 item 4): stricter than the generic `DecisionThresholds::default()`
+/// used by code-edit-shaped workloads, since a wrong auto-confirm here mints
+/// a real, usable credential grant rather than just approving a text
+/// answer. Deliberately does *not* inherit `[human_verify.default]` (see
+/// `load_thresholds`) — a project's house-style default tuned for code
+/// review shouldn't silently loosen the one gate that hands out live
+/// secrets. A project can still explicitly override it via
+/// `[human_verify.credential_scope_elevation]`.
+fn credential_scope_elevation_baseline() -> DecisionThresholds {
+    DecisionThresholds {
+        min_confidence: 0.9,
+        max_risk_score: 15,
+        escalate_risk_score: 30,
+    }
+}
+
 /// Resolve the `DecisionThresholds` for `workload_type`: a `[human_verify.default]`
 /// table layers over the built-in default, then `[human_verify.<workload_type>]`
 /// layers over that — each table only needs to override the fields it cares
 /// about (v0.17.0.12.26 item 4).
 ///
+/// `credential_scope_elevation` (v0.17.6.6 item 4) is the one exception: it
+/// layers `[human_verify.credential_scope_elevation]` directly over its own
+/// stricter built-in baseline, skipping `[human_verify.default]` entirely
+/// (see `credential_scope_elevation_baseline`'s doc comment for why).
+///
 /// `pub(crate)`: also reused by `verify_audit::run_redteam_review`
 /// (v0.17.0.12.27) to compute a threshold-tightening proposal's baseline.
 pub(crate) fn load_thresholds(workspace_root: &Path, workload_type: &str) -> DecisionThresholds {
     let toml = load_workflow_toml(workspace_root);
+
+    if workload_type == CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE {
+        let baseline = credential_scope_elevation_baseline();
+        return toml
+            .human_verify
+            .get(workload_type)
+            .map(|p| p.apply_over(baseline))
+            .unwrap_or(baseline);
+    }
+
     let base = toml
         .human_verify
         .get("default")
@@ -576,6 +622,15 @@ struct HumanVerifyAuditEntry<'a> {
     opinion: &'a OpinionResult,
     validator: &'a ValidatorResult,
     decision: Decision,
+    /// Additive fields for a `credential_scope_elevation` commit (v0.17.6.6
+    /// item 5): the scope actually minted onto the fresh token and its TTL.
+    /// Absent (and omitted from the serialized line) for every other
+    /// workload -- this reuses `.ta/human-verify-audit.jsonl` rather than
+    /// adding a new audit store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    granted_scope: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<u64>,
 }
 
 /// Append one entry to `.ta/human-verify-audit.jsonl` — gitignored,
@@ -802,6 +857,8 @@ fn handle_human_verify_with_pipeline(
             opinion: &opinion,
             validator: &validator,
             decision,
+            granted_scope: None,
+            ttl: None,
         };
         write_audit_entry(&workspace_root, &entry);
 
@@ -912,6 +969,295 @@ fn escalate_to_human(
         });
     }
     human::handle_ask_human(state, params.into())
+}
+
+// ── Credential scope elevation (v0.17.6.6) ────────────────────────────────
+
+/// Structured context for a credential-scope-elevation escalation
+/// (v0.17.6.6 item 2), built by the gateway broker
+/// (`tools::action::resolve_connector_authorization`) when a
+/// `ta_external_action` dispatch hits a scope deficit at the live
+/// interception point (v0.17.6.3) — wired into `ta_human_verify`'s existing
+/// opinion/validator/gate pipeline instead of a parallel approval path.
+#[derive(Debug, Clone)]
+pub(crate) struct ScopeElevationRequest {
+    pub connector_id: String,
+    pub credential_id: Uuid,
+    pub agent_id: String,
+    pub requested_scope: String,
+    /// Scopes already present on the token that was presented and found
+    /// deficient — the elevation's "current caveats" (biscuit terminology
+    /// carries over ahead of the v0.17.6.4 migration to real biscuits).
+    pub current_caveats: Vec<String>,
+    pub target_uri: Option<String>,
+    pub goal_id: Option<String>,
+    /// The full scope set declared on the underlying vault `Credential` —
+    /// the ceiling no elevation may exceed, regardless of what the
+    /// opinion/validator pipeline concludes (item 3).
+    pub parent_goal_scope: Vec<String>,
+}
+
+impl ScopeElevationRequest {
+    fn question(&self) -> String {
+        format!(
+            "A credential scope elevation was requested for connector '{}': the presented \
+             session token only allows {:?}, but scope '{}' is required. Approve minting a \
+             fresh, narrowly attenuated token granting just '{}'?",
+            self.connector_id, self.current_caveats, self.requested_scope, self.requested_scope
+        )
+    }
+
+    fn context(&self) -> String {
+        serde_json::json!({
+            "requested_scope": self.requested_scope,
+            "current_caveats": self.current_caveats,
+            "target_uri": self.target_uri,
+            "goal_id": self.goal_id,
+            "parent_goal_scope": self.parent_goal_scope,
+        })
+        .to_string()
+    }
+}
+
+/// Wraps a `SyntheticPipeline` with a non-bypassable computational pre-check
+/// (v0.17.6.6 item 3) for the `credential_scope_elevation` workload:
+/// `requested_scope ⊆ parent_goal_scope` is asserted before the wrapped
+/// pipeline's validator ever runs its LLM critique. A violation short-
+/// circuits straight to `Verdict::Block` (which `decide()` always turns into
+/// `Decision::Reject`, never an auto-commit) — the LLM is never invoked, so
+/// no model output can override a scope that was never grantable in the
+/// first place.
+struct ScopeContainmentPipeline<'a> {
+    inner: &'a dyn SyntheticPipeline,
+    requested_scope: String,
+    parent_goal_scope: Vec<String>,
+}
+
+impl SyntheticPipeline for ScopeContainmentPipeline<'_> {
+    fn opinion(&self, question: &str, context: Option<&str>) -> Result<OpinionResult, String> {
+        self.inner.opinion(question, context)
+    }
+
+    fn validate(
+        &self,
+        question: &str,
+        context: Option<&str>,
+        opinion: &OpinionResult,
+    ) -> Result<ValidatorResult, String> {
+        if !self
+            .parent_goal_scope
+            .iter()
+            .any(|s| s == &self.requested_scope)
+        {
+            return Ok(ValidatorResult {
+                verdict: Verdict::Block,
+                risk_score: 100,
+                confidence: 1.0,
+                reasoning: format!(
+                    "non-bypassable pre-check: requested scope '{}' is not contained in the \
+                     parent goal's scope {:?} — forced Block before the validator's LLM \
+                     critique ran; no model output can override this.",
+                    self.requested_scope, self.parent_goal_scope
+                ),
+            });
+        }
+        self.inner.validate(question, context, opinion)
+    }
+}
+
+/// Handle a credential-scope-elevation escalation (v0.17.6.6): wraps
+/// `pipeline` with the non-bypassable parent-containment pre-check (item 3),
+/// forces `workload_type = "credential_scope_elevation"` (item 4) regardless
+/// of the goal's most recent routing decision, and on `Decision::Commit`
+/// mints a fresh, narrowly attenuated session token via the vault broker
+/// rather than just returning the answer as freeform text (item 5). Any
+/// other decision falls through to the existing blocking `ta_ask_human` UI,
+/// completely unchanged — the caller (`tools::action::dispatch_auto_action`)
+/// treats that outcome as "captured for review", exactly as a scope deficit
+/// already did before this phase.
+///
+/// Takes an explicit `pipeline` (mirroring `handle_human_verify_with_pipeline`)
+/// so the caller controls whether a real `HeadlessSyntheticPipeline` (which
+/// spawns a subprocess) or a deterministic test double is used.
+pub(crate) fn handle_credential_scope_elevation(
+    state: &Arc<Mutex<GatewayState>>,
+    request: ScopeElevationRequest,
+    credential_vault_use_keychain: bool,
+    pipeline: &dyn SyntheticPipeline,
+) -> Result<CallToolResult, McpError> {
+    let workspace_root = {
+        let locked = state
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
+        locked.config.workspace_root.clone()
+    };
+
+    let question = request.question();
+    let context = request.context();
+    let verify_params = HumanVerifyParams {
+        question: question.clone(),
+        context: Some(context.clone()),
+        response_hint: "choice".to_string(),
+        choices: vec!["approve".to_string(), "deny".to_string()],
+        timeout_secs: default_timeout(),
+        budget: None,
+    };
+
+    let (_, security_tier) = resolve_workload_context(&workspace_root);
+    if security_tier != AdvisorSecurity::Auto {
+        tracing::info!(
+            connector = %request.connector_id,
+            requested_scope = %request.requested_scope,
+            security_tier = %security_tier,
+            "ta_human_verify (credential_scope_elevation): security_tier != auto, escalating directly"
+        );
+        return escalate_to_human(state, verify_params, None);
+    }
+
+    let scoped_pipeline = ScopeContainmentPipeline {
+        inner: pipeline,
+        requested_scope: request.requested_scope.clone(),
+        parent_goal_scope: request.parent_goal_scope.clone(),
+    };
+
+    let opinion = match scoped_pipeline.opinion(&question, Some(&context)) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "ta_human_verify (credential_scope_elevation): opinion pass failed, escalating to human"
+            );
+            return escalate_to_human(
+                state,
+                verify_params,
+                Some(format!(
+                    "[ta_human_verify credential_scope_elevation] Synthetic opinion pass \
+                     failed ({e}) — escalated directly."
+                )),
+            );
+        }
+    };
+
+    let validator = match scoped_pipeline.validate(&question, Some(&context), &opinion) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "ta_human_verify (credential_scope_elevation): validator pass failed, escalating to human"
+            );
+            return escalate_to_human(
+                state,
+                verify_params,
+                Some(format!(
+                    "[ta_human_verify credential_scope_elevation] Synthetic validator pass \
+                     failed ({e}) after opinion answered \"{}\" — escalated directly.",
+                    opinion.answer
+                )),
+            );
+        }
+    };
+
+    let thresholds = load_thresholds(&workspace_root, CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE);
+    let input = DecisionInput {
+        verdict: validator.verdict,
+        risk_score: validator.risk_score,
+        confidence: validator.confidence,
+    };
+    let decision = decide(&input, &thresholds);
+
+    tracing::info!(
+        connector = %request.connector_id,
+        requested_scope = %request.requested_scope,
+        decision = ?decision,
+        "ta_human_verify (credential_scope_elevation): synthetic pipeline decision"
+    );
+    crate::verify_audit::record_invocation(
+        &workspace_root,
+        CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE,
+        decision,
+    );
+
+    if !decision.is_auto_approvable() {
+        let extra_context = format!(
+            "[ta_human_verify synthetic pre-check: {decision:?}] Opinion answer: \"{}\" \
+             (confidence {:.0}%). Validator verdict: {:?} (risk {}, confidence {:.0}%) — {}",
+            opinion.answer,
+            opinion.confidence * 100.0,
+            validator.verdict,
+            validator.risk_score,
+            validator.confidence * 100.0,
+            validator.reasoning,
+        );
+        return escalate_to_human(state, verify_params, Some(extra_context));
+    }
+
+    // Commit: mint a fresh, narrowly attenuated token -- only the specific
+    // requested scope, never the credential's full parent scope (item 5).
+    let mut cred_config = ta_credentials::CredentialsConfig::for_project(&workspace_root);
+    cred_config.use_keychain = credential_vault_use_keychain;
+    let granted_scope = vec![request.requested_scope.clone()];
+    let mint_result = ta_credentials::FileVault::open(&cred_config).and_then(|mut vault| {
+        use ta_credentials::CredentialVault;
+        vault.issue_token(
+            request.credential_id,
+            &request.agent_id,
+            granted_scope.clone(),
+            SCOPE_ELEVATION_TOKEN_TTL_SECS,
+        )
+    });
+
+    let token = match mint_result {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "ta_human_verify (credential_scope_elevation): token mint failed after Commit, \
+                 escalating to human"
+            );
+            return escalate_to_human(
+                state,
+                verify_params,
+                Some(format!(
+                    "[ta_human_verify credential_scope_elevation] The synthetic pipeline \
+                     committed the elevation, but minting the attenuated token failed ({e}) — \
+                     escalated directly."
+                )),
+            );
+        }
+    };
+
+    let entry = HumanVerifyAuditEntry {
+        id: Uuid::new_v4(),
+        timestamp: Utc::now().to_rfc3339(),
+        question: &question,
+        context: Some(&context),
+        workload_type: CREDENTIAL_SCOPE_ELEVATION_WORKLOAD_TYPE,
+        opinion: &opinion,
+        validator: &validator,
+        decision,
+        granted_scope: Some(&granted_scope),
+        ttl: Some(SCOPE_ELEVATION_TOKEN_TTL_SECS),
+    };
+    write_audit_entry(&workspace_root, &entry);
+
+    let response = serde_json::json!({
+        "answer": opinion.answer,
+        "auto_confirmed": true,
+        "decision": decision,
+        "opinion_reasoning": opinion.reasoning,
+        "opinion_confidence": opinion.confidence,
+        "validator_reasoning": validator.reasoning,
+        "validator_confidence": validator.confidence,
+        "validator_risk_score": validator.risk_score,
+        "granted_scope": granted_scope,
+        "session_token": token.token_id,
+        "ttl_secs": SCOPE_ELEVATION_TOKEN_TTL_SECS,
+        "audit_log": ".ta/human-verify-audit.jsonl",
+    });
+    Ok(CallToolResult::success(vec![Content::json(response)
+        .map_err(|e| {
+            McpError::internal_error(e.to_string(), None)
+        })?]))
 }
 
 #[cfg(test)]
@@ -1526,5 +1872,199 @@ mod tests {
         // No seeded misses -> no "known past mistakes" section at all.
         let empty_ctx = build_opinion_context("A new question", None, &[]);
         assert!(!empty_ctx.contains("Known past mistakes"));
+    }
+
+    // ── Credential scope elevation (v0.17.6.6) ────────────────────────────
+
+    fn make_test_credential(
+        dir: &std::path::Path,
+        scopes: Vec<String>,
+    ) -> ta_credentials::Credential {
+        use ta_credentials::CredentialVault;
+        let mut cred_config = ta_credentials::CredentialsConfig::for_project(dir);
+        cred_config.use_keychain = false;
+        let mut vault = ta_credentials::FileVault::open(&cred_config).unwrap();
+        vault
+            .add("TEST_TOKEN", "test-service", "super-secret-value", scopes)
+            .unwrap()
+    }
+
+    fn scope_elevation_request(cred_id: Uuid) -> ScopeElevationRequest {
+        ScopeElevationRequest {
+            connector_id: "paper-trading".to_string(),
+            credential_id: cred_id,
+            agent_id: "test-agent".to_string(),
+            requested_scope: "trade.write".to_string(),
+            current_caveats: vec!["trade.read".to_string()],
+            target_uri: Some("mcp://connector/paper-trading".to_string()),
+            goal_id: Some("test-agent".to_string()),
+            parent_goal_scope: vec!["trade.read".to_string(), "trade.write".to_string()],
+        }
+    }
+
+    #[test]
+    fn credential_scope_elevation_commit_mints_narrow_token_and_extends_audit_entry() {
+        let dir = tempdir().unwrap();
+        write_routing_decision(dir.path(), "docs", "auto");
+        let cred =
+            make_test_credential(dir.path(), vec!["trade.read".into(), "trade.write".into()]);
+        let state = make_state(dir.path());
+
+        let pipeline = FakePipeline {
+            opinion: OpinionResult {
+                answer: "Approve".to_string(),
+                reasoning: "Within parent scope, low risk.".to_string(),
+                confidence: 0.99,
+            },
+            validator: ValidatorResult {
+                verdict: Verdict::Pass,
+                risk_score: 1,
+                confidence: 0.99,
+                reasoning: "Contained within parent scope.".to_string(),
+            },
+        };
+
+        let result = handle_credential_scope_elevation(
+            &state,
+            scope_elevation_request(cred.id),
+            false,
+            &pipeline,
+        )
+        .expect("should succeed");
+        let text = content_text(&result);
+        assert!(text.contains("\"auto_confirmed\":true"), "got: {}", text);
+        assert!(
+            text.contains("\"granted_scope\":[\"trade.write\"]"),
+            "got: {}",
+            text
+        );
+
+        let audit_path = dir.path().join(".ta").join("human-verify-audit.jsonl");
+        let audit = std::fs::read_to_string(&audit_path).expect("audit log should exist");
+        assert!(
+            audit.contains("\"granted_scope\":[\"trade.write\"]"),
+            "got: {}",
+            audit
+        );
+        assert!(audit.contains("\"ttl\":900"), "got: {}", audit);
+        assert!(
+            audit.contains("\"workload_type\":\"credential_scope_elevation\""),
+            "got: {}",
+            audit
+        );
+
+        // A fresh, narrower token really was minted in the vault.
+        use ta_credentials::CredentialVault;
+        let mut cred_config = ta_credentials::CredentialsConfig::for_project(dir.path());
+        cred_config.use_keychain = false;
+        let vault = ta_credentials::FileVault::open(&cred_config).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let token_id = Uuid::parse_str(json["session_token"].as_str().unwrap()).unwrap();
+        let token = vault.validate_token(token_id).unwrap();
+        assert_eq!(token.allowed_scopes, vec!["trade.write".to_string()]);
+    }
+
+    #[test]
+    fn credential_scope_elevation_ignores_routing_log_workload_type_for_thresholds() {
+        // The most recently routed workload is "docs" (lenient defaults),
+        // but the elevation must be gated by credential_scope_elevation's
+        // own stricter built-in baseline (item 4), not "docs"'s.
+        let dir = tempdir().unwrap();
+        write_routing_decision(dir.path(), "docs", "auto");
+        let cred =
+            make_test_credential(dir.path(), vec!["trade.read".into(), "trade.write".into()]);
+        let state = make_state(dir.path());
+
+        // Risk score of 20 would auto-commit under docs' lenient defaults
+        // (max_risk_score 40) but must NOT auto-commit under
+        // credential_scope_elevation's stricter baseline (max_risk_score 15).
+        let pipeline = FakePipeline {
+            opinion: OpinionResult {
+                answer: "Approve".to_string(),
+                reasoning: "Seems fine.".to_string(),
+                confidence: 0.95,
+            },
+            validator: ValidatorResult {
+                verdict: Verdict::Pass,
+                risk_score: 20,
+                confidence: 0.95,
+                reasoning: "Moderate risk.".to_string(),
+            },
+        };
+
+        spawn_answer_thread(dir.path(), "human reviewed and denied");
+        let result = handle_credential_scope_elevation(
+            &state,
+            scope_elevation_request(cred.id),
+            false,
+            &pipeline,
+        )
+        .expect("should escalate rather than auto-commit");
+        let text = content_text(&result);
+        assert!(text.contains("human reviewed and denied"), "got: {}", text);
+
+        let audit_path = dir.path().join(".ta").join("human-verify-audit.jsonl");
+        assert!(
+            !audit_path.exists(),
+            "an escalated elevation must not mint or audit a commit"
+        );
+    }
+
+    #[test]
+    fn credential_scope_elevation_forces_block_when_requested_scope_exceeds_parent_scope() {
+        // item 6: even a favorable opinion/validator verdict must not
+        // override the non-bypassable parent-containment pre-check.
+        let dir = tempdir().unwrap();
+        write_routing_decision(dir.path(), "docs", "auto");
+        let cred = make_test_credential(dir.path(), vec!["trade.read".into()]);
+        let state = make_state(dir.path());
+
+        let mut request = scope_elevation_request(cred.id);
+        // Requested scope is NOT in parent_goal_scope.
+        request.requested_scope = "trade.write".to_string();
+        request.parent_goal_scope = vec!["trade.read".to_string()];
+
+        // A pipeline that would happily auto-commit if the pre-check didn't
+        // run first -- MustNotBeCalledPipeline's validate() would panic if
+        // reached, proving the wrapper short-circuits before the LLM ever
+        // runs.
+        struct FavorableOpinionOnlyPipeline;
+        impl SyntheticPipeline for FavorableOpinionOnlyPipeline {
+            fn opinion(&self, _q: &str, _c: Option<&str>) -> Result<OpinionResult, String> {
+                Ok(OpinionResult {
+                    answer: "Approve".to_string(),
+                    reasoning: "Looks fine to me.".to_string(),
+                    confidence: 0.99,
+                })
+            }
+            fn validate(
+                &self,
+                _q: &str,
+                _c: Option<&str>,
+                _o: &OpinionResult,
+            ) -> Result<ValidatorResult, String> {
+                panic!(
+                    "the validator's LLM critique must never run once the parent-containment \
+                     pre-check has already failed"
+                );
+            }
+        }
+
+        spawn_answer_thread(dir.path(), "human confirmed deny");
+        let result = handle_credential_scope_elevation(
+            &state,
+            request,
+            false,
+            &FavorableOpinionOnlyPipeline,
+        )
+        .expect("should escalate (force-blocked), not panic or auto-commit");
+        let text = content_text(&result);
+        assert!(text.contains("human confirmed deny"), "got: {}", text);
+
+        let audit_path = dir.path().join(".ta").join("human-verify-audit.jsonl");
+        assert!(
+            !audit_path.exists(),
+            "a force-blocked elevation must never mint a token"
+        );
     }
 }

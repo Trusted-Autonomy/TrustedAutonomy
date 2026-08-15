@@ -10163,7 +10163,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.4 — Migrate Session Tokens to Biscuit
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.6.3
 
 **Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
@@ -10200,19 +10200,19 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.6 — Human Escalation for Credential Scope Elevation
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.6.3 (needs a live interception point to trigger from); does not strictly require v0.17.6.4/6.5, since the trigger condition works the same whether the held token is a `SessionToken` or a biscuit.
 
 **Goal**: Wire scope-exceeding requests into TA's existing `ta_human_verify` two-stage confidence-gated escalation instead of building a parallel approval path.
 
 **Items**:
-1. [ ] Trigger condition at the gateway's interception point (v0.17.6.3): `requested_scope ⊄ token.allowed_scopes` — a deterministic, mechanical comparison, not an LLM judgment call.
-2. [ ] Call `ta_human_verify` with a structured (not freeform) question carrying `{requested_scope, current_caveats, target_uri, goal_id, parent_goal_scope}` as context, reusing the existing opinion/validator/gate pipeline unchanged.
-3. [ ] Add one non-bypassable computational pre-check to the validator stage for this workload type: `requested_scope ⊆ parent_goal_scope` asserted before the LLM critique runs — any violation forces `verdict: Block` regardless of model output.
-4. [ ] New `credential_scope_elevation` workload type in `.ta/workflow.toml` with a stricter default `escalate_risk_score` than code-edit workloads.
-5. [ ] On `Commit`: broker mints a fresh, narrowly attenuated token; `.ta/human-verify-audit.jsonl` gets two additive fields, `granted_scope` and `ttl` — no new audit store. On anything else: falls through to the existing blocking `ta_ask_human` UI unchanged.
-6. [ ] Tests: a scope-exceeding request that violates parent-containment is force-blocked even if the opinion/validator LLM passes both signal a favorable verdict; a legitimate elevation within parent scope can still auto-confirm per existing thresholds.
-7. [ ] USAGE.md: document the new escalation trigger alongside the existing `ta_human_verify` docs.
+1. [x] Trigger condition at the gateway's interception point (v0.17.6.3): `requested_scope ⊄ token.allowed_scopes` — a deterministic, mechanical comparison, not an LLM judgment call.
+2. [x] Call `ta_human_verify` with a structured (not freeform) question carrying `{requested_scope, current_caveats, target_uri, goal_id, parent_goal_scope}` as context, reusing the existing opinion/validator/gate pipeline unchanged.
+3. [x] Add one non-bypassable computational pre-check to the validator stage for this workload type: `requested_scope ⊆ parent_goal_scope` asserted before the LLM critique runs — any violation forces `verdict: Block` regardless of model output.
+4. [x] New `credential_scope_elevation` workload type in `.ta/workflow.toml` with a stricter default `escalate_risk_score` than code-edit workloads.
+5. [x] On `Commit`: broker mints a fresh, narrowly attenuated token; `.ta/human-verify-audit.jsonl` gets two additive fields, `granted_scope` and `ttl` — no new audit store. On anything else: falls through to the existing blocking `ta_ask_human` UI unchanged.
+6. [x] Tests: a scope-exceeding request that violates parent-containment is force-blocked even if the opinion/validator LLM passes both signal a favorable verdict; a legitimate elevation within parent scope can still auto-confirm per existing thresholds.
+7. [x] USAGE.md: document the new escalation trigger alongside the existing `ta_human_verify` docs.
 
 #### Version: `0.17.6-alpha.6`
 

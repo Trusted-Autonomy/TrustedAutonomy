@@ -12,6 +12,9 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "workflow.toml",
     "policy.yaml",
     "constitution.toml",
+    "connectors.toml", // broker-mediated connector declarations (v0.17.6.3) — registered
+    // late (v0.17.6.6) after this hygiene test caught the gap; team policy, VCS-committed
+    // like workflow.toml.
     "memory.toml",
     "bmad.toml",
     "config.toml",
