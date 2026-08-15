@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.6-alpha.3
+**Version**: 0.17.7-alpha.1
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -489,6 +489,92 @@ name = "process-inbox"
 goal = "Check inbox and draft replies"
 agent = "claude-code"
 ```
+
+### Workflow Graphs
+
+Workflow graphs are a separate, lower-level engine (`ta-workflow::graph`) from the step-based Workflow TOML above. Where a step workflow chains sequential goal-runs, a graph wires together five typed node kinds — dispatch work, review it from multiple angles, weigh the reviews into one decision, then act on it — as a small TOML file instead of Rust code.
+
+**The five node kinds:**
+
+| Node | Role | Built-in kinds |
+|---|---|---|
+| `[[worker]]` | Dispatches new work (starts a goal) | `goal_dispatch` |
+| `[[reviewer]]` | Produces one scored vote on a draft/decision | `policy`, `advisor_confidence` |
+| `[decision]` | Fans in every reviewer vote, applies weights/threshold/algorithm | `weighted` |
+| `[action]` | Acts on the decision | `recommend`, `auto_approve` |
+| `[[trigger]]` | Fires the graph on an external event (parses today; execution wiring lands in a later release) | `vcs_task_completion` |
+
+**Recommendation vs. auto-approval is the same decision, different wiring.** A `[decision]` node never encodes whether its output is binding or advisory — that's purely which `[action] kind` the graph is wired to. Swap `kind = "recommend"` for `kind = "auto_approve"` in an otherwise identical graph, and the exact same decision goes from "surfaced to a human" to "applied automatically." **New graphs default to `recommend`** — a human must explicitly edit a graph to `auto_approve` before it can act on its own.
+
+Reference graph (also shipped at `templates/workflows/graphs/phase-review-panel.toml` — copy it to `.ta/workflows/graphs/<name>.toml` to use):
+
+```toml
+[[reviewer]]
+id = "policy_check"
+kind = "policy"
+
+[decision]
+id = "panel_verdict"
+kind = "weighted"
+algorithm = "weighted"   # "raft" | "paxos" | "weighted"
+threshold = 0.75
+inputs = ["policy_check"]
+weights = { policy_check = 1.0 }
+
+[action]
+id = "outcome"
+kind = "recommend"       # swap to "auto_approve" to let this graph apply drafts
+decision = "panel_verdict"
+```
+
+Run it with:
+
+```bash
+ta workflow graph-run phase-review-panel --title "My draft" --verb implement
+```
+
+**Dispatching work with `[[worker]]`.** A `goal_dispatch` worker starts a new goal via `ta goal start`, feeding `--verb`/`--workload-hint` straight into the existing routing brain's workload-type classification — no new Rust code is needed to add a new kind of work, only a `[workload_types.<verb>]` binding in `.ta/workflow.toml`:
+
+```toml
+# .ta/workflow.toml
+[workload_types.implement]
+team = "implementer"
+persona = "careful-reviewer"
+
+[workload_types.create]
+team = "reviewer"
+persona = "creative-generator"
+```
+
+```toml
+# .ta/workflows/graphs/dispatch-and-review.toml
+[[worker]]
+id = "dispatch"
+kind = "goal_dispatch"
+
+[[reviewer]]
+id = "policy_check"
+kind = "policy"
+
+[decision]
+id = "verdict"
+threshold = 0.75
+inputs = ["policy_check"]
+
+[action]
+id = "outcome"
+kind = "recommend"
+decision = "verdict"
+```
+
+```bash
+# Same graph, two different dispatches — the routing decision (team/persona/
+# agent) differs purely from --verb, no graph or Rust change required:
+ta workflow graph-run dispatch-and-review --title "Add OAuth" --verb implement
+ta workflow graph-run dispatch-and-review --title "New logo" --verb create --workload-hint art
+```
+
+`ta workflow graph-run <name>` is a synchronous "run now" entry point for testing and debugging a graph definition — it does not yet wait on `[[trigger]]` sources or replace `ta draft apply`'s real approval gate (that wiring lands in a later phase). Flags: `--title`, `--objective`, `--verb` (default `implement`), `--workload-hint`, `--phase`.
 
 ---
 
