@@ -7532,12 +7532,16 @@ touches `ta_external_action` at all) closes it more broadly.
    its own call into the connector's adapter plugin (as `TA_CONNECTOR_SECRET`
    on that one subprocess invocation) -- never into the request payload, and
    never back into the response relayed to the agent.
-5. If the requested scope exceeds what the token allows, the action is
-   **captured for human review** rather than hard-denied -- the same
-   `ta draft view` pending-actions surface other auto-policy actions use.
-   Full structured escalation through `ta_human_verify` lands in v0.17.6.6;
-   until then, a reviewer re-grants a wider-scoped token via
-   `ta credentials grant` to unblock it.
+5. If the requested scope exceeds what the token allows, the request is
+   escalated through `ta_human_verify`'s confidence-gated pipeline
+   (v0.17.6.6, see [Human Escalation for Credential Scope
+   Elevation](#human-escalation-for-credential-scope-elevation) below)
+   instead of being hard-denied. A high-confidence, low-risk elevation that
+   stays within the credential's own declared scopes can auto-confirm and
+   the action proceeds immediately; anything else falls through to the same
+   `ta draft view` pending-actions surface other auto-policy actions use, and
+   a reviewer can re-grant a wider-scoped token via `ta credentials grant`
+   to unblock it manually.
 6. Calling `ta_external_action` with an undeclared `connector`, or a
    `broker_mediated` connector missing/lacking a valid `session_token`,
    returns a clear, actionable error rather than silently falling back to
@@ -7549,6 +7553,56 @@ the broker-resolved secret from their own subprocess environment as
 exchanged with TA, so it cannot end up logged to `.ta/action-log.jsonl` or
 echoed into a plugin's own response by accident (a well-behaved plugin
 should not echo it either way).
+
+#### Human Escalation for Credential Scope Elevation
+
+When a broker-mediated `ta_external_action` call hits a scope deficit (step
+5 above), TA wires it straight into the existing `ta_human_verify` two-stage
+confidence-gated pipeline (v0.17.6.6) instead of a bespoke approval path or
+an indefinite hard denial:
+
+1. **Trigger** -- a deterministic, mechanical comparison at the gateway's
+   live interception point: `requested_scope ⊄ token.allowed_scopes`. Never
+   an LLM judgment call.
+2. **Structured escalation** -- `ta_human_verify` runs with a structured
+   question carrying `requested_scope`, `current_caveats` (the scopes
+   already on the deficient token), `target_uri`, `goal_id`, and
+   `parent_goal_scope` (the full scope set declared on the underlying vault
+   credential) as context, under a dedicated `credential_scope_elevation`
+   workload type -- the same opinion/validator/gate pipeline used elsewhere,
+   unchanged.
+3. **Non-bypassable containment check** -- before the validator's LLM
+   critique ever runs, a computational pre-check asserts `requested_scope ⊆
+   parent_goal_scope`. A violation forces `verdict: Block` (which always
+   rejects) regardless of what the opinion/validator pipeline would
+   otherwise conclude -- an elevation can never exceed what the credential
+   itself was ever allowed to grant, no matter how confident the model is.
+4. **Stricter default gate** -- `credential_scope_elevation` gets its own
+   built-in threshold baseline (`min_confidence = 0.9`, `max_risk_score =
+   15`, `escalate_risk_score = 30`), stricter than the generic defaults used
+   by code-edit-shaped workloads, since a wrong auto-confirm here mints a
+   real, usable credential grant rather than just approving a text answer.
+   It intentionally does not inherit `[human_verify.default]` -- a
+   project's house-style default tuned for code review shouldn't silently
+   loosen the one gate that hands out live secrets. Override it explicitly
+   if needed:
+
+   ```toml
+   [human_verify.credential_scope_elevation]
+   escalate_risk_score = 20   # even stricter than the built-in default of 30
+   ```
+
+5. **On `Commit`** -- the broker mints a fresh session token scoped to
+   *only* the requested scope (never the credential's full parent scope),
+   with a 15-minute TTL (shorter than the 1-hour baseline goal-run grant,
+   since this is a narrow, ad hoc widening for one action rather than a
+   whole session's credential set). `.ta/human-verify-audit.jsonl` gets two
+   additive fields on that entry, `granted_scope` and `ttl` -- no new audit
+   store. The `ta_external_action` call then proceeds immediately using the
+   newly authorized secret.
+6. **On anything else** -- falls through to the existing blocking
+   `ta_ask_human` UI unchanged, and the action is captured for review
+   exactly as an unresolved scope deficit always was.
 
 ### Context Memory
 

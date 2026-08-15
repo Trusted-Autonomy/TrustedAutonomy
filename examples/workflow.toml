@@ -165,3 +165,17 @@ health_check = true
 #
 # [human_verify.security]             # high-stakes workload: stricter
 # escalate_risk_score = 50
+#
+# [human_verify.credential_scope_elevation]  # v0.17.6.6: gates a broker
+# escalate_risk_score = 20                   # scope-elevation grant, not just
+#                                             # a text answer. Already has a
+#                                             # stricter built-in default than
+#                                             # every other workload
+#                                             # (min_confidence = 0.9,
+#                                             # max_risk_score = 15,
+#                                             # escalate_risk_score = 30) and
+#                                             # deliberately does NOT inherit
+#                                             # [human_verify.default] — tune
+#                                             # this table explicitly rather
+#                                             # than relying on a house-style
+#                                             # default meant for code review.
