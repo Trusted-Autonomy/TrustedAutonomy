@@ -7397,7 +7397,11 @@ broker's public key (stored alongside `credentials.json` in `.ta/`) can
 verify one offline -- no round trip to whichever process minted it. This is
 what lets `ta credentials grant` (a CLI process) mint a grant that the MCP
 gateway (a different process) can independently verify for broker-mediated
-connectors, below.
+connectors, below. A holder can also *attenuate* a grant it already has --
+narrow its scopes and shorten its TTL by appending a block, without needing
+the broker's signing key at all -- which is how swarm sub-goal fan-out
+narrows credentials hop-by-hop (see "Swarm fan-out narrowing is
+cryptographic" below).
 
 `ta credentials grant` mints a grant directly for inspection or manual use;
 `ta run --credential-scopes` (below) does the same thing internally for
@@ -7479,6 +7483,33 @@ the nested `ta run` process each sub-goal spawns receives the same
 `--credential-scopes` value explicitly and applies the identical scope
 filter to its own eventual agent spawn -- clearing the environment there too
 -- rather than relying solely on what the parent process happened to strip.
+
+**Swarm fan-out narrowing is cryptographic, not just conventional
+(v0.17.6.5).** For a broker-mediated connector, a sub-goal that already holds
+a biscuit grant for a credential (because its own parent spawn handed it one)
+doesn't get a brand-new, independently-minted grant when it fans out to its
+own sub-sub-goals -- it *attenuates* the token it's already holding, in
+process, via `biscuit.append()`. No network round trip, and no root signing
+key is needed to attenuate; that's the whole point of a biscuit. The
+practical difference from a fresh mint: the resulting child token carries a
+`check` clause that the broker's authorizer enforces on every use, so a
+scope dropped at *any* hop in the chain is provably gone for every
+descendant, not just absent from a list a well-behaved caller happens to
+consult. A two-level-deep swarm (a sub-goal that itself runs `--workflow
+swarm`) narrows the same way at both hops -- the grandchild's token can be
+cryptographically proven to reject a scope its grandparent held but its
+parent never passed down, even if that parent's own bookkeeping were
+compromised.
+
+This is transparent -- no new flags -- and falls back to today's
+independent-mint-from-the-vault behavior whenever there's no held token to
+attenuate: the top-level swarm launch (nothing to inherit from yet) and any
+credential that isn't broker-mediated for this connector (its scope handoff
+still goes through the `--credential-scopes` narrowing above, pending
+per-tool credential shims in a later phase). Each attenuation also narrows
+the token's TTL to whichever is shorter: the caller's requested TTL, or the
+parent token's own remaining validity -- so a sub-goal can never end up
+holding a longer-lived grant than the process that spawned it.
 
 #### Broker-Mediated Connectors
 

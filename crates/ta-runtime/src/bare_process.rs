@@ -283,7 +283,19 @@ pub fn apply_credentials_to_env(
         if cred.broker_mediated {
             match &cred.session_token_id {
                 Some(token_id) => {
-                    env.insert(format!("TA_SESSION_TOKEN_{}", cred.name), token_id.clone());
+                    let key = format!("TA_SESSION_TOKEN_{}", cred.name);
+                    // v0.17.6.5: the expiry rides alongside the token as a
+                    // plain, unenforced hint -- a downstream process that
+                    // inherits this credential (e.g. attenuating it further
+                    // for its own swarm sub-goal) uses it only to estimate
+                    // `parent_remaining_ttl`. The real bound stays whatever
+                    // check is cryptographically embedded in the token
+                    // itself, so a tampered/missing hint here can only make
+                    // that estimate pessimistic, never unsafe.
+                    if let Some(expires_at) = cred.session_token_expires_at {
+                        env.insert(format!("{key}_EXPIRES_AT"), expires_at.to_rfc3339());
+                    }
+                    env.insert(key, token_id.clone());
                 }
                 None => {
                     tracing::warn!(
