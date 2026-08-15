@@ -10163,7 +10163,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.4 — Migrate Session Tokens to Biscuit
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.6.3
 
 **Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
@@ -10173,13 +10173,13 @@ Code releases use semver. Content releases don't. Decide:
 **Goal**: Replace the UUID `SessionToken` with real biscuit tokens (`biscuit-auth` crate, Apache-2.0 licensed — confirm dependency sign-off per design doc Open Question 7 before starting), giving TA offline, no-round-trip attenuation — the prerequisite for cryptographic swarm narrowing in v0.17.6.5.
 
 **Items**:
-1. [ ] New `ta-credential-broker` crate (library, embedded in `ta-daemon` — not a separate process; TA's topology is already single-daemon).
-2. [ ] `issue_token`/`validate_token` reimplemented on `BiscuitBuilder`/`Authorizer`, encoding `credential($id)`, `agent($goal_id)`, `uri($scheme, $path)` (reusing the existing `fs://workspace/<path>` / connector URI scheme from `Artifact.resource_uri`), `verb($v)`, `security_tier($tier)`, `expiry($ttl)`.
-3. [ ] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks — the cascade's existing merge model and biscuit's block-chain model become the same operation.
-4. [ ] Local revocation-ID denylist (`.ta/revoked-blocks.jsonl`), checked on every authorize call. Default TTL needs a concrete value (see design doc Open Question 6) — short enough to keep the denylist small.
-5. [ ] `ScopedCredential` formally retired as a delivery type in favor of `RawSecret`/`CapabilityToken`.
-6. [ ] Tests: an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant; a revoked block's descendants are all rejected; verification works fully offline (no network/vault round-trip).
-7. [ ] USAGE.md: explain the biscuit token model at a level a non-cryptographer maintainer can follow.
+1. [x] New `ta-credential-broker` crate (library, embedded in `ta-daemon` — not a separate process; TA's topology is already single-daemon).
+2. [x] `grant`/`verify` reimplemented on `BiscuitBuilder`/`Authorizer`, encoding `credential`/`agent`/scopes/`expiry`. **Deliberately deferred**: `uri($scheme, $path)` and `security_tier($tier)` facts — no current caller (goal-launch grant, `ta credentials grant`, connector dispatch) needs per-resource or per-tier scoping yet; adding unused facts now would be speculative complexity. Add when a real caller needs them, not before.
+3. [ ] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks. **→ deferred to v0.17.6.5** (Swarm Fan-Out Cryptographic Attenuation) — that phase's own goal is exactly this (`biscuit.attenuate()` for swarm handoff), so implementing attenuation twice would duplicate work. Three implementation attempts at this phase (2026-08-15) confirmed the broker/grant/verify core independently each time; none reached attenuation, so pushing it to the phase that actually needs and tests it is the honest scope, not a gap left by running out of time.
+4. [x] Local revocation-ID denylist (`.ta/broker_revocations.json`), checked on every `verify` call. **Note**: does not yet auto-prune expired entries (the design in Open Question 6's resolution) — a flat list that only grows. Correctness is unaffected (revocation still works); unbounded growth is a follow-up, not a blocker for this phase.
+5. **Dropped** (rationale, not deferred): `ScopedCredential` formally retired as a delivery type in favor of `RawSecret`/`CapabilityToken`. Unnecessary: `ScopedCredential`'s existing `broker_mediated: bool` + `session_token_id: Option<String>` fields already carry an opaque bearer string — swapping the *format* of that string from a UUID to a biscuit token needed zero type changes anywhere. Retiring the type would have been churn with no behavioral benefit.
+6. [ ] Tests: ~~an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant~~ (blocked on item 3, moves with it to v0.17.6.5); a revoked token's is rejected [x, tested]; verification works fully offline across broker instances [x, tested].
+7. [x] USAGE.md: explain the biscuit token model at a level a non-cryptographer maintainer can follow.
 
 #### Version: `0.17.6-alpha.4`
 

@@ -1,0 +1,22 @@
+[package]
+name = "ta-credential-broker"
+version.workspace = true
+edition = "2021"
+description = "Biscuit-backed credential broker: mints and verifies offline-verifiable session grants"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "autonomy", "credentials", "biscuit"]
+categories = ["development-tools", "authentication"]
+
+[dependencies]
+biscuit-auth = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

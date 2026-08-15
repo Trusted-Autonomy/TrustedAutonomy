@@ -670,13 +670,6 @@ fn resolve_connector_authorization(
             None,
         ));
     };
-    let Ok(token_id) = Uuid::parse_str(session_token) else {
-        return ConnectorAuthorization::Error(McpError::invalid_params(
-            format!("session_token '{session_token}' is not a valid token id"),
-            None,
-        ));
-    };
-
     let mut cred_config = ta_credentials::CredentialsConfig::for_project(workspace_root);
     cred_config.use_keychain = credential_vault_use_keychain;
     let Ok(vault) = ta_credentials::FileVault::open(&cred_config) else {
@@ -690,13 +683,36 @@ fn resolve_connector_authorization(
         ));
     };
 
-    let token = match vault.validate_token(token_id) {
-        Ok(t) => t,
+    // v0.17.6.4: the presented `session_token` is now a biscuit grant minted
+    // by `ta_credential_broker::CredentialBroker` (see `ta credentials
+    // grant` / `load_vault_credentials`), not a UUID that resolves against
+    // `FileVault`'s in-process token list. `CredentialBroker::verify`
+    // checks the signature, the grant's embedded expiry, and the broker's
+    // revocation denylist entirely offline — no shared state with whichever
+    // process minted it is required.
+    let broker_dir = cred_config
+        .vault_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| workspace_root.join(".ta"));
+    let Ok(broker) = ta_credential_broker::CredentialBroker::open(&broker_dir) else {
+        return ConnectorAuthorization::Error(McpError::internal_error(
+            format!(
+                "connector '{connector_id}' is broker_mediated but the credential broker at \
+                 {} could not be opened",
+                broker_dir.display()
+            ),
+            None,
+        ));
+    };
+
+    let grant = match broker.verify(session_token) {
+        Ok(g) => g,
         Err(e) => {
             return ConnectorAuthorization::Error(McpError::invalid_params(
                 format!(
-                    "session_token for connector '{connector_id}' failed validation: {e} \
-                     (tokens expire — mint a fresh one via `ta credentials grant`)"
+                    "session_token for connector '{connector_id}' failed verification: {e} \
+                     (grants expire — mint a fresh one via `ta credentials grant`)"
                 ),
                 None,
             ));
@@ -704,19 +720,19 @@ fn resolve_connector_authorization(
     };
 
     if let Some(agent_id) = requesting_agent_id {
-        if token.agent_id != agent_id {
+        if grant.agent_id != agent_id {
             return ConnectorAuthorization::Error(McpError::invalid_params(
                 format!(
                     "session_token for connector '{connector_id}' was issued to a different \
                      agent ('{}') than the requesting goal's agent ('{agent_id}')",
-                    token.agent_id
+                    grant.agent_id
                 ),
                 None,
             ));
         }
     }
 
-    let credential = match vault.get(token.credential_id) {
+    let credential = match vault.get(grant.credential_id) {
         Ok(c) => c,
         Err(e) => {
             return ConnectorAuthorization::Error(McpError::internal_error(
@@ -738,7 +754,7 @@ fn resolve_connector_authorization(
     }
 
     if let Some(required_scope) = &entry.required_scope {
-        if !token.allowed_scopes.iter().any(|s| s == required_scope) {
+        if !grant.allowed_scopes.iter().any(|s| s == required_scope) {
             return ConnectorAuthorization::ScopeDeficit {
                 description: format!(
                     "ta_external_action:{} via connector '{connector_id}' requires scope \
@@ -747,7 +763,7 @@ fn resolve_connector_authorization(
                      than auto-denied (structured human escalation via ta_human_verify lands \
                      in v0.17.6.6); a reviewer can re-grant a wider-scoped token via \
                      `ta credentials grant`.",
-                    params.action_type, token.allowed_scopes
+                    params.action_type, grant.allowed_scopes
                 ),
             };
         }
@@ -1493,8 +1509,9 @@ else:
                 vec!["trade.write".into()],
             )
             .unwrap();
-        let token = vault
-            .issue_token(cred.id, "test-agent", vec!["trade.write".into()], 3600)
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let granted = broker
+            .grant(cred.id, "test-agent", vec!["trade.write".into()], 3600)
             .unwrap();
 
         let state = make_state(dir.path());
@@ -1506,7 +1523,7 @@ else:
             dry_run: false,
             budget: None,
             connector: Some("paper-trading".into()),
-            session_token: Some(token.token_id.to_string()),
+            session_token: Some(granted.token),
         };
 
         let result = handle_external_action(&state, params).unwrap();
@@ -1574,6 +1591,104 @@ else:
     }
 
     #[test]
+    fn broker_mediated_connector_with_malformed_token_is_a_clear_actionable_error() {
+        // v0.17.6.4: `session_token` is now a biscuit grant, not a UUID —
+        // a garbage string must fail broker verification with an
+        // actionable message, not panic on `Uuid::parse_str`.
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            b"[connectors.paper-trading]\n\
+              credential_name = \"PAPER_API_KEY\"\n\
+              broker_mediated = true\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("paper-trading".into()),
+            session_token: Some("not-a-real-uuid-or-biscuit".into()),
+        };
+
+        let err = handle_external_action(&state, params).unwrap_err();
+        assert!(
+            err.message.to_string().contains("failed verification"),
+            "expected an actionable verification-failure error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn broker_mediated_connector_with_revoked_grant_is_a_clear_actionable_error() {
+        use ta_credentials::CredentialVault;
+
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.\"connector.execute\"]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            b"[connectors.paper-trading]\n\
+              credential_name = \"PAPER_API_KEY\"\n\
+              broker_mediated = true\n",
+        )
+        .unwrap();
+        write_broker_test_plugin(dir.path());
+        write_routing_decision(dir.path(), "auto");
+
+        let mut vault = open_test_vault(dir.path());
+        let cred = vault
+            .add(
+                "PAPER_API_KEY",
+                "paper-trading",
+                "sk-live-supersecret-do-not-leak",
+                vec![],
+            )
+            .unwrap();
+        let mut broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let granted = broker.grant(cred.id, "test-agent", vec![], 3600).unwrap();
+        broker.revoke(&granted.token_id).unwrap();
+
+        let state = make_state(dir.path());
+        let params = ExternalActionParams {
+            action_type: "connector.execute".into(),
+            payload: json!({}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: Some("paper-trading".into()),
+            session_token: Some(granted.token),
+        };
+
+        let err = handle_external_action(&state, params).unwrap_err();
+        assert!(
+            err.message.to_string().contains("failed verification"),
+            "expected an actionable verification-failure error for a revoked grant: {}",
+            err.message
+        );
+    }
+
+    #[test]
     fn broker_mediated_connector_scope_deficit_is_captured_for_review_not_denied() {
         use ta_credentials::CredentialVault;
 
@@ -1597,7 +1712,7 @@ else:
         write_routing_decision(dir.path(), "auto");
 
         let mut vault = open_test_vault(dir.path());
-        // Credential/token exist, but the token was only granted a narrower
+        // Credential/grant exist, but the grant was only issued a narrower
         // scope than the connector requires.
         let cred = vault
             .add(
@@ -1607,8 +1722,9 @@ else:
                 vec!["trade.read".into(), "trade.write".into()],
             )
             .unwrap();
-        let token = vault
-            .issue_token(cred.id, "test-agent", vec!["trade.read".into()], 3600)
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let granted = broker
+            .grant(cred.id, "test-agent", vec!["trade.read".into()], 3600)
             .unwrap();
 
         let state = make_state(dir.path());
@@ -1620,7 +1736,7 @@ else:
             dry_run: false,
             budget: None,
             connector: Some("paper-trading".into()),
-            session_token: Some(token.token_id.to_string()),
+            session_token: Some(granted.token),
         };
 
         let result = handle_external_action(&state, params).unwrap();

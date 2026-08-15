@@ -31,13 +31,16 @@ pub enum CredentialsCommands {
         /// Credential ID (UUID) or prefix.
         id: String,
     },
-    /// Issue a scoped, time-limited session token for an agent (v0.17.6.2).
+    /// Issue a scoped, time-limited session grant for an agent (v0.17.6.2;
+    /// migrated to biscuit tokens in v0.17.6.4).
     ///
-    /// This is the real credential-delivery path: the token records who it
-    /// was issued to, which scopes it authorizes, and when it expires. It
-    /// does not itself hand back the underlying secret — `ta run` uses the
-    /// same `issue_token`/`validate_token` path internally to gate secret
-    /// delivery into an agent's environment.
+    /// This is the real credential-delivery path: the grant records who it
+    /// was issued to, which scopes it authorizes, and when it expires,
+    /// cryptographically signed by `ta-credential-broker` so any process
+    /// holding the broker's public key (e.g. the MCP gateway) can verify it
+    /// offline. It does not itself hand back the underlying secret — `ta
+    /// run` uses the same `CredentialBroker::grant` path internally to gate
+    /// secret delivery into an agent's environment.
     Grant {
         /// Credential ID (UUID) or prefix.
         id: String,
@@ -122,14 +125,31 @@ fn list_credentials(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn grant_token(
+/// Where the broker's root key and revocation denylist live — alongside
+/// `credentials.json`, inside the project's `.ta` dir.
+fn broker_dir(config: &GatewayConfig) -> std::path::PathBuf {
+    cred_config(config)
+        .vault_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| config.workspace_root.join(".ta"))
+}
+
+/// Resolve `id_str` (a credential id or prefix) and mint a biscuit-backed
+/// grant for it via [`ta_credential_broker::CredentialBroker`]. Split out
+/// from `grant_token` so the minted token itself (not just "did this print
+/// without erroring") is assertable in tests.
+fn mint_grant(
     config: &GatewayConfig,
     id_str: &str,
     agent: &str,
     scopes: &[String],
     ttl_secs: u64,
-) -> anyhow::Result<()> {
-    let mut vault = FileVault::open(&cred_config(config))?;
+) -> anyhow::Result<(
+    ta_credentials::CredentialSummary,
+    ta_credential_broker::GrantedToken,
+)> {
+    let vault = FileVault::open(&cred_config(config))?;
 
     // Support prefix matching, same as `revoke`.
     let creds = vault.list()?;
@@ -148,17 +168,30 @@ fn grant_token(
         ),
     };
 
-    let token = vault.issue_token(cred.id, agent, scopes.to_vec(), ttl_secs)?;
+    let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(config))?;
+    let granted = broker.grant(cred.id, agent, scopes.to_vec(), ttl_secs)?;
+    Ok((cred, granted))
+}
+
+fn grant_token(
+    config: &GatewayConfig,
+    id_str: &str,
+    agent: &str,
+    scopes: &[String],
+    ttl_secs: u64,
+) -> anyhow::Result<()> {
+    let (cred, granted) = mint_grant(config, id_str, agent, scopes, ttl_secs)?;
     println!("Session token issued:");
-    println!("  Token ID:   {}", token.token_id);
+    println!("  Token:      {}", granted.token);
+    println!("  Token ID:   {}", granted.token_id);
     println!("  Credential: {} ({})", cred.name, cred.id);
-    println!("  Agent:      {}", token.agent_id);
-    if !token.allowed_scopes.is_empty() {
-        println!("  Scopes:     {}", token.allowed_scopes.join(", "));
+    println!("  Agent:      {}", granted.agent_id);
+    if !granted.allowed_scopes.is_empty() {
+        println!("  Scopes:     {}", granted.allowed_scopes.join(", "));
     }
     println!(
         "  Expires:    {}",
-        token.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+        granted.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
     Ok(())
 }
@@ -187,5 +220,59 @@ fn revoke_credential(config: &GatewayConfig, id_str: &str) -> anyhow::Result<()>
             id_str,
             n
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_config(dir: &TempDir) -> GatewayConfig {
+        let mut config = GatewayConfig::for_project(dir.path());
+        config.credential_vault_use_keychain = false;
+        config
+    }
+
+    #[test]
+    fn grant_mints_a_broker_verifiable_token_not_a_vault_only_uuid() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        add_credential(&config, "svc", "svc", "secret", &["read".into()]).unwrap();
+        let cred_id = FileVault::open(&cred_config(&config))
+            .unwrap()
+            .list()
+            .unwrap()[0]
+            .id;
+
+        let (cred, granted) = mint_grant(
+            &config,
+            &cred_id.to_string(),
+            "agent-1",
+            &["read".into()],
+            3600,
+        )
+        .unwrap();
+        assert_eq!(cred.id, cred_id);
+
+        // The whole point of the migration: a *different* CredentialBroker
+        // instance, opened fresh on the same `.ta` dir (standing in for the
+        // gateway process, which never shares memory with this CLI process),
+        // can verify the token purely from what it was handed — no lookup
+        // into `vault.tokens` required, unlike the old UUID SessionToken.
+        let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(&config)).unwrap();
+        let verified = broker.verify(&granted.token).unwrap();
+        assert_eq!(verified.credential_id, cred_id);
+        assert_eq!(verified.agent_id, "agent-1");
+        assert_eq!(verified.allowed_scopes, vec!["read".to_string()]);
+    }
+
+    #[test]
+    fn grant_for_unknown_prefix_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        let result = mint_grant(&config, "deadbeef", "agent-1", &[], 3600);
+        assert!(result.is_err());
     }
 }

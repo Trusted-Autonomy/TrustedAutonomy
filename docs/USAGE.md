@@ -7353,20 +7353,30 @@ ta credentials revoke <credential-id>
 ta credentials grant <credential-id> --agent <goal-id> --scope "read" --ttl 3600
 ```
 
-Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. The
-`FileVault` issues session tokens with configurable TTL:
+Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. Session
+grants are minted by `ta-credential-broker` as signed
+[biscuit](https://www.biscuitsec.org/) tokens (v0.17.6.4) with configurable
+TTL:
 
 ```
 Agent requests: "I need gmail read access for goal abc123"
-TA issues:      SessionToken { ttl: 3600s, scopes: ["read"], agent: "claude-code" }
-Agent uses:     The token (never the raw credential)
-TA proxies:     Token → real credential on each API call
+TA issues:      a biscuit grant: { credential, agent: "claude-code", scopes: ["read"], ttl: 3600s }
+Agent uses:     the grant (never the raw credential)
+TA proxies:     grant → real credential on each API call
 ```
 
-`ta credentials grant` mints a token directly for inspection or manual use;
+Unlike the plain reference ids TA used before v0.17.6.4, a grant is
+self-contained and cryptographically signed: any process holding the
+broker's public key (stored alongside `credentials.json` in `.ta/`) can
+verify one offline -- no round trip to whichever process minted it. This is
+what lets `ta credentials grant` (a CLI process) mint a grant that the MCP
+gateway (a different process) can independently verify for broker-mediated
+connectors, below.
+
+`ta credentials grant` mints a grant directly for inspection or manual use;
 `ta run --credential-scopes` (below) does the same thing internally for
 every credential it hands to an agent process -- each one is only injected
-after its own token has been issued and validated, so a credential that
+after its own grant has been minted and verified, so a credential that
 fails either step (for example, an already-expired TTL) is withheld rather
 than handed over.
 
@@ -7478,8 +7488,8 @@ marked `broker_mediated = true` are withheld from the agent's environment.
 
 | | `broker_mediated = false` (default) | `broker_mediated = true` |
 |---|---|---|
-| What the agent's env contains | `GITHUB_TOKEN=ghp_...` (the raw secret) | `TA_SESSION_TOKEN_GITHUB_TOKEN=<token-id>` (opaque) |
-| What `ta_external_action` needs | Nothing connector-specific | `connector: "github"`, `session_token: "<token-id>"` |
+| What the agent's env contains | `GITHUB_TOKEN=ghp_...` (the raw secret) | `TA_SESSION_TOKEN_GITHUB_TOKEN=<biscuit grant>` (opaque) |
+| What `ta_external_action` needs | Nothing connector-specific | `connector: "github"`, `session_token: "<biscuit grant>"` |
 | Where the real secret is attached | Wherever the agent's own process/plugin script chooses to use the env var | Only to the gateway's own outbound call to the connector's plugin, as `TA_CONNECTOR_SECRET` on that one subprocess invocation |
 | Does the secret ever appear in the agent-visible request or response? | Potentially -- nothing stops the agent from echoing it | Never |
 
@@ -7491,17 +7501,19 @@ touches `ta_external_action` at all) closes it more broadly.
 
 **End-to-end flow for a broker-mediated connector:**
 
-1. `ta run` mints a session token for the credential as usual (see above),
+1. `ta run` mints a session grant for the credential as usual (see above),
    but because `.ta/connectors.toml` marks it `broker_mediated`, the agent's
-   environment receives `TA_SESSION_TOKEN_GITHUB_TOKEN=<token-id>` instead
-   of the raw `GITHUB_TOKEN` value.
+   environment receives `TA_SESSION_TOKEN_GITHUB_TOKEN=<biscuit grant>`
+   instead of the raw `GITHUB_TOKEN` value.
 2. The agent calls `ta_external_action` with `connector: "github"` and
-   `session_token: "<token-id>"` (read from its own environment) alongside
-   the normal `action_type`/`payload`.
-3. The gateway independently re-validates the token against the credential
-   vault (expiry, and that it was issued to this same agent), confirms it
-   backs the `github` connector's declared credential, and checks
-   `required_scope` against the token's `allowed_scopes`.
+   `session_token: "<biscuit grant>"` (read from its own environment)
+   alongside the normal `action_type`/`payload`.
+3. The gateway independently verifies the grant -- entirely offline, no
+   vault round trip needed for the cryptographic check itself (expiry and
+   revocation are enforced by `ta-credential-broker::CredentialBroker`
+   directly), and that it was issued to this same agent -- then confirms it
+   backs the `github` connector's declared credential and checks
+   `required_scope` against the grant's `allowed_scopes`.
 4. On success, the gateway resolves the real secret and attaches it only to
    its own call into the connector's adapter plugin (as `TA_CONNECTOR_SECRET`
    on that one subprocess invocation) -- never into the request payload, and

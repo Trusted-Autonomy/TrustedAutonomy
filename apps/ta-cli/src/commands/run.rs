@@ -4898,10 +4898,10 @@ fn scoped_credential_env(
     env
 }
 
-/// Default TTL for the session tokens minted by [`load_vault_credentials`]
+/// Default TTL for the session grants minted by [`load_vault_credentials`]
 /// (v0.17.6.2). Generous enough to cover a typical single goal run without
-/// being unbounded; a real per-goal deadline arrives with the biscuit
-/// migration in v0.17.6.4/6.5.
+/// being unbounded; a real per-goal deadline arrives with swarm attenuation
+/// in v0.17.6.5.
 const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
 
 /// Load every credential currently registered in `<project_root>/.ta/credentials.json`
@@ -4911,13 +4911,14 @@ const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
 /// read. For each credential eligible for `required_scopes` (same
 /// eligibility rule `apply_credentials_to_env` enforces: unscoped credentials
 /// are always eligible, scoped ones need at least one overlapping scope), a
-/// `SessionToken` is minted via `CredentialVault::issue_token` and
-/// immediately checked via `CredentialVault::validate_token` *before* the
-/// secret is ever read. A credential that fails either step (e.g. the vault
-/// rejects the mint, or — once TTLs shorter than a spawn are used — the
-/// token is already expired) is withheld, not silently granted. This makes
-/// every credential handed to an agent process correspond to a recorded,
-/// time-boxed grant in the vault rather than an unconditional `vault.get`.
+/// grant is minted via `ta_credential_broker::CredentialBroker::grant`
+/// (v0.17.6.4 — previously a vault-local `SessionToken`) and immediately
+/// checked via `CredentialBroker::verify` *before* the secret is ever read.
+/// A credential that fails either step (e.g. the mint fails, or — once TTLs
+/// shorter than a spawn are used — the grant is already expired) is
+/// withheld, not silently granted. This makes every credential handed to an
+/// agent process correspond to a recorded, time-boxed, cryptographically
+/// verifiable grant rather than an unconditional `vault.get`.
 ///
 /// Returns an empty list (not an error) when the vault doesn't exist or is
 /// unreadable — an unpopulated vault is the common case today, and callers
@@ -4938,10 +4939,18 @@ fn load_vault_credentials(
 
     let mut cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
     cred_config.use_keychain = use_keychain;
-    let Ok(mut vault) = ta_credentials::FileVault::open(&cred_config) else {
+    let Ok(vault) = ta_credentials::FileVault::open(&cred_config) else {
         return Vec::new();
     };
     let Ok(summaries) = vault.list() else {
+        return Vec::new();
+    };
+    let broker_dir = cred_config
+        .vault_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| project_root.join(".ta"));
+    let Ok(broker) = ta_credential_broker::CredentialBroker::open(&broker_dir) else {
         return Vec::new();
     };
     // v0.17.6.3: connectors declared `broker_mediated = true` in
@@ -4969,22 +4978,22 @@ fn load_vault_credentials(
                 return None;
             }
 
-            let token = match vault.issue_token(summary.id, agent_id, granted_scopes, ttl_secs) {
-                Ok(token) => token,
+            let granted = match broker.grant(summary.id, agent_id, granted_scopes, ttl_secs) {
+                Ok(granted) => granted,
                 Err(e) => {
                     tracing::warn!(
                         credential = %summary.name,
                         error = %e,
-                        "failed to issue session token; credential withheld"
+                        "failed to mint session grant; credential withheld"
                     );
                     return None;
                 }
             };
-            if let Err(e) = vault.validate_token(token.token_id) {
+            if let Err(e) = broker.verify(&granted.token) {
                 tracing::warn!(
                     credential = %summary.name,
                     error = %e,
-                    "issued session token failed validation; credential withheld"
+                    "minted session grant failed verification; credential withheld"
                 );
                 return None;
             }
@@ -4994,7 +5003,7 @@ fn load_vault_credentials(
                 let cred =
                     ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes);
                 if broker_mediated {
-                    cred.with_broker_mediation(token.token_id.to_string())
+                    cred.with_broker_mediation(granted.token)
                 } else {
                     cred
                 }
@@ -11197,10 +11206,11 @@ plan_pending_window = 7
 
     #[test]
     fn load_vault_credentials_withholds_credential_when_token_already_expired() {
-        // v0.17.6.2 regression guard: issue_token/validate_token must be
-        // load-bearing here, not decorative. A 0-second TTL means the minted
-        // token is expired the instant `validate_token` checks it, so the
-        // credential must be withheld even though it's otherwise eligible.
+        // v0.17.6.2 regression guard (broker.grant/broker.verify since
+        // v0.17.6.4): the mint-then-verify gate must be load-bearing here,
+        // not decorative. A 0-second TTL means the minted grant is expired
+        // the instant `verify` checks it, so the credential must be
+        // withheld even though it's otherwise eligible.
         use ta_credentials::{CredentialVault, FileVault};
 
         let dir = tempfile::tempdir().unwrap();
@@ -11213,6 +11223,46 @@ plan_pending_window = 7
 
         let creds = load_vault_credentials(dir.path(), "agent-1", &[], 0, false);
         assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn load_vault_credentials_broker_mediated_session_token_is_biscuit_verifiable() {
+        // v0.17.6.4: for a `broker_mediated = true` connector,
+        // `session_token_id` must be a token that `ta-credential-broker`
+        // itself can verify offline in a *separate* process — the gateway,
+        // which never shares memory with `ta run`'s spawn — not a UUID that
+        // only resolves against this process's in-memory FileVault state.
+        use ta_credentials::{CredentialVault, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\nbroker_mediated = true\n",
+        )
+        .unwrap();
+
+        let cred_id = {
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
+            vault
+                .add("GITHUB_TOKEN", "github", "ghp_secret", vec![])
+                .unwrap()
+                .id
+        };
+
+        let creds = load_vault_credentials(dir.path(), "agent-1", &[], 3600, false);
+        assert_eq!(creds.len(), 1);
+        assert!(creds[0].broker_mediated);
+        let session_token = creds[0]
+            .session_token_id
+            .as_deref()
+            .expect("broker-mediated credential must carry a session token");
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let verified = broker.verify(session_token).unwrap();
+        assert_eq!(verified.credential_id, cred_id);
+        assert_eq!(verified.agent_id, "agent-1");
     }
 
     #[test]

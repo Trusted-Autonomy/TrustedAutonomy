@@ -45,6 +45,7 @@ arboard = { workspace = true }
 # Internal crates — version kept in sync with workspace by bump-version.sh
 ta-audit = { path = "../../crates/ta-audit", version = "0.17.7-alpha.1" }
 ta-credentials = { path = "../../crates/ta-credentials", version = "0.17.7-alpha.1" }
+ta-credential-broker = { path = "../../crates/ta-credential-broker", version = "0.17.7-alpha.1" }
 ta-memory = { path = "../../crates/ta-memory", version = "0.17.7-alpha.1" }
 ta-changeset = { path = "../../crates/ta-changeset", version = "0.17.7-alpha.1" }
 ta-connector-fs = { path = "../../crates/ta-connectors/fs", version = "0.17.7-alpha.1" }
