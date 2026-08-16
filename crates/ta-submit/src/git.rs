@@ -271,9 +271,7 @@ impl GitAdapter {
 
     /// Check if gh CLI is available
     fn has_gh_cli(&self) -> bool {
-        Command::new("gh")
-            .arg("--version")
-            .output()
+        run_gh_bounded(&["--version"], &self.work_dir, Duration::from_secs(5))
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
