@@ -10,6 +10,8 @@
 //   execute_step()        — full statechart executor with guards, actions, context patches
 
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use crate::step_action::{ActionRouter, StepAction};
 use crate::step_context::{StepInput, StepOutput, TransitionPayload, WorkflowContext};
@@ -270,10 +272,71 @@ pub enum PrCiStatus {
     Closed,
 }
 
+/// Runs a `gh` subcommand with a hard wall-clock deadline, never blocking
+/// indefinitely. `gh` can hang (slow/unreachable network, or -- on Windows,
+/// where GitHub-hosted runners preinstall `gh` -- a `gh`-named credential
+/// shim on `PATH`, see v0.17.6.7) and `poll_pr_ci_status()` is a
+/// best-effort polling call that must never let a hung subprocess block
+/// the whole step executor. Output is drained concurrently on reader
+/// threads while polling for the deadline, avoiding a full-pipe-buffer
+/// deadlock. Returns `None` on spawn failure or timeout (child is killed).
+/// Mirrors `ta_submit::git::run_gh_bounded` -- duplicated locally rather
+/// than shared across crates for now; see project memory for the case for
+/// extracting this into one shared low-level crate instead.
+fn run_gh_bounded(args: &[&str], timeout: Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+
+    let mut child = std::process::Command::new("gh")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stdout_pipe {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr_pipe {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return None,
+        }
+    };
+
+    Some(std::process::Output {
+        status,
+        stdout: stdout_handle.join().unwrap_or_default(),
+        stderr: stderr_handle.join().unwrap_or_default(),
+    })
+}
+
 /// Poll `gh pr view --json statusCheckRollup` and map the result to a `PrCiStatus`.
 pub fn poll_pr_ci_status(pr_number: u64) -> PrCiStatus {
-    let output = std::process::Command::new("gh")
-        .args([
+    let output = run_gh_bounded(
+        &[
             "pr",
             "view",
             &pr_number.to_string(),
@@ -281,11 +344,12 @@ pub fn poll_pr_ci_status(pr_number: u64) -> PrCiStatus {
             "state,statusCheckRollup",
             "--jq",
             ".state + \":\" + (if (.statusCheckRollup | length) == 0 then \"PENDING\" else (.statusCheckRollup | map(.conclusion) | if any(. == \"FAILURE\") then \"FAILURE\" elif all(. == \"SUCCESS\" or . == \"SKIPPED\") then \"SUCCESS\" else \"PENDING\" end) end)",
-        ])
-        .output();
+        ],
+        Duration::from_secs(10),
+    );
 
     match output {
-        Ok(out) if out.status.success() => {
+        Some(out) if out.status.success() => {
             let raw = String::from_utf8_lossy(&out.stdout);
             let line = raw.trim();
             if line.starts_with("MERGED") || line.contains("MERGED") {
