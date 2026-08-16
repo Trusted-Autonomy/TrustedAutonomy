@@ -1671,17 +1671,19 @@ fn build_swarm_sub_goal_command(
     // derivation is needed.
     // No goal_id exists yet for this sub-goal (its `ta run` child mints its
     // own), so the title stands in as the token's `agent_id` for now — good
-    // enough for audit-trail purposes ahead of v0.17.6.5's cryptographic
-    // swarm attenuation, which replaces this whole handoff with a real
-    // attenuated biscuit.
+    // enough for audit-trail purposes when this spawn falls back to a fresh
+    // vault mint (the swarm root, or a non-broker-mediated credential); a
+    // spawn that instead inherits and attenuates a held token (v0.17.6.5)
+    // carries the original grantee's `agent_id` forward from the parent.
+    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let available = load_vault_credentials(
         workspace_root,
         &format!("swarm:{sub_goal_title}"),
         credential_scopes,
         CREDENTIAL_TOKEN_TTL_SECS,
         use_keychain,
+        &current_env,
     );
-    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let sub_goal_env = scoped_credential_env(&current_env, &available, credential_scopes);
 
     cmd.env_clear();
@@ -5058,9 +5060,16 @@ fn install_credential_shims(
 
 /// Default TTL for the session grants minted by [`load_vault_credentials`]
 /// (v0.17.6.2). Generous enough to cover a typical single goal run without
-/// being unbounded; a real per-goal deadline arrives with swarm attenuation
-/// in v0.17.6.5.
+/// being unbounded.
 const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
+
+/// Default per-wave TTL ceiling for a swarm sub-goal's *attenuated* grant
+/// (v0.17.6.5) — deliberately tighter than [`CREDENTIAL_TOKEN_TTL_SECS`]'s
+/// whole-goal budget, since a single wave is expected to be a fraction of a
+/// full run. Only ever narrows further (never widens) the parent's actual
+/// remaining validity: see [`load_vault_credentials`]'s `ttl_secs =
+/// min(parent_remaining_ttl, wave_deadline)` computation.
+const SWARM_WAVE_TTL_SECS: u64 = 1800;
 
 /// Load every credential currently registered in `<project_root>/.ta/credentials.json`
 /// (via `ta credentials add`) as a `ScopedCredential`, secret value included.
@@ -5069,14 +5078,29 @@ const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
 /// read. For each credential eligible for `required_scopes` (same
 /// eligibility rule `apply_credentials_to_env` enforces: unscoped credentials
 /// are always eligible, scoped ones need at least one overlapping scope), a
-/// grant is minted via `ta_credential_broker::CredentialBroker::grant`
-/// (v0.17.6.4 — previously a vault-local `SessionToken`) and immediately
-/// checked via `CredentialBroker::verify` *before* the secret is ever read.
-/// A credential that fails either step (e.g. the mint fails, or — once TTLs
-/// shorter than a spawn are used — the grant is already expired) is
+/// grant is obtained and immediately checked *before* the secret is ever
+/// read. A credential that fails either step (e.g. the mint fails, or — once
+/// TTLs shorter than a spawn are used — the grant is already expired) is
 /// withheld, not silently granted. This makes every credential handed to an
 /// agent process correspond to a recorded, time-boxed, cryptographically
 /// verifiable grant rather than an unconditional `vault.get`.
+///
+/// v0.17.6.5: the grant is obtained one of two ways, chosen per credential:
+/// - **Attenuation** (the common case for a swarm sub-goal): if `parent_env`
+///   already carries a `TA_SESSION_TOKEN_<name>` — meaning *this* process
+///   itself was handed a broker-mediated token for this exact credential by
+///   its own parent spawn — that held token is attenuated in-process via
+///   `CredentialBroker::attenuate`, narrowing scope to `required_scopes` and
+///   TTL to `min(parent_remaining_ttl, SWARM_WAVE_TTL_SECS)`. No root key or
+///   network round-trip. This is what makes the resulting child grant
+///   cryptographically, not just conventionally, narrower: it can never
+///   exceed what the parent's own token actually embeds, regardless of what
+///   `required_scopes` claims.
+/// - **Fresh mint** (the root case: no inherited token exists, e.g. the
+///   top-level `ta run` invocation, or a credential that isn't
+///   broker-mediated for this connector): `CredentialBroker::grant` as
+///   before v0.17.6.5 — every attenuation chain has to start somewhere, and
+///   the vault is that root of trust.
 ///
 /// Returns an empty list (not an error) when the vault doesn't exist or is
 /// unreadable — an unpopulated vault is the common case today, and callers
@@ -5086,13 +5110,20 @@ const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
 /// `use_keychain` should be `true` for every real invocation; it exists so
 /// tests can force file-based key custody instead of touching the real,
 /// process-global OS keychain (see `CredentialsConfig::use_keychain`).
+///
+/// `parent_env` should be this process's own environment (`std::env::vars()`
+/// collected by the caller) — passed in rather than read here so the
+/// attenuation-vs-fresh-mint decision is a pure function of its input and
+/// directly testable.
 fn load_vault_credentials(
     project_root: &Path,
     agent_id: &str,
     required_scopes: &[String],
     ttl_secs: u64,
     use_keychain: bool,
+    parent_env: &std::collections::HashMap<String, String>,
 ) -> Vec<ta_runtime::ScopedCredential> {
+    use chrono::{DateTime, Utc};
     use ta_credentials::CredentialVault;
 
     let mut cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
@@ -5117,6 +5148,7 @@ fn load_vault_credentials(
     // presents the minted session token to `ta_external_action` instead,
     // and the gateway broker resolves the real secret server-side.
     let connector_registry = ta_credentials::ConnectorRegistry::load(&project_root.join(".ta"));
+    let now = Utc::now();
     summaries
         .into_iter()
         .filter_map(|summary| {
@@ -5136,18 +5168,74 @@ fn load_vault_credentials(
                 return None;
             }
 
-            let granted = match broker.grant(summary.id, agent_id, granted_scopes, ttl_secs) {
-                Ok(granted) => granted,
-                Err(e) => {
+            let parent_token_key = format!("TA_SESSION_TOKEN_{}", summary.name);
+            let inherited = parent_env.get(&parent_token_key).and_then(|parent_token| {
+                let parent_remaining = parent_env
+                    .get(&format!("{parent_token_key}_EXPIRES_AT"))
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| (dt.with_timezone(&Utc) - now).num_seconds().max(0) as u64)
+                    .unwrap_or(ttl_secs);
+                let hop_ttl = parent_remaining.min(ttl_secs).min(SWARM_WAVE_TTL_SECS);
+                match broker.attenuate(parent_token, granted_scopes.clone(), hop_ttl) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        tracing::warn!(
+                            credential = %summary.name,
+                            error = %e,
+                            "failed to attenuate inherited session grant; \
+                             falling back to a fresh vault mint"
+                        );
+                        None
+                    }
+                }
+            });
+
+            let (granted, attenuated) = match inherited {
+                Some(granted) => {
+                    if granted.allowed_scopes.is_empty() && !granted_scopes.is_empty() {
+                        // Attenuation narrowed this credential to nothing —
+                        // the parent's own token no longer covers any scope
+                        // this sub-goal declared, so withhold it entirely
+                        // rather than hand over a token that can never
+                        // authorize anything.
+                        return None;
+                    }
+                    (granted, true)
+                }
+                None => match broker.grant(summary.id, agent_id, granted_scopes, ttl_secs) {
+                    Ok(granted) => (granted, false),
+                    Err(e) => {
+                        tracing::warn!(
+                            credential = %summary.name,
+                            error = %e,
+                            "failed to mint session grant; credential withheld"
+                        );
+                        return None;
+                    }
+                },
+            };
+            if attenuated {
+                // Attenuated grants embed a `requested_scope` check that
+                // plain `verify()` can't satisfy (see `CredentialBroker::
+                // attenuate`'s doc comment) — spot-check every scope this
+                // grant actually claims via the same mechanism that will
+                // gate real use downstream. An attenuation narrowed to zero
+                // scopes needs no such check (nothing to spot-check) and was
+                // already validated structurally by `attenuate()` itself
+                // succeeding.
+                if let Some(bad) = granted
+                    .allowed_scopes
+                    .iter()
+                    .find(|s| broker.authorize_scope(&granted.token, s).is_err())
+                {
                     tracing::warn!(
                         credential = %summary.name,
-                        error = %e,
-                        "failed to mint session grant; credential withheld"
+                        scope = %bad,
+                        "attenuated session grant failed verification; credential withheld"
                     );
                     return None;
                 }
-            };
-            if let Err(e) = broker.verify(&granted.token) {
+            } else if let Err(e) = broker.verify(&granted.token) {
                 tracing::warn!(
                     credential = %summary.name,
                     error = %e,
@@ -5162,6 +5250,7 @@ fn load_vault_credentials(
                     ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes);
                 if broker_mediated {
                     cred.with_broker_mediation(granted.token)
+                        .with_expiry(granted.expires_at)
                 } else {
                     cred
                 }
@@ -5223,6 +5312,7 @@ fn launch_agent_via_runtime(
     let mut env: std::collections::HashMap<String, String> = match credential_scopes {
         Some(scopes) => {
             let project_root = project_root_from_staging(staging_path);
+            let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             let available = project_root
                 .as_deref()
                 .map(|root| {
@@ -5232,10 +5322,10 @@ fn launch_agent_via_runtime(
                         scopes,
                         CREDENTIAL_TOKEN_TTL_SECS,
                         true,
+                        &current_env,
                     )
                 })
                 .unwrap_or_default();
-            let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             scoped_credential_env(&current_env, &available, scopes)
         }
         None => std::collections::HashMap::new(),
@@ -11320,7 +11410,15 @@ plan_pending_window = 7
     #[test]
     fn load_vault_credentials_returns_empty_for_unpopulated_vault() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_vault_credentials(dir.path(), "agent-1", &[], 3600, false).is_empty());
+        assert!(load_vault_credentials(
+            dir.path(),
+            "agent-1",
+            &[],
+            3600,
+            false,
+            &Default::default()
+        )
+        .is_empty());
     }
 
     #[test]
@@ -11346,6 +11444,7 @@ plan_pending_window = 7
             &["repo.read".to_string()],
             3600,
             false,
+            &Default::default(),
         );
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0].name, "GITHUB_TOKEN");
@@ -11373,6 +11472,7 @@ plan_pending_window = 7
             &["repo.read".to_string()],
             3600,
             false,
+            &Default::default(),
         );
         assert!(creds.is_empty());
     }
@@ -11394,7 +11494,8 @@ plan_pending_window = 7
                 .unwrap();
         }
 
-        let creds = load_vault_credentials(dir.path(), "agent-1", &[], 0, false);
+        let creds =
+            load_vault_credentials(dir.path(), "agent-1", &[], 0, false, &Default::default());
         assert!(creds.is_empty());
     }
 
@@ -11424,7 +11525,8 @@ plan_pending_window = 7
                 .id
         };
 
-        let creds = load_vault_credentials(dir.path(), "agent-1", &[], 3600, false);
+        let creds =
+            load_vault_credentials(dir.path(), "agent-1", &[], 3600, false, &Default::default());
         assert_eq!(creds.len(), 1);
         assert!(creds[0].broker_mediated);
         let session_token = creds[0]
@@ -11436,6 +11538,136 @@ plan_pending_window = 7
         let verified = broker.verify(session_token).unwrap();
         assert_eq!(verified.credential_id, cred_id);
         assert_eq!(verified.agent_id, "agent-1");
+    }
+
+    /// Set up a broker-mediated `GITHUB_TOKEN` credential and mint a root
+    /// grant for it directly (bypassing `load_vault_credentials`, standing
+    /// in for "what this test process's own parent already handed it").
+    /// Returns `(project_dir, ta_dir, granted_root_token)`.
+    fn setup_broker_mediated_root_grant(
+        scopes: Vec<String>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        ta_credential_broker::GrantedToken,
+    ) {
+        use ta_credentials::{CredentialVault, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\nbroker_mediated = true\n",
+        )
+        .unwrap();
+
+        let cred_id = {
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
+            vault
+                .add("GITHUB_TOKEN", "github", "ghp_secret", vec![])
+                .unwrap()
+                .id
+        };
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let root = broker.grant(cred_id, "swarm-root", scopes, 3600).unwrap();
+        (dir, ta_dir, root)
+    }
+
+    #[test]
+    fn load_vault_credentials_attenuates_inherited_session_token_instead_of_fresh_minting() {
+        // v0.17.6.5: when this process's own environment already carries a
+        // `TA_SESSION_TOKEN_<name>` for a credential (i.e. this process was
+        // itself handed a broker-mediated grant by its own parent spawn),
+        // `load_vault_credentials` must attenuate that held token in-process
+        // rather than independently re-minting a fresh, unrelated grant from
+        // the vault. The proof that real attenuation happened (not a fresh
+        // grant that merely reports a smaller scope list): a scope present
+        // in the root grant but never requested here is cryptographically
+        // unusable on the resulting token, not just absent from a Rust-side
+        // list.
+        let (dir, ta_dir, root) =
+            setup_broker_mediated_root_grant(vec!["repo.read".into(), "repo.write".into()]);
+
+        let mut parent_env = std::collections::HashMap::new();
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN".to_string(),
+            root.token.clone(),
+        );
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN_EXPIRES_AT".to_string(),
+            root.expires_at.to_rfc3339(),
+        );
+
+        let creds = load_vault_credentials(
+            dir.path(),
+            "swarm:child-sub-goal",
+            &["repo.read".to_string()],
+            3600,
+            false,
+            &parent_env,
+        );
+
+        assert_eq!(creds.len(), 1);
+        let child_token = creds[0]
+            .session_token_id
+            .as_deref()
+            .expect("broker-mediated credential must carry a session token");
+        // Must be a genuinely different (attenuated) token, not the parent's
+        // own token string handed straight through.
+        assert_ne!(child_token, root.token);
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        assert!(broker.authorize_scope(child_token, "repo.read").is_ok());
+        // "repo.write" was in the root grant but never requested by this
+        // hop — the authorizer itself must reject it, proving this is real
+        // attenuation and not a fresh, independently-scoped grant.
+        assert!(broker.authorize_scope(child_token, "repo.write").is_err());
+    }
+
+    #[test]
+    fn load_vault_credentials_attenuation_ttl_never_exceeds_parent_remaining() {
+        // The child's effective TTL must be bounded by the parent's actual
+        // remaining validity, not just the caller's requested `ttl_secs` —
+        // proven here by granting the parent a ~3-second remaining TTL and
+        // requesting an hour for the child; the child must still expire
+        // within a few seconds, not an hour.
+        let (dir, ta_dir, root) = setup_broker_mediated_root_grant(vec!["repo.read".into()]);
+
+        let mut parent_env = std::collections::HashMap::new();
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN".to_string(),
+            root.token.clone(),
+        );
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN_EXPIRES_AT".to_string(),
+            // Override the root's real (3600s) expiry with one a few
+            // seconds out (comfortably more than one whole second so
+            // truncating `.num_seconds()` doesn't round it down to zero
+            // before `load_vault_credentials` even runs), standing in for
+            // "the parent's own grant is about to expire" without needing a
+            // slow real-time 3600s test.
+            (chrono::Utc::now() + chrono::Duration::seconds(3)).to_rfc3339(),
+        );
+
+        let creds = load_vault_credentials(
+            dir.path(),
+            "swarm:child-sub-goal",
+            &["repo.read".to_string()],
+            3600, // caller asks for an hour...
+            false,
+            &parent_env,
+        );
+        assert_eq!(creds.len(), 1);
+        let child_token = creds[0].session_token_id.clone().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(3200));
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        // ...but the parent only had ~1 second left, so the child must
+        // already be expired.
+        assert!(broker.authorize_scope(&child_token, "repo.read").is_err());
     }
 
     // ── Shell/CLI credential shims (v0.17.6.7) ────────────────────────────
