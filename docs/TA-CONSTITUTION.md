@@ -393,7 +393,7 @@ The VCS Submit Invariant applies to all current built-in adapters (git, svn, per
 
 ## 16. Workflow Graph & Modular Decision Nodes
 
-> **DRAFT — pending user approval, not yet in the Appendix checklist.** Added 2026-07-21 alongside `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`, red-teamed by three adversarial passes (PM, head of engineering, non-technical user) same day. Not yet enforced. This banner and the missing checklist rows are the graduation gate: remove the banner and add §16 rows to the Appendix table only once v0.17.7.1 ships and this section has been through normal review — don't let enforcement start silently just because the code exists.
+> **Graduated 2026-08-15 (v0.17.7.3).** Added 2026-07-21 alongside `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`, red-teamed by three adversarial passes (PM, head of engineering, non-technical user) same day. §16.3's call-site invariant is now enforced in code: `ta draft apply`'s approval gate calls exactly one graph instance (`apps/ta-cli/src/commands/workflow_graph.rs::run_apply_gate`) instead of calling `should_auto_approve_draft`/`check_advisor_auto_approve`/`run_consensus` directly. See the Appendix Compliance Checklist below for the enforced rows.
 
 **Why this section exists**: found 2026-07-20, during this session's autonomous multi-phase run — `ta_policy::auto_approve::should_auto_approve_draft`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine (`stage_consensus`/`stage_apply_draft`) each independently decide whether to auto-approve a draft apply, with no shared gate and no awareness of one another; a consensus-approved draft today bypasses the other two entirely. Separately, `execute_pr_merged_continuation` (v0.17.0.12.31) is wired directly to Git/GitHub semantics rather than the project's own `SourceAdapter` abstraction, and has no way to inspect *why* a CI check failed. This section exists to stop a fourth disconnected approval mechanism and a second platform-specific trigger path from being built, the same way §1.6/§1.7/§1.8 exist to stop their own named incidents from recurring.
 
@@ -424,7 +424,8 @@ For pre-release review, verify each command against these rules:
 |---------|-----------|
 | `ta run` | 4.1-4.4 (injection/cleanup), 5.1-5.2 (state machine) |
 | `ta draft build` | 4.3 (cleanup before diff), 3.2 (infrastructure exclusion) |
-| `ta draft apply` | 2.1-2.2 (branch isolation + restoration), 2.4 (default submit), 7.3 (audit) |
+| `ta draft apply` | 2.1-2.2 (branch isolation + restoration), 2.4 (default submit), 7.3 (audit), 16.1-16.3 (single graph approval gate) |
+| `ta workflow graph-run` | 16.1-16.2 (recommend/auto-approve, same decision), 16.4 (VCS-adapter-mediated triggers), 16.5 (data-defined graphs) |
 | `ta draft deny` | 7.4 (terminal audit), 10.1 (state transition) |
 | `ta goal start` | 3.1 (staging copy), 5.1 (Created → Configured) |
 | `ta goal list` | 5.6 (traceability — failed+staging goals visible by default) |

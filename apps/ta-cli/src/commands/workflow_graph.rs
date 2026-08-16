@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use ta_mcp_gateway::GatewayConfig;
 use ta_workflow::graph::{
     ActionDef, ActionNode, ActionOutcome, Decision, GraphContext, GraphDefinition, GraphError,
-    NodeDef, NodeRegistry, ReviewInput, TriggerPayload, TriggerSource, WorkItem, WorkResult,
-    WorkerNode,
+    NodeDef, NodeRegistry, ReviewInput, ReviewerNode, ReviewerVote, TriggerPayload, TriggerSource,
+    WorkItem, WorkResult, WorkerNode,
 };
 
 use crate::commands::draft::{self, DraftCommands};
@@ -256,6 +256,183 @@ impl ActionNode for RecommendAction {
             kind: "recommend".to_string(),
             applied: false,
             message,
+            metadata,
+        })
+    }
+}
+
+// ── AgentPanelReviewer (ReviewerNode, v0.17.7.3) ─────────────────────────
+
+/// Spawns a role-persona agent (constitution §1.6: `TeamRole` is a
+/// data-defined string, so `"head_of_security"`/`"head_of_sales"`/any new
+/// role needs zero core changes) to review the current draft, then reads
+/// back its scored verdict. Reuses `GoalDispatchAction`'s dispatch machinery
+/// (one dispatch path, not a second spawner) to launch the review goal, and
+/// the same verdict-file shape `governed_workflow.rs::stage_consensus`
+/// already reads (`{"score": <0.0-1.0>, "findings": [...]}`) so a persona
+/// author learns one contract, not two.
+pub struct AgentPanelReviewer {
+    pub dispatcher: GoalDispatchAction,
+    pub role: String,
+    pub poll_interval: std::time::Duration,
+    pub max_polls: u32,
+}
+
+impl AgentPanelReviewer {
+    pub fn new(config: GatewayConfig, role: impl Into<String>) -> Self {
+        Self {
+            dispatcher: GoalDispatchAction::new(config),
+            role: role.into(),
+            poll_interval: std::time::Duration::from_secs(10),
+            max_polls: 60,
+        }
+    }
+
+    fn verdict_path(&self, ctx: &GraphContext) -> std::path::PathBuf {
+        ctx.run_dir
+            .join("reviewers")
+            .join(&self.role)
+            .join("verdict.json")
+    }
+
+    fn read_verdict(path: &std::path::Path) -> Option<(f64, Vec<String>)> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let verdict: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let score = verdict
+            .get("score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let findings = verdict
+            .get("findings")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((score, findings))
+    }
+}
+
+impl ReviewerNode for AgentPanelReviewer {
+    fn review(&self, input: &ReviewInput, ctx: &GraphContext) -> Result<ReviewerVote, GraphError> {
+        let verdict_path = self.verdict_path(ctx);
+
+        if !verdict_path.exists() {
+            let objective = format!(
+                "# Review panel: {role}\n\nReview this draft as the {role} and write your \
+                 verdict to `{path}` as JSON: {{\"score\": <0.0-1.0>, \"findings\": [\"...\"]}}.\n\n\
+                 Draft: {draft_id}\nChanged paths: {paths}\nLines changed: {lines}\n",
+                role = self.role,
+                path = verdict_path.display(),
+                draft_id = input.draft_id.as_deref().unwrap_or("(unknown)"),
+                paths = input.changed_paths.join(", "),
+                lines = input.lines_changed,
+            );
+            let item = WorkItem {
+                title: format!(
+                    "Panel review ({}): {}",
+                    self.role,
+                    input.draft_id.as_deref().unwrap_or("draft")
+                ),
+                objective,
+                phase_id: input.plan_phase.clone(),
+                verb: "review".to_string(),
+                workload_hint: Some("agent_panel_review".to_string()),
+            };
+            self.dispatcher.dispatch(&item, ctx)?;
+        }
+
+        for attempt in 0..self.max_polls {
+            if let Some((score, findings)) = Self::read_verdict(&verdict_path) {
+                return Ok(ReviewerVote {
+                    role: self.role.clone(),
+                    score,
+                    findings,
+                    timed_out: false,
+                });
+            }
+            if attempt + 1 < self.max_polls && !self.poll_interval.is_zero() {
+                std::thread::sleep(self.poll_interval);
+            }
+        }
+
+        Ok(ReviewerVote {
+            role: self.role.clone(),
+            score: 0.0,
+            findings: vec![format!(
+                "role '{}' did not write a verdict within {} poll(s) (interval {:?}) — \
+                 treated as timeout",
+                self.role, self.max_polls, self.poll_interval
+            )],
+            timed_out: true,
+        })
+    }
+}
+
+// ── EscalateAction (ActionNode, v0.17.7.3) ───────────────────────────────
+
+/// Notifies via the existing `ta-events::notification` system and halts the
+/// graph at this node (constitution §16.1/§16.2): a `Decision` that doesn't
+/// clear its threshold is neither auto-applied nor silently recommended — it
+/// surfaces to a human with an explicit, observable signal instead.
+pub struct EscalateAction {
+    pub events_dir: std::path::PathBuf,
+}
+
+impl EscalateAction {
+    pub fn new(workspace_root: impl Into<std::path::PathBuf>) -> Self {
+        let workspace_root: std::path::PathBuf = workspace_root.into();
+        Self {
+            events_dir: workspace_root.join(".ta").join("events"),
+        }
+    }
+}
+
+impl ActionNode for EscalateAction {
+    fn act(&self, decision: &Decision, ctx: &GraphContext) -> Result<ActionOutcome, GraphError> {
+        use ta_events::schema::{EventEnvelope, SessionEvent};
+        use ta_events::store::{EventStore, FsEventStore};
+
+        let draft_id = ctx
+            .vars
+            .get("draft_id")
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        let event = SessionEvent::GraphDecisionEscalated {
+            run_id: ctx.run_id.clone(),
+            draft_id,
+            score: decision.score,
+            summary: decision.summary.clone(),
+        };
+        let store = FsEventStore::new(&self.events_dir);
+        if let Err(e) = store.append(&EventEnvelope::new(event)) {
+            tracing::warn!(
+                error = %e,
+                run_id = %ctx.run_id,
+                "graph: EscalateAction failed to record escalation event — halting anyway"
+            );
+        }
+
+        tracing::warn!(
+            run_id = %ctx.run_id,
+            score = decision.score,
+            "graph: EscalateAction halted the graph"
+        );
+
+        let mut metadata = HashMap::new();
+        if let Some(id) = draft_id {
+            metadata.insert("draft_id".to_string(), id.to_string());
+        }
+        Ok(ActionOutcome {
+            kind: "escalate".to_string(),
+            applied: false,
+            message: format!(
+                "decision escalated for human review (score={:.2}, proceed={}) — graph halted \
+                 at this node, no auto-approve or silent recommendation issued",
+                decision.score, decision.proceed
+            ),
             metadata,
         })
     }
@@ -622,6 +799,20 @@ pub fn build_registry(config: GatewayConfig) -> NodeRegistry {
         Ok(Box::new(RecommendAction) as Box<dyn ActionNode>)
     });
 
+    let escalate_root = config.workspace_root.clone();
+    registry.register_action("escalate", move |_def: &ActionDef| {
+        Ok(Box::new(EscalateAction::new(escalate_root.clone())) as Box<dyn ActionNode>)
+    });
+
+    let panel_config = config.clone();
+    registry.register_reviewer("agent_panel", move |def: &NodeDef| {
+        let role = def.param_str("role").unwrap_or("reviewer").to_string();
+        let mut reviewer = AgentPanelReviewer::new(panel_config.clone(), role);
+        reviewer.poll_interval = poll_interval_param(def);
+        reviewer.max_polls = max_polls_param(def);
+        Ok(Box::new(reviewer) as Box<dyn ReviewerNode>)
+    });
+
     let corrective_config = config.clone();
     registry.register_action("corrective_goal", move |def: &ActionDef| {
         let retry_cap = def
@@ -656,6 +847,101 @@ pub fn build_registry(config: GatewayConfig) -> NodeRegistry {
     });
 
     registry
+}
+
+// ── `ta draft apply`'s one graph instance (v0.17.7.3, constitution §16.3) ──
+//
+// `run_apply_gate` is the single named call site `ta draft apply` (and, per
+// the same invariant, every other apply/merge-gating code path) must go
+// through instead of calling `should_auto_approve_draft`,
+// `check_advisor_auto_approve`, or `run_consensus` directly. A project may
+// author `.ta/workflows/graphs/draft-apply-gate.toml` (e.g. the
+// `phase-review-panel.toml` shape, with a `policy`/`agent_panel` panel) to
+// replace the default single-reviewer gate below with a full review panel —
+// same call site, different data, per constitution §16.5.
+
+const DEFAULT_APPLY_GATE_GRAPH: &str = r#"
+[[reviewer]]
+id = "advisor_confidence"
+kind = "advisor_confidence"
+
+[decision]
+id = "gate"
+kind = "weighted"
+algorithm = "weighted"
+threshold = 0.5
+inputs = ["advisor_confidence"]
+"#;
+
+/// The gate `ta draft apply` has always effectively run (a single
+/// `ta_decision::gate::decide()` check) expressed as a graph, used only when
+/// the project hasn't authored its own `draft-apply-gate.toml` — preserves
+/// today's behavior exactly (see `AdvisorConfidenceReviewer`'s doc comment:
+/// score 1.0 iff `decide().is_auto_approvable()`, threshold 0.5 makes that a
+/// pure pass/fail).
+fn default_apply_gate_graph_def() -> GraphDefinition {
+    GraphDefinition::from_toml_str(DEFAULT_APPLY_GATE_GRAPH)
+        .expect("DEFAULT_APPLY_GATE_GRAPH is a fixed constant covered by a unit test")
+}
+
+/// `build_registry` plus the project's real `auto_approval` thresholds
+/// wired into `advisor_confidence` (overriding `with_builtins()`'s bare
+/// `DecisionThresholds::default()`), so the graph's decision matches what
+/// `[draft.auto_approval]` in `workflow.toml` actually configures.
+fn build_apply_gate_registry(
+    config: GatewayConfig,
+    thresholds: ta_decision::DecisionThresholds,
+) -> NodeRegistry {
+    let mut registry = build_registry(config);
+    registry.register_reviewer("advisor_confidence", move |_def| {
+        Ok(Box::new(
+            ta_workflow::graph::nodes::AdvisorConfidenceReviewer::with_thresholds(thresholds),
+        ) as Box<dyn ReviewerNode>)
+    });
+    registry
+}
+
+/// Run the one graph instance `ta draft apply`'s approval gate calls
+/// (constitution §16.3). Loads `.ta/workflows/graphs/draft-apply-gate.toml`
+/// if the project has authored one; otherwise runs
+/// `default_apply_gate_graph_def()`, matching the gate's pre-v0.17.7.3
+/// inline behavior exactly. A malformed (but present) custom graph is a
+/// hard error, not a silent fallback — the human authored it, they need to
+/// know it's broken.
+pub fn run_apply_gate(
+    config: &GatewayConfig,
+    review_input: &ReviewInput,
+    thresholds: ta_decision::DecisionThresholds,
+) -> anyhow::Result<Decision> {
+    let def = match GraphDefinition::load_named(&config.workspace_root, "draft-apply-gate") {
+        Ok(def) => def,
+        Err(GraphError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            default_apply_gate_graph_def()
+        }
+        Err(e) => anyhow::bail!(
+            "failed to load .ta/workflows/graphs/draft-apply-gate.toml: {e}\n\
+             Fix the graph definition, or delete the file to use the built-in default gate."
+        ),
+    };
+    let registry = build_apply_gate_registry(config.clone(), thresholds);
+    let mut ctx = GraphContext::new(&config.workspace_root, uuid::Uuid::new_v4().to_string());
+    if let Some(draft_id) = &review_input.draft_id {
+        ctx.vars.insert("draft_id".to_string(), draft_id.clone());
+    }
+    let outcome = ta_workflow::graph::run_graph(
+        &def,
+        &registry,
+        &WorkItem::default(),
+        review_input,
+        &mut ctx,
+    )
+    .map_err(|e| anyhow::anyhow!("draft-apply-gate graph run failed: {e}"))?;
+    outcome.decision.ok_or_else(|| {
+        anyhow::anyhow!(
+            "draft-apply-gate graph produced no [decision] — check the graph definition \
+             has a [decision] block"
+        )
+    })
 }
 
 /// Resolve this project's configured `SourceAdapter` the same way
@@ -1263,6 +1549,161 @@ persona = "creative-generator"
         assert_eq!(
             outcomes[1].metadata.get("escalated").map(String::as_str),
             Some("true")
+        );
+    }
+
+    // ── AgentPanelReviewer / EscalateAction (v0.17.7.3) ──────────────────
+
+    #[test]
+    fn agent_panel_reviewer_reads_a_pre_existing_verdict_without_redispatching() {
+        let project = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let ctx = GraphContext::new(project.path(), "run-panel-pre-existing");
+
+        let verdict_dir = ctx.run_dir.join("reviewers").join("head_of_security");
+        std::fs::create_dir_all(&verdict_dir).unwrap();
+        std::fs::write(
+            verdict_dir.join("verdict.json"),
+            serde_json::json!({"score": 0.9, "findings": ["looks fine"]}).to_string(),
+        )
+        .unwrap();
+
+        let reviewer = AgentPanelReviewer::new(config.clone(), "head_of_security");
+        let vote = reviewer
+            .review(&ReviewInput::default(), &ctx)
+            .expect("review must succeed reading the pre-existing verdict");
+
+        assert_eq!(vote.score, 0.9);
+        assert_eq!(vote.findings, vec!["looks fine".to_string()]);
+        assert!(!vote.timed_out);
+
+        let store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        assert!(
+            store.list().unwrap().is_empty(),
+            "must not dispatch a review goal when a verdict already exists"
+        );
+    }
+
+    #[test]
+    fn agent_panel_reviewer_dispatches_then_times_out_when_no_verdict_appears() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let ctx = GraphContext::new(project.path(), "run-panel-timeout");
+
+        let mut reviewer = AgentPanelReviewer::new(config.clone(), "pm");
+        reviewer.poll_interval = std::time::Duration::ZERO;
+        reviewer.max_polls = 1;
+
+        let vote = reviewer
+            .review(
+                &ReviewInput {
+                    draft_id: Some("draft-1".to_string()),
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert!(vote.timed_out);
+        assert_eq!(vote.score, 0.0);
+
+        let store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        assert!(
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .any(|g| g.title.contains("Panel review (pm)")),
+            "must actually dispatch a review goal via GoalDispatchAction machinery, \
+             not a stub, even though no verdict ever arrived"
+        );
+    }
+
+    #[test]
+    fn escalate_action_never_applies_and_records_a_notification_event() {
+        let project = TempDir::new().unwrap();
+        let ctx = GraphContext::new(project.path(), "run-escalate-test");
+        let action = EscalateAction::new(project.path());
+
+        let decision = Decision {
+            score: 0.3,
+            proceed: false,
+            algorithm_used: ta_workflow::consensus::ConsensusAlgorithm::Weighted,
+            scores_by_role: HashMap::new(),
+            findings_by_role: HashMap::new(),
+            timed_out_roles: vec![],
+            override_active: false,
+            summary: "panel did not clear threshold".to_string(),
+        };
+        let outcome = action.act(&decision, &ctx).unwrap();
+
+        assert!(!outcome.applied, "EscalateAction must never apply");
+        assert_eq!(outcome.kind, "escalate");
+
+        use ta_events::schema::SessionEvent;
+        use ta_events::store::{EventQueryFilter, EventStore, FsEventStore};
+        let store = FsEventStore::new(&action.events_dir);
+        let events = store.query(&EventQueryFilter::default()).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.payload,
+                SessionEvent::GraphDecisionEscalated { run_id, .. } if run_id == "run-escalate-test"
+            )),
+            "must record a GraphDecisionEscalated event for the notification system to pick up"
+        );
+    }
+
+    #[test]
+    fn reference_phase_review_panel_graph_lets_the_panel_outweigh_a_denied_policy_check() {
+        // Loads the actual shipped template (templates/workflows/graphs/
+        // phase-review-panel.toml) — proves it's not just documentation, it
+        // really parses and runs through this exact registry. `policy_check`
+        // is denied by default (bare `PolicyDocument`, §1.3 human-in-the-loop
+        // default) but the three agent_panel votes (weight 3.5 of 4.5) still
+        // clear the 0.75 threshold, matching the weighted-average math in
+        // the design spec §3 worked example.
+        let project = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let ctx = GraphContext::new(project.path(), "run-reference-panel");
+
+        for role in ["pm", "head_of_security", "head_of_engineering"] {
+            let verdict_dir = ctx.run_dir.join("reviewers").join(role);
+            std::fs::create_dir_all(&verdict_dir).unwrap();
+            std::fs::write(
+                verdict_dir.join("verdict.json"),
+                serde_json::json!({"score": 1.0, "findings": []}).to_string(),
+            )
+            .unwrap();
+        }
+
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../templates/workflows/graphs/phase-review-panel.toml");
+        let def = GraphDefinition::load_file(&template_path).unwrap();
+        let registry = build_registry(config);
+
+        let mut ctx = ctx;
+        let outcome = ta_workflow::graph::run_graph(
+            &def,
+            &registry,
+            &WorkItem::default(),
+            &ReviewInput::default(),
+            &mut ctx,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.votes.len(), 4);
+        let decision = outcome.decision.unwrap();
+        assert!(
+            decision.proceed,
+            "panel votes (weight 3.5/4.5) must outweigh the denied policy check: score={:.4}",
+            decision.score
+        );
+        let action_outcome = outcome.action_outcome.unwrap();
+        assert_eq!(action_outcome.kind, "recommend");
+        assert!(
+            !action_outcome.applied,
+            "the shipped template defaults to recommend, per constitution §16.2"
         );
     }
 }

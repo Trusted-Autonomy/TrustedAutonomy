@@ -499,12 +499,14 @@ Workflow graphs are a separate, lower-level engine (`ta-workflow::graph`) from t
 | Node | Role | Built-in kinds |
 |---|---|---|
 | `[[worker]]` | Dispatches new work (starts a goal) | `goal_dispatch` |
-| `[[reviewer]]` | Produces one scored vote on a draft/decision | `policy`, `advisor_confidence` |
+| `[[reviewer]]` | Produces one scored vote on a draft/decision | `policy`, `advisor_confidence`, `agent_panel` |
 | `[decision]` | Fans in every reviewer vote, applies weights/threshold/algorithm | `weighted` |
-| `[action]` | Acts on the decision | `recommend`, `auto_approve`, `corrective_goal` |
+| `[action]` | Acts on the decision | `recommend`, `auto_approve`, `corrective_goal`, `escalate` |
 | `[[trigger]]` | Fires on an external event — parses and is runnable standalone via `ta workflow watch-ci` today; full `ta workflow graph-run` wiring lands in a later release | `vcs_task_completion`, `ci_failure` |
 
-**Recommendation vs. auto-approval is the same decision, different wiring.** A `[decision]` node never encodes whether its output is binding or advisory — that's purely which `[action] kind` the graph is wired to. Swap `kind = "recommend"` for `kind = "auto_approve"` in an otherwise identical graph, and the exact same decision goes from "surfaced to a human" to "applied automatically." **New graphs default to `recommend`** — a human must explicitly edit a graph to `auto_approve` before it can act on its own.
+**Recommendation vs. auto-approval is the same decision, different wiring.** A `[decision]` node never encodes whether its output is binding or advisory — that's purely which `[action] kind` the graph is wired to. Swap `kind = "recommend"` for `kind = "auto_approve"` in an otherwise identical graph, and the exact same decision goes from "surfaced to a human" to "applied automatically." **New graphs default to `recommend`** — a human must explicitly edit a graph to `auto_approve` before it can act on its own. `kind = "escalate"` is a third option: it records a `graph_decision_escalated` event (picked up by the existing notification-rules engine) and halts the graph at that node — neither applying nor silently recommending.
+
+**Multi-role review panels with `agent_panel`.** Each `[[reviewer]] kind = "agent_panel"` entry spawns a role-persona agent (`role = "head_of_security"`, `role = "pm"`, anything — `TeamRole` is a free-text string, so a new panel member is a TOML edit, not a Rust change) to review the current draft. The persona agent writes its verdict to `.ta/workflow-runs/<run-id>/graph/reviewers/<role>/verdict.json` as `{"score": <0.0-1.0>, "findings": ["..."]}`; the reviewer node polls for that file and reports a `timed_out` vote if it never appears.
 
 Reference graph (also shipped at `templates/workflows/graphs/phase-review-panel.toml` — copy it to `.ta/workflows/graphs/<name>.toml` to use):
 
@@ -513,13 +515,28 @@ Reference graph (also shipped at `templates/workflows/graphs/phase-review-panel.
 id = "policy_check"
 kind = "policy"
 
+[[reviewer]]
+id = "pm_score"
+kind = "agent_panel"
+role = "pm"
+
+[[reviewer]]
+id = "security_score"
+kind = "agent_panel"
+role = "head_of_security"
+
+[[reviewer]]
+id = "engineering_score"
+kind = "agent_panel"
+role = "head_of_engineering"
+
 [decision]
 id = "panel_verdict"
 kind = "weighted"
 algorithm = "weighted"   # "raft" | "paxos" | "weighted"
 threshold = 0.75
-inputs = ["policy_check"]
-weights = { policy_check = 1.0 }
+inputs = ["policy_check", "pm_score", "security_score", "engineering_score"]
+weights = { policy_check = 1.0, pm_score = 1.0, security_score = 1.5, engineering_score = 1.0 }
 
 [action]
 id = "outcome"
@@ -532,6 +549,10 @@ Run it with:
 ```bash
 ta workflow graph-run phase-review-panel --title "My draft" --verb implement
 ```
+
+### `ta draft apply`'s Approval Gate: One Graph Instance
+
+Per constitution §16.3, `ta draft apply`'s real approval check calls exactly one graph instance — it no longer calls `should_auto_approve_draft`, `check_advisor_auto_approve`, or `run_consensus` directly. By default (no graph file present) it runs the same single-reviewer `advisor_confidence` check the CLI has always run, expressed as a graph. To upgrade the gate to a full review panel without touching any Rust code, author `.ta/workflows/graphs/draft-apply-gate.toml` (the `phase-review-panel.toml` shape above works as-is, or extend it with `advisor_confidence`) — `ta draft apply` picks it up automatically on the next run. A malformed custom graph file is a hard error (not a silent fallback to the default), so a typo in your override is caught immediately rather than quietly ignored.
 
 **Dispatching work with `[[worker]]`.** A `goal_dispatch` worker starts a new goal via `ta goal start`, feeding `--verb`/`--workload-hint` straight into the existing routing brain's workload-type classification — no new Rust code is needed to add a new kind of work, only a `[workload_types.<verb>]` binding in `.ta/workflow.toml`:
 

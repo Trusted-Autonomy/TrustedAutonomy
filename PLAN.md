@@ -10284,7 +10284,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.7-alpha.2`
 ### v0.17.7.3 — Multi-Role Review Panels + Single Approval-Gate Unification
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.7.1, v0.17.7.2
 
 **Coordination note**: v0.17.5.3 item 3 (Pluggable Domain-Action Adapters) also touches `check_advisor_auto_approve()` wiring and `security_tier` consultation. If v0.17.5.3 lands first, this phase's unification must account for the domain-adapter dispatch path too rather than re-diverging it; if this phase lands first, v0.17.5.3 item 3 should route its risk_score/verdict through the same one-graph gate instead of adding a fourth path. Flagged as an API-impact overlap per the v0.17.0.12.34 dependency-wave process if both are scheduled into the same wave.
@@ -10292,13 +10292,13 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 **Goal**: Add `AgentPanelReviewer` (spawns a persona agent — PM, head of security, head of engineering, head of sales, etc. — role strings, no core change needed since `TeamRole` is already data-defined per v0.17.0.12.12), make `WeightedDecisionNode`'s threshold/algorithm/weights genuinely config-driven from the graph TOML (removing the hardcoded `threshold=0.75`/`ConsensusAlgorithm::Raft`/empty-weights literals in `governed_workflow.rs`'s `stage_consensus`), and enforce constitution §16.3's named call-site invariant: migrate `ta draft apply`'s real approval check to call exactly one graph instance.
 
 **Items**:
-1. [ ] `AgentPanelReviewer` — spawns a role-persona agent per constitution §1.6 (data-defined `TeamRole`), scores a draft/decision, returns a `ReviewerVote`.
-2. [ ] Wire graph TOML's `[decision] algorithm/threshold/weights` fields through to `ta-workflow::consensus::run_consensus`, replacing `governed_workflow.rs`'s hardcoded literals (`stage_consensus`, ~line 2489-2492).
-3. [ ] **Call-site migration (the §16.3 enforcement)**: `ta draft apply`'s approval gate calls one graph instance. Remove/redirect all other direct callers of `should_auto_approve_draft`, `check_advisor_auto_approve`, and `run_consensus`-for-gating so each becomes a `ReviewerNode` feeding that one graph instead.
-4. [ ] `EscalateAction` — notifies via existing `ta-events::notification` system, halts the graph at that node.
-5. [ ] A reference `phase-review-panel.toml` graph (per spec §3): policy + PM + head-of-security + head-of-engineering reviewers → weighted decision → configurable auto-approve/recommend action.
-6. [ ] Tests: the three previously-independent mechanisms each produce identical `ReviewerVote`s to what they produced standalone (no behavior regression for existing callers during migration); a test asserting the §16.3 invariant statically or at runtime (e.g., a lint/grep-based CI check that no code outside the graph engine calls the three functions directly) so the rule isn't just prose.
-7. [ ] USAGE.md + constitution: remove §16's DRAFT banner and add §16 rows to the Appendix Compliance Checklist once this phase ships (per the graduation gate stated in §16's banner).
+1. [x] `AgentPanelReviewer` — spawns a role-persona agent per constitution §1.6 (data-defined `TeamRole`), scores a draft/decision, returns a `ReviewerVote`.
+2. [x] Wire graph TOML's `[decision] algorithm/threshold/weights` fields through to `ta-workflow::consensus::run_consensus`, replacing `governed_workflow.rs`'s hardcoded literals (`stage_consensus`, ~line 2489-2492).
+3. [x] **Call-site migration (the §16.3 enforcement)**: `ta draft apply`'s approval gate calls one graph instance. Remove/redirect all other direct callers of `should_auto_approve_draft`, `check_advisor_auto_approve`, and `run_consensus`-for-gating so each becomes a `ReviewerNode` feeding that one graph instead.
+4. [x] `EscalateAction` — notifies via existing `ta-events::notification` system, halts the graph at that node.
+5. [x] A reference `phase-review-panel.toml` graph (per spec §3): policy + PM + head-of-security + head-of-engineering reviewers → weighted decision → configurable auto-approve/recommend action.
+6. [x] Tests: the three previously-independent mechanisms each produce identical `ReviewerVote`s to what they produced standalone (no behavior regression for existing callers during migration); a test asserting the §16.3 invariant statically or at runtime (e.g., a lint/grep-based CI check that no code outside the graph engine calls the three functions directly) so the rule isn't just prose.
+7. [x] USAGE.md + constitution: remove §16's DRAFT banner and add §16 rows to the Appendix Compliance Checklist once this phase ships (per the graduation gate stated in §16's banner).
 
 #### Version: `0.17.7-alpha.3`
 ### v0.17.7.4 — Advisor Natural-Language Multi-Phase Entry Point
