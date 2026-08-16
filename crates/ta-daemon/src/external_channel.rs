@@ -836,11 +836,17 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_delivery_invalid_json_output() {
+        // Windows has no standalone `echo` binary (it's a shell builtin, not
+        // a PATH-resolvable executable) -- Command::new("echo") fails to
+        // spawn at all there rather than producing non-JSON output, same
+        // pitfall `stdio_delivery_with_echo` above already works around.
+        // `sh -c` works cross-platform, including on Windows CI runners
+        // (Git for Windows ships sh.exe on PATH).
         let manifest = PluginManifest {
             name: "bad-json".into(),
             version: "0.1.0".into(),
-            command: Some("echo".into()),
-            args: vec!["not-json".into()],
+            command: Some("sh".into()),
+            args: vec!["-c".into(), "echo not-json".into()],
             protocol: PluginProtocol::JsonStdio,
             deliver_url: None,
             auth_token_env: None,
