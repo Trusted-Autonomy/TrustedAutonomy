@@ -99,15 +99,14 @@ fn find_real_gh(path_var: &str, exclude_dir: Option<&Path>, cwd: &Path) -> Optio
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use tempfile::TempDir;
 
+    #[cfg(unix)]
     fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
         fs::write(path, "#!/bin/sh\necho fake-gh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]

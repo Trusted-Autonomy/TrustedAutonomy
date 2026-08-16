@@ -102,8 +102,15 @@ jobs:
         timeout-minutes: 30
 
       - name: Run tests
-        run: cargo test --workspace -- --test-threads=4
-        timeout-minutes: 15
+        # test-threads capped at 2 (not 4) on Windows specifically: standard
+        # GitHub-hosted Windows runners are 2 cores / 7GB RAM, and this
+        # workspace's growing subprocess- and crypto-heavy test suite
+        # (real `git init` spawns, biscuit-auth key generation) has been
+        # observed pushing --test-threads=4 into runner-level resource
+        # starvation ("hosted runner lost communication with the server"),
+        # not a deterministic test hang.
+        run: cargo test --workspace -- --test-threads=2
+        timeout-minutes: 20
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
