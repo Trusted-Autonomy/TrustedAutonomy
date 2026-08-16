@@ -11,6 +11,7 @@
 //   - OCI: mounted secrets file or container env (set during container start)
 //   - VM: secure channel post-boot (e.g., virtio-vsock or MMIO region)
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A scoped, short-lived credential to be injected into an agent runtime.
@@ -47,6 +48,18 @@ pub struct ScopedCredential {
     /// reference, never `value` itself.
     #[serde(default)]
     pub session_token_id: Option<String>,
+
+    /// The moment `session_token_id` stops being cryptographically valid
+    /// (v0.17.6.5), present only when known. Informational, not enforced
+    /// here: the real bound is the `check if time(...)` clause embedded in
+    /// the token itself, evaluated by `CredentialBroker`. Carried alongside
+    /// the token purely so a downstream spawn that inherits this credential
+    /// (e.g. a nested swarm sub-goal attenuating it further) can compute
+    /// `min(parent_remaining_ttl, ...)` without decoding the token, via the
+    /// `TA_SESSION_TOKEN_<name>_EXPIRES_AT` sibling env var
+    /// `apply_credentials_to_env` injects when this is `Some`.
+    #[serde(default)]
+    pub session_token_expires_at: Option<DateTime<Utc>>,
 }
 
 impl ScopedCredential {
@@ -58,6 +71,7 @@ impl ScopedCredential {
             scopes: Vec::new(),
             broker_mediated: false,
             session_token_id: None,
+            session_token_expires_at: None,
         }
     }
 
@@ -73,6 +87,7 @@ impl ScopedCredential {
             scopes,
             broker_mediated: false,
             session_token_id: None,
+            session_token_expires_at: None,
         }
     }
 
@@ -83,6 +98,14 @@ impl ScopedCredential {
     pub fn with_broker_mediation(mut self, session_token_id: impl Into<String>) -> Self {
         self.broker_mediated = true;
         self.session_token_id = Some(session_token_id.into());
+        self
+    }
+
+    /// Attach the token's expiry (v0.17.6.5) so a downstream inheritor can
+    /// compute its own attenuation TTL. No effect unless
+    /// `with_broker_mediation` was also called.
+    pub fn with_expiry(mut self, expires_at: DateTime<Utc>) -> Self {
+        self.session_token_expires_at = Some(expires_at);
         self
     }
 }
