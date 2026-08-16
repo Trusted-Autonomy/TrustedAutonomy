@@ -1,14 +1,25 @@
-# phase-review-panel.toml — Workflow Graph Engine reference graph (v0.17.7.1).
+# phase-review-panel.toml — Workflow Graph Engine reference graph
+# (v0.17.7.1, upgraded to a multi-role panel in v0.17.7.3).
 #
 # Copy this file to .ta/workflows/graphs/phase-review-panel.toml (or any
 # other name) then run:
 #   ta workflow graph-run phase-review-panel --title "My draft" --verb implement
 #
-# This graph expresses today's existing single-reviewer approval flow as
-# data: a policy check feeds a weighted decision, which surfaces to a human
-# via RecommendAction. Per constitution §16.2, every new graph defaults to
-# `recommend` — a human must explicitly change `[action] kind` to
-# "auto_approve" to let this graph apply drafts on its own.
+# A policy check plus a three-person review panel (PM, head of security,
+# head of engineering — each an `agent_panel` reviewer spawned via
+# `GoalDispatchAction`'s dispatch machinery) all feed one weighted decision,
+# which surfaces to a human via RecommendAction. Per constitution §16.2,
+# every new graph defaults to `recommend` — a human must explicitly change
+# `[action] kind` to "auto_approve" to let this graph apply drafts on its
+# own. Per §16.5, the threshold/algorithm/weights below are data — edit them
+# directly, no code change needed.
+#
+# `agent_panel`'s `role` is a free-text string (constitution §1.6:
+# `TeamRole` is data-defined, not a closed enum) — add or rename panel
+# members by adding another `[[reviewer]]` block with a new `role`, no core
+# change required. Each panel member's persona agent writes its verdict to
+# `.ta/workflow-runs/<run-id>/graph/reviewers/<role>/verdict.json` as
+# `{"score": <0.0-1.0>, "findings": ["..."]}`.
 #
 # See docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md §3
 # for the full design this schema implements, and docs/USAGE.md's
@@ -18,13 +29,28 @@
 id = "policy_check"
 kind = "policy"
 
+[[reviewer]]
+id = "pm_score"
+kind = "agent_panel"
+role = "pm"
+
+[[reviewer]]
+id = "security_score"
+kind = "agent_panel"
+role = "head_of_security"
+
+[[reviewer]]
+id = "engineering_score"
+kind = "agent_panel"
+role = "head_of_engineering"
+
 [decision]
 id = "panel_verdict"
 kind = "weighted"
 algorithm = "weighted"   # "raft" | "paxos" | "weighted" — closed enum per §16.5
 threshold = 0.75
-inputs = ["policy_check"]
-weights = { policy_check = 1.0 }
+inputs = ["policy_check", "pm_score", "security_score", "engineering_score"]
+weights = { policy_check = 1.0, pm_score = 1.0, security_score = 1.5, engineering_score = 1.0 }
 
 [action]
 id = "outcome"
