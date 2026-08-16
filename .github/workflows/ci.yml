@@ -102,8 +102,17 @@ jobs:
         timeout-minutes: 30
 
       - name: Run tests
-        run: cargo test --workspace -- --test-threads=4
-        timeout-minutes: 15
+        # DIAGNOSTIC (temporary, round 2): the doctor.rs and external_channel.rs
+        # hangs found via the first --test-threads=1 diagnostic run are fixed,
+        # but Windows Build still failed with "runner lost communication" over
+        # ~59 minutes (started 08:09:55, job died 09:09:33 -- far past this
+        # step's own 15-min budget, meaning the runner itself went unresponsive
+        # rather than this step's timeout firing). Re-running single-threaded
+        # again to check for a second, still-unidentified hanging test now that
+        # the first two are gone, before concluding this is Windows-runner
+        # infra flakiness independent of the code.
+        run: cargo test --workspace -- --test-threads=1
+        timeout-minutes: 25
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
