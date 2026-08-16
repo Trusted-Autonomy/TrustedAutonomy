@@ -98,6 +98,7 @@ fn find_real_gh(path_var: &str, exclude_dir: Option<&Path>, cwd: &Path) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use tempfile::TempDir;
