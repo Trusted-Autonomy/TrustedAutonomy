@@ -102,19 +102,8 @@ jobs:
         timeout-minutes: 30
 
       - name: Run tests
-        # DIAGNOSTIC (temporary): --test-threads=1 to get strictly
-        # sequential output. Both --test-threads=4 and =2 hang on this
-        # Windows runner with no per-test error -- reducing thread count
-        # made the hang appear *earlier* (immediately after "running N
-        # tests", zero individual results), which points to a specific
-        # test deterministically hanging rather than general resource
-        # starvation (fewer threads means a stuck test blocks a larger
-        # fraction of the pool immediately, instead of others interleaving
-        # around it). Single-threaded execution will show the exact test
-        # name in the log right before it stalls. Revert to a parallel
-        # value once that test is identified and fixed/gated.
-        run: cargo test --workspace -- --test-threads=1
-        timeout-minutes: 25
+        run: cargo test --workspace -- --test-threads=4
+        timeout-minutes: 15
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
