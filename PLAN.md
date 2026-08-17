@@ -10302,7 +10302,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.7-alpha.3`
 ### v0.17.7.4 — Advisor Natural-Language Multi-Phase Entry Point
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Depends on**: v0.17.7.3
 
 **Goal**: The user-facing payoff of this whole spec (per the non-technical-user red-team pass, the *only* part of v0.17.7 usable without hand-editing TOML): let the advisor parse "build phases v0.17.3 through v0.17.8" (or similar natural language), resolve the range against PLAN.md's existing dependency/ordering data (12.30/12.34), construct one `phase-review-panel`-style graph instance per phase, chain phases via `VcsTaskCompletionTrigger` on each phase's merge, and dispatch independent phases in parallel via v0.17.0.12.34's dependency-wave planner where safe.
