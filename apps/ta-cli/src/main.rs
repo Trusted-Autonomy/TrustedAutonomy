@@ -997,6 +997,15 @@ enum Commands {
     /// Start the MCP server on stdio.
     #[command(hide = true)]
     Serve,
+    /// git `credential.helper` backend for broker-mediated connectors
+    /// (v0.17.6.7). Not meant to be invoked directly — `ta run` points a
+    /// git repo's `credential.helper` config at this subcommand when a
+    /// connector in `.ta/connectors.toml` declares a matching `hosts` entry.
+    #[command(hide = true)]
+    CredentialHelper {
+        /// git's operation: `get`, `store`, or `erase` (see `gitcredentials(7)`).
+        operation: String,
+    },
     /// Build the project using the configured build adapter.
     ///
     /// Auto-detects the build system (Cargo, npm, Make) or uses the adapter
@@ -1913,6 +1922,14 @@ fn dispatch_raw(
             let skip = std::env::var("TA_SKIP_ONBOARD_CHECK").is_ok_and(|v| v == "1");
             commands::onboard::check_provider_configured(skip)?;
             commands::serve::execute(project_root)
+        }
+        Commands::CredentialHelper { operation } => {
+            let root = commands::credential_helper::resolve_project_root(project_root);
+            let stdin = std::io::stdin();
+            let mut reader = stdin.lock();
+            let stdout = std::io::stdout();
+            let mut writer = stdout.lock();
+            commands::credential_helper::execute(operation, &root, &mut reader, &mut writer, true)
         }
         Commands::Build { test } => commands::build::execute(config, *test),
         Commands::Sync { noun, extra } => match noun {

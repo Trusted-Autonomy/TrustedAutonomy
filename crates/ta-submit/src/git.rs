@@ -1,7 +1,8 @@
 //! Git adapter for branch-based workflows with GitHub/GitLab PR creation
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use ta_changeset::DraftPackage;
 use ta_goal::CommitContext;
 
@@ -114,6 +115,68 @@ fn truncate_log_excerpt(full: &str) -> String {
     }
 }
 
+/// Runs a `gh` subcommand with a hard wall-clock deadline, never blocking
+/// indefinitely. `gh` can hang (slow/unreachable network, or -- on Windows,
+/// where GitHub-hosted runners preinstall `gh` -- interaction with a
+/// `gh`-named credential shim v0.17.6.7 can put on `PATH`) and
+/// `check_failures()`/`fetch_failed_run_log()` are both best-effort,
+/// read-only diagnostic paths that must never let a hung subprocess block
+/// the caller. Output is drained concurrently on reader threads while
+/// polling for the deadline, which also avoids a full-pipe-buffer deadlock
+/// if `gh` produces enough output before the process exits (a real risk for
+/// `--log-failed`, which can be many KB). Returns `None` on spawn failure
+/// or timeout (in which case the child is killed).
+fn run_gh_bounded(args: &[&str], cwd: &Path, timeout: Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+
+    let mut child = Command::new("gh")
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stdout_pipe {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr_pipe {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return None,
+        }
+    };
+
+    Some(std::process::Output {
+        status,
+        stdout: stdout_handle.join().unwrap_or_default(),
+        stderr: stderr_handle.join().unwrap_or_default(),
+    })
+}
+
 /// Truncate `s` to at most `max_chars` Unicode scalar values.
 ///
 /// Trims trailing whitespace and dashes after truncation to avoid ugly endings.
@@ -208,9 +271,7 @@ impl GitAdapter {
 
     /// Check if gh CLI is available
     fn has_gh_cli(&self) -> bool {
-        Command::new("gh")
-            .arg("--version")
-            .output()
+        run_gh_bounded(&["--version"], &self.work_dir, Duration::from_secs(5))
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
@@ -219,11 +280,11 @@ impl GitAdapter {
     /// `check_failures()`. Returns `None` on any failure — the caller
     /// degrades to a manual-lookup hint rather than propagating an error.
     fn fetch_failed_run_log(&self, run_id: &str) -> Option<String> {
-        let output = Command::new("gh")
-            .args(["run", "view", run_id, "--log-failed"])
-            .current_dir(&self.work_dir)
-            .output()
-            .ok()?;
+        let output = run_gh_bounded(
+            &["run", "view", run_id, "--log-failed"],
+            &self.work_dir,
+            Duration::from_secs(10),
+        )?;
         if !output.status.success() {
             return None;
         }
@@ -1507,12 +1568,13 @@ impl SourceAdapter for GitAdapter {
         // we can pull an Actions run ID out of. Degrades to an empty vec on
         // any failure here (best-effort, matching check_review's style) —
         // check_failures is read-only diagnostic detail, never a hard error.
-        let output = Command::new("gh")
-            .args(["pr", "checks", review_id, "--json", "name,bucket,link"])
-            .current_dir(&self.work_dir)
-            .output();
+        let output = run_gh_bounded(
+            &["pr", "checks", review_id, "--json", "name,bucket,link"],
+            &self.work_dir,
+            Duration::from_secs(10),
+        );
         let checks: Vec<serde_json::Value> = match output {
-            Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
+            Some(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
                 Ok(v) => v,
                 Err(_) => return Ok(vec![]),
             },

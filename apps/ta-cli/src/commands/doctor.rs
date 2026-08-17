@@ -388,14 +388,7 @@ fn check_agent_binary(agent_name: &str, project_root: &Path) -> CheckResult {
 fn check_gh_cli() -> CheckResult {
     match which::which("gh") {
         Ok(path) => {
-            // Check auth status.
-            let auth_ok = std::process::Command::new("gh")
-                .args(["auth", "status"])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let auth_ok = run_gh_auth_status_bounded(std::time::Duration::from_secs(5));
             if auth_ok {
                 CheckResult::ok("gh CLI", format!("{} -- authenticated", path.display()))
             } else {
@@ -411,6 +404,43 @@ fn check_gh_cli() -> CheckResult {
             "not found on PATH".to_string(),
             "Install GitHub CLI: https://cli.github.com",
         ),
+    }
+}
+
+/// Runs `gh auth status` with a hard wall-clock deadline, never blocking
+/// indefinitely. `gh auth status` can hang (slow/unreachable network,
+/// or -- since v0.17.6.7 -- a `gh`-named credential shim on `PATH` in turn
+/// spawning a real `gh` child of its own) and this check must never let a
+/// hung subprocess block `ta doctor` itself. Output is discarded (only
+/// success/failure is used), which also sidesteps any pipe-inheritance
+/// hang from a nested child process holding an inherited handle open.
+fn run_gh_auth_status_bounded(timeout: std::time::Duration) -> bool {
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("gh")
+        .args(["auth", "status"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return false,
+        }
     }
 }
 

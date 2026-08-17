@@ -10218,17 +10218,17 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.7 — Shell/CLI Credential Isolation (the Dominant Real-World Path)
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.6.4 (broker must exist to back the credential shims)
 
 **Goal**: v0.17.6.3 closes the MCP-tool-call leak path, but a Bash-driven coding agent's *majority* credentialed actions — `git push`, `gh pr create`, `npm publish`, `docker login`, a raw `curl` with a bearer header — never touch an MCP tool call at all, and nothing in the earlier stages changes that without this one. Found by adversarial review of the original design draft, which had understated this as a "fallback edge case" rather than the dominant path it actually is for a shell-driven agent.
 
 **Items**:
-1. [ ] `git-credential-helper` backed by the broker (git already supports pluggable credential helpers — no git behavior change needed, just point `credential.helper` at a local broker-backed binary).
-2. [ ] `gh auth` shim for the GitHub CLI (same pattern — `gh` supports external auth token resolution).
-3. [ ] For the general case: evaluate a local loopback HTTPS forward proxy (`HTTPS_PROXY` pointed at it) that injects the `Authorization` header for allow-listed hosts server-side. **This requires the agent's process to trust a local CA for TLS interception on allow-listed hosts — a real trust tradeoff, not a footnote.** Resolve at implementation time whether this is acceptable or whether Stage 7 should stay scoped to helper-binary shims only (git/gh/npm/docker specifically) with the generic proxy case dropped or deferred (see design doc Open Question 4).
-4. [ ] Tests: a shell command using a broker-backed credential helper never has the raw secret in its own process environment; an unlisted host via the proxy path (if built) passes through unmodified with no credential injected.
-5. [ ] USAGE.md: document which CLI tools are covered by a credential shim and which still need the reduced-security fallback.
+1. [x] `git-credential-helper` backed by the broker (git already supports pluggable credential helpers — no git behavior change needed, just point `credential.helper` at a local broker-backed binary).
+2. [x] `gh auth` shim for the GitHub CLI (same pattern — `gh` supports external auth token resolution).
+3. [x] For the general case: evaluate a local loopback HTTPS forward proxy (`HTTPS_PROXY` pointed at it) that injects the `Authorization` header for allow-listed hosts server-side. **This requires the agent's process to trust a local CA for TLS interception on allow-listed hosts — a real trust tradeoff, not a footnote.** Resolve at implementation time whether this is acceptable or whether Stage 7 should stay scoped to helper-binary shims only (git/gh/npm/docker specifically) with the generic proxy case dropped or deferred (see design doc Open Question 4).
+4. [x] Tests: a shell command using a broker-backed credential helper never has the raw secret in its own process environment; an unlisted host via the proxy path (if built) passes through unmodified with no credential injected.
+5. [x] USAGE.md: document which CLI tools are covered by a credential shim and which still need the reduced-security fallback.
 
 #### Version: `0.17.6-alpha.7`
 

@@ -50,6 +50,17 @@ pub struct ConnectorEntry {
     /// consulted when `broker_mediated` is `true`.
     #[serde(default)]
     pub required_scope: Option<String>,
+
+    /// Hostnames this connector's credential shim should match (v0.17.6.7),
+    /// e.g. `["github.com"]` for git's `host=` credential-protocol field or
+    /// the GitHub CLI's API host. Only consulted by the Stage 7 shell/CLI
+    /// shims (`ta credential-helper`, the `gh` wrapper binary) — the
+    /// MCP-tool-call broker path (v0.17.6.3) never needs a hostname, since
+    /// the agent already names the connector explicitly. Empty by default:
+    /// a connector with no declared hosts is invisible to the shell shims,
+    /// even if `broker_mediated` is `true`.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 /// Every connector declared in `.ta/connectors.toml`, keyed by symbolic id.
@@ -115,6 +126,33 @@ impl ConnectorRegistry {
         self.connectors
             .values()
             .any(|c| c.credential_name == credential_name && c.broker_mediated)
+    }
+
+    /// Find the broker-mediated connector entry declaring `host` (v0.17.6.7)
+    /// — used by the shell/CLI credential shims (`ta credential-helper`,
+    /// the `gh` wrapper) to map a request's hostname back to a vault
+    /// credential. A connector that isn't `broker_mediated`, or that
+    /// declares no `hosts` at all, is never returned here — those stay on
+    /// the reduced-security env-injection fallback, exactly as before this
+    /// connector existed.
+    pub fn find_by_host(&self, host: &str) -> Option<(&str, &ConnectorEntry)> {
+        self.connectors
+            .iter()
+            .find(|(_, entry)| {
+                entry.broker_mediated && entry.hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+            })
+            .map(|(id, entry)| (id.as_str(), entry))
+    }
+
+    /// Whether any declared connector is both `broker_mediated` and has at
+    /// least one `hosts` entry — the precondition for installing the Stage 7
+    /// shell/CLI shims at all (v0.17.6.7). A project with no such connector
+    /// gets no git-config mutation and no `PATH` change, keeping the shims
+    /// entirely opt-in per `.ta/connectors.toml`.
+    pub fn has_shell_shim_connector(&self) -> bool {
+        self.connectors
+            .values()
+            .any(|c| c.broker_mediated && !c.hosts.is_empty())
     }
 }
 
@@ -191,5 +229,76 @@ broker_mediated = false
         assert!(registry.is_broker_mediated_credential("GITHUB_TOKEN"));
         assert!(!registry.is_broker_mediated_credential("SLACK_BOT_TOKEN"));
         assert!(!registry.is_broker_mediated_credential("UNDECLARED_TOKEN"));
+    }
+
+    #[test]
+    fn find_by_host_matches_broker_mediated_connector_with_declared_hosts() {
+        let toml = r#"
+[connectors.github]
+credential_name = "GITHUB_TOKEN"
+broker_mediated = true
+hosts = ["github.com", "gist.github.com"]
+"#;
+        let registry = ConnectorRegistry::parse(toml);
+
+        let (id, entry) = registry.find_by_host("github.com").unwrap();
+        assert_eq!(id, "github");
+        assert_eq!(entry.credential_name, "GITHUB_TOKEN");
+
+        // Case-insensitive, and a second declared host resolves too.
+        let (id2, _) = registry.find_by_host("GIST.GITHUB.COM").unwrap();
+        assert_eq!(id2, "github");
+
+        assert!(registry.find_by_host("gitlab.com").is_none());
+    }
+
+    #[test]
+    fn find_by_host_ignores_non_broker_mediated_and_hostless_connectors() {
+        let toml = r#"
+[connectors.github]
+credential_name = "GITHUB_TOKEN"
+broker_mediated = false
+hosts = ["github.com"]
+
+[connectors.slack-ops]
+credential_name = "SLACK_BOT_TOKEN"
+broker_mediated = true
+"#;
+        let registry = ConnectorRegistry::parse(toml);
+
+        // Not broker_mediated -> never matched by the shell shims, even
+        // though it declares the host.
+        assert!(registry.find_by_host("github.com").is_none());
+        // broker_mediated but no `hosts` declared -> never matched either.
+        assert!(registry.find_by_host("slack.com").is_none());
+    }
+
+    #[test]
+    fn has_shell_shim_connector_requires_broker_mediated_and_hosts() {
+        assert!(!ConnectorRegistry::default().has_shell_shim_connector());
+
+        let none_qualify = ConnectorRegistry::parse(
+            r#"
+[connectors.github]
+credential_name = "GITHUB_TOKEN"
+broker_mediated = true
+
+[connectors.slack-ops]
+credential_name = "SLACK_BOT_TOKEN"
+broker_mediated = false
+hosts = ["slack.com"]
+"#,
+        );
+        assert!(!none_qualify.has_shell_shim_connector());
+
+        let qualifies = ConnectorRegistry::parse(
+            r#"
+[connectors.github]
+credential_name = "GITHUB_TOKEN"
+broker_mediated = true
+hosts = ["github.com"]
+"#,
+        );
+        assert!(qualifies.has_shell_shim_connector());
     }
 }
