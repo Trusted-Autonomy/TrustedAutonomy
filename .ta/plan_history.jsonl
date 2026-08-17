@@ -533,3 +533,4 @@
 {"new_status":"pending","note":"phase reset to pending — goal denied","old_status":"in_progress","phase_id":"v0.17.6.4","timestamp":"2026-08-15T08:01:17.034480+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.4","source":"daemon_claim","timestamp":"2026-08-17T00:02:43.187108+00:00"}
 {"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.7.4","timestamp":"2026-08-17T00:18:12.731169+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.4","source":"daemon_claim","timestamp":"2026-08-17T00:18:34.335930+00:00"}
