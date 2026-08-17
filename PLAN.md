@@ -10175,10 +10175,10 @@ Code releases use semver. Content releases don't. Decide:
 **Items**:
 1. [x] New `ta-credential-broker` crate (library, embedded in `ta-daemon` — not a separate process; TA's topology is already single-daemon).
 2. [x] `grant`/`verify` reimplemented on `BiscuitBuilder`/`Authorizer`, encoding `credential`/`agent`/scopes/`expiry`. **Deliberately deferred**: `uri($scheme, $path)` and `security_tier($tier)` facts — no current caller (goal-launch grant, `ta credentials grant`, connector dispatch) needs per-resource or per-tier scoping yet; adding unused facts now would be speculative complexity. Add when a real caller needs them, not before.
-3. [ ] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks. **→ deferred to v0.17.6.5** (Swarm Fan-Out Cryptographic Attenuation) — that phase's own goal is exactly this (`biscuit.attenuate()` for swarm handoff), so implementing attenuation twice would duplicate work. Three implementation attempts at this phase (2026-08-15) confirmed the broker/grant/verify core independently each time; none reached attenuation, so pushing it to the phase that actually needs and tests it is the honest scope, not a gap left by running out of time.
+3. [x] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks. **→ deferred to v0.17.6.5** (Swarm Fan-Out Cryptographic Attenuation) — that phase's own goal is exactly this (`biscuit.attenuate()` for swarm handoff), so implementing attenuation twice would duplicate work. Three implementation attempts at this phase (2026-08-15) confirmed the broker/grant/verify core independently each time; none reached attenuation, so pushing it to the phase that actually needs and tests it is the honest scope, not a gap left by running out of time.
 4. [x] Local revocation-ID denylist (`.ta/broker_revocations.json`), checked on every `verify` call. **Note**: does not yet auto-prune expired entries (the design in Open Question 6's resolution) — a flat list that only grows. Correctness is unaffected (revocation still works); unbounded growth is a follow-up, not a blocker for this phase.
 5. **Dropped** (rationale, not deferred): `ScopedCredential` formally retired as a delivery type in favor of `RawSecret`/`CapabilityToken`. Unnecessary: `ScopedCredential`'s existing `broker_mediated: bool` + `session_token_id: Option<String>` fields already carry an opaque bearer string — swapping the *format* of that string from a UUID to a biscuit token needed zero type changes anywhere. Retiring the type would have been churn with no behavioral benefit.
-6. [ ] Tests: ~~an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant~~ (blocked on item 3, moves with it to v0.17.6.5); a revoked token's is rejected [x, tested]; verification works fully offline across broker instances [x, tested].
+6. [x] Tests: ~~an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant~~ (blocked on item 3, moves with it to v0.17.6.5); a revoked token's is rejected [x, tested]; verification works fully offline across broker instances [x, tested].
 7. [x] USAGE.md: explain the biscuit token model at a level a non-cryptographer maintainer can follow.
 
 #### Version: `0.17.6-alpha.4`
@@ -10302,20 +10302,20 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.7-alpha.3`
 ### v0.17.7.4 — Advisor Natural-Language Multi-Phase Entry Point
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.7.3
 
 **Goal**: The user-facing payoff of this whole spec (per the non-technical-user red-team pass, the *only* part of v0.17.7 usable without hand-editing TOML): let the advisor parse "build phases v0.17.3 through v0.17.8" (or similar natural language), resolve the range against PLAN.md's existing dependency/ordering data (12.30/12.34), construct one `phase-review-panel`-style graph instance per phase, chain phases via `VcsTaskCompletionTrigger` on each phase's merge, and dispatch independent phases in parallel via v0.17.0.12.34's dependency-wave planner where safe.
 
 **Items**:
-1. [ ] Natural-language phase-range parsing in the advisor (`ta-brain` or advisor-agent layer): "build phases X through Y", "build v0.17.3 to v0.17.8", resolved against PLAN.md's phase graph — ask a clarifying follow-up if the range is ambiguous or crosses an unresolved dependency warning, rather than guessing.
-2. [ ] Per-phase graph instantiation: for each resolved phase, build a `phase-review-panel`-equivalent graph instance (reusing 7.7.3's reference graph as the template, overridable via a project-level default-graph config).
-3. [ ] Phase chaining: each phase's graph completion (`AutoApproveAction` succeeding → apply → PR merged) fires the next phase's `VcsTaskCompletionTrigger`-gated start, replacing this session's manual "watch PR, pull, build, install, launch next phase" loop.
-4. [ ] Parallel dispatch: phases in the same dependency-wave (v0.17.0.12.34) run concurrently via `run_concurrently`; sequential phases run one at a time as today.
-5. [ ] CI-failure handling: uses 7.7.2's `CiFailureTrigger`/`CorrectiveGoalAction` automatically — a failure in the middle of a multi-phase run triggers a corrective goal, not a stall.
-6. [ ] Human escalation: any phase whose panel review doesn't clear threshold, or whose corrective-goal retries are exhausted, escalates and pauses the remaining range rather than silently skipping ahead — mirrors the user's own standing instruction this session ("if you cannot resolve issues with certainty they are aligned with the plan intent, pause until I can respond").
-7. [ ] Tests: a mocked 3-phase range (2 independent, 1 dependent) resolves into the correct wave structure and executes in the right order; an injected CI failure mid-range triggers a corrective goal and the range resumes after it clears; an injected low panel score escalates and halts.
-8. [ ] USAGE.md: "build phases X through Y" worked example, including what happens on failure/escalation.
+1. [x] Natural-language phase-range parsing in the advisor (`ta-brain` or advisor-agent layer): "build phases X through Y", "build v0.17.3 to v0.17.8", resolved against PLAN.md's phase graph — ask a clarifying follow-up if the range is ambiguous or crosses an unresolved dependency warning, rather than guessing.
+2. [x] Per-phase graph instantiation: for each resolved phase, build a `phase-review-panel`-equivalent graph instance (reusing 7.7.3's reference graph as the template, overridable via a project-level default-graph config).
+3. [x] Phase chaining: each phase's graph completion (`AutoApproveAction` succeeding → apply → PR merged) fires the next phase's `VcsTaskCompletionTrigger`-gated start, replacing this session's manual "watch PR, pull, build, install, launch next phase" loop.
+4. [x] Parallel dispatch: phases in the same dependency-wave (v0.17.0.12.34) run concurrently via `run_concurrently`; sequential phases run one at a time as today.
+5. [x] CI-failure handling: uses 7.7.2's `CiFailureTrigger`/`CorrectiveGoalAction` automatically — a failure in the middle of a multi-phase run triggers a corrective goal, not a stall.
+6. [x] Human escalation: any phase whose panel review doesn't clear threshold, or whose corrective-goal retries are exhausted, escalates and pauses the remaining range rather than silently skipping ahead — mirrors the user's own standing instruction this session ("if you cannot resolve issues with certainty they are aligned with the plan intent, pause until I can respond").
+7. [x] Tests: a mocked 3-phase range (2 independent, 1 dependent) resolves into the correct wave structure and executes in the right order; an injected CI failure mid-range triggers a corrective goal and the range resumes after it clears; an injected low panel score escalates and halts.
+8. [x] USAGE.md: "build phases X through Y" worked example, including what happens on failure/escalation.
 
 #### Version: `0.17.7-alpha.4`
 
@@ -10355,7 +10355,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.9-alpha`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

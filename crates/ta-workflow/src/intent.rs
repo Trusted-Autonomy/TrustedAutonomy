@@ -114,6 +114,50 @@ pub enum ResolutionResult {
 /// Minimum score required to present a confirmation card rather than a clarifying question.
 pub const CONFIDENCE_THRESHOLD: f64 = 0.80;
 
+/// A parsed "build phases X through Y" style multi-phase range request
+/// (v0.17.7.4). Distinct from [`ExtractedIntent`]'s single `version_ref` —
+/// this only matches when *two* version references are present with a
+/// range connector between them, so single-phase requests ("implement
+/// v0.15") keep going through [`extract_intent`]/[`resolve_intent`]
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseRangeIntent {
+    /// First version reference in the request, e.g. `"v0.17.3"`.
+    pub start: String,
+    /// Second version reference in the request, e.g. `"v0.17.8"`.
+    pub end: String,
+}
+
+/// Connector words/symbols that make two adjacent version references read
+/// as a range rather than, say, a comparison ("v0.17.3 and v0.17.8").
+const RANGE_CONNECTORS: &[&str] = &["through", "thru", "to", "-", "..", "->"];
+
+/// Extract a phase-range reference from free-form text, e.g. "build phases
+/// v0.17.3 through v0.17.8" or "build v0.17.3 to v0.17.8".
+///
+/// Returns `None` when fewer than two version references are present, or
+/// when the text between the first two doesn't contain a range connector —
+/// callers should fall back to [`extract_intent`]'s single-`version_ref`
+/// handling in that case, rather than guessing a range was intended.
+pub fn extract_phase_range(text: &str) -> Option<PhaseRangeIntent> {
+    let version_re = regex::Regex::new(r"\bv\d+(?:\.\d+)+\b").expect("static");
+    let matches: Vec<regex::Match> = version_re.find_iter(text).collect();
+    if matches.len() < 2 {
+        return None;
+    }
+    let start = matches[0];
+    let end = matches[1];
+    let between = text[start.end()..end.start()].to_lowercase();
+    let has_connector = RANGE_CONNECTORS.iter().any(|c| between.contains(c));
+    if !has_connector {
+        return None;
+    }
+    Some(PhaseRangeIntent {
+        start: start.as_str().to_string(),
+        end: end.as_str().to_string(),
+    })
+}
+
 /// Extract structured intent entities from a free-form text string.
 pub fn extract_intent(text: &str) -> ExtractedIntent {
     let lower = text.to_lowercase();
@@ -572,6 +616,52 @@ mod tests {
         let intent = extract_intent("run plan-build-phases");
         // "run" is a known verb
         assert!(intent.intent_verb.is_action());
+    }
+
+    // ── extract_phase_range ─────────────────────────────────────────────────
+
+    #[test]
+    fn extract_phase_range_through() {
+        let range = extract_phase_range("build phases v0.17.3 through v0.17.8").unwrap();
+        assert_eq!(range.start, "v0.17.3");
+        assert_eq!(range.end, "v0.17.8");
+    }
+
+    #[test]
+    fn extract_phase_range_to() {
+        let range = extract_phase_range("build v0.17.3 to v0.17.8").unwrap();
+        assert_eq!(range.start, "v0.17.3");
+        assert_eq!(range.end, "v0.17.8");
+    }
+
+    #[test]
+    fn extract_phase_range_dash() {
+        let range = extract_phase_range("v0.17.3-v0.17.8").unwrap();
+        assert_eq!(range.start, "v0.17.3");
+        assert_eq!(range.end, "v0.17.8");
+    }
+
+    #[test]
+    fn extract_phase_range_none_for_single_version() {
+        assert_eq!(extract_phase_range("implement remaining v0.15"), None);
+    }
+
+    #[test]
+    fn extract_phase_range_none_without_connector() {
+        // Two version refs but no range connector between them — must not
+        // guess a range was intended.
+        assert_eq!(
+            extract_phase_range("compare v0.17.3 and also v0.17.8 someday"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_phase_range_ignores_a_third_version_ref() {
+        // Only the first two version refs bound the range.
+        let range = extract_phase_range("build v0.17.3 through v0.17.8, not v0.18.0").unwrap();
+        assert_eq!(range.start, "v0.17.3");
+        assert_eq!(range.end, "v0.17.8");
     }
 
     // ── format_confirmation_card ────────────────────────────────────────────

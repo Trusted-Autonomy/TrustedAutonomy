@@ -17,7 +17,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-ta-credentials = { path = "../ta-credentials", version = "0.17.7-alpha.2" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.7-alpha.4" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

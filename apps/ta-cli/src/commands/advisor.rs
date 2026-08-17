@@ -368,6 +368,16 @@ fn create(
         );
     }
 
+    // "build phases v0.17.3 through v0.17.8" (v0.17.7.4) — a multi-phase
+    // range request lands on the phase-range driver instead of the
+    // single-goal pipeline below. `extract_phase_range` only matches when
+    // two version refs are present with a range connector between them, so
+    // ordinary single-goal prompts ("implement remaining v0.15") are
+    // unaffected.
+    if let Some(range) = ta_workflow::intent::extract_phase_range(prompt) {
+        return crate::commands::multi_phase::handle_phase_range(config, &range, json_output);
+    }
+
     let no_op_clarifier = ta_advisor::NoClarification;
     let headless_clarifier = HeadlessClarifier {
         workspace_root: &config.workspace_root,

@@ -621,7 +621,38 @@ Both triggers go through `SourceAdapter` only — never a platform-specific API 
 
 **Retry cap and escalation** reuse the exact same auto-fix mechanism as `ta workflow build-milestone --on-gate-failure=auto-fix` (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second, parallel retry mechanism. Each new CI failure on the same review counts as one attempt; once the attempt count exceeds `--retry-cap`, the watch stops launching fixes and reports an escalation instead of retrying forever.
 
-`ta workflow watch-ci` doesn't yet know which goal originally opened the review it's watching, so each corrective fix lands as its own new goal rather than continuing the original goal's branch. A future release (chaining this into the advisor's multi-phase entry point) will seed that link automatically so fixes land on the same PR.
+`ta workflow watch-ci` doesn't yet know which goal originally opened the review it's watching, so each corrective fix lands as its own new goal rather than continuing the original goal's branch. The multi-phase advisor entry point below seeds that link automatically so fixes land on the same PR.
+
+### Multi-Phase Advisor Runs: "build phases X through Y"
+
+Ask the advisor for a range of plan phases in one shot, and it resolves the range, runs each phase's implementation through a review panel, and chains to the next phase automatically — no more manually watching a PR, pulling, building, installing, and launching the next phase by hand.
+
+```bash
+ta advisor create "build phases v0.17.3 through v0.17.8"
+```
+
+Also recognizes "build v0.17.3 to v0.17.8" and "v0.17.3 - v0.17.8". A prompt with only one version reference (`"implement remaining v0.15"`) is unaffected — it still goes through the normal single-goal advisor pipeline.
+
+**What happens for each resolved phase:**
+
+1. The phase's implementation goal is dispatched (same as `ta goal start`).
+2. The advisor waits for that goal's draft to be built (`ta draft build`) — a human, or the agent working the goal, does the actual implementation; this step just waits for it to show up.
+3. Once a draft exists, the phase's `phase-review-panel` graph instance runs against it (see [Workflow Graphs](#workflow-graphs) above) — reviewers vote, a weighted decision is reached, and the configured `[action]` runs.
+4. If the action applies (i.e. the graph is configured `auto_approve`, not the advisory `recommend` default), the draft is applied and submitted, CI is watched via the same `CiFailureTrigger`/`CorrectiveGoalAction` loop as `ta workflow watch-ci` (fix goals land as follow-ups on the *same* PR, not a new one), and the advisor waits for the PR to reach a terminal state before moving on.
+
+**Parallel phases.** Phases with no dependency on each other land in the same [dependency wave](#dependency-waves-for-plan-phases-ta-plan-waves) and dispatch concurrently; phases with a dependency wait for their wave to start. This is the same wave data `ta plan waves` shows you ahead of time.
+
+**Pausing instead of guessing.** The range halts (rather than skipping ahead) whenever the outcome for the current phase isn't certain:
+
+- The requested range doesn't resolve cleanly — an unknown phase ID, a reversed range, or a phase in the range that depends on something outside it that isn't done yet. The advisor asks a clarifying question instead of guessing.
+- A phase's draft never appears within the poll budget (the implementation is still in progress) — implement the phase and run `ta draft build`, then re-run the same `ta advisor create "build phases ..."` command to continue.
+- The review panel's decision never applies — either it didn't clear its threshold, or the graph is still in the default advisory `recommend` mode (someone needs to explicitly opt a graph into `auto_approve` before it can act on its own, per constitution §16.2).
+- A CI failure's corrective-goal retries are exhausted.
+- A PR never reaches a terminal (merged/closed) state within the poll budget.
+
+Every phase after the paused one is left untouched — the advisor prints exactly which phase paused, why, and which phases are still pending so you know what to do next.
+
+Uses the same `--retry-cap`/poll defaults as `ta workflow watch-ci` (1 retry, 30s poll interval, 120 max polls) and the project-level `phase-review-panel` graph override described above — author `.ta/workflows/graphs/phase-review-panel.toml` to change the panel's reviewers/threshold/weights, or swap `[action] kind` to `auto_approve` to let a resolved range apply on its own.
 
 ---
 
