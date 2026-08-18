@@ -4991,6 +4991,16 @@ fn install_credential_shims(
                 let status = std::process::Command::new("git")
                     .args(["config", "--local", "credential.helper", &helper_value])
                     .current_dir(working_dir)
+                    // GIT_DIR/GIT_WORK_TREE, when set (this process itself
+                    // running inside a TA-managed goal session,
+                    // v0.13.17.3), override `current_dir`-based repository
+                    // discovery entirely — without clearing them this would
+                    // write `credential.helper` into the wrong repo's git
+                    // config instead of `working_dir`'s. A no-op when unset
+                    // (the normal, non-nested case).
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_CEILING_DIRECTORIES")
                     .status();
                 match status {
                     Ok(s) if s.success() => {
@@ -8346,6 +8356,14 @@ fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Re
             "status",
             "--porcelain",
         ])
+        // GIT_DIR/GIT_WORK_TREE, when set (e.g. this process is itself
+        // running inside a TA-managed goal session, v0.13.17.3), override
+        // `-C`'s repository discovery entirely — without clearing them this
+        // check would silently inspect the wrong repository instead of
+        // `project_root`. A no-op when unset (the normal, non-nested case).
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES")
         .output()
     {
         Ok(o) => o,
@@ -10441,27 +10459,46 @@ plan_pending_window = 7
     #[test]
     fn check_vcs_clean_passes_for_clean_git_repo() {
         // Create a minimal git repo with a committed file — clean tree.
+        //
+        // Clears GIT_DIR/GIT_WORK_TREE on every git call: the TA agent
+        // environment sets these (v0.13.17.3) so a bare `git` invocation
+        // would otherwise operate on this session's own staging repo
+        // instead of `dir.path()`, regardless of `current_dir` — GIT_DIR
+        // takes precedence over cwd-based discovery. Same guard
+        // `init_test_git` below (and `draft.rs`'s `clear_git_env`) already
+        // uses; found live when a test-suite run under this env leaked a
+        // stray commit into the real repo.
         let dir = tempfile::tempdir().unwrap();
         let _ = std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         std::fs::write(dir.path().join("README.md"), "hello").unwrap();
         let _ = std::process::Command::new("git")
             .args(["add", "."])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
 
         let result = check_vcs_clean(dir.path(), false);
@@ -10471,22 +10508,32 @@ plan_pending_window = 7
     #[test]
     fn check_vcs_clean_headless_proceeds_on_dirty_tree() {
         // Create a git repo with an uncommitted change; headless=true should proceed (Ok).
+        // See `check_vcs_clean_passes_for_clean_git_repo` above for why GIT_DIR/
+        // GIT_WORK_TREE must be cleared on every git call here.
         let dir = tempfile::tempdir().unwrap();
         let _ = std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         // Write an uncommitted file to make the tree dirty.
         std::fs::write(dir.path().join("dirty.txt"), "change").unwrap();
@@ -11727,12 +11774,20 @@ plan_pending_window = 7
 
     #[test]
     fn install_credential_shims_writes_git_config_when_working_dir_is_a_repo() {
+        // Clears GIT_DIR/GIT_WORK_TREE/GIT_CEILING_DIRECTORIES on every git
+        // call: the TA agent environment sets these (v0.13.17.3), so a bare
+        // `git` invocation would otherwise operate on this session's own
+        // staging repo instead of `repo`, regardless of `current_dir` —
+        // GIT_DIR takes precedence over cwd-based discovery.
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let init = std::process::Command::new("git")
             .args(["init", "--quiet"])
             .current_dir(&repo)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .status();
         if !matches!(init, Ok(s) if s.success()) {
             eprintln!("skipping: `git init` unavailable in this environment");
@@ -11764,6 +11819,9 @@ plan_pending_window = 7
         let helper = std::process::Command::new("git")
             .args(["config", "--local", "--get", "credential.helper"])
             .current_dir(&repo)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
         let value = String::from_utf8_lossy(&helper.stdout);
