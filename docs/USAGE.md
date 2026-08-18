@@ -4295,6 +4295,38 @@ Checkpoints:
   [12:43] tests_pass — 847 tests passed
 ```
 
+### Rebuilding a Draft After Review
+
+Review happens after a goal reaches `pr_ready` — so what do you do when review turns up a small issue? You don't need a new goal run. As long as the goal's staging workspace still exists, you can fix it directly and rebuild:
+
+```bash
+# Draft is at pr_ready (or approved) and review found a small bug.
+cd <staging-workspace-path>       # shown by `ta goal status <goal-id>`
+# ...edit the file(s) that need fixing...
+
+ta draft build --goal <goal-id>   # or: ta draft build --latest
+```
+
+This re-diffs the staging workspace against the source directory and produces a new draft, exactly like the first build. The old draft is marked `superseded` rather than silently discarded, and the new draft records where it came from:
+
+```bash
+$ ta draft view <goal-id>
+Draft: a7b38384/2 · test-rebuild-01
+Status: pending_review
+Rebuilt from: pr_ready state at 2026-08-18 09:12:03 (supersedes a7b38384-...-first-draft-id)
+  — this diff may include edits made directly to staging, not just agent-authored changes.
+Goal: Fix auth bug
+...
+```
+
+That `Rebuilt from:` line is a trust-boundary marker, not a warning to ignore: it tells the reviewer this draft's diff may contain human edits to staging (yours), not only agent output, since the agent process had already exited by the time the goal reached `pr_ready`/`approved`. It never blends silently with a normal agent-authored draft.
+
+**What states support a rebuild:**
+- `running` / `finalizing` — the normal case (agent still working, or just exited).
+- `pr_ready` / `approved` — a draft already exists; rebuilding re-diffs the same staging workspace and supersedes the old draft. Rebuilding from `approved` sends the goal back to `pr_ready`, since the new diff is no longer exactly what was approved.
+
+**What doesn't:** a goal that has moved past the rebuild window (`applied`, `merged`, `completed`, `denied`, `failed`) gets a clear error explaining that further changes need a follow-up goal (`ta run --follow-up`) — distinct from the error you get if the staging workspace itself has been torn down (e.g. after `ta goal purge`), which tells you there's nothing left to rebuild from. Before this, both cases produced the same dead-end message ("must be running or finalizing to build draft"), and the only recovery was a manual `git worktree` copy-out entirely outside TA.
+
 ### Goal Purge
 
 Remove old goal records and their staging directories in bulk:

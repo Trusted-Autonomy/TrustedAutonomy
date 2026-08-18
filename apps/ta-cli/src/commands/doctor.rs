@@ -1108,6 +1108,18 @@ fn apply_fix(
             )?;
             Ok(format!("Closed {} stale draft(s)", closed))
         }
+        "stale_terminal_goals" => {
+            // v0.17.6.3.2: reconcile goals whose real-world outcome is
+            // already settled (draft applied/closed, or plan phase
+            // completed by a different goal) but whose own GoalRunState
+            // never followed — a goal stuck at pr_ready/under_review/
+            // approved forever otherwise.
+            let fixed = super::goal::reconcile_stale_terminal_goals(config)?;
+            for line in &fixed {
+                println!("  {}", line);
+            }
+            Ok(format!("Reconciled {} stale goal(s)", fixed.len()))
+        }
         "stale_failed_goals" | "stale_pr_ready" => {
             // Run GC for stale goals.
             super::gc::execute(

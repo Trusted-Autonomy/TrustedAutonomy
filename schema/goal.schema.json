@@ -99,6 +99,31 @@
           "type": "object"
         },
         {
+          "description": "The goal's draft reached a terminal closed state without being\napplied through the normal review flow — either genuinely abandoned,\nor the underlying work shipped through an external path (a\nhand-merged PR/commit) that TA never applied itself (v0.17.6.3.2).\n\n`applied_externally_ref` mirrors `DraftStatus::Closed`'s distinction:\n`None` means abandoned, `Some(ref)` means the work landed via an\nexternal PR/commit reference. Kept on the goal (not just the draft)\nso goal-level views (`ta goal list`, `ta doctor`) don't need to\ncross-reference the draft record to know a goal is truly done.",
+          "properties": {
+            "applied_externally_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "closed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
           "description": "PR/review was merged and main branch was synced (v0.12.0.1).\nThe full run→draft→apply→merge→sync loop is complete.",
           "properties": {
             "state": {

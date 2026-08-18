@@ -70,6 +70,7 @@ pub fn has_active_goal(store: &GoalRunStore) -> bool {
                         | GoalRunState::Merged
                         | GoalRunState::Completed
                         | GoalRunState::Failed { .. }
+                        | GoalRunState::Closed { .. }
                 )
             })
         })

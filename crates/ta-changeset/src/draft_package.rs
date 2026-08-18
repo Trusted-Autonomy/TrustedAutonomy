@@ -541,6 +541,26 @@ pub enum TrustLevel {
     Quarantined,
 }
 
+/// Records that a draft was produced by rebuilding from a goal state where the
+/// agent process had already exited (`pr_ready`/`approved`), rather than from a
+/// fresh `Running`/`Finalizing` build (v0.17.6.3.1 — Draft Rebuild Window).
+///
+/// This is the trust-boundary marker: a rebuild's diff may contain edits a human
+/// reviewer made directly to the staging workspace, not just agent-authored
+/// changes. `ta draft view` surfaces this distinctly so provenance is never
+/// silently blended between "agent wrote this" and "reviewer amended this".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct RebuildProvenance {
+    /// The goal's lifecycle state at the moment `ta draft build` was re-run
+    /// (e.g. `"pr_ready"`, `"approved"`).
+    pub previous_goal_state: String,
+    /// The prior draft package this rebuild superseded, if one existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_draft_id: Option<Uuid>,
+    /// When the rebuild happened.
+    pub rebuilt_at: DateTime<Utc>,
+}
+
 // ---- Review Requests ----
 
 /// What approvals this PR needs.
@@ -738,6 +758,14 @@ pub struct DraftPackage {
     /// keeping source unchanged and logging a warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_md_base: Option<String>,
+
+    /// Rebuild provenance (v0.17.6.3.1).
+    ///
+    /// `Some` when this draft was produced by rebuilding from `pr_ready`/`approved`
+    /// (the agent process had already exited) rather than from a live `Running`/
+    /// `Finalizing` goal. `None` for a normal first build. See `RebuildProvenance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuilt_from: Option<RebuildProvenance>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -925,6 +953,14 @@ pub enum DraftStatus {
         closed_at: DateTime<Utc>,
         reason: Option<String>,
         closed_by: String,
+        /// Set when the underlying work actually shipped through an external
+        /// path (`ta draft close --applied-externally <ref>`) rather than
+        /// being abandoned — a PR/commit reference. `None` means a genuine
+        /// abandon (the default `ta draft close` behavior). Distinguishing
+        /// the two matters because only the abandon case should reset the
+        /// plan phase back to `pending` (v0.17.6.3.2).
+        #[serde(default)]
+        applied_externally_ref: Option<String>,
     },
 }
 
@@ -1082,6 +1118,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         draft_seq,
         plan_phase: None,
         plan_md_base: None,
+        rebuilt_from: None,
     }
 }
 
@@ -1235,6 +1272,7 @@ mod tests {
             draft_seq: 0,
             plan_phase: None,
             plan_md_base: None,
+            rebuilt_from: None,
         }
     }
 
@@ -1426,6 +1464,7 @@ mod tests {
             closed_at: Utc::now(),
             reason: Some("Hand-merged upstream".to_string()),
             closed_by: "human-reviewer".to_string(),
+            applied_externally_ref: None,
         };
         assert_eq!(status.to_string(), "closed");
         let json = serde_json::to_string(&status).unwrap();
@@ -1441,10 +1480,42 @@ mod tests {
             closed_at: Utc::now(),
             reason: None,
             closed_by: "human-reviewer".to_string(),
+            applied_externally_ref: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let restored: DraftStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, status);
+    }
+
+    #[test]
+    fn draft_status_closed_applied_externally_serialization() {
+        let status = DraftStatus::Closed {
+            closed_at: Utc::now(),
+            reason: Some("landed via PR #579".to_string()),
+            closed_by: "human-reviewer".to_string(),
+            applied_externally_ref: Some("PR#579".to_string()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("PR#579"));
+        let restored: DraftStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, status);
+    }
+
+    #[test]
+    fn draft_status_closed_deserializes_legacy_json_without_applied_externally_ref() {
+        // Pre-v0.17.6.3.2 drafts on disk never wrote `applied_externally_ref` —
+        // it must default to `None` rather than fail to deserialize.
+        let legacy_json = r#"{"status":"closed","closed_at":"2026-01-01T00:00:00Z","reason":null,"closed_by":"human-reviewer"}"#;
+        let restored: DraftStatus = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            restored,
+            DraftStatus::Closed {
+                closed_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+                reason: None,
+                closed_by: "human-reviewer".to_string(),
+                applied_externally_ref: None,
+            }
+        );
     }
 
     #[test]
@@ -2069,6 +2140,7 @@ mod tests {
                 closed_at: Utc::now(),
                 reason: None,
                 closed_by: "human".to_string(),
+                applied_externally_ref: None,
             },
         ];
 

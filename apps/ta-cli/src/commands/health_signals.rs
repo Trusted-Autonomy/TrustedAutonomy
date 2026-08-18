@@ -80,6 +80,7 @@ pub fn compute_health_signals(config: &GatewayConfig) -> Vec<HealthSignal> {
     check_stale_goals(config, &mut signals);
     check_stale_staging_dirs(config, &mut signals);
     check_stale_drafts_signal(config, &mut signals);
+    check_stale_terminal_goals_signal(config, &mut signals);
     check_plugin_crash_loops(config, &mut signals);
     check_daemon_log_error_rate(config, &mut signals);
     check_daemon_log_size(config, &mut signals);
@@ -349,6 +350,78 @@ fn check_stale_drafts_signal(config: &GatewayConfig, signals: &mut Vec<HealthSig
                 stale_count, stale_days
             ),
             "run `ta doctor --fix` to close them automatically, or `ta draft list --stale` to review first".to_string(),
+        ));
+    }
+}
+
+/// v0.17.6.3.2: goals stuck at `PrReady`/`UnderReview`/`Approved` whose
+/// real-world outcome has already been settled — their draft reached a
+/// terminal state without the goal following (pre-fix records; going
+/// forward `close_package`/`apply_package` transition the goal in the same
+/// operation), or their plan phase is already `done` via a different goal
+/// (superseded without ever being closed). Read-only detection; the actual
+/// fix is `goal::reconcile_stale_terminal_goals`, invoked from
+/// `ta doctor --fix`.
+fn check_stale_terminal_goals_signal(config: &GatewayConfig, signals: &mut Vec<HealthSignal>) {
+    use ta_changeset::draft_package::DraftStatus;
+
+    let store = match GoalRunStore::new(&config.goals_dir) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let goals = match store.list() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    let plan_path = config.workspace_root.join("PLAN.md");
+    let done_phase_ids: Vec<String> = if plan_path.exists() {
+        let content = std::fs::read_to_string(&plan_path).unwrap_or_default();
+        super::plan::parse_plan(&content)
+            .into_iter()
+            .filter(|p| matches!(p.status, super::plan::PlanStatus::Done))
+            .map(|p| p.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let stranded = goals
+        .iter()
+        .filter(|g| {
+            matches!(
+                g.state,
+                GoalRunState::PrReady | GoalRunState::UnderReview | GoalRunState::Approved { .. }
+            )
+        })
+        .filter(|g| {
+            let draft_terminal = g.pr_package_id.is_some_and(|pkg_id| {
+                super::draft::load_package(config, pkg_id).is_ok_and(|pkg| {
+                    matches!(
+                        pkg.status,
+                        DraftStatus::Applied { .. } | DraftStatus::Closed { .. }
+                    )
+                })
+            });
+            let phase_already_done = g.plan_phase.as_ref().is_some_and(|phase_id| {
+                done_phase_ids
+                    .iter()
+                    .any(|id| super::plan::phase_ids_match(id, phase_id))
+            });
+            draft_terminal || phase_already_done
+        })
+        .count();
+
+    if stranded > 0 {
+        signals.push(HealthSignal::new(
+            "stale_terminal_goals",
+            SignalSeverity::Warn,
+            format!(
+                "{} goal(s) stranded in a review state whose outcome is already settled \
+                 (draft applied/closed, or plan phase completed by a different goal)",
+                stranded
+            ),
+            "run `ta doctor --fix` to reconcile goal state automatically".to_string(),
         ));
     }
 }
