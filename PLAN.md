@@ -10131,7 +10131,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.3.1 — Draft Rebuild Window: Allow Rebuilding from `pr_ready`/`approved`
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Why this exists**: found live, repeatedly, across this entire v0.17.5.x/v0.17.6.x arc (v0.17.5.1, v0.17.5.2, v0.17.5.3, v0.17.6.1, v0.17.6.2, v0.17.6.3 — six phases in a row, not a one-off). `ta draft build` refuses to rebuild once the parent goal has left `running`/`finalizing` state — `apps/ta-cli/src/commands/draft.rs:1964`, `"Goal is in {} state (must be running or finalizing to build draft)"`. In practice, review happens *after* a goal reaches `pr_ready`, so any bug found during review (however small) is architecturally unfixable through TA's own draft-build/apply path — the draft can never be live-patched. The only recovery every time this session was a full manual `git worktree` bypass: copy files out of staging by hand, fix, re-run the full verify suite, commit/push/PR/merge outside TA entirely. That is a TA product gap, not a one-off review inconvenience — the human reviewer should be able to fix a small issue and re-request a draft build without leaving the tool.
