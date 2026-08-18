@@ -17,6 +17,7 @@ pub mod concurrent;
 pub mod consensus;
 pub mod definition;
 pub mod error;
+pub mod graph;
 pub mod intent;
 pub mod interaction;
 pub mod params;

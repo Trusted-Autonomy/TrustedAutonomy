@@ -19,7 +19,6 @@ chrono = { workspace = true }
 ta-changeset = { path = "../../ta-changeset", version = "0.17.8-alpha" }
 ta-workspace = { path = "../../ta-workspace", version = "0.17.8-alpha" }
 ta-audit = { path = "../../ta-audit", version = "0.17.8-alpha" }
-
 [dev-dependencies]
 tempfile = { workspace = true }
 ta-policy = { path = "../../ta-policy", version = "0.17.8-alpha" }

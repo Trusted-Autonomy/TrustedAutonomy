@@ -520,3 +520,20 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.1","source":"daemon_claim","timestamp":"2026-08-12T05:24:26.381981+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.2","source":"daemon_claim","timestamp":"2026-08-12T06:43:59.947811+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.3","source":"daemon_claim","timestamp":"2026-08-12T08:35:05.036672+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.6","source":"daemon_claim","timestamp":"2026-08-15T07:03:23.787834+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.4","source":"daemon_claim","timestamp":"2026-08-15T07:03:23.788259+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.1","source":"daemon_claim","timestamp":"2026-08-15T07:03:23.800345+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.6","source":"daemon_claim","timestamp":"2026-08-15T07:04:10.777255+00:00"}
+{"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.6.4","timestamp":"2026-08-15T07:05:32.368011+00:00"}
+{"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.6.6","timestamp":"2026-08-15T07:05:32.875740+00:00"}
+{"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.7.1","timestamp":"2026-08-15T07:05:33.357821+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.4","source":"daemon_claim","timestamp":"2026-08-15T07:10:59.760589+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.6.6","source":"daemon_claim","timestamp":"2026-08-15T07:11:44.154573+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.1","source":"daemon_claim","timestamp":"2026-08-15T07:11:51.173163+00:00"}
+{"new_status":"pending","note":"phase reset to pending — goal denied","old_status":"in_progress","phase_id":"v0.17.6.4","timestamp":"2026-08-15T08:01:17.034480+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.4","source":"daemon_claim","timestamp":"2026-08-17T00:02:43.187108+00:00"}
+{"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.7.4","timestamp":"2026-08-17T00:18:12.731169+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.4","source":"daemon_claim","timestamp":"2026-08-17T00:18:34.335930+00:00"}
+{"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.7.4","timestamp":"2026-08-17T01:14:42.214619+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.7.4","source":"daemon_claim","timestamp":"2026-08-17T01:14:56.474798+00:00"}
+{"new_status":"done","old_status":"in_progress","phase_id":"v0.17.7.4","timestamp":"2026-08-17T23:32:11.509420+00:00"}

@@ -287,6 +287,26 @@ pub struct StageDef {
     /// When absent, all pending phases are considered.
     #[serde(default)]
     pub phase_filter: Option<String>,
+    // ── v0.17.7.3 fields (kind = "consensus") ────────────────────────────────
+    /// For `kind = "consensus"`: "raft" | "paxos" | "weighted". Defaults to
+    /// "raft" (the previously-hardcoded literal) when absent — config-driven
+    /// per constitution §16.5, no longer a compiled-in constant
+    /// (`ta_workflow::graph::WeightedDecisionNode` fixes the same gap for the
+    /// graph engine; this fixes it for `stage_consensus`).
+    #[serde(default)]
+    pub consensus_algorithm: Option<String>,
+    /// For `kind = "consensus"`: pass/fail threshold (0.0-1.0). Defaults to
+    /// 0.75 (the previously-hardcoded literal) when absent.
+    #[serde(default)]
+    pub consensus_threshold: Option<f64>,
+    /// For `kind = "consensus"`: per-role weight multipliers. Defaults to
+    /// empty (equal weighting) when absent.
+    #[serde(default)]
+    pub consensus_weights: std::collections::HashMap<String, f64>,
+    /// For `kind = "consensus"`: require every listed role to have voted
+    /// (no timeouts) for the consensus to proceed. Defaults to `false`.
+    #[serde(default)]
+    pub consensus_require_all: bool,
 }
 
 // ── New step kinds (v0.15.13 + v0.15.14) ─────────────────────────────────────
@@ -2422,6 +2442,7 @@ fn stage_consensus(
     _config: &WorkflowConfig,
 ) -> anyhow::Result<Option<String>> {
     use std::collections::HashMap;
+    use std::str::FromStr;
     use ta_workflow::consensus::{run_consensus, ConsensusAlgorithm, ConsensusInput, ReviewerVote};
 
     let run_id = &run.run_id;
@@ -2491,10 +2512,18 @@ fn stage_consensus(
         });
     }
 
-    let weights: HashMap<String, f64> = HashMap::new();
-    let threshold = 0.75_f64;
-    let algorithm = ConsensusAlgorithm::Raft;
-    let require_all = false;
+    // Config-driven, not hardcoded literals (v0.17.7.3, constitution §16.5)
+    // — mirrors `ta_workflow::graph::WeightedDecisionNode::from_def`'s
+    // TOML-sourced threshold/algorithm/weights, sourced here from the
+    // stage's own `consensus_*` fields instead of a graph `[decision]` def.
+    let weights: HashMap<String, f64> = stage_def.consensus_weights.clone();
+    let threshold = stage_def.consensus_threshold.unwrap_or(0.75);
+    let algorithm = stage_def
+        .consensus_algorithm
+        .as_deref()
+        .and_then(|s| ConsensusAlgorithm::from_str(s).ok())
+        .unwrap_or(ConsensusAlgorithm::Raft);
+    let require_all = stage_def.consensus_require_all;
     let override_reason: Option<String> = None;
 
     let run_dir = opts
@@ -3965,6 +3994,10 @@ mod tests {
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         }
     }
 
@@ -4850,6 +4883,10 @@ kind = "static_analysis"
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         };
 
         let opts = RunOptions {
@@ -4913,6 +4950,10 @@ kind = "static_analysis"
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         };
 
         let opts = RunOptions {
@@ -4962,6 +5003,10 @@ kind = "static_analysis"
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         };
 
         let result = stage_join(&mut run, &stage_def).unwrap();
@@ -4996,6 +5041,10 @@ kind = "static_analysis"
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         };
 
         let err = stage_join(&mut run, &stage_def).unwrap_err();
@@ -5028,6 +5077,10 @@ kind = "static_analysis"
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         };
 
         let result = stage_join(&mut run, &stage_def);
@@ -5125,6 +5178,10 @@ kind = "apply_draft"
             max_parallel: None,
             lang: None,
             phase_filter: None,
+            consensus_algorithm: None,
+            consensus_threshold: None,
+            consensus_weights: std::collections::HashMap::new(),
+            consensus_require_all: false,
         }
     }
 
@@ -5214,6 +5271,60 @@ kind = "apply_draft"
         };
         let err = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap_err();
         assert!(err.to_string().contains("BLOCKED"));
+    }
+
+    #[test]
+    fn stage_consensus_reads_threshold_algorithm_weights_from_stage_def_not_hardcoded() {
+        // Same two votes as `stage_consensus_below_threshold_fails` (which
+        // BLOCKs under the hardcoded default threshold=0.75), but with a
+        // stage-level config lowering the threshold and up-weighting the
+        // higher-scoring role — proves the values come from `StageDef`, not
+        // compiled-in literals (v0.17.7.3 item 2).
+        let dir = tempdir().unwrap();
+        let run_id = "test-consensus-config-driven";
+        let review_base = dir.path().join(".ta").join("review").join(run_id);
+        for (role, score) in &[("architect_review", 0.3_f64), ("security_review", 0.6_f64)] {
+            let role_dir = review_base.join(role);
+            std::fs::create_dir_all(&role_dir).unwrap();
+            let verdict = serde_json::json!({"score": score, "findings": []});
+            std::fs::write(
+                role_dir.join("verdict.json"),
+                serde_json::to_string(&verdict).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let config = WorkflowConfig::default();
+        let mut run = GovernedWorkflowRun::new(run_id, "test-wf", "Goal");
+        let mut stage_def = make_consensus_stage_def(vec![
+            "architect_review".to_string(),
+            "security_review".to_string(),
+        ]);
+        stage_def.consensus_algorithm = Some("weighted".to_string());
+        stage_def.consensus_threshold = Some(0.4);
+        stage_def
+            .consensus_weights
+            .insert("security_review".to_string(), 3.0);
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "test",
+            goal_title: "test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+            params: Default::default(),
+        };
+        let result = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap();
+        assert!(
+            result.is_some(),
+            "weighted average (0.3*1.0 + 0.6*3.0)/4.0 = 0.525 must clear the \
+             configured 0.4 threshold, even though it fails the old hardcoded 0.75"
+        );
+        let out = run.outputs.get("consensus").unwrap();
+        assert_eq!(out.get("proceed").unwrap(), "true");
+        assert_eq!(out.get("algorithm").unwrap(), "weighted");
     }
 
     #[test]

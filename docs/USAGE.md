@@ -490,6 +490,170 @@ goal = "Check inbox and draft replies"
 agent = "claude-code"
 ```
 
+### Workflow Graphs
+
+Workflow graphs are a separate, lower-level engine (`ta-workflow::graph`) from the step-based Workflow TOML above. Where a step workflow chains sequential goal-runs, a graph wires together five typed node kinds — dispatch work, review it from multiple angles, weigh the reviews into one decision, then act on it — as a small TOML file instead of Rust code.
+
+**The five node kinds:**
+
+| Node | Role | Built-in kinds |
+|---|---|---|
+| `[[worker]]` | Dispatches new work (starts a goal) | `goal_dispatch` |
+| `[[reviewer]]` | Produces one scored vote on a draft/decision | `policy`, `advisor_confidence`, `agent_panel` |
+| `[decision]` | Fans in every reviewer vote, applies weights/threshold/algorithm | `weighted` |
+| `[action]` | Acts on the decision | `recommend`, `auto_approve`, `corrective_goal`, `escalate` |
+| `[[trigger]]` | Fires on an external event — parses and is runnable standalone via `ta workflow watch-ci` today; full `ta workflow graph-run` wiring lands in a later release | `vcs_task_completion`, `ci_failure` |
+
+**Recommendation vs. auto-approval is the same decision, different wiring.** A `[decision]` node never encodes whether its output is binding or advisory — that's purely which `[action] kind` the graph is wired to. Swap `kind = "recommend"` for `kind = "auto_approve"` in an otherwise identical graph, and the exact same decision goes from "surfaced to a human" to "applied automatically." **New graphs default to `recommend`** — a human must explicitly edit a graph to `auto_approve` before it can act on its own. `kind = "escalate"` is a third option: it records a `graph_decision_escalated` event (picked up by the existing notification-rules engine) and halts the graph at that node — neither applying nor silently recommending.
+
+**Multi-role review panels with `agent_panel`.** Each `[[reviewer]] kind = "agent_panel"` entry spawns a role-persona agent (`role = "head_of_security"`, `role = "pm"`, anything — `TeamRole` is a free-text string, so a new panel member is a TOML edit, not a Rust change) to review the current draft. The persona agent writes its verdict to `.ta/workflow-runs/<run-id>/graph/reviewers/<role>/verdict.json` as `{"score": <0.0-1.0>, "findings": ["..."]}`; the reviewer node polls for that file and reports a `timed_out` vote if it never appears.
+
+Reference graph (also shipped at `templates/workflows/graphs/phase-review-panel.toml` — copy it to `.ta/workflows/graphs/<name>.toml` to use):
+
+```toml
+[[reviewer]]
+id = "policy_check"
+kind = "policy"
+
+[[reviewer]]
+id = "pm_score"
+kind = "agent_panel"
+role = "pm"
+
+[[reviewer]]
+id = "security_score"
+kind = "agent_panel"
+role = "head_of_security"
+
+[[reviewer]]
+id = "engineering_score"
+kind = "agent_panel"
+role = "head_of_engineering"
+
+[decision]
+id = "panel_verdict"
+kind = "weighted"
+algorithm = "weighted"   # "raft" | "paxos" | "weighted"
+threshold = 0.75
+inputs = ["policy_check", "pm_score", "security_score", "engineering_score"]
+weights = { policy_check = 1.0, pm_score = 1.0, security_score = 1.5, engineering_score = 1.0 }
+
+[action]
+id = "outcome"
+kind = "recommend"       # swap to "auto_approve" to let this graph apply drafts
+decision = "panel_verdict"
+```
+
+Run it with:
+
+```bash
+ta workflow graph-run phase-review-panel --title "My draft" --verb implement
+```
+
+### `ta draft apply`'s Approval Gate: One Graph Instance
+
+Per constitution §16.3, `ta draft apply`'s real approval check calls exactly one graph instance — it no longer calls `should_auto_approve_draft`, `check_advisor_auto_approve`, or `run_consensus` directly. By default (no graph file present) it runs the same single-reviewer `advisor_confidence` check the CLI has always run, expressed as a graph. To upgrade the gate to a full review panel without touching any Rust code, author `.ta/workflows/graphs/draft-apply-gate.toml` (the `phase-review-panel.toml` shape above works as-is, or extend it with `advisor_confidence`) — `ta draft apply` picks it up automatically on the next run. A malformed custom graph file is a hard error (not a silent fallback to the default), so a typo in your override is caught immediately rather than quietly ignored.
+
+**Dispatching work with `[[worker]]`.** A `goal_dispatch` worker starts a new goal via `ta goal start`, feeding `--verb`/`--workload-hint` straight into the existing routing brain's workload-type classification — no new Rust code is needed to add a new kind of work, only a `[workload_types.<verb>]` binding in `.ta/workflow.toml`:
+
+```toml
+# .ta/workflow.toml
+[workload_types.implement]
+team = "implementer"
+persona = "careful-reviewer"
+
+[workload_types.create]
+team = "reviewer"
+persona = "creative-generator"
+```
+
+```toml
+# .ta/workflows/graphs/dispatch-and-review.toml
+[[worker]]
+id = "dispatch"
+kind = "goal_dispatch"
+
+[[reviewer]]
+id = "policy_check"
+kind = "policy"
+
+[decision]
+id = "verdict"
+threshold = 0.75
+inputs = ["policy_check"]
+
+[action]
+id = "outcome"
+kind = "recommend"
+decision = "verdict"
+```
+
+```bash
+# Same graph, two different dispatches — the routing decision (team/persona/
+# agent) differs purely from --verb, no graph or Rust change required:
+ta workflow graph-run dispatch-and-review --title "Add OAuth" --verb implement
+ta workflow graph-run dispatch-and-review --title "New logo" --verb create --workload-hint art
+```
+
+`ta workflow graph-run <name>` is a synchronous "run now" entry point for testing and debugging a graph definition — it does not yet wait on `[[trigger]]` sources or replace `ta draft apply`'s real approval gate (that wiring lands in a later phase). Flags: `--title`, `--objective`, `--verb` (default `implement`), `--workload-hint`, `--phase`.
+
+### CI-Failure Watch & Corrective Goals
+
+`ta workflow watch-ci <review-id>` generalizes the "watch CI, read the failing job log, diagnose, fix, push, repeat" loop into two graph nodes:
+
+- **`CiFailureTrigger`** polls your configured VCS adapter's review status and fires the moment CI status flips from passing (or unknown) to failing — not on every poll while it stays red.
+- **`CorrectiveGoalAction`** responds to that failure by launching a follow-up fix goal (via the same dispatch path `[[worker]] kind = "goal_dispatch"` uses) with the failing check's name and a log excerpt injected directly into the goal's objective.
+
+```bash
+ta workflow watch-ci 123 --retry-cap 2
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--retry-cap` | `1` | Max consecutive auto-fix attempts before escalating to a human. |
+| `--poll-interval-secs` | `30` | Seconds between CI status polls. |
+| `--max-polls` | `120` | Max polls per wait cycle before giving up on that review. |
+
+Both triggers go through `SourceAdapter` only — never a platform-specific API call directly, per the constitution's VCS-adapter invariant (§16.4). This has two consequences:
+
+- Any adapter that implements `check_review()` (Git today; a future Perforce/SVN CI integration tomorrow) gets `VcsTaskCompletionTrigger`/`CiFailureTrigger` support automatically, with no trigger-side code change.
+- An adapter with no per-check failure detail (Perforce, SVN, "none" — or Git without the `gh` CLI installed) is fully compliant, not a gap: `SourceAdapter::check_failures()` defaults to an empty list, and `CiFailureTrigger` degrades to `"CI failure detail unavailable for this VCS adapter, investigate manually"` instead of guessing or erroring.
+
+**Retry cap and escalation** reuse the exact same auto-fix mechanism as `ta workflow build-milestone --on-gate-failure=auto-fix` (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second, parallel retry mechanism. Each new CI failure on the same review counts as one attempt; once the attempt count exceeds `--retry-cap`, the watch stops launching fixes and reports an escalation instead of retrying forever.
+
+`ta workflow watch-ci` doesn't yet know which goal originally opened the review it's watching, so each corrective fix lands as its own new goal rather than continuing the original goal's branch. The multi-phase advisor entry point below seeds that link automatically so fixes land on the same PR.
+
+### Multi-Phase Advisor Runs: "build phases X through Y"
+
+Ask the advisor for a range of plan phases in one shot, and it resolves the range, runs each phase's implementation through a review panel, and chains to the next phase automatically — no more manually watching a PR, pulling, building, installing, and launching the next phase by hand.
+
+```bash
+ta advisor create "build phases v0.17.3 through v0.17.8"
+```
+
+Also recognizes "build v0.17.3 to v0.17.8" and "v0.17.3 - v0.17.8". A prompt with only one version reference (`"implement remaining v0.15"`) is unaffected — it still goes through the normal single-goal advisor pipeline.
+
+**What happens for each resolved phase:**
+
+1. The phase's implementation goal is dispatched (same as `ta goal start`).
+2. The advisor waits for that goal's draft to be built (`ta draft build`) — a human, or the agent working the goal, does the actual implementation; this step just waits for it to show up.
+3. Once a draft exists, the phase's `phase-review-panel` graph instance runs against it (see [Workflow Graphs](#workflow-graphs) above) — reviewers vote, a weighted decision is reached, and the configured `[action]` runs.
+4. If the action applies (i.e. the graph is configured `auto_approve`, not the advisory `recommend` default), the draft is applied and submitted, CI is watched via the same `CiFailureTrigger`/`CorrectiveGoalAction` loop as `ta workflow watch-ci` (fix goals land as follow-ups on the *same* PR, not a new one), and the advisor waits for the PR to reach a terminal state before moving on.
+
+**Parallel phases.** Phases with no dependency on each other land in the same [dependency wave](#dependency-waves-for-plan-phases-ta-plan-waves) and dispatch concurrently; phases with a dependency wait for their wave to start. This is the same wave data `ta plan waves` shows you ahead of time.
+
+**Pausing instead of guessing.** The range halts (rather than skipping ahead) whenever the outcome for the current phase isn't certain:
+
+- The requested range doesn't resolve cleanly — an unknown phase ID, a reversed range, or a phase in the range that depends on something outside it that isn't done yet. The advisor asks a clarifying question instead of guessing.
+- A phase's draft never appears within the poll budget (the implementation is still in progress) — implement the phase and run `ta draft build`, then re-run the same `ta advisor create "build phases ..."` command to continue.
+- The review panel's decision never applies — either it didn't clear its threshold, or the graph is still in the default advisory `recommend` mode (someone needs to explicitly opt a graph into `auto_approve` before it can act on its own, per constitution §16.2).
+- A CI failure's corrective-goal retries are exhausted.
+- A PR never reaches a terminal (merged/closed) state within the poll budget.
+
+Every phase after the paused one is left untouched — the advisor prints exactly which phase paused, why, and which phases are still pending so you know what to do next.
+
+Uses the same `--retry-cap`/poll defaults as `ta workflow watch-ci` (1 retry, 30s poll interval, 120 max polls) and the project-level `phase-review-panel` graph override described above — author `.ta/workflows/graphs/phase-review-panel.toml` to change the panel's reviewers/threshold/weights, or swap `[action] kind` to `auto_approve` to let a resolved range apply on its own.
+
 ---
 
 ## Setup for CLI
@@ -7269,20 +7433,34 @@ ta credentials revoke <credential-id>
 ta credentials grant <credential-id> --agent <goal-id> --scope "read" --ttl 3600
 ```
 
-Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. The
-`FileVault` issues session tokens with configurable TTL:
+Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. Session
+grants are minted by `ta-credential-broker` as signed
+[biscuit](https://www.biscuitsec.org/) tokens (v0.17.6.4) with configurable
+TTL:
 
 ```
 Agent requests: "I need gmail read access for goal abc123"
-TA issues:      SessionToken { ttl: 3600s, scopes: ["read"], agent: "claude-code" }
-Agent uses:     The token (never the raw credential)
-TA proxies:     Token → real credential on each API call
+TA issues:      a biscuit grant: { credential, agent: "claude-code", scopes: ["read"], ttl: 3600s }
+Agent uses:     the grant (never the raw credential)
+TA proxies:     grant → real credential on each API call
 ```
 
-`ta credentials grant` mints a token directly for inspection or manual use;
+Unlike the plain reference ids TA used before v0.17.6.4, a grant is
+self-contained and cryptographically signed: any process holding the
+broker's public key (stored alongside `credentials.json` in `.ta/`) can
+verify one offline -- no round trip to whichever process minted it. This is
+what lets `ta credentials grant` (a CLI process) mint a grant that the MCP
+gateway (a different process) can independently verify for broker-mediated
+connectors, below. A holder can also *attenuate* a grant it already has --
+narrow its scopes and shorten its TTL by appending a block, without needing
+the broker's signing key at all -- which is how swarm sub-goal fan-out
+narrows credentials hop-by-hop (see "Swarm fan-out narrowing is
+cryptographic" below).
+
+`ta credentials grant` mints a grant directly for inspection or manual use;
 `ta run --credential-scopes` (below) does the same thing internally for
 every credential it hands to an agent process -- each one is only injected
-after its own token has been issued and validated, so a credential that
+after its own grant has been minted and verified, so a credential that
 fails either step (for example, an already-expired TTL) is withheld rather
 than handed over.
 
@@ -7360,6 +7538,33 @@ the nested `ta run` process each sub-goal spawns receives the same
 filter to its own eventual agent spawn -- clearing the environment there too
 -- rather than relying solely on what the parent process happened to strip.
 
+**Swarm fan-out narrowing is cryptographic, not just conventional
+(v0.17.6.5).** For a broker-mediated connector, a sub-goal that already holds
+a biscuit grant for a credential (because its own parent spawn handed it one)
+doesn't get a brand-new, independently-minted grant when it fans out to its
+own sub-sub-goals -- it *attenuates* the token it's already holding, in
+process, via `biscuit.append()`. No network round trip, and no root signing
+key is needed to attenuate; that's the whole point of a biscuit. The
+practical difference from a fresh mint: the resulting child token carries a
+`check` clause that the broker's authorizer enforces on every use, so a
+scope dropped at *any* hop in the chain is provably gone for every
+descendant, not just absent from a list a well-behaved caller happens to
+consult. A two-level-deep swarm (a sub-goal that itself runs `--workflow
+swarm`) narrows the same way at both hops -- the grandchild's token can be
+cryptographically proven to reject a scope its grandparent held but its
+parent never passed down, even if that parent's own bookkeeping were
+compromised.
+
+This is transparent -- no new flags -- and falls back to today's
+independent-mint-from-the-vault behavior whenever there's no held token to
+attenuate: the top-level swarm launch (nothing to inherit from yet) and any
+credential that isn't broker-mediated for this connector (its scope handoff
+still goes through the `--credential-scopes` narrowing above, pending
+per-tool credential shims in a later phase). Each attenuation also narrows
+the token's TTL to whichever is shorter: the caller's requested TTL, or the
+parent token's own remaining validity -- so a sub-goal can never end up
+holding a longer-lived grant than the process that spawned it.
+
 #### Broker-Mediated Connectors
 
 Even with `--credential-scopes` narrowing which credentials an agent
@@ -7394,40 +7599,47 @@ marked `broker_mediated = true` are withheld from the agent's environment.
 
 | | `broker_mediated = false` (default) | `broker_mediated = true` |
 |---|---|---|
-| What the agent's env contains | `GITHUB_TOKEN=ghp_...` (the raw secret) | `TA_SESSION_TOKEN_GITHUB_TOKEN=<token-id>` (opaque) |
-| What `ta_external_action` needs | Nothing connector-specific | `connector: "github"`, `session_token: "<token-id>"` |
+| What the agent's env contains | `GITHUB_TOKEN=ghp_...` (the raw secret) | `TA_SESSION_TOKEN_GITHUB_TOKEN=<biscuit grant>` (opaque) |
+| What `ta_external_action` needs | Nothing connector-specific | `connector: "github"`, `session_token: "<biscuit grant>"` |
 | Where the real secret is attached | Wherever the agent's own process/plugin script chooses to use the env var | Only to the gateway's own outbound call to the connector's plugin, as `TA_CONNECTOR_SECRET` on that one subprocess invocation |
 | Does the secret ever appear in the agent-visible request or response? | Potentially -- nothing stops the agent from echoing it | Never |
 
 The `broker_mediated = false` path is the same env-injection behavior TA
 has always had -- kept as an explicitly-flagged reduced-security fallback
-(logged at `debug`) until a per-tool credential shim (v0.17.6.7, for the
-dominant `git push`/`gh pr create`/`curl` shell-command case that never
-touches `ta_external_action` at all) closes it more broadly.
+(logged at `debug`). For the dominant `git push`/`gh pr create` shell-command
+case that never touches `ta_external_action` at all, see [Shell/CLI
+Credential Isolation](#shellcli-credential-isolation) below; `npm`/`docker`/
+raw `curl` remain on this fallback.
 
 **End-to-end flow for a broker-mediated connector:**
 
-1. `ta run` mints a session token for the credential as usual (see above),
+1. `ta run` mints a session grant for the credential as usual (see above),
    but because `.ta/connectors.toml` marks it `broker_mediated`, the agent's
-   environment receives `TA_SESSION_TOKEN_GITHUB_TOKEN=<token-id>` instead
-   of the raw `GITHUB_TOKEN` value.
+   environment receives `TA_SESSION_TOKEN_GITHUB_TOKEN=<biscuit grant>`
+   instead of the raw `GITHUB_TOKEN` value.
 2. The agent calls `ta_external_action` with `connector: "github"` and
-   `session_token: "<token-id>"` (read from its own environment) alongside
-   the normal `action_type`/`payload`.
-3. The gateway independently re-validates the token against the credential
-   vault (expiry, and that it was issued to this same agent), confirms it
-   backs the `github` connector's declared credential, and checks
-   `required_scope` against the token's `allowed_scopes`.
+   `session_token: "<biscuit grant>"` (read from its own environment)
+   alongside the normal `action_type`/`payload`.
+3. The gateway independently verifies the grant -- entirely offline, no
+   vault round trip needed for the cryptographic check itself (expiry and
+   revocation are enforced by `ta-credential-broker::CredentialBroker`
+   directly), and that it was issued to this same agent -- then confirms it
+   backs the `github` connector's declared credential and checks
+   `required_scope` against the grant's `allowed_scopes`.
 4. On success, the gateway resolves the real secret and attaches it only to
    its own call into the connector's adapter plugin (as `TA_CONNECTOR_SECRET`
    on that one subprocess invocation) -- never into the request payload, and
    never back into the response relayed to the agent.
-5. If the requested scope exceeds what the token allows, the action is
-   **captured for human review** rather than hard-denied -- the same
-   `ta draft view` pending-actions surface other auto-policy actions use.
-   Full structured escalation through `ta_human_verify` lands in v0.17.6.6;
-   until then, a reviewer re-grants a wider-scoped token via
-   `ta credentials grant` to unblock it.
+5. If the requested scope exceeds what the token allows, the request is
+   escalated through `ta_human_verify`'s confidence-gated pipeline
+   (v0.17.6.6, see [Human Escalation for Credential Scope
+   Elevation](#human-escalation-for-credential-scope-elevation) below)
+   instead of being hard-denied. A high-confidence, low-risk elevation that
+   stays within the credential's own declared scopes can auto-confirm and
+   the action proceeds immediately; anything else falls through to the same
+   `ta draft view` pending-actions surface other auto-policy actions use, and
+   a reviewer can re-grant a wider-scoped token via `ta credentials grant`
+   to unblock it manually.
 6. Calling `ta_external_action` with an undeclared `connector`, or a
    `broker_mediated` connector missing/lacking a valid `session_token`,
    returns a clear, actionable error rather than silently falling back to
@@ -7439,6 +7651,98 @@ the broker-resolved secret from their own subprocess environment as
 exchanged with TA, so it cannot end up logged to `.ta/action-log.jsonl` or
 echoed into a plugin's own response by accident (a well-behaved plugin
 should not echo it either way).
+
+#### Shell/CLI Credential Isolation
+
+Broker mediation above closes the leak path for connectors used through
+`ta_external_action` -- but a Bash-driven coding agent's *majority*
+credentialed actions never touch an MCP tool call at all: `git push`,
+`gh pr create`, `npm publish`, `docker login`, a raw `curl` with a bearer
+header all read a raw secret straight out of the agent's own shell
+environment. Two concrete shims close this for the tools that support it;
+everything else stays on the reduced-security env-injection fallback below,
+same as before this section existed.
+
+Declare which hostnames a broker-mediated connector's credential shims
+should match by adding a `hosts` list to its `.ta/connectors.toml` entry:
+
+```toml
+[connectors.github]
+credential_name = "GITHUB_TOKEN"
+broker_mediated = true
+required_scope = "repo.write"
+hosts = ["github.com"]   # enables the git-credential-helper and gh shims below
+```
+
+A connector with no `hosts` entry is invisible to both shims -- only the
+`ta_external_action` broker path (above) applies to it, unchanged.
+
+**Covered today:**
+
+| Tool | Mechanism |
+|---|---|
+| `git` (`git push`, `git pull`, `git clone` over HTTPS) | `ta run` writes a repo-local `credential.helper = "!<ta binary> credential-helper"` into `.git/config` whenever a broker-mediated connector declares a matching `hosts` entry. git already supports pluggable credential helpers (`gitcredentials(7)`) -- no change to git's own behavior. On each auth request, `ta credential-helper get` reads git's `host=`/`protocol=` request from stdin, resolves the real secret via the broker/vault (the same lookup the `ta_external_action` path uses), and prints `username=`/`password=` back to git. The raw secret exists only in this short-lived helper process and in git's own pipe to it -- never in the agent's persistent shell environment or the LLM's context. A host no broker-mediated connector declares produces no output and no error, so git falls through to its own prompt/other configured helpers exactly as if this helper were never installed. |
+| `gh` (GitHub CLI) | The GitHub CLI has no external-auth-token-resolution hook the way git does, so this is a different mechanism: `ta run` stages a small `gh`-named wrapper binary at `<project root>/.ta/bin/gh` and prepends that directory onto the agent's `PATH`, so a bare `gh ...` invocation resolves to the wrapper before the real CLI. Each invocation resolves the real secret the same way the git helper does, finds the real `gh` binary by searching `PATH` with the wrapper's own directory excluded, and execs it with `GH_TOKEN` set only on that one child process -- never on the wrapper's own environment, and never on the agent's own long-lived shell environment. No matching connector, no session token, or no real `gh` found on `PATH` all fail open: the wrapper runs the real `gh` unmodified wherever it can still be found, the same behavior as if the shim had never been installed. |
+
+**Not covered yet** (stays on the `broker_mediated = false` reduced-security
+env-injection fallback, `bare_process.rs`, logged at `debug`): `npm`,
+`docker`, and any raw `curl`/HTTP client usage. Closing the general case
+would need a local loopback forward proxy that injects the `Authorization`
+header for allow-listed hosts server-side -- which requires the agent's
+process to trust a local CA for TLS interception on those hosts, a real,
+separate trust decision. That trust boundary is deliberately not bundled
+into the git/gh shims above; it's tracked as a future phase requiring its
+own explicit sign-off rather than an implicit rider on this one.
+
+#### Human Escalation for Credential Scope Elevation
+
+When a broker-mediated `ta_external_action` call hits a scope deficit (step
+5 above), TA wires it straight into the existing `ta_human_verify` two-stage
+confidence-gated pipeline (v0.17.6.6) instead of a bespoke approval path or
+an indefinite hard denial:
+
+1. **Trigger** -- a deterministic, mechanical comparison at the gateway's
+   live interception point: `requested_scope ⊄ token.allowed_scopes`. Never
+   an LLM judgment call.
+2. **Structured escalation** -- `ta_human_verify` runs with a structured
+   question carrying `requested_scope`, `current_caveats` (the scopes
+   already on the deficient token), `target_uri`, `goal_id`, and
+   `parent_goal_scope` (the full scope set declared on the underlying vault
+   credential) as context, under a dedicated `credential_scope_elevation`
+   workload type -- the same opinion/validator/gate pipeline used elsewhere,
+   unchanged.
+3. **Non-bypassable containment check** -- before the validator's LLM
+   critique ever runs, a computational pre-check asserts `requested_scope ⊆
+   parent_goal_scope`. A violation forces `verdict: Block` (which always
+   rejects) regardless of what the opinion/validator pipeline would
+   otherwise conclude -- an elevation can never exceed what the credential
+   itself was ever allowed to grant, no matter how confident the model is.
+4. **Stricter default gate** -- `credential_scope_elevation` gets its own
+   built-in threshold baseline (`min_confidence = 0.9`, `max_risk_score =
+   15`, `escalate_risk_score = 30`), stricter than the generic defaults used
+   by code-edit-shaped workloads, since a wrong auto-confirm here mints a
+   real, usable credential grant rather than just approving a text answer.
+   It intentionally does not inherit `[human_verify.default]` -- a
+   project's house-style default tuned for code review shouldn't silently
+   loosen the one gate that hands out live secrets. Override it explicitly
+   if needed:
+
+   ```toml
+   [human_verify.credential_scope_elevation]
+   escalate_risk_score = 20   # even stricter than the built-in default of 30
+   ```
+
+5. **On `Commit`** -- the broker mints a fresh session token scoped to
+   *only* the requested scope (never the credential's full parent scope),
+   with a 15-minute TTL (shorter than the 1-hour baseline goal-run grant,
+   since this is a narrow, ad hoc widening for one action rather than a
+   whole session's credential set). `.ta/human-verify-audit.jsonl` gets two
+   additive fields on that entry, `granted_scope` and `ttl` -- no new audit
+   store. The `ta_external_action` call then proceeds immediately using the
+   newly authorized secret.
+6. **On anything else** -- falls through to the existing blocking
+   `ta_ask_human` UI unchanged, and the action is captured for review
+   exactly as an unresolved scope deficit always was.
 
 ### Context Memory
 

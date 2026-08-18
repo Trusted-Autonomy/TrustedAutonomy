@@ -45,6 +45,24 @@ impl std::fmt::Display for ConsensusAlgorithm {
     }
 }
 
+/// Parses the same lowercase names `Display` produces — used by
+/// `graph::WeightedDecisionNode` to read a TOML `[decision] algorithm`
+/// string (v0.17.7.1) rather than hardcoding an algorithm at each call site.
+impl std::str::FromStr for ConsensusAlgorithm {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "raft" => Ok(ConsensusAlgorithm::Raft),
+            "paxos" => Ok(ConsensusAlgorithm::Paxos),
+            "weighted" => Ok(ConsensusAlgorithm::Weighted),
+            other => Err(format!(
+                "unknown consensus algorithm '{other}' (expected raft/paxos/weighted)"
+            )),
+        }
+    }
+}
+
 // ── ReviewerVote ─────────────────────────────────────────────────────────────
 
 /// A single reviewer's contribution to the consensus panel.
@@ -189,6 +207,20 @@ mod tests {
         assert_eq!(ConsensusAlgorithm::Raft.to_string(), "raft");
         assert_eq!(ConsensusAlgorithm::Paxos.to_string(), "paxos");
         assert_eq!(ConsensusAlgorithm::Weighted.to_string(), "weighted");
+    }
+
+    #[test]
+    fn algorithm_from_str_round_trips_display() {
+        use std::str::FromStr;
+        for variant in [
+            ConsensusAlgorithm::Raft,
+            ConsensusAlgorithm::Paxos,
+            ConsensusAlgorithm::Weighted,
+        ] {
+            let parsed = ConsensusAlgorithm::from_str(&variant.to_string()).unwrap();
+            assert_eq!(parsed, variant);
+        }
+        assert!(ConsensusAlgorithm::from_str("bogus").is_err());
     }
 
     #[test]

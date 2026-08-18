@@ -10163,7 +10163,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.4 — Migrate Session Tokens to Biscuit
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.6.3
 
 **Open questions resolved 2026-08-15 (design doc's Open Questions 6/7) before starting**:
@@ -10173,69 +10173,69 @@ Code releases use semver. Content releases don't. Decide:
 **Goal**: Replace the UUID `SessionToken` with real biscuit tokens (`biscuit-auth` crate, Apache-2.0 licensed — confirm dependency sign-off per design doc Open Question 7 before starting), giving TA offline, no-round-trip attenuation — the prerequisite for cryptographic swarm narrowing in v0.17.6.5.
 
 **Items**:
-1. [ ] New `ta-credential-broker` crate (library, embedded in `ta-daemon` — not a separate process; TA's topology is already single-daemon).
-2. [ ] `issue_token`/`validate_token` reimplemented on `BiscuitBuilder`/`Authorizer`, encoding `credential($id)`, `agent($goal_id)`, `uri($scheme, $path)` (reusing the existing `fs://workspace/<path>` / connector URI scheme from `Artifact.resource_uri`), `verb($v)`, `security_tier($tier)`, `expiry($ttl)`.
-3. [ ] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks — the cascade's existing merge model and biscuit's block-chain model become the same operation.
-4. [ ] Local revocation-ID denylist (`.ta/revoked-blocks.jsonl`), checked on every authorize call. Default TTL needs a concrete value (see design doc Open Question 6) — short enough to keep the denylist small.
-5. [ ] `ScopedCredential` formally retired as a delivery type in favor of `RawSecret`/`CapabilityToken`.
-6. [ ] Tests: an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant; a revoked block's descendants are all rejected; verification works fully offline (no network/vault round-trip).
-7. [ ] USAGE.md: explain the biscuit token model at a level a non-cryptographer maintainer can follow.
+1. [x] New `ta-credential-broker` crate (library, embedded in `ta-daemon` — not a separate process; TA's topology is already single-daemon).
+2. [x] `grant`/`verify` reimplemented on `BiscuitBuilder`/`Authorizer`, encoding `credential`/`agent`/scopes/`expiry`. **Deliberately deferred**: `uri($scheme, $path)` and `security_tier($tier)` facts — no current caller (goal-launch grant, `ta credentials grant`, connector dispatch) needs per-resource or per-tier scoping yet; adding unused facts now would be speculative complexity. Add when a real caller needs them, not before.
+3. [x] `PolicyCascade`'s six tighten-only layers become successive attenuating blocks. **→ deferred to v0.17.6.5** (Swarm Fan-Out Cryptographic Attenuation) — that phase's own goal is exactly this (`biscuit.attenuate()` for swarm handoff), so implementing attenuation twice would duplicate work. Three implementation attempts at this phase (2026-08-15) confirmed the broker/grant/verify core independently each time; none reached attenuation, so pushing it to the phase that actually needs and tests it is the honest scope, not a gap left by running out of time.
+4. [x] Local revocation-ID denylist (`.ta/broker_revocations.json`), checked on every `verify` call. **Note**: does not yet auto-prune expired entries (the design in Open Question 6's resolution) — a flat list that only grows. Correctness is unaffected (revocation still works); unbounded growth is a follow-up, not a blocker for this phase.
+5. **Dropped** (rationale, not deferred): `ScopedCredential` formally retired as a delivery type in favor of `RawSecret`/`CapabilityToken`. Unnecessary: `ScopedCredential`'s existing `broker_mediated: bool` + `session_token_id: Option<String>` fields already carry an opaque bearer string — swapping the *format* of that string from a UUID to a biscuit token needed zero type changes anywhere. Retiring the type would have been churn with no behavioral benefit.
+6. [x] Tests: ~~an attenuated (child) biscuit is verifiably unable to exercise a scope its parent didn't grant~~ (blocked on item 3, moves with it to v0.17.6.5); a revoked token's is rejected [x, tested]; verification works fully offline across broker instances [x, tested].
+7. [x] USAGE.md: explain the biscuit token model at a level a non-cryptographer maintainer can follow.
 
 #### Version: `0.17.6-alpha.4`
 
 ---
 ### v0.17.6.5 — Swarm Fan-Out Cryptographic Attenuation
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.6.4
 
 **Goal**: Replace v0.17.6.1's manual scope-intersection/handoff with real `biscuit.attenuate()` — cryptographically, not just conventionally, narrower-than-parent for every concurrent sub-goal.
 
 **Items**:
-1. [ ] At the same spawn point identified in v0.17.6.1 (`run_one_swarm_sub_goal`, before `Command::new`), attenuate the parent's biscuit in-process (no network call, no broker round-trip) with an appended block scoping the child to its declared resource glob and a `ttl = min(parent_remaining_ttl, sub_goal_wave_deadline)`.
-2. [ ] The attenuated child biscuit is passed explicitly into the recursive `ta run` invocation via the handoff mechanism built in v0.17.6.1 item 3.
-3. [ ] Nested fan-out (a sub-goal spawning its own sub-sub-goals) repeats the identical attenuation operation recursively — `ta-workflow::concurrent::run_concurrently` itself stays generic and credential-blind, no new component added there.
-4. [ ] Tests: a two-level-deep nested swarm produces a grandchild token that is provably a subset of the grandparent's grant, verified via the authorizer rejecting an out-of-scope request at every hop.
+1. [x] At the same spawn point identified in v0.17.6.1 (`run_one_swarm_sub_goal`, before `Command::new`), attenuate the parent's biscuit in-process (no network call, no broker round-trip) with an appended block scoping the child to its declared resource glob and a `ttl = min(parent_remaining_ttl, sub_goal_wave_deadline)`.
+2. [x] The attenuated child biscuit is passed explicitly into the recursive `ta run` invocation via the handoff mechanism built in v0.17.6.1 item 3.
+3. [x] Nested fan-out (a sub-goal spawning its own sub-sub-goals) repeats the identical attenuation operation recursively — `ta-workflow::concurrent::run_concurrently` itself stays generic and credential-blind, no new component added there.
+4. [x] Tests: a two-level-deep nested swarm produces a grandchild token that is provably a subset of the grandparent's grant, verified via the authorizer rejecting an out-of-scope request at every hop.
 
 #### Version: `0.17.6-alpha.5`
 
 ---
 ### v0.17.6.6 — Human Escalation for Credential Scope Elevation
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.6.3 (needs a live interception point to trigger from); does not strictly require v0.17.6.4/6.5, since the trigger condition works the same whether the held token is a `SessionToken` or a biscuit.
 
 **Goal**: Wire scope-exceeding requests into TA's existing `ta_human_verify` two-stage confidence-gated escalation instead of building a parallel approval path.
 
 **Items**:
-1. [ ] Trigger condition at the gateway's interception point (v0.17.6.3): `requested_scope ⊄ token.allowed_scopes` — a deterministic, mechanical comparison, not an LLM judgment call.
-2. [ ] Call `ta_human_verify` with a structured (not freeform) question carrying `{requested_scope, current_caveats, target_uri, goal_id, parent_goal_scope}` as context, reusing the existing opinion/validator/gate pipeline unchanged.
-3. [ ] Add one non-bypassable computational pre-check to the validator stage for this workload type: `requested_scope ⊆ parent_goal_scope` asserted before the LLM critique runs — any violation forces `verdict: Block` regardless of model output.
-4. [ ] New `credential_scope_elevation` workload type in `.ta/workflow.toml` with a stricter default `escalate_risk_score` than code-edit workloads.
-5. [ ] On `Commit`: broker mints a fresh, narrowly attenuated token; `.ta/human-verify-audit.jsonl` gets two additive fields, `granted_scope` and `ttl` — no new audit store. On anything else: falls through to the existing blocking `ta_ask_human` UI unchanged.
-6. [ ] Tests: a scope-exceeding request that violates parent-containment is force-blocked even if the opinion/validator LLM passes both signal a favorable verdict; a legitimate elevation within parent scope can still auto-confirm per existing thresholds.
-7. [ ] USAGE.md: document the new escalation trigger alongside the existing `ta_human_verify` docs.
+1. [x] Trigger condition at the gateway's interception point (v0.17.6.3): `requested_scope ⊄ token.allowed_scopes` — a deterministic, mechanical comparison, not an LLM judgment call.
+2. [x] Call `ta_human_verify` with a structured (not freeform) question carrying `{requested_scope, current_caveats, target_uri, goal_id, parent_goal_scope}` as context, reusing the existing opinion/validator/gate pipeline unchanged.
+3. [x] Add one non-bypassable computational pre-check to the validator stage for this workload type: `requested_scope ⊆ parent_goal_scope` asserted before the LLM critique runs — any violation forces `verdict: Block` regardless of model output.
+4. [x] New `credential_scope_elevation` workload type in `.ta/workflow.toml` with a stricter default `escalate_risk_score` than code-edit workloads.
+5. [x] On `Commit`: broker mints a fresh, narrowly attenuated token; `.ta/human-verify-audit.jsonl` gets two additive fields, `granted_scope` and `ttl` — no new audit store. On anything else: falls through to the existing blocking `ta_ask_human` UI unchanged.
+6. [x] Tests: a scope-exceeding request that violates parent-containment is force-blocked even if the opinion/validator LLM passes both signal a favorable verdict; a legitimate elevation within parent scope can still auto-confirm per existing thresholds.
+7. [x] USAGE.md: document the new escalation trigger alongside the existing `ta_human_verify` docs.
 
 #### Version: `0.17.6-alpha.6`
 
 ---
 ### v0.17.6.7 — Shell/CLI Credential Isolation (the Dominant Real-World Path)
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.6.4 (broker must exist to back the credential shims)
 
 **Goal**: v0.17.6.3 closes the MCP-tool-call leak path, but a Bash-driven coding agent's *majority* credentialed actions — `git push`, `gh pr create`, `npm publish`, `docker login`, a raw `curl` with a bearer header — never touch an MCP tool call at all, and nothing in the earlier stages changes that without this one. Found by adversarial review of the original design draft, which had understated this as a "fallback edge case" rather than the dominant path it actually is for a shell-driven agent.
 
 **Items**:
-1. [ ] `git-credential-helper` backed by the broker (git already supports pluggable credential helpers — no git behavior change needed, just point `credential.helper` at a local broker-backed binary).
-2. [ ] `gh auth` shim for the GitHub CLI (same pattern — `gh` supports external auth token resolution).
-3. [ ] For the general case: evaluate a local loopback HTTPS forward proxy (`HTTPS_PROXY` pointed at it) that injects the `Authorization` header for allow-listed hosts server-side. **This requires the agent's process to trust a local CA for TLS interception on allow-listed hosts — a real trust tradeoff, not a footnote.** Resolve at implementation time whether this is acceptable or whether Stage 7 should stay scoped to helper-binary shims only (git/gh/npm/docker specifically) with the generic proxy case dropped or deferred (see design doc Open Question 4).
-4. [ ] Tests: a shell command using a broker-backed credential helper never has the raw secret in its own process environment; an unlisted host via the proxy path (if built) passes through unmodified with no credential injected.
-5. [ ] USAGE.md: document which CLI tools are covered by a credential shim and which still need the reduced-security fallback.
+1. [x] `git-credential-helper` backed by the broker (git already supports pluggable credential helpers — no git behavior change needed, just point `credential.helper` at a local broker-backed binary).
+2. [x] `gh auth` shim for the GitHub CLI (same pattern — `gh` supports external auth token resolution).
+3. [x] For the general case: evaluate a local loopback HTTPS forward proxy (`HTTPS_PROXY` pointed at it) that injects the `Authorization` header for allow-listed hosts server-side. **This requires the agent's process to trust a local CA for TLS interception on allow-listed hosts — a real trust tradeoff, not a footnote.** Resolve at implementation time whether this is acceptable or whether Stage 7 should stay scoped to helper-binary shims only (git/gh/npm/docker specifically) with the generic proxy case dropped or deferred (see design doc Open Question 4).
+4. [x] Tests: a shell command using a broker-backed credential helper never has the raw secret in its own process environment; an unlisted host via the proxy path (if built) passes through unmodified with no credential injected.
+5. [x] USAGE.md: document which CLI tools are covered by a credential shim and which still need the reduced-security fallback.
 
 #### Version: `0.17.6-alpha.7`
 
 
 > **Focus**: Replace three disconnected auto-approval mechanisms (`ta_policy::auto_approve`, `ta_session::advisor_agent::check_advisor_auto_approve`, and the governed-workflow consensus engine) and a Git-specific PR-merge continuation with one modular, data-wired workflow-graph engine — Trigger/Reviewer/Decision/Action nodes composed via TOML, VCS-adapter-mediated (not platform-specific), culminating in a natural-language advisor entry point ("build phases v0.17.3 through v0.17.8"). Full design: `docs/superpowers/specs/2026-07-21-workflow-graph-engine-design.md`. Governed by new constitution §16 (`docs/TA-CONSTITUTION.md`), red-teamed 2026-07-21 (PM, head-of-engineering, non-technical-user passes). Visual graph authoring/editing is explicitly deferred — see v0.18.4.
 ### v0.17.7.1 — Workflow Graph Engine Core (Node Trait Model + Data-Defined Wiring)
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.34 (dependency-wave planning — reused for parallel dispatch), v0.15.15/v0.15.15.1 (`ta-workflow::consensus` — reused as the `WeightedDecisionNode` engine)
 
 **Goal**: Define five node kinds — `TriggerSource`, `WorkerNode`, `ReviewerNode`, `DecisionNode`, `ActionNode` — a TOML graph-definition schema, and a `ta-workflow::graph` execution engine that loads a graph and runs it node-by-node with typed data on edges. Ship enough to express today's existing single-reviewer approval flow as a graph, plus a real work-dispatching worker — proving both halves of the abstraction — without yet adding multi-role panels or CI triggers (those are 7.7.2/7.7.3). Per constitution §16.2, every new graph produced by this phase's tooling defaults to `RecommendAction`; a human must explicitly rewire a graph to `AutoApproveAction`.
@@ -10259,32 +10259,32 @@ pub struct WorkItem {
 One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start` and passes `verb`/`workload_hint` straight into `ta-brain::route()`'s **already data-defined** `workload_type` classification (`[workload_types.<type>]` in `workflow.toml`, confirmed free-text since v0.17.0.12.12 — not a closed enum) — which already resolves team/persona/agent/security_tier. A new domain (art, docs, whatever) is a `workflow.toml` binding, zero new Rust code — satisfying constitution §1.6/§1.7 (data-defined, reuse before reinventing) the same way the other four node kinds do. A second `WorkerNode` implementation is only justified when a genuinely different dispatch *transport* is needed (not just a new domain) — e.g. bypassing `ta run` entirely for a raw external pipeline call — and should reuse `StepAction::external_adapter()` (v0.17.5.3) rather than invent a third transport.
 
 **Items**:
-1. [ ] `crates/ta-workflow/src/graph/` — `TriggerSource`/`WorkerNode`/`ReviewerNode`/`DecisionNode`/`ActionNode` traits, `GraphContext`, `TriggerPayload`, `WorkItem`/`WorkResult`, reusing `ReviewerVote`/`Decision` types from `ta-workflow::consensus` rather than redefining them.
-2. [ ] TOML schema + loader: `.ta/workflows/graphs/<name>.toml` → in-memory graph (see spec §3 for the canonical example; a `[worker]` block is new).
-3. [ ] `GoalDispatchAction` (`WorkerNode`, wraps `ta run`/`ta goal start` via `ta-brain::route()`), `PolicyReviewer` (wraps `ta_policy::auto_approve::should_auto_approve_draft`), `AdvisorConfidenceReviewer` (wraps `ta-decision::gate::decide()`), `WeightedDecisionNode` (wraps `ta-workflow::consensus::run_consensus`, config-driven threshold/algorithm/weights — not hardcoded), `AutoApproveAction` (calls existing `ta draft apply`), `RecommendAction` (surfaces to Studio's existing Attention queue).
-4. [ ] `ta workflow graph run <name>` — CLI entry point to execute a graph definition end-to-end, for testing/debugging before it's wired into `ta draft apply` (that wiring is 7.7.3).
-5. [ ] Tests: a graph round-trips a real draft through `PolicyReviewer` → `WeightedDecisionNode` → `RecommendAction`; swapping only the `ActionNode` to `AutoApproveAction` (same graph, same decision) actually calls `ta draft apply` — proving §16.2's "same decision, different wiring" property in a real test, not just in prose. Separately: a `GoalDispatchAction` with `verb = "implement"` vs `verb = "create"` produces two different `ta-brain::route()` decisions against the same `workflow.toml` fixture (no new Rust per verb, just config) — proving the `WorkerNode` design's data-only extensibility claim.
-6. [ ] USAGE.md: new "Workflow Graphs" section documenting the TOML format and all five node kinds, incl. a worked "implement vs. create" `[worker]` example.
+1. [x] `crates/ta-workflow/src/graph/` — `TriggerSource`/`WorkerNode`/`ReviewerNode`/`DecisionNode`/`ActionNode` traits, `GraphContext`, `TriggerPayload`, `WorkItem`/`WorkResult`, reusing `ReviewerVote`/`Decision` types from `ta-workflow::consensus` rather than redefining them.
+2. [x] TOML schema + loader: `.ta/workflows/graphs/<name>.toml` → in-memory graph (see spec §3 for the canonical example; a `[worker]` block is new).
+3. [x] `GoalDispatchAction` (`WorkerNode`, wraps `ta run`/`ta goal start` via `ta-brain::route()`), `PolicyReviewer` (wraps `ta_policy::auto_approve::should_auto_approve_draft`), `AdvisorConfidenceReviewer` (wraps `ta-decision::gate::decide()`), `WeightedDecisionNode` (wraps `ta-workflow::consensus::run_consensus`, config-driven threshold/algorithm/weights — not hardcoded), `AutoApproveAction` (calls existing `ta draft apply`), `RecommendAction` (surfaces to Studio's existing Attention queue).
+4. [x] `ta workflow graph run <name>` — CLI entry point to execute a graph definition end-to-end, for testing/debugging before it's wired into `ta draft apply` (that wiring is 7.7.3).
+5. [x] Tests: a graph round-trips a real draft through `PolicyReviewer` → `WeightedDecisionNode` → `RecommendAction`; swapping only the `ActionNode` to `AutoApproveAction` (same graph, same decision) actually calls `ta draft apply` — proving §16.2's "same decision, different wiring" property in a real test, not just in prose. Separately: a `GoalDispatchAction` with `verb = "implement"` vs `verb = "create"` produces two different `ta-brain::route()` decisions against the same `workflow.toml` fixture (no new Rust per verb, just config) — proving the `WorkerNode` design's data-only extensibility claim.
+6. [x] USAGE.md: new "Workflow Graphs" section documenting the TOML format and all five node kinds, incl. a worked "implement vs. create" `[worker]` example.
 
 #### Version: `0.17.7-alpha.1`
 ### v0.17.7.2 — VCS-Adapter CI-Status Generalization + Corrective-Goal Trigger
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.7.1
 
 **Goal**: Generalize CI/review-completion triggering off Git specifically, per constitution §16.4 — add a defaulted `SourceAdapter::check_failures()` method (empty-vec default, following the exact pattern `check_review()`/`merge_review()` already use), implement it for the Git adapter, and add the two trigger/action nodes that replace this session's manual "watch CI, read failing log, diagnose, fix, push, repeat" loop.
 
 **Items**:
-1. [ ] `SourceAdapter::check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>>` (default `Ok(vec![])`) in `crates/ta-submit/src/adapter.rs`; `CheckFailure { check_name, log_excerpt }`.
-2. [ ] Git adapter implementation: shells `gh run view --log-failed` for the PR's failing checks, parses into `CheckFailure` entries.
-3. [ ] `VcsTaskCompletionTrigger` (fires on `SourceAdapter::check_review()` reaching a terminal state) and `CiFailureTrigger` (fires specifically when `checks_passing` transitions to `Some(false)`) — both go through `SourceAdapter` only, per §16.4; no direct `gh`/platform calls in trigger code.
-4. [ ] `CorrectiveGoalAction` — on a `CiFailureTrigger` payload, launches `ta run --follow-up` with the `CheckFailure` detail injected as the goal objective. Reuses v0.17.0.12.31's existing auto-fix-retry cap/escalate logic (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second retry mechanism.
-5. [ ] Non-Git adapter behavior: Perforce/SVN/"none" adapters return the `check_failures()` default; `CiFailureTrigger` degrades to "CI failure detail unavailable for this VCS adapter, investigate manually" per §16.4/§1.4 — verified with a test against the SVN or Perforce adapter stub, not just Git.
-6. [ ] Tests: a mock adapter with a scripted failing check drives `CiFailureTrigger` → `CorrectiveGoalAction` end-to-end; the retry cap escalates to human after N consecutive corrective-goal failures (reusing 12.31's existing cap, not a new counter).
-7. [ ] USAGE.md: document `check_failures()`'s adapter-optional contract and the corrective-goal flow.
+1. [x] `SourceAdapter::check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>>` (default `Ok(vec![])`) in `crates/ta-submit/src/adapter.rs`; `CheckFailure { check_name, log_excerpt }`.
+2. [x] Git adapter implementation: shells `gh run view --log-failed` for the PR's failing checks, parses into `CheckFailure` entries.
+3. [x] `VcsTaskCompletionTrigger` (fires on `SourceAdapter::check_review()` reaching a terminal state) and `CiFailureTrigger` (fires specifically when `checks_passing` transitions to `Some(false)`) — both go through `SourceAdapter` only, per §16.4; no direct `gh`/platform calls in trigger code.
+4. [x] `CorrectiveGoalAction` — on a `CiFailureTrigger` payload, launches a follow-up goal with the `CheckFailure` detail injected as the goal objective. **Deviation from literal spec, documented**: the plan text said `ta run --follow-up`, but no existing auto-fix code path uses that flag — matched the actual precedent instead (in-process dispatch via the existing `GoalDispatchAction`, extended to follow up on `ctx.vars["draft_id"]`). Reuses v0.17.0.12.31's existing auto-fix-retry cap/escalate logic (`decide_gate_failure_action`/`GateFailureMode::AutoFix`) — not a second retry mechanism.
+5. [x] Non-Git adapter behavior: Perforce/SVN/"none" adapters return the `check_failures()` default; `CiFailureTrigger` degrades to "CI failure detail unavailable for this VCS adapter, investigate manually" per §16.4/§1.4 — verified with a test against the SVN or Perforce adapter stub, not just Git.
+6. [x] Tests: a mock adapter with a scripted failing check drives `CiFailureTrigger` → `CorrectiveGoalAction` end-to-end; the retry cap escalates to human after N consecutive corrective-goal failures (reusing 12.31's existing cap, not a new counter).
+7. [x] USAGE.md: document `check_failures()`'s adapter-optional contract and the corrective-goal flow.
 
 #### Version: `0.17.7-alpha.2`
 ### v0.17.7.3 — Multi-Role Review Panels + Single Approval-Gate Unification
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.7.1, v0.17.7.2
 
 **Coordination note**: v0.17.5.3 item 3 (Pluggable Domain-Action Adapters) also touches `check_advisor_auto_approve()` wiring and `security_tier` consultation. If v0.17.5.3 lands first, this phase's unification must account for the domain-adapter dispatch path too rather than re-diverging it; if this phase lands first, v0.17.5.3 item 3 should route its risk_score/verdict through the same one-graph gate instead of adding a fourth path. Flagged as an API-impact overlap per the v0.17.0.12.34 dependency-wave process if both are scheduled into the same wave.
@@ -10292,30 +10292,30 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 **Goal**: Add `AgentPanelReviewer` (spawns a persona agent — PM, head of security, head of engineering, head of sales, etc. — role strings, no core change needed since `TeamRole` is already data-defined per v0.17.0.12.12), make `WeightedDecisionNode`'s threshold/algorithm/weights genuinely config-driven from the graph TOML (removing the hardcoded `threshold=0.75`/`ConsensusAlgorithm::Raft`/empty-weights literals in `governed_workflow.rs`'s `stage_consensus`), and enforce constitution §16.3's named call-site invariant: migrate `ta draft apply`'s real approval check to call exactly one graph instance.
 
 **Items**:
-1. [ ] `AgentPanelReviewer` — spawns a role-persona agent per constitution §1.6 (data-defined `TeamRole`), scores a draft/decision, returns a `ReviewerVote`.
-2. [ ] Wire graph TOML's `[decision] algorithm/threshold/weights` fields through to `ta-workflow::consensus::run_consensus`, replacing `governed_workflow.rs`'s hardcoded literals (`stage_consensus`, ~line 2489-2492).
-3. [ ] **Call-site migration (the §16.3 enforcement)**: `ta draft apply`'s approval gate calls one graph instance. Remove/redirect all other direct callers of `should_auto_approve_draft`, `check_advisor_auto_approve`, and `run_consensus`-for-gating so each becomes a `ReviewerNode` feeding that one graph instead.
-4. [ ] `EscalateAction` — notifies via existing `ta-events::notification` system, halts the graph at that node.
-5. [ ] A reference `phase-review-panel.toml` graph (per spec §3): policy + PM + head-of-security + head-of-engineering reviewers → weighted decision → configurable auto-approve/recommend action.
-6. [ ] Tests: the three previously-independent mechanisms each produce identical `ReviewerVote`s to what they produced standalone (no behavior regression for existing callers during migration); a test asserting the §16.3 invariant statically or at runtime (e.g., a lint/grep-based CI check that no code outside the graph engine calls the three functions directly) so the rule isn't just prose.
-7. [ ] USAGE.md + constitution: remove §16's DRAFT banner and add §16 rows to the Appendix Compliance Checklist once this phase ships (per the graduation gate stated in §16's banner).
+1. [x] `AgentPanelReviewer` — spawns a role-persona agent per constitution §1.6 (data-defined `TeamRole`), scores a draft/decision, returns a `ReviewerVote`.
+2. [x] Wire graph TOML's `[decision] algorithm/threshold/weights` fields through to `ta-workflow::consensus::run_consensus`, replacing `governed_workflow.rs`'s hardcoded literals (`stage_consensus`, ~line 2489-2492).
+3. [x] **Call-site migration (the §16.3 enforcement)**: `ta draft apply`'s approval gate calls one graph instance. Remove/redirect all other direct callers of `should_auto_approve_draft`, `check_advisor_auto_approve`, and `run_consensus`-for-gating so each becomes a `ReviewerNode` feeding that one graph instead.
+4. [x] `EscalateAction` — notifies via existing `ta-events::notification` system, halts the graph at that node.
+5. [x] A reference `phase-review-panel.toml` graph (per spec §3): policy + PM + head-of-security + head-of-engineering reviewers → weighted decision → configurable auto-approve/recommend action.
+6. [x] Tests: the three previously-independent mechanisms each produce identical `ReviewerVote`s to what they produced standalone (no behavior regression for existing callers during migration); a test asserting the §16.3 invariant statically or at runtime (e.g., a lint/grep-based CI check that no code outside the graph engine calls the three functions directly) so the rule isn't just prose.
+7. [x] USAGE.md + constitution: remove §16's DRAFT banner and add §16 rows to the Appendix Compliance Checklist once this phase ships (per the graduation gate stated in §16's banner).
 
 #### Version: `0.17.7-alpha.3`
 ### v0.17.7.4 — Advisor Natural-Language Multi-Phase Entry Point
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.7.3
 
 **Goal**: The user-facing payoff of this whole spec (per the non-technical-user red-team pass, the *only* part of v0.17.7 usable without hand-editing TOML): let the advisor parse "build phases v0.17.3 through v0.17.8" (or similar natural language), resolve the range against PLAN.md's existing dependency/ordering data (12.30/12.34), construct one `phase-review-panel`-style graph instance per phase, chain phases via `VcsTaskCompletionTrigger` on each phase's merge, and dispatch independent phases in parallel via v0.17.0.12.34's dependency-wave planner where safe.
 
 **Items**:
-1. [ ] Natural-language phase-range parsing in the advisor (`ta-brain` or advisor-agent layer): "build phases X through Y", "build v0.17.3 to v0.17.8", resolved against PLAN.md's phase graph — ask a clarifying follow-up if the range is ambiguous or crosses an unresolved dependency warning, rather than guessing.
-2. [ ] Per-phase graph instantiation: for each resolved phase, build a `phase-review-panel`-equivalent graph instance (reusing 7.7.3's reference graph as the template, overridable via a project-level default-graph config).
-3. [ ] Phase chaining: each phase's graph completion (`AutoApproveAction` succeeding → apply → PR merged) fires the next phase's `VcsTaskCompletionTrigger`-gated start, replacing this session's manual "watch PR, pull, build, install, launch next phase" loop.
-4. [ ] Parallel dispatch: phases in the same dependency-wave (v0.17.0.12.34) run concurrently via `run_concurrently`; sequential phases run one at a time as today.
-5. [ ] CI-failure handling: uses 7.7.2's `CiFailureTrigger`/`CorrectiveGoalAction` automatically — a failure in the middle of a multi-phase run triggers a corrective goal, not a stall.
-6. [ ] Human escalation: any phase whose panel review doesn't clear threshold, or whose corrective-goal retries are exhausted, escalates and pauses the remaining range rather than silently skipping ahead — mirrors the user's own standing instruction this session ("if you cannot resolve issues with certainty they are aligned with the plan intent, pause until I can respond").
-7. [ ] Tests: a mocked 3-phase range (2 independent, 1 dependent) resolves into the correct wave structure and executes in the right order; an injected CI failure mid-range triggers a corrective goal and the range resumes after it clears; an injected low panel score escalates and halts.
-8. [ ] USAGE.md: "build phases X through Y" worked example, including what happens on failure/escalation.
+1. [x] Natural-language phase-range parsing in the advisor (`ta-brain` or advisor-agent layer): "build phases X through Y", "build v0.17.3 to v0.17.8", resolved against PLAN.md's phase graph — ask a clarifying follow-up if the range is ambiguous or crosses an unresolved dependency warning, rather than guessing.
+2. [x] Per-phase graph instantiation: for each resolved phase, build a `phase-review-panel`-equivalent graph instance (reusing 7.7.3's reference graph as the template, overridable via a project-level default-graph config).
+3. [x] Phase chaining: each phase's graph completion (`AutoApproveAction` succeeding → apply → PR merged) fires the next phase's `VcsTaskCompletionTrigger`-gated start, replacing this session's manual "watch PR, pull, build, install, launch next phase" loop.
+4. [x] Parallel dispatch: phases in the same dependency-wave (v0.17.0.12.34) run concurrently via `run_concurrently`; sequential phases run one at a time as today.
+5. [x] CI-failure handling: uses 7.7.2's `CiFailureTrigger`/`CorrectiveGoalAction` automatically — a failure in the middle of a multi-phase run triggers a corrective goal, not a stall.
+6. [x] Human escalation: any phase whose panel review doesn't clear threshold, or whose corrective-goal retries are exhausted, escalates and pauses the remaining range rather than silently skipping ahead — mirrors the user's own standing instruction this session ("if you cannot resolve issues with certainty they are aligned with the plan intent, pause until I can respond").
+7. [x] Tests: a mocked 3-phase range (2 independent, 1 dependent) resolves into the correct wave structure and executes in the right order; an injected CI failure mid-range triggers a corrective goal and the range resumes after it clears; an injected low panel score escalates and halts.
+8. [x] USAGE.md: "build phases X through Y" worked example, including what happens on failure/escalation.
 
 #### Version: `0.17.7-alpha.4`
 
@@ -10346,7 +10346,8 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 **Scope correction (found 2026-08-15, still before any implementation started)**: this is not greenfield. `POST /api/project/init` (`crates/ta-daemon/src/api/project_browser.rs:272`, backing Studio's "New Project" form) already does most of this — creates `.ta/{goals,pr_packages,memory,events,personas,workflows}`, a starter `PLAN.md`, a starter `workflow.toml` — genuinely one-step, but Studio-only: no CLI equivalent exists (`ta init`/`ta create project` don't call it), and it doesn't run VCS/gitignore setup or write a `CLAUDE.md`. The real gap is narrower than originally scoped: expose this as a CLI command sharing the same implementation (not a second, divergent one), and extend both call paths to also cover VCS setup and a starter `CLAUDE.md`.
 
 **Items**:
-1. [ ] Extract `POST /api/project/init`'s logic into one shared function; `ta init` (or `ta create project`, consistent with the existing 10-verb surface) is a new CLI entry point calling that same function — do not reimplement project-init a second time. Extend the **shared function itself** (not just the CLI path) to also: run the equivalent of `ta setup vcs`, write a minimal starter `CLAUDE.md` (stack-agnostic rules only — git workflow/branch discipline, observability mandate; leave build/test commands as a TODO placeholder since the stack isn't known at init time), and accept terms (interactive prompt for the CLI, `--accept-terms` for scripted use; Studio's existing "New Project" form flow covers its own consent). Per explicit user instruction (2026-08-15): Studio's "New Project" form must end up calling this same extended function too, so a project created from Studio also gets VCS setup + `CLAUDE.md` — not just the CLI path.
+1. [ ] Extract `POST /api/project/init`'s logic into one shared function; `ta init` (or `ta create project`, consistent with the existing 10-verb surface) is a new CLI entry point calling that same function — do not reimplement project-init a second time. Extend the **shared function itself** (not just the CLI path) to also: run the equivalent of `ta setup vcs`, write a minimal starter `CLAUDE.md` (stack-agnostic rules only — git workflow/branch discipline, observability mandate; leave build/test commands as a TODO placeholder since the stack isn't known at init time), write a correct project-scoped `.mcp.json` (`TA_CALLER_MODE=orchestrator`, matching what `ta dev`'s `inject_mcp_server_config_with_session` already writes — see item 1a below for why this matters), and accept terms (interactive prompt for the CLI, `--accept-terms` for scripted use; Studio's existing "New Project" form flow covers its own consent). Per explicit user instruction (2026-08-15): Studio's "New Project" form must end up calling this same extended function too, so a project created from Studio also gets VCS setup + `CLAUDE.md` — not just the CLI path.
+1a. [ ] **Found live 2026-08-15, folded into this phase's scope**: a new project with no project-scoped `.mcp.json` of its own falls back to whatever the user's global/user-scope `ta` MCP config happens to be — if that global config carries `TA_IS_STAGING=1` (a mistake a prior session recommended and has since been corrected, see memory), `ta_goal_start` is refused for every such project with a confusing "re-entrant call" error that has nothing to do with the real cause. `ta init` writing a correct project-scoped `.mcp.json` (item 1) closes this for any project it's run on; additionally, `ta doctor` should detect and warn when a project has no project-scoped `.mcp.json` but the resolved (global/user-scope) `ta` MCP config carries `TA_IS_STAGING=1` — regardless of whether `ta init` has been run — since a global misconfiguration shouldn't require every affected project to individually discover the same bug.
 2. [ ] `ta status` (and any other read-only command) should detect an uninitialized project and say so explicitly — e.g. "This project hasn't been set up for TA yet. Run `ta init` to get started." — instead of silently showing an empty dashboard that looks identical to a fully-set-up, zero-goal project.
 3. [ ] Idempotent: running `ta init` again on an already-initialized project is a safe no-op (reports current state, doesn't reset anything, doesn't overwrite an existing `CLAUDE.md`) — same spirit as `ta setup vcs --force` being the explicit opt-in for a destructive rewrite.
 4. [ ] Tests: `ta init` on a fresh git repo produces a working `.ta/` directory, gitignore entries, and a starter `CLAUDE.md` in one call; `ta status` before `ta init` clearly reports the uninitialized state; `ta init` run twice is a no-op the second time and never clobbers a `CLAUDE.md` the user has since edited; Studio's "New Project" form and `ta init` produce identical `.ta/` output for the same inputs (regression guard for the shared-logic requirement in item 1).
@@ -10354,7 +10355,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.9-alpha`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

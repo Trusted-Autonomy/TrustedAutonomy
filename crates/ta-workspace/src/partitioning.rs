@@ -12,6 +12,9 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "workflow.toml",
     "policy.yaml",
     "constitution.toml",
+    "connectors.toml", // broker-mediated connector declarations (v0.17.6.3) — registered
+    // late (v0.17.6.6) after this hygiene test caught the gap; team policy, VCS-committed
+    // like workflow.toml.
     "memory.toml",
     "bmad.toml",
     "config.toml",
@@ -51,7 +54,8 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "advisor-notes/",
     "team-sessions/", // persistent team session state (v0.17.5.1)
     "draft-build-ctx/",
-    "memory/",     // local memory cache (project-memory/ is the VCS-committed counterpart)
+    "bin/", // staged shell/CLI credential shim binaries (v0.17.6.7) — a machine-local copy of the `gh` wrapper, never committed
+    "memory/", // local memory cache (project-memory/ is the VCS-committed counterpart)
     "link-cache/", // cached remote project manifests (v0.16.1.5)
     // Runtime files
     "velocity-stats.jsonl",

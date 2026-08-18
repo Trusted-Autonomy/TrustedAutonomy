@@ -1671,17 +1671,19 @@ fn build_swarm_sub_goal_command(
     // derivation is needed.
     // No goal_id exists yet for this sub-goal (its `ta run` child mints its
     // own), so the title stands in as the token's `agent_id` for now — good
-    // enough for audit-trail purposes ahead of v0.17.6.5's cryptographic
-    // swarm attenuation, which replaces this whole handoff with a real
-    // attenuated biscuit.
+    // enough for audit-trail purposes when this spawn falls back to a fresh
+    // vault mint (the swarm root, or a non-broker-mediated credential); a
+    // spawn that instead inherits and attenuates a held token (v0.17.6.5)
+    // carries the original grantee's `agent_id` forward from the parent.
+    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let available = load_vault_credentials(
         workspace_root,
         &format!("swarm:{sub_goal_title}"),
         credential_scopes,
         CREDENTIAL_TOKEN_TTL_SECS,
         use_keychain,
+        &current_env,
     );
-    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let sub_goal_env = scoped_credential_env(&current_env, &available, credential_scopes);
 
     cmd.env_clear();
@@ -4898,11 +4900,186 @@ fn scoped_credential_env(
     env
 }
 
-/// Default TTL for the session tokens minted by [`load_vault_credentials`]
+// ── Shell/CLI credential shims (v0.17.6.7) ────────────────────────────────
+//
+// v0.17.6.3 built the gateway's live interception point for MCP tool calls,
+// but a Bash-driven coding agent's *majority* credentialed actions — `git
+// push`, `gh pr create`, `npm publish`, a raw `curl` with a bearer header —
+// never touch an MCP tool call at all. These helpers wire the two concrete
+// shims that close this for git and the GitHub CLI (`docs/superpowers/specs/
+// 2026-08-03-agent-credential-security-design.md`, Stage 7 items 1-2):
+// git's pluggable `credential.helper` protocol (`apps/ta-cli/src/commands/
+// credential_helper.rs`), and a `gh` PATH-shadow wrapper binary
+// (`apps/ta-cli/src/bin/gh_shim.rs`). The general case (arbitrary
+// `curl`/`npm`/`docker` calls via a local TLS-intercepting forward proxy,
+// PLAN item 3) is deliberately out of scope — see `docs/USAGE.md` "Shell/CLI
+// Credential Isolation" for the resolved trust-model tradeoff (design doc
+// Open Question 4: a MITM-capable local CA is a real, separate trust
+// decision that deserves its own phase, not a rider on this one).
+
+/// Filename of the `gh` wrapper binary this process was built alongside —
+/// same binary name on every platform except the `.exe` suffix on Windows.
+fn gh_wrapper_filename() -> &'static str {
+    if cfg!(windows) {
+        "gh.exe"
+    } else {
+        "gh"
+    }
+}
+
+/// Minimal POSIX-shell quoting for a path that may contain spaces — git
+/// invokes a `!`-prefixed `credential.helper` value through `sh -c`, so an
+/// unquoted space in the `ta` binary's own path would break the command.
+/// Not a general-purpose shell-quoting utility, just enough for this one
+/// call site.
+fn shell_quote_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))
+    {
+        s
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// The `credential.helper` value to write into a repo's local git config.
+/// The leading `!` tells git to run the rest as a shell command rather than
+/// searching `PATH` for `git-credential-<value>` — needed because `ta`'s
+/// own binary name doesn't follow that convention. Pure string formatting;
+/// the actual git-config mutation happens in `install_credential_shims`.
+fn git_credential_helper_value(ta_bin: &Path) -> String {
+    format!("!{} credential-helper", shell_quote_path(ta_bin))
+}
+
+/// Prepend `dir` to an existing `PATH` value (or start fresh if there was
+/// none) using the platform path-list separator.
+fn prepend_path(existing: Option<&str>, dir: &Path) -> String {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    match existing {
+        Some(existing) if !existing.is_empty() => format!("{}{sep}{existing}", dir.display()),
+        _ => dir.display().to_string(),
+    }
+}
+
+/// Wire up Stage 7 shell/CLI credential shims for one agent spawn.
+///
+/// No-op (env untouched) unless `registry` declares at least one
+/// broker-mediated connector with `hosts` set — see
+/// `ConnectorRegistry::has_shell_shim_connector`. Both individual shims
+/// fail open: any error staging them (missing sibling `gh` binary,
+/// unwritable git config, `working_dir` not a git repo) is logged at `warn`
+/// and skipped, never blocks agent launch — narrowing how a credential
+/// already withheld from `env` (broker-mediated credentials never appear
+/// there; see `ta_runtime::apply_credentials_to_env`) is strictly additive,
+/// not something agent launch should ever depend on succeeding.
+fn install_credential_shims(
+    env: &mut std::collections::HashMap<String, String>,
+    project_root: &Path,
+    working_dir: &Path,
+    registry: &ta_credentials::ConnectorRegistry,
+) {
+    if !registry.has_shell_shim_connector() {
+        return;
+    }
+
+    // git: point this repo's local credential.helper at `ta credential-helper`.
+    if working_dir.join(".git").exists() {
+        match std::env::current_exe() {
+            Ok(ta_bin) => {
+                let helper_value = git_credential_helper_value(&ta_bin);
+                let status = std::process::Command::new("git")
+                    .args(["config", "--local", "credential.helper", &helper_value])
+                    .current_dir(working_dir)
+                    // GIT_DIR/GIT_WORK_TREE, when set (this process itself
+                    // running inside a TA-managed goal session,
+                    // v0.13.17.3), override `current_dir`-based repository
+                    // discovery entirely — without clearing them this would
+                    // write `credential.helper` into the wrong repo's git
+                    // config instead of `working_dir`'s. A no-op when unset
+                    // (the normal, non-nested case).
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_CEILING_DIRECTORIES")
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        tracing::debug!(
+                            working_dir = %working_dir.display(),
+                            "installed broker-backed git credential.helper"
+                        );
+                    }
+                    Ok(s) => tracing::warn!(
+                        code = ?s.code(),
+                        "git config credential.helper failed; git push/pull for broker-mediated \
+                         connectors will fall back to git's own credential resolution"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "could not run `git config` to install the credential helper"
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not resolve the running ta binary's path; skipping git credential.helper setup"
+            ),
+        }
+    }
+
+    // gh: stage the wrapper binary next to it and prepend its directory to PATH.
+    if let Ok(ta_bin) = std::env::current_exe() {
+        if let Some(bin_dir) = ta_bin.parent() {
+            let src = bin_dir.join(gh_wrapper_filename());
+            if src.is_file() {
+                let shim_dir = project_root.join(".ta").join("bin");
+                if let Err(e) = std::fs::create_dir_all(&shim_dir) {
+                    tracing::warn!(error = %e, "could not create .ta/bin for the gh credential shim");
+                } else {
+                    let dest = shim_dir.join(gh_wrapper_filename());
+                    match std::fs::copy(&src, &dest) {
+                        Ok(_) => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &dest,
+                                    std::fs::Permissions::from_mode(0o755),
+                                );
+                            }
+                            let existing = env.get("PATH").map(String::as_str);
+                            env.insert("PATH".to_string(), prepend_path(existing, &shim_dir));
+                            tracing::debug!(dest = %dest.display(), "installed gh credential shim");
+                        }
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "could not stage the gh credential shim binary"
+                        ),
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    src = %src.display(),
+                    "no gh wrapper binary found next to ta; gh calls use the reduced-security \
+                     env-injection fallback"
+                );
+            }
+        }
+    }
+}
+
+/// Default TTL for the session grants minted by [`load_vault_credentials`]
 /// (v0.17.6.2). Generous enough to cover a typical single goal run without
-/// being unbounded; a real per-goal deadline arrives with the biscuit
-/// migration in v0.17.6.4/6.5.
+/// being unbounded.
 const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
+
+/// Default per-wave TTL ceiling for a swarm sub-goal's *attenuated* grant
+/// (v0.17.6.5) — deliberately tighter than [`CREDENTIAL_TOKEN_TTL_SECS`]'s
+/// whole-goal budget, since a single wave is expected to be a fraction of a
+/// full run. Only ever narrows further (never widens) the parent's actual
+/// remaining validity: see [`load_vault_credentials`]'s `ttl_secs =
+/// min(parent_remaining_ttl, wave_deadline)` computation.
+const SWARM_WAVE_TTL_SECS: u64 = 1800;
 
 /// Load every credential currently registered in `<project_root>/.ta/credentials.json`
 /// (via `ta credentials add`) as a `ScopedCredential`, secret value included.
@@ -4911,13 +5088,29 @@ const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
 /// read. For each credential eligible for `required_scopes` (same
 /// eligibility rule `apply_credentials_to_env` enforces: unscoped credentials
 /// are always eligible, scoped ones need at least one overlapping scope), a
-/// `SessionToken` is minted via `CredentialVault::issue_token` and
-/// immediately checked via `CredentialVault::validate_token` *before* the
-/// secret is ever read. A credential that fails either step (e.g. the vault
-/// rejects the mint, or — once TTLs shorter than a spawn are used — the
-/// token is already expired) is withheld, not silently granted. This makes
-/// every credential handed to an agent process correspond to a recorded,
-/// time-boxed grant in the vault rather than an unconditional `vault.get`.
+/// grant is obtained and immediately checked *before* the secret is ever
+/// read. A credential that fails either step (e.g. the mint fails, or — once
+/// TTLs shorter than a spawn are used — the grant is already expired) is
+/// withheld, not silently granted. This makes every credential handed to an
+/// agent process correspond to a recorded, time-boxed, cryptographically
+/// verifiable grant rather than an unconditional `vault.get`.
+///
+/// v0.17.6.5: the grant is obtained one of two ways, chosen per credential:
+/// - **Attenuation** (the common case for a swarm sub-goal): if `parent_env`
+///   already carries a `TA_SESSION_TOKEN_<name>` — meaning *this* process
+///   itself was handed a broker-mediated token for this exact credential by
+///   its own parent spawn — that held token is attenuated in-process via
+///   `CredentialBroker::attenuate`, narrowing scope to `required_scopes` and
+///   TTL to `min(parent_remaining_ttl, SWARM_WAVE_TTL_SECS)`. No root key or
+///   network round-trip. This is what makes the resulting child grant
+///   cryptographically, not just conventionally, narrower: it can never
+///   exceed what the parent's own token actually embeds, regardless of what
+///   `required_scopes` claims.
+/// - **Fresh mint** (the root case: no inherited token exists, e.g. the
+///   top-level `ta run` invocation, or a credential that isn't
+///   broker-mediated for this connector): `CredentialBroker::grant` as
+///   before v0.17.6.5 — every attenuation chain has to start somewhere, and
+///   the vault is that root of trust.
 ///
 /// Returns an empty list (not an error) when the vault doesn't exist or is
 /// unreadable — an unpopulated vault is the common case today, and callers
@@ -4927,21 +5120,36 @@ const CREDENTIAL_TOKEN_TTL_SECS: u64 = 3600;
 /// `use_keychain` should be `true` for every real invocation; it exists so
 /// tests can force file-based key custody instead of touching the real,
 /// process-global OS keychain (see `CredentialsConfig::use_keychain`).
+///
+/// `parent_env` should be this process's own environment (`std::env::vars()`
+/// collected by the caller) — passed in rather than read here so the
+/// attenuation-vs-fresh-mint decision is a pure function of its input and
+/// directly testable.
 fn load_vault_credentials(
     project_root: &Path,
     agent_id: &str,
     required_scopes: &[String],
     ttl_secs: u64,
     use_keychain: bool,
+    parent_env: &std::collections::HashMap<String, String>,
 ) -> Vec<ta_runtime::ScopedCredential> {
+    use chrono::{DateTime, Utc};
     use ta_credentials::CredentialVault;
 
     let mut cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
     cred_config.use_keychain = use_keychain;
-    let Ok(mut vault) = ta_credentials::FileVault::open(&cred_config) else {
+    let Ok(vault) = ta_credentials::FileVault::open(&cred_config) else {
         return Vec::new();
     };
     let Ok(summaries) = vault.list() else {
+        return Vec::new();
+    };
+    let broker_dir = cred_config
+        .vault_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| project_root.join(".ta"));
+    let Ok(broker) = ta_credential_broker::CredentialBroker::open(&broker_dir) else {
         return Vec::new();
     };
     // v0.17.6.3: connectors declared `broker_mediated = true` in
@@ -4950,6 +5158,7 @@ fn load_vault_credentials(
     // presents the minted session token to `ta_external_action` instead,
     // and the gateway broker resolves the real secret server-side.
     let connector_registry = ta_credentials::ConnectorRegistry::load(&project_root.join(".ta"));
+    let now = Utc::now();
     summaries
         .into_iter()
         .filter_map(|summary| {
@@ -4969,22 +5178,78 @@ fn load_vault_credentials(
                 return None;
             }
 
-            let token = match vault.issue_token(summary.id, agent_id, granted_scopes, ttl_secs) {
-                Ok(token) => token,
-                Err(e) => {
+            let parent_token_key = format!("TA_SESSION_TOKEN_{}", summary.name);
+            let inherited = parent_env.get(&parent_token_key).and_then(|parent_token| {
+                let parent_remaining = parent_env
+                    .get(&format!("{parent_token_key}_EXPIRES_AT"))
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| (dt.with_timezone(&Utc) - now).num_seconds().max(0) as u64)
+                    .unwrap_or(ttl_secs);
+                let hop_ttl = parent_remaining.min(ttl_secs).min(SWARM_WAVE_TTL_SECS);
+                match broker.attenuate(parent_token, granted_scopes.clone(), hop_ttl) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        tracing::warn!(
+                            credential = %summary.name,
+                            error = %e,
+                            "failed to attenuate inherited session grant; \
+                             falling back to a fresh vault mint"
+                        );
+                        None
+                    }
+                }
+            });
+
+            let (granted, attenuated) = match inherited {
+                Some(granted) => {
+                    if granted.allowed_scopes.is_empty() && !granted_scopes.is_empty() {
+                        // Attenuation narrowed this credential to nothing —
+                        // the parent's own token no longer covers any scope
+                        // this sub-goal declared, so withhold it entirely
+                        // rather than hand over a token that can never
+                        // authorize anything.
+                        return None;
+                    }
+                    (granted, true)
+                }
+                None => match broker.grant(summary.id, agent_id, granted_scopes, ttl_secs) {
+                    Ok(granted) => (granted, false),
+                    Err(e) => {
+                        tracing::warn!(
+                            credential = %summary.name,
+                            error = %e,
+                            "failed to mint session grant; credential withheld"
+                        );
+                        return None;
+                    }
+                },
+            };
+            if attenuated {
+                // Attenuated grants embed a `requested_scope` check that
+                // plain `verify()` can't satisfy (see `CredentialBroker::
+                // attenuate`'s doc comment) — spot-check every scope this
+                // grant actually claims via the same mechanism that will
+                // gate real use downstream. An attenuation narrowed to zero
+                // scopes needs no such check (nothing to spot-check) and was
+                // already validated structurally by `attenuate()` itself
+                // succeeding.
+                if let Some(bad) = granted
+                    .allowed_scopes
+                    .iter()
+                    .find(|s| broker.authorize_scope(&granted.token, s).is_err())
+                {
                     tracing::warn!(
                         credential = %summary.name,
-                        error = %e,
-                        "failed to issue session token; credential withheld"
+                        scope = %bad,
+                        "attenuated session grant failed verification; credential withheld"
                     );
                     return None;
                 }
-            };
-            if let Err(e) = vault.validate_token(token.token_id) {
+            } else if let Err(e) = broker.verify(&granted.token) {
                 tracing::warn!(
                     credential = %summary.name,
                     error = %e,
-                    "issued session token failed validation; credential withheld"
+                    "minted session grant failed verification; credential withheld"
                 );
                 return None;
             }
@@ -4994,7 +5259,8 @@ fn load_vault_credentials(
                 let cred =
                     ta_runtime::ScopedCredential::with_scopes(full.name, full.secret, full.scopes);
                 if broker_mediated {
-                    cred.with_broker_mediation(token.token_id.to_string())
+                    cred.with_broker_mediation(granted.token)
+                        .with_expiry(granted.expires_at)
                 } else {
                     cred
                 }
@@ -5056,6 +5322,7 @@ fn launch_agent_via_runtime(
     let mut env: std::collections::HashMap<String, String> = match credential_scopes {
         Some(scopes) => {
             let project_root = project_root_from_staging(staging_path);
+            let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             let available = project_root
                 .as_deref()
                 .map(|root| {
@@ -5065,10 +5332,10 @@ fn launch_agent_via_runtime(
                         scopes,
                         CREDENTIAL_TOKEN_TTL_SECS,
                         true,
+                        &current_env,
                     )
                 })
                 .unwrap_or_default();
-            let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
             scoped_credential_env(&current_env, &available, scopes)
         }
         None => std::collections::HashMap::new(),
@@ -5081,6 +5348,21 @@ fn launch_agent_via_runtime(
     // Inject ANTHROPIC_BASE_URL when context compression is enabled (v0.17.0.7).
     // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
     inject_compression_url(&mut env, config, staging_path);
+
+    // Stage 7 shell/CLI credential shims (v0.17.6.7): TA_PROJECT_ROOT lets
+    // `ta credential-helper` / the `gh` wrapper find `.ta/` regardless of the
+    // agent's own working directory (which is `staging_path`, not
+    // necessarily where `.ta/` lives), the same convention `ta serve`
+    // already uses. `install_credential_shims` is itself a no-op unless a
+    // broker-mediated connector declares `hosts` in `.ta/connectors.toml`.
+    if let Some(project_root) = project_root_from_staging(staging_path) {
+        env.insert(
+            "TA_PROJECT_ROOT".to_string(),
+            project_root.display().to_string(),
+        );
+        let registry = ta_credentials::ConnectorRegistry::load(&project_root.join(".ta"));
+        install_credential_shims(&mut env, &project_root, staging_path, &registry);
+    }
 
     // Expand args (replace {prompt} template variable).
     let mut args: Vec<String> = config
@@ -8074,6 +8356,14 @@ fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Re
             "status",
             "--porcelain",
         ])
+        // GIT_DIR/GIT_WORK_TREE, when set (e.g. this process is itself
+        // running inside a TA-managed goal session, v0.13.17.3), override
+        // `-C`'s repository discovery entirely — without clearing them this
+        // check would silently inspect the wrong repository instead of
+        // `project_root`. A no-op when unset (the normal, non-nested case).
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES")
         .output()
     {
         Ok(o) => o,
@@ -10169,27 +10459,46 @@ plan_pending_window = 7
     #[test]
     fn check_vcs_clean_passes_for_clean_git_repo() {
         // Create a minimal git repo with a committed file — clean tree.
+        //
+        // Clears GIT_DIR/GIT_WORK_TREE on every git call: the TA agent
+        // environment sets these (v0.13.17.3) so a bare `git` invocation
+        // would otherwise operate on this session's own staging repo
+        // instead of `dir.path()`, regardless of `current_dir` — GIT_DIR
+        // takes precedence over cwd-based discovery. Same guard
+        // `init_test_git` below (and `draft.rs`'s `clear_git_env`) already
+        // uses; found live when a test-suite run under this env leaked a
+        // stray commit into the real repo.
         let dir = tempfile::tempdir().unwrap();
         let _ = std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         std::fs::write(dir.path().join("README.md"), "hello").unwrap();
         let _ = std::process::Command::new("git")
             .args(["add", "."])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
 
         let result = check_vcs_clean(dir.path(), false);
@@ -10199,22 +10508,32 @@ plan_pending_window = 7
     #[test]
     fn check_vcs_clean_headless_proceeds_on_dirty_tree() {
         // Create a git repo with an uncommitted change; headless=true should proceed (Ok).
+        // See `check_vcs_clean_passes_for_clean_git_repo` above for why GIT_DIR/
+        // GIT_WORK_TREE must be cleared on every git call here.
         let dir = tempfile::tempdir().unwrap();
         let _ = std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         let _ = std::process::Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output();
         // Write an uncommitted file to make the tree dirty.
         std::fs::write(dir.path().join("dirty.txt"), "change").unwrap();
@@ -11138,7 +11457,15 @@ plan_pending_window = 7
     #[test]
     fn load_vault_credentials_returns_empty_for_unpopulated_vault() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_vault_credentials(dir.path(), "agent-1", &[], 3600, false).is_empty());
+        assert!(load_vault_credentials(
+            dir.path(),
+            "agent-1",
+            &[],
+            3600,
+            false,
+            &Default::default()
+        )
+        .is_empty());
     }
 
     #[test]
@@ -11164,6 +11491,7 @@ plan_pending_window = 7
             &["repo.read".to_string()],
             3600,
             false,
+            &Default::default(),
         );
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0].name, "GITHUB_TOKEN");
@@ -11191,16 +11519,18 @@ plan_pending_window = 7
             &["repo.read".to_string()],
             3600,
             false,
+            &Default::default(),
         );
         assert!(creds.is_empty());
     }
 
     #[test]
     fn load_vault_credentials_withholds_credential_when_token_already_expired() {
-        // v0.17.6.2 regression guard: issue_token/validate_token must be
-        // load-bearing here, not decorative. A 0-second TTL means the minted
-        // token is expired the instant `validate_token` checks it, so the
-        // credential must be withheld even though it's otherwise eligible.
+        // v0.17.6.2 regression guard (broker.grant/broker.verify since
+        // v0.17.6.4): the mint-then-verify gate must be load-bearing here,
+        // not decorative. A 0-second TTL means the minted grant is expired
+        // the instant `verify` checks it, so the credential must be
+        // withheld even though it's otherwise eligible.
         use ta_credentials::{CredentialVault, FileVault};
 
         let dir = tempfile::tempdir().unwrap();
@@ -11211,8 +11541,314 @@ plan_pending_window = 7
                 .unwrap();
         }
 
-        let creds = load_vault_credentials(dir.path(), "agent-1", &[], 0, false);
+        let creds =
+            load_vault_credentials(dir.path(), "agent-1", &[], 0, false, &Default::default());
         assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn load_vault_credentials_broker_mediated_session_token_is_biscuit_verifiable() {
+        // v0.17.6.4: for a `broker_mediated = true` connector,
+        // `session_token_id` must be a token that `ta-credential-broker`
+        // itself can verify offline in a *separate* process — the gateway,
+        // which never shares memory with `ta run`'s spawn — not a UUID that
+        // only resolves against this process's in-memory FileVault state.
+        use ta_credentials::{CredentialVault, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\nbroker_mediated = true\n",
+        )
+        .unwrap();
+
+        let cred_id = {
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
+            vault
+                .add("GITHUB_TOKEN", "github", "ghp_secret", vec![])
+                .unwrap()
+                .id
+        };
+
+        let creds =
+            load_vault_credentials(dir.path(), "agent-1", &[], 3600, false, &Default::default());
+        assert_eq!(creds.len(), 1);
+        assert!(creds[0].broker_mediated);
+        let session_token = creds[0]
+            .session_token_id
+            .as_deref()
+            .expect("broker-mediated credential must carry a session token");
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let verified = broker.verify(session_token).unwrap();
+        assert_eq!(verified.credential_id, cred_id);
+        assert_eq!(verified.agent_id, "agent-1");
+    }
+
+    /// Set up a broker-mediated `GITHUB_TOKEN` credential and mint a root
+    /// grant for it directly (bypassing `load_vault_credentials`, standing
+    /// in for "what this test process's own parent already handed it").
+    /// Returns `(project_dir, ta_dir, granted_root_token)`.
+    fn setup_broker_mediated_root_grant(
+        scopes: Vec<String>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        ta_credential_broker::GrantedToken,
+    ) {
+        use ta_credentials::{CredentialVault, FileVault};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\nbroker_mediated = true\n",
+        )
+        .unwrap();
+
+        let cred_id = {
+            let mut vault = FileVault::open(&test_cred_config(dir.path())).unwrap();
+            vault
+                .add("GITHUB_TOKEN", "github", "ghp_secret", vec![])
+                .unwrap()
+                .id
+        };
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let root = broker.grant(cred_id, "swarm-root", scopes, 3600).unwrap();
+        (dir, ta_dir, root)
+    }
+
+    #[test]
+    fn load_vault_credentials_attenuates_inherited_session_token_instead_of_fresh_minting() {
+        // v0.17.6.5: when this process's own environment already carries a
+        // `TA_SESSION_TOKEN_<name>` for a credential (i.e. this process was
+        // itself handed a broker-mediated grant by its own parent spawn),
+        // `load_vault_credentials` must attenuate that held token in-process
+        // rather than independently re-minting a fresh, unrelated grant from
+        // the vault. The proof that real attenuation happened (not a fresh
+        // grant that merely reports a smaller scope list): a scope present
+        // in the root grant but never requested here is cryptographically
+        // unusable on the resulting token, not just absent from a Rust-side
+        // list.
+        let (dir, ta_dir, root) =
+            setup_broker_mediated_root_grant(vec!["repo.read".into(), "repo.write".into()]);
+
+        let mut parent_env = std::collections::HashMap::new();
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN".to_string(),
+            root.token.clone(),
+        );
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN_EXPIRES_AT".to_string(),
+            root.expires_at.to_rfc3339(),
+        );
+
+        let creds = load_vault_credentials(
+            dir.path(),
+            "swarm:child-sub-goal",
+            &["repo.read".to_string()],
+            3600,
+            false,
+            &parent_env,
+        );
+
+        assert_eq!(creds.len(), 1);
+        let child_token = creds[0]
+            .session_token_id
+            .as_deref()
+            .expect("broker-mediated credential must carry a session token");
+        // Must be a genuinely different (attenuated) token, not the parent's
+        // own token string handed straight through.
+        assert_ne!(child_token, root.token);
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        assert!(broker.authorize_scope(child_token, "repo.read").is_ok());
+        // "repo.write" was in the root grant but never requested by this
+        // hop — the authorizer itself must reject it, proving this is real
+        // attenuation and not a fresh, independently-scoped grant.
+        assert!(broker.authorize_scope(child_token, "repo.write").is_err());
+    }
+
+    #[test]
+    fn load_vault_credentials_attenuation_ttl_never_exceeds_parent_remaining() {
+        // The child's effective TTL must be bounded by the parent's actual
+        // remaining validity, not just the caller's requested `ttl_secs` —
+        // proven here by granting the parent a ~3-second remaining TTL and
+        // requesting an hour for the child; the child must still expire
+        // within a few seconds, not an hour.
+        let (dir, ta_dir, root) = setup_broker_mediated_root_grant(vec!["repo.read".into()]);
+
+        let mut parent_env = std::collections::HashMap::new();
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN".to_string(),
+            root.token.clone(),
+        );
+        parent_env.insert(
+            "TA_SESSION_TOKEN_GITHUB_TOKEN_EXPIRES_AT".to_string(),
+            // Override the root's real (3600s) expiry with one a few
+            // seconds out (comfortably more than one whole second so
+            // truncating `.num_seconds()` doesn't round it down to zero
+            // before `load_vault_credentials` even runs), standing in for
+            // "the parent's own grant is about to expire" without needing a
+            // slow real-time 3600s test.
+            (chrono::Utc::now() + chrono::Duration::seconds(3)).to_rfc3339(),
+        );
+
+        let creds = load_vault_credentials(
+            dir.path(),
+            "swarm:child-sub-goal",
+            &["repo.read".to_string()],
+            3600, // caller asks for an hour...
+            false,
+            &parent_env,
+        );
+        assert_eq!(creds.len(), 1);
+        let child_token = creds[0].session_token_id.clone().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(3200));
+
+        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        // ...but the parent only had ~1 second left, so the child must
+        // already be expired.
+        assert!(broker.authorize_scope(&child_token, "repo.read").is_err());
+    }
+
+    // ── Shell/CLI credential shims (v0.17.6.7) ────────────────────────────
+
+    #[test]
+    fn shell_quote_path_leaves_simple_paths_unquoted() {
+        assert_eq!(
+            shell_quote_path(Path::new("/usr/local/bin/ta")),
+            "/usr/local/bin/ta"
+        );
+    }
+
+    #[test]
+    fn shell_quote_path_quotes_and_escapes_paths_with_spaces() {
+        let quoted = shell_quote_path(Path::new("/Users/me/My Apps/ta"));
+        assert_eq!(quoted, "'/Users/me/My Apps/ta'");
+    }
+
+    #[test]
+    fn git_credential_helper_value_uses_bang_prefix_and_subcommand() {
+        let value = git_credential_helper_value(Path::new("/usr/local/bin/ta"));
+        assert_eq!(value, "!/usr/local/bin/ta credential-helper");
+    }
+
+    #[test]
+    fn prepend_path_adds_separator_when_path_already_set() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let result = prepend_path(Some("/usr/bin"), Path::new("/proj/.ta/bin"));
+        assert_eq!(result, format!("/proj/.ta/bin{sep}/usr/bin"));
+    }
+
+    #[test]
+    fn prepend_path_with_no_existing_path_is_just_the_dir() {
+        assert_eq!(
+            prepend_path(None, Path::new("/proj/.ta/bin")),
+            "/proj/.ta/bin"
+        );
+        assert_eq!(
+            prepend_path(Some(""), Path::new("/proj/.ta/bin")),
+            "/proj/.ta/bin"
+        );
+    }
+
+    #[test]
+    fn install_credential_shims_is_a_no_op_without_a_shell_shim_connector() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ta_credentials::ConnectorRegistry::default();
+        let mut env = std::collections::HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+
+        install_credential_shims(&mut env, dir.path(), dir.path(), &registry);
+
+        // Untouched: no PATH mutation, and no .ta/bin directory materialized.
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert!(!dir.path().join(".ta/bin").exists());
+    }
+
+    #[test]
+    fn install_credential_shims_writes_git_config_when_working_dir_is_a_repo() {
+        // Clears GIT_DIR/GIT_WORK_TREE/GIT_CEILING_DIRECTORIES on every git
+        // call: the TA agent environment sets these (v0.13.17.3), so a bare
+        // `git` invocation would otherwise operate on this session's own
+        // staging repo instead of `repo`, regardless of `current_dir` —
+        // GIT_DIR takes precedence over cwd-based discovery.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .status();
+        if !matches!(init, Ok(s) if s.success()) {
+            eprintln!("skipping: `git init` unavailable in this environment");
+            return;
+        }
+        // `git init` runs as a real subprocess; on some sandboxed
+        // filesystems the new `.git` directory isn't immediately visible to
+        // this process's own `Path::exists()` calls. Poll briefly rather
+        // than assume synchronous visibility -- bounded to 500ms, a no-op
+        // on any normal filesystem where the first check already succeeds.
+        for _ in 0..50 {
+            if repo.join(".git").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\n\
+             broker_mediated = true\nhosts = [\"github.com\"]\n",
+        )
+        .unwrap();
+        let registry = ta_credentials::ConnectorRegistry::load(&dir.path().join(".ta"));
+        let mut env = std::collections::HashMap::new();
+        install_credential_shims(&mut env, dir.path(), &repo, &registry);
+
+        let helper = std::process::Command::new("git")
+            .args(["config", "--local", "--get", "credential.helper"])
+            .current_dir(&repo)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        let value = String::from_utf8_lossy(&helper.stdout);
+        assert!(
+            value.contains("credential-helper"),
+            "expected credential.helper to be set, got: {value:?}"
+        );
+    }
+
+    #[test]
+    fn install_credential_shims_does_not_touch_git_config_outside_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_repo = dir.path().join("not-a-repo");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/connectors.toml"),
+            "[connectors.github]\ncredential_name = \"GITHUB_TOKEN\"\n\
+             broker_mediated = true\nhosts = [\"github.com\"]\n",
+        )
+        .unwrap();
+        let registry = ta_credentials::ConnectorRegistry::load(&dir.path().join(".ta"));
+        let mut env = std::collections::HashMap::new();
+        // Must not panic or attempt a git-config write with no `.git` present.
+        install_credential_shims(&mut env, dir.path(), &not_a_repo, &registry);
+        assert!(!not_a_repo.join(".git").exists());
     }
 
     #[test]

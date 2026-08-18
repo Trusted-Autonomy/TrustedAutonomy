@@ -41,7 +41,10 @@ impl NotificationSeverity {
         match event_type {
             "policy_violation" => Self::Critical,
             "goal_failed" | "build_failed" | "sync_conflict" | "api_connection_lost" => Self::Error,
-            "agent_needs_input" | "question_stale" | "draft_denied" => Self::Warning,
+            "agent_needs_input"
+            | "question_stale"
+            | "draft_denied"
+            | "graph_decision_escalated" => Self::Warning,
             _ => Self::Info,
         }
     }
