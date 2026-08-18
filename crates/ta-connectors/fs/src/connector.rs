@@ -315,6 +315,7 @@ impl<S: ChangeStore> FsConnector<S> {
             draft_seq: 0,
             plan_phase: None,
             plan_md_base: None,
+            rebuilt_from: None,
         };
 
         Ok(package)

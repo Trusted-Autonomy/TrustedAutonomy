@@ -541,6 +541,26 @@ pub enum TrustLevel {
     Quarantined,
 }
 
+/// Records that a draft was produced by rebuilding from a goal state where the
+/// agent process had already exited (`pr_ready`/`approved`), rather than from a
+/// fresh `Running`/`Finalizing` build (v0.17.6.3.1 — Draft Rebuild Window).
+///
+/// This is the trust-boundary marker: a rebuild's diff may contain edits a human
+/// reviewer made directly to the staging workspace, not just agent-authored
+/// changes. `ta draft view` surfaces this distinctly so provenance is never
+/// silently blended between "agent wrote this" and "reviewer amended this".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct RebuildProvenance {
+    /// The goal's lifecycle state at the moment `ta draft build` was re-run
+    /// (e.g. `"pr_ready"`, `"approved"`).
+    pub previous_goal_state: String,
+    /// The prior draft package this rebuild superseded, if one existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_draft_id: Option<Uuid>,
+    /// When the rebuild happened.
+    pub rebuilt_at: DateTime<Utc>,
+}
+
 // ---- Review Requests ----
 
 /// What approvals this PR needs.
@@ -738,6 +758,14 @@ pub struct DraftPackage {
     /// keeping source unchanged and logging a warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_md_base: Option<String>,
+
+    /// Rebuild provenance (v0.17.6.3.1).
+    ///
+    /// `Some` when this draft was produced by rebuilding from `pr_ready`/`approved`
+    /// (the agent process had already exited) rather than from a live `Running`/
+    /// `Finalizing` goal. `None` for a normal first build. See `RebuildProvenance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuilt_from: Option<RebuildProvenance>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -1082,6 +1110,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         draft_seq,
         plan_phase: None,
         plan_md_base: None,
+        rebuilt_from: None,
     }
 }
 
@@ -1235,6 +1264,7 @@ mod tests {
             draft_seq: 0,
             plan_phase: None,
             plan_md_base: None,
+            rebuilt_from: None,
         }
     }
 

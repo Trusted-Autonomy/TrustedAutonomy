@@ -140,11 +140,32 @@ impl TerminalRenderer {
             _ => pkg.package_id.to_string(),
         };
 
+        // v0.17.6.3.1: Rebuild provenance — never silently blend a rebuild (which may
+        // carry reviewer-made staging edits) with a normal agent-authored draft.
+        let rebuild_banner = if let Some(rb) = &pkg.rebuilt_from {
+            let warn_color = if self.color { "\x1b[33m" } else { "" };
+            let superseded = rb
+                .superseded_draft_id
+                .map(|id| format!(" (supersedes {})", id))
+                .unwrap_or_default();
+            format!(
+                "{warn_color}Rebuilt from: {} state at {}{}{reset} — this diff may include \
+                 edits made directly to staging, not just agent-authored changes.\n\n",
+                rb.previous_goal_state,
+                rb.rebuilt_at.format("%Y-%m-%d %H:%M:%S"),
+                superseded,
+                reset = reset
+            )
+        } else {
+            String::new()
+        };
+
         format!(
             "{bold}Draft: {}{reset}\n\
             Status: {}{}{reset}\n\
             Goal: {}\n\
             Created: {}\n\n\
+            {}\
             {bold}Summary:{reset}\n\
             {}\n\n\
             {bold}Why:{reset}\n\
@@ -156,6 +177,7 @@ impl TerminalRenderer {
             pkg.status,
             Self::strip_html(&pkg.goal.title),
             pkg.created_at.format("%Y-%m-%d %H:%M:%S"),
+            rebuild_banner,
             Self::strip_html(&pkg.summary.what_changed),
             Self::strip_html(&pkg.summary.why),
             Self::strip_html(&pkg.summary.impact),
@@ -1023,6 +1045,7 @@ mod tests {
             draft_seq: 0,
             plan_phase: None,
             plan_md_base: None,
+            rebuilt_from: None,
         }
     }
 
