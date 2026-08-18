@@ -10342,7 +10342,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 ---
 ### v0.17.9 — One-Command Project Onboarding (`ta init`)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Why this exists**: found live 2026-08-14 onboarding two brand-new repos (`agentic-pm`, `MLAppInstaller`) onto TA. Confirmed by direct code read: `.ta/` directory creation is wired into `run.rs`/`goal.rs` only — it does not exist after `ta status` or `ta setup vcs` (verified live: ran both against a fresh repo, `.ta/` still absent afterward). There is no single command that fully onboards a new project; "adding TA to a project" today is an undocumented multi-step sequence (`ta setup vcs` for gitignore, then your first `ta run`/`ta create goal` implicitly bootstraps everything else), with no command telling you the project isn't yet initialized or what to do about it. Explicit user requirement: "I need adding TA to a project and using it to be dead simple, one click/one line."
