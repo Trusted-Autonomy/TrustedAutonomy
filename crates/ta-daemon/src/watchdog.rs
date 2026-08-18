@@ -1393,7 +1393,10 @@ pub fn startup_gc_pass(
         let is_failed = matches!(goal.state, GoalRunState::Failed { .. });
         let is_applied_completed = matches!(
             goal.state,
-            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Merged
+            GoalRunState::Applied
+                | GoalRunState::Completed
+                | GoalRunState::Merged
+                | GoalRunState::Closed { .. }
         );
         // PrReady goals whose draft was denied never transition to a terminal state.
         // GC treats them as terminal once they're past the applied cutoff.

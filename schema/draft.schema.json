@@ -804,6 +804,14 @@
         {
           "description": "This draft has been manually closed (abandoned, hand-merged, or obsolete).",
           "properties": {
+            "applied_externally_ref": {
+              "default": null,
+              "description": "Set when the underlying work actually shipped through an external\npath (`ta draft close --applied-externally <ref>`) rather than\nbeing abandoned — a PR/commit reference. `None` means a genuine\nabandon (the default `ta draft close` behavior). Distinguishing\nthe two matters because only the abandon case should reset the\nplan phase back to `pending` (v0.17.6.3.2).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "closed_at": {
               "format": "date-time",
               "type": "string"

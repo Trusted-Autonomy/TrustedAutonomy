@@ -427,9 +427,12 @@ fn find_parent_goal(
             sorted.sort_by_key(|g| Reverse(g.updated_at));
 
             // Prefer goals that haven't been applied yet.
-            let unapplied = sorted
-                .iter()
-                .find(|g| !matches!(g.state, GoalRunState::Applied | GoalRunState::Completed));
+            let unapplied = sorted.iter().find(|g| {
+                !matches!(
+                    g.state,
+                    GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Closed { .. }
+                )
+            });
 
             if let Some(goal) = unapplied {
                 Ok(goal.goal_run_id)
@@ -748,7 +751,10 @@ fn list_goals(
     // recoverable and should not disappear from the default view.
     if !all && state.is_none() || active {
         goals.retain(|g| {
-            if matches!(g.state, GoalRunState::Applied | GoalRunState::Completed) {
+            if matches!(
+                g.state,
+                GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Closed { .. }
+            ) {
                 return false;
             }
             if let GoalRunState::Failed { .. } = &g.state {
@@ -1625,7 +1631,10 @@ fn delete_goal(
             let has_draft = g.pr_package_id.is_some();
             let is_terminal = matches!(
                 g.state,
-                GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
+                GoalRunState::Applied
+                    | GoalRunState::Completed
+                    | GoalRunState::Failed { .. }
+                    | GoalRunState::Closed { .. }
             );
 
             let disposition = if !has_draft && !is_terminal {
@@ -2173,7 +2182,10 @@ fn gc_goals(
         // 2. Missing staging detection: non-terminal goals whose staging dir is gone.
         let is_terminal = matches!(
             goal.state,
-            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
+            GoalRunState::Applied
+                | GoalRunState::Completed
+                | GoalRunState::Failed { .. }
+                | GoalRunState::Closed { .. }
         );
         if !is_terminal
             && goal.state != GoalRunState::Created
@@ -3018,6 +3030,18 @@ fn goal_post_mortem(config: &GatewayConfig, store: &GoalRunStore, id: &str) -> a
             println!("  Next: ta draft view");
         } else if goal.state == GoalRunState::Completed || goal.state == GoalRunState::Applied {
             println!("  Goal completed successfully -- no issues detected.");
+        } else if let GoalRunState::Closed {
+            applied_externally_ref,
+            ..
+        } = &goal.state
+        {
+            match applied_externally_ref {
+                Some(r) => println!(
+                    "  Goal's draft was closed as applied externally (ref: {}) -- no issues detected.",
+                    r
+                ),
+                None => println!("  Goal's draft was closed as abandoned -- no issues detected."),
+            }
         } else {
             println!("  No specific diagnosis available. Check agent logs for details.");
         }
@@ -3811,6 +3835,130 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
     } else {
         Ok(())
     }
+}
+
+// ── Goal-terminal-state reconciliation (v0.17.6.3.2) ────────────────────────
+
+/// Detect goals stuck in a review-eligible state (`PrReady`/`UnderReview`/
+/// `Approved`) whose real-world outcome has already been settled, and
+/// transition each one to a matching terminal `GoalRunState`.
+///
+/// Two cases, both found live via `ta goal list` on 2026-08-18 (7 stale
+/// `pr_ready` records for already-`done` phases):
+///
+/// 1. **Draft already terminal, goal never followed.** `close_package`
+///    (v0.17.6.3.2) and `apply_package` now transition the goal in the same
+///    operation going forward, but records written before this fix still
+///    have a terminal draft (`Applied`/`Closed`) sitting next to a goal
+///    stuck at `PrReady`/`UnderReview`/`Approved`.
+/// 2. **Superseded without being closed.** The goal's `plan_phase` is
+///    already `done` in `PLAN.md` (completed by a *different* goal — e.g.
+///    after a phantom-in-progress recovery relaunch), but this goal's own
+///    draft was never closed at all, so nothing ever prompted a transition.
+///
+/// Called from `ta doctor --fix` (see `doctor.rs`'s `"stale_terminal_goals"`
+/// arm). Returns one human-readable line per goal reconciled.
+pub(crate) fn reconcile_stale_terminal_goals(
+    config: &GatewayConfig,
+) -> anyhow::Result<Vec<String>> {
+    let store = GoalRunStore::new(&config.goals_dir)?;
+    let goals = store.list()?;
+
+    let plan_path = config.workspace_root.join("PLAN.md");
+    let done_phase_ids: Vec<String> = if plan_path.exists() {
+        let content = std::fs::read_to_string(&plan_path).unwrap_or_default();
+        super::plan::parse_plan(&content)
+            .into_iter()
+            .filter(|p| matches!(p.status, super::plan::PlanStatus::Done))
+            .map(|p| p.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut fixed = Vec::new();
+
+    for goal in &goals {
+        // Only reconcile goals sitting in a review-eligible-but-stuck state —
+        // never touch goals still genuinely in flight (Running, Configured,
+        // Finalizing, DraftPending, AwaitingInput, Created).
+        if !matches!(
+            goal.state,
+            GoalRunState::PrReady | GoalRunState::UnderReview | GoalRunState::Approved { .. }
+        ) {
+            continue;
+        }
+
+        let prev_state = goal.state.to_string();
+
+        // Case 1: the linked draft already reached a terminal state.
+        if let Some(pkg_id) = goal.pr_package_id {
+            if let Ok(pkg) = super::draft::load_package(config, pkg_id) {
+                match &pkg.status {
+                    ta_changeset::draft_package::DraftStatus::Applied { .. } => {
+                        if store
+                            .transition(goal.goal_run_id, GoalRunState::Applied)
+                            .is_ok()
+                        {
+                            fixed.push(format!(
+                                "{} — draft already applied; goal was stranded at {}",
+                                goal.display_tag(),
+                                prev_state
+                            ));
+                        }
+                        continue;
+                    }
+                    ta_changeset::draft_package::DraftStatus::Closed {
+                        reason,
+                        applied_externally_ref,
+                        ..
+                    } => {
+                        let new_state = GoalRunState::Closed {
+                            reason: reason.clone(),
+                            applied_externally_ref: applied_externally_ref.clone(),
+                        };
+                        if store.transition(goal.goal_run_id, new_state).is_ok() {
+                            fixed.push(format!(
+                                "{} — draft already closed; goal was stranded at {}",
+                                goal.display_tag(),
+                                prev_state
+                            ));
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Case 2: superseded without being closed — the phase this goal was
+        // working on is already `done`, completed by a different goal.
+        if let Some(ref phase_id) = goal.plan_phase {
+            let phase_done = done_phase_ids
+                .iter()
+                .any(|id| super::plan::phase_ids_match(id, phase_id));
+            if phase_done {
+                let new_state = GoalRunState::Closed {
+                    reason: Some(format!(
+                        "phase {} already completed by a different goal — \
+                         reconciled by ta doctor --fix",
+                        phase_id
+                    )),
+                    applied_externally_ref: None,
+                };
+                if store.transition(goal.goal_run_id, new_state).is_ok() {
+                    fixed.push(format!(
+                        "{} — phase {} already done via another goal; goal was stranded at {}",
+                        goal.display_tag(),
+                        phase_id,
+                        prev_state
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(fixed)
 }
 
 #[cfg(test)]
