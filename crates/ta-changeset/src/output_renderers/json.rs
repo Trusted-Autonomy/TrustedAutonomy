@@ -122,6 +122,7 @@ mod tests {
             draft_seq: 0,
             plan_phase: None,
             plan_md_base: None,
+            rebuilt_from: None,
         };
 
         let adapter = JsonRenderer::new();

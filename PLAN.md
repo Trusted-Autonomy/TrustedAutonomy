@@ -10131,17 +10131,17 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.3.1 — Draft Rebuild Window: Allow Rebuilding from `pr_ready`/`approved`
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Why this exists**: found live, repeatedly, across this entire v0.17.5.x/v0.17.6.x arc (v0.17.5.1, v0.17.5.2, v0.17.5.3, v0.17.6.1, v0.17.6.2, v0.17.6.3 — six phases in a row, not a one-off). `ta draft build` refuses to rebuild once the parent goal has left `running`/`finalizing` state — `apps/ta-cli/src/commands/draft.rs:1964`, `"Goal is in {} state (must be running or finalizing to build draft)"`. In practice, review happens *after* a goal reaches `pr_ready`, so any bug found during review (however small) is architecturally unfixable through TA's own draft-build/apply path — the draft can never be live-patched. The only recovery every time this session was a full manual `git worktree` bypass: copy files out of staging by hand, fix, re-run the full verify suite, commit/push/PR/merge outside TA entirely. That is a TA product gap, not a one-off review inconvenience — the human reviewer should be able to fix a small issue and re-request a draft build without leaving the tool.
 
 **Items**:
-1. [ ] Extend the goal state machine (or add a narrow, explicitly-scoped exception) so `ta draft build` can rebuild from `pr_ready`/`approved` when the underlying staging workspace still exists and hasn't been torn down — re-diff against the (possibly hand-edited) staging directory rather than requiring a fresh agent run.
-2. [ ] Decide and document the trust boundary: rebuilding from `pr_ready` implies the *reviewer*, not the agent, may have edited staging directly — the resulting draft's provenance (agent-authored vs. reviewer-amended) should be visible in `ta draft view`, not silently blended.
-3. [ ] `ta draft build --latest` (and any explicit `--goal <id>` form) should surface a clear, actionable error distinguishing "goal genuinely finished/torn down, nothing to rebuild" from "goal is in a state that could support a rebuild but doesn't yet" — today both cases produce the same dead-end message.
-4. [ ] Tests: a goal that reaches `pr_ready`, gets a staging edit, and calls `ta draft build` again produces an updated draft reflecting the edit, without requiring a new goal run.
-5. [ ] USAGE.md: document the rebuild-from-`pr_ready` flow as the expected way to fix small review findings, replacing the manual-worktree-finish workaround in practice (not just in docs).
+1. [x] Extend the goal state machine (or add a narrow, explicitly-scoped exception) so `ta draft build` can rebuild from `pr_ready`/`approved` when the underlying staging workspace still exists and hasn't been torn down — re-diff against the (possibly hand-edited) staging directory rather than requiring a fresh agent run.
+2. [x] Decide and document the trust boundary: rebuilding from `pr_ready` implies the *reviewer*, not the agent, may have edited staging directly — the resulting draft's provenance (agent-authored vs. reviewer-amended) should be visible in `ta draft view`, not silently blended.
+3. [x] `ta draft build --latest` (and any explicit `--goal <id>` form) should surface a clear, actionable error distinguishing "goal genuinely finished/torn down, nothing to rebuild" from "goal is in a state that could support a rebuild but doesn't yet" — today both cases produce the same dead-end message.
+4. [x] Tests: a goal that reaches `pr_ready`, gets a staging edit, and calls `ta draft build` again produces an updated draft reflecting the edit, without requiring a new goal run.
+5. [x] USAGE.md: document the rebuild-from-`pr_ready` flow as the expected way to fix small review findings, replacing the manual-worktree-finish workaround in practice (not just in docs).
 
 #### Version: `0.17.6-alpha.3.1`
 
