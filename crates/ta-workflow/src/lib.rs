@@ -16,7 +16,6 @@ pub mod artifact_store;
 pub mod concurrent;
 pub mod consensus;
 pub mod definition;
-pub mod dependency_wave;
 pub mod error;
 pub mod graph;
 pub mod intent;
@@ -50,7 +49,6 @@ pub use definition::{
     FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowBudget, WorkflowCatalog,
     WorkflowDefinition,
 };
-pub use dependency_wave::{api_impact_overlaps, plan_waves, WaveError, WaveNode};
 pub use intent::{
     extract_intent, format_confirmation_card, resolve_intent, ExtractedIntent, IntentVerb,
     ResolutionResult, ScopeModifier, TemplateCandidate, CONFIDENCE_THRESHOLD,
@@ -60,6 +58,9 @@ pub use params::{
     TemplateLibrary, TemplateSource,
 };
 pub use registry::{cached_index_path, RegistryEntry, RegistryIndex};
+// Dependency-wave planning (v0.17.0.12.34) was extracted to a standalone
+// public crate (v0.17.8) — see https://github.com/Trusted-Autonomy/task-graph.
+pub use task_graph::{impact_tags_overlap, plan_waves, WaveError, WaveNode};
 // Re-export ArtifactType from ta-changeset for callers that only depend on ta-workflow.
 pub use error::WorkflowError;
 pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse};
