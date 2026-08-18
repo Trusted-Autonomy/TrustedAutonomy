@@ -766,7 +766,7 @@ fn run_new(
     let project_config = GatewayConfig::for_project(&project_dir);
     // Use the init template that maps from our project template.
     let init_result = init::execute(
-        &init::InitCommands::Run {
+        Some(&init::InitCommands::Run {
             template: init_template_name.map(|s| s.to_string()),
             detect: init_template_name.is_none(),
             name: Some(project_name.clone()),
@@ -774,7 +774,7 @@ fn run_new(
             remote: None,
             non_interactive: true,
             overwrite: false,
-        },
+        }),
         &project_config,
     );
     if let Err(e) = init_result {
