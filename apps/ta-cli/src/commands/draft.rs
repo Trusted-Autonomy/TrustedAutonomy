@@ -310,6 +310,15 @@ pub enum DraftCommands {
         /// Who is closing the draft.
         #[arg(long, default_value = "human-reviewer")]
         closed_by: String,
+        /// Record this draft as closed-because-applied rather than
+        /// closed-because-abandoned: the work already shipped through an
+        /// external path (a hand-merged PR or commit) instead of through
+        /// `ta draft apply`. Takes a PR or commit reference. Unlike the
+        /// default close behavior, this does NOT reset the plan phase back
+        /// to pending — the phase's `done` status (if already set) is left
+        /// untouched, since the work genuinely completed (v0.17.6.3.2).
+        #[arg(long, value_name = "PR-OR-COMMIT-REF")]
+        applied_externally: Option<String>,
         /// Close all stale drafts (Approved or PendingReview) older than the configured threshold.
         /// Requires confirmation unless --yes is passed.
         #[arg(long)]
@@ -862,16 +871,29 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             id,
             reason,
             closed_by,
+            applied_externally,
             stale,
             older_than,
             yes,
         } => {
+            if *stale && applied_externally.is_some() {
+                anyhow::bail!(
+                    "--applied-externally applies to a single draft and cannot be combined \
+                     with --stale (which closes multiple drafts as abandoned)."
+                );
+            }
             if *stale {
                 close_stale_drafts(config, *older_than, reason.as_deref(), closed_by, *yes)
                     .map(|_| ())
             } else {
                 let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
-                close_package(config, &resolved, reason.as_deref(), closed_by)
+                close_package(
+                    config,
+                    &resolved,
+                    reason.as_deref(),
+                    closed_by,
+                    applied_externally.as_deref(),
+                )
             }
         }
         DraftCommands::Gc {
@@ -3525,7 +3547,16 @@ fn list_packages(
             DraftStatus::Superseded { superseded_by } => {
                 format!("superseded ({})", &superseded_by.to_string()[..8])
             }
-            DraftStatus::Closed { .. } => "closed".to_string(),
+            // v0.17.6.3.2: distinguish a genuine abandon from work that
+            // shipped through an external PR/commit — collapsing both into
+            // a bare "closed" made the two cases indistinguishable at a
+            // glance, which is how the terminal-state confusion this phase
+            // fixes went unnoticed for as long as it did.
+            DraftStatus::Closed {
+                applied_externally_ref: Some(ext_ref),
+                ..
+            } => format!("closed (applied externally: {})", ext_ref),
+            DraftStatus::Closed { .. } => "closed (abandoned)".to_string(),
             DraftStatus::Applied { applied_via, .. } => {
                 format!("Applied ({})", applied_via)
             }
@@ -8738,15 +8769,28 @@ fn apply_package(
                             parent_pkg.status,
                             DraftStatus::PendingReview | DraftStatus::Approved { .. }
                         ) {
+                            let auto_close_reason = format!(
+                                "Auto-closed: follow-up draft {} applied (same staging)",
+                                pkg.package_id
+                            );
                             parent_pkg.status = DraftStatus::Closed {
                                 closed_at: Utc::now(),
-                                reason: Some(format!(
-                                    "Auto-closed: follow-up draft {} applied (same staging)",
-                                    pkg.package_id
-                                )),
+                                reason: Some(auto_close_reason.clone()),
                                 closed_by: "ta-system".to_string(),
+                                applied_externally_ref: None,
                             };
                             let _ = save_package(config, &parent_pkg);
+                            // v0.17.6.3.2: keep the parent GoalRun's own state in
+                            // sync with its draft — otherwise it stays stranded
+                            // at PrReady/UnderReview forever even though its
+                            // draft is now terminal.
+                            let _ = goal_store.transition(
+                                parent_goal_id,
+                                GoalRunState::Closed {
+                                    reason: Some(auto_close_reason),
+                                    applied_externally_ref: None,
+                                },
+                            );
                             println!(
                                 "  Auto-closed parent draft {} (superseded by this follow-up).",
                                 &parent_pr_id.to_string()[..8]
@@ -9651,11 +9695,20 @@ fn run_apply_safety_checks(
 // ── Draft close (v0.3.6) ────────────────────────────────────────────
 
 /// Close a draft without applying it (abandoned, hand-merged, or obsolete).
+///
+/// `applied_externally` distinguishes the two cases the reviewer may mean by
+/// "close" (v0.17.6.3.2): `None` is a genuine abandon (the long-standing
+/// default — resets an `in_progress` plan phase back to `pending`); `Some(ref)`
+/// records that the work actually shipped through an external PR/commit that
+/// TA never applied itself, and must NOT reset the phase — the phase's `done`
+/// status (if the external merge already landed and was synced) reflects
+/// reality and reverting it would be the exact bug this phase fixes.
 fn close_package(
     config: &GatewayConfig,
     id: &str,
     reason: Option<&str>,
     closed_by: &str,
+    applied_externally: Option<&str>,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let mut pkg = load_package(config, package_id)?;
@@ -9682,6 +9735,7 @@ fn close_package(
         closed_at: Utc::now(),
         reason: reason.map(|s| s.to_string()),
         closed_by: closed_by.to_string(),
+        applied_externally_ref: applied_externally.map(|s| s.to_string()),
     };
     save_package(config, &pkg)?;
 
@@ -9693,6 +9747,7 @@ fn close_package(
                 "action": "closed",
                 "previous_status": prev_status,
                 "reason": reason.unwrap_or(""),
+                "applied_externally_ref": applied_externally,
             }));
         let _ = audit_log.append(&mut event);
     }
@@ -9721,33 +9776,65 @@ fn close_package(
         gid
     };
 
-    // Reset plan phase from in_progress → pending when a draft is closed.
-    // A closed draft means the work is abandoned — the phase is no longer in progress.
-    if let Some(goal_id) = package_goal_id {
-        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir);
-        if let Ok(store) = goal_store {
-            if let Ok(Some(goal)) = store.get(goal_id) {
-                if let Some(ref phase_id) = goal.plan_phase {
-                    let note = "phase reset to pending — draft closed";
-                    match super::plan::reset_phase_if_in_progress(
-                        &config.workspace_root,
-                        phase_id,
-                        note,
-                    ) {
-                        Ok(true) => {
-                            println!("Plan: phase {} reset to pending (draft closed)", phase_id);
+    // v0.17.6.3.2: Reset plan phase from in_progress → pending only for a
+    // genuine abandon. When the work actually landed externally, resetting
+    // the phase would silently discard a completion that already happened —
+    // the exact race this phase exists to fix. `reset_phase_if_in_progress`
+    // also independently refuses to revert a phase already marked `done`, so
+    // this guard only matters for the narrow in-flight-race window.
+    if applied_externally.is_none() {
+        if let Some(goal_id) = package_goal_id {
+            let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir);
+            if let Ok(store) = goal_store {
+                if let Ok(Some(goal)) = store.get(goal_id) {
+                    if let Some(ref phase_id) = goal.plan_phase {
+                        let note = "phase reset to pending — draft closed";
+                        match super::plan::reset_phase_if_in_progress(
+                            &config.workspace_root,
+                            phase_id,
+                            note,
+                        ) {
+                            Ok(true) => {
+                                println!(
+                                    "Plan: phase {} reset to pending (draft closed)",
+                                    phase_id
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    phase = %phase_id,
+                                    error = %e,
+                                    "Failed to reset plan phase on close"
+                                );
+                            }
                         }
-                        Ok(false) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                phase = %phase_id,
-                                error = %e,
-                                "Failed to reset plan phase on close"
-                            );
-                        }
+                        // Best-effort: tell the daemon to release the in-memory phase claim.
+                        release_phase_claim_via_daemon(&config.workspace_root, phase_id);
                     }
-                    // Best-effort: tell the daemon to release the in-memory phase claim.
-                    release_phase_claim_via_daemon(&config.workspace_root, phase_id);
+                }
+            }
+        }
+    }
+
+    // v0.17.6.3.2: Transition the parent GoalRun to a matching terminal state
+    // in the same operation — a closed draft used to leave its goal stranded
+    // at PrReady/UnderReview/Approved forever, invisible to every "is this
+    // goal terminal" check across gc/doctor/status.
+    if let Some(goal_id) = package_goal_id {
+        if let Ok(store) = ta_goal::GoalRunStore::new(&config.goals_dir) {
+            let new_state = GoalRunState::Closed {
+                reason: reason.map(|s| s.to_string()),
+                applied_externally_ref: applied_externally.map(|s| s.to_string()),
+            };
+            match store.transition(goal_id, new_state) {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        goal_id = %goal_id,
+                        error = %e,
+                        "Could not transition goal to Closed state on draft close"
+                    );
                 }
             }
         }
@@ -9756,6 +9843,9 @@ fn close_package(
     println!("Draft {} closed.", package_id);
     if let Some(r) = reason {
         println!("  Reason: {}", r);
+    }
+    if let Some(ext_ref) = applied_externally {
+        println!("  Applied externally: {}", ext_ref);
     }
     println!("  Previous status: {}", prev_status);
     Ok(())
@@ -9925,7 +10015,7 @@ pub(crate) fn close_stale_drafts(
     let mut closed = 0usize;
     for p in &stale {
         let id = p.package_id.to_string();
-        match close_package(config, &id, Some(close_reason), closed_by) {
+        match close_package(config, &id, Some(close_reason), closed_by, None) {
             Ok(()) => {
                 closed += 1;
                 println!("Closed draft {}.", &id[..8]);
@@ -9966,7 +10056,10 @@ fn gc_packages(
         // Only GC goals in terminal states.
         let is_terminal = matches!(
             goal.state,
-            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
+            GoalRunState::Applied
+                | GoalRunState::Completed
+                | GoalRunState::Failed { .. }
+                | GoalRunState::Closed { .. }
         );
 
         // Also GC goals whose drafts are in terminal states (Denied, Closed, Superseded).
@@ -10073,6 +10166,7 @@ fn gc_packages(
                             GoalRunState::Applied
                                 | GoalRunState::Completed
                                 | GoalRunState::Failed { .. }
+                                | GoalRunState::Closed { .. }
                         )
                     })
                 });
@@ -17022,6 +17116,225 @@ fn run() {
             "in_progress marker should be gone: {}",
             plan_after
         );
+    }
+
+    // ── v0.17.6.3.2: close terminal-state fix ───────────────────────────
+
+    /// Regression guard on today's correct behavior: closing a draft
+    /// without `--applied-externally` still resets an `in_progress` phase
+    /// to `pending` (the genuine-abandon case must not change).
+    #[test]
+    fn close_package_default_still_resets_in_progress_phase_to_pending() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "### v0.99.2 — Close reset test\n<!-- status: in_progress -->\n\n- [ ] Do the thing\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Close reset test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "test".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.2".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Close reset test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+
+        close_package(&config, &pkg_id, Some("abandoned"), "reviewer", None).unwrap();
+
+        let plan_after = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert!(
+            plan_after.contains("<!-- status: pending -->"),
+            "phase should be reset to pending after abandon close: {}",
+            plan_after
+        );
+
+        // The goal itself must also reach a terminal state — the exact gap
+        // this phase fixes (previously the goal was left stranded at PrReady).
+        let updated_goal = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        match updated_goal.state {
+            ta_goal::GoalRunState::Closed {
+                applied_externally_ref,
+                ..
+            } => assert!(applied_externally_ref.is_none()),
+            other => panic!("expected goal to be Closed(abandoned), got: {:?}", other),
+        }
+    }
+
+    /// Closing with `--applied-externally` must leave an already-`done`
+    /// plan phase status untouched (the actual v0.17.6.3.2 bug: the race
+    /// where a manual-worktree fix landed but PLAN.md still locally read
+    /// `in_progress` — closing must not revert it to `pending`).
+    #[test]
+    fn close_package_applied_externally_leaves_in_progress_phase_untouched() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "### v0.99.3 — Applied-externally test\n<!-- status: in_progress -->\n\n- [ ] Do the thing\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Applied-externally test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "test".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.3".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Applied-externally test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+
+        close_package(
+            &config,
+            &pkg_id,
+            Some("landed via manual worktree PR"),
+            "reviewer",
+            Some("PR#579"),
+        )
+        .unwrap();
+
+        // The plan phase must be left exactly as it was — still in_progress,
+        // NOT reset to pending. This is the actual regression this phase fixes:
+        // the work already shipped, so reverting the phase would be a lie.
+        let plan_after = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert!(
+            plan_after.contains("<!-- status: in_progress -->"),
+            "phase must be left untouched when closed as applied-externally: {}",
+            plan_after
+        );
+        assert!(!plan_after.contains("<!-- status: pending -->"));
+
+        // The draft records the applied-externally ref.
+        let closed_pkg = load_package(&config, packages[0].package_id).unwrap();
+        match closed_pkg.status {
+            ta_changeset::draft_package::DraftStatus::Closed {
+                applied_externally_ref,
+                ..
+            } => assert_eq!(applied_externally_ref.as_deref(), Some("PR#579")),
+            other => panic!("expected Closed status, got: {:?}", other),
+        }
+
+        // The goal transitions to a matching terminal state carrying the ref.
+        let updated_goal = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        match updated_goal.state {
+            ta_goal::GoalRunState::Closed {
+                applied_externally_ref,
+                ..
+            } => assert_eq!(applied_externally_ref.as_deref(), Some("PR#579")),
+            other => panic!(
+                "expected goal to be Closed(applied externally), got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// The reconciliation pass (`ta doctor --fix`) must identify and close
+    /// goals stranded at `pr_ready` whose plan phase has since reached
+    /// `done` via a different goal — the "superseded without being closed"
+    /// case escalated 2026-08-18 (7 stale `pr_ready` records found live).
+    #[test]
+    fn reconcile_stale_terminal_goals_closes_goal_whose_phase_is_done_elsewhere() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "### v0.99.4 — Superseded test\n<!-- status: in_progress -->\n\n- [ ] Do the thing\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Superseded test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "test".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.4".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Superseded test", false).unwrap();
+
+        // This goal is now stuck at PrReady. Simulate the phase having been
+        // completed by a DIFFERENT goal (relaunch after a phantom-in-progress
+        // recovery) — PLAN.md marks the phase done without this goal's own
+        // draft ever being closed or applied.
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "### v0.99.4 — Superseded test\n<!-- status: done -->\n\n- [x] Do the thing\n",
+        )
+        .unwrap();
+
+        let goal_before = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(goal_before.state, ta_goal::GoalRunState::PrReady);
+
+        let fixed = super::super::goal::reconcile_stale_terminal_goals(&config).unwrap();
+        assert_eq!(
+            fixed.len(),
+            1,
+            "expected exactly one goal reconciled: {:?}",
+            fixed
+        );
+
+        let goal_after = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert!(
+            matches!(goal_after.state, ta_goal::GoalRunState::Closed { .. }),
+            "goal should have been reconciled to Closed, got: {:?}",
+            goal_after.state
+        );
+
+        // The phase's `done` status must remain untouched by reconciliation.
+        let plan_after = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert!(plan_after.contains("<!-- status: done -->"));
     }
 
     // ── v0.15.14.0: already-Applied error message ────────────────────────

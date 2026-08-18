@@ -123,8 +123,10 @@ pub fn execute(
 
     for goal in &goals {
         let is_failed = matches!(goal.state, GoalRunState::Failed { .. });
-        let is_applied_or_completed =
-            matches!(goal.state, GoalRunState::Applied | GoalRunState::Completed);
+        let is_applied_or_completed = matches!(
+            goal.state,
+            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Closed { .. }
+        );
         let is_terminal = is_failed || is_applied_or_completed;
 
         // 1. Zombie detection: running goals past threshold.
@@ -335,9 +337,10 @@ pub fn execute(
     if compact {
         let compact_cutoff = chrono::Utc::now() - chrono::Duration::days(compact_after_days as i64);
         for goal in &goals {
-            let is_compactable =
-                matches!(goal.state, GoalRunState::Applied | GoalRunState::Completed)
-                    && goal.updated_at < compact_cutoff;
+            let is_compactable = matches!(
+                goal.state,
+                GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Closed { .. }
+            ) && goal.updated_at < compact_cutoff;
 
             if !is_compactable {
                 continue;
@@ -594,6 +597,7 @@ fn delete_stale_staging(
                     | GoalRunState::Completed
                     | GoalRunState::Failed { .. }
                     | GoalRunState::Merged
+                    | GoalRunState::Closed { .. }
             );
             is_terminal && !g.workspace_path.as_os_str().is_empty() && g.workspace_path.exists()
         })
@@ -710,7 +714,10 @@ pub fn run_periodic_gc(
         let is_failed = matches!(goal.state, GoalRunState::Failed { .. });
         let is_applied_completed = matches!(
             goal.state,
-            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Merged
+            GoalRunState::Applied
+                | GoalRunState::Completed
+                | GoalRunState::Merged
+                | GoalRunState::Closed { .. }
         );
 
         let past_cutoff = if is_failed {
@@ -823,6 +830,7 @@ pub fn enforce_staging_cap(config: &GatewayConfig) -> bool {
                 | GoalRunState::Applied
                 | GoalRunState::Completed
                 | GoalRunState::Merged
+                | GoalRunState::Closed { .. }
         );
         if !is_reclaimable {
             continue;

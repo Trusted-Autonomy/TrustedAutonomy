@@ -56,6 +56,21 @@ pub enum GoalRunState {
     /// Approved changes have been applied to the target.
     Applied,
 
+    /// The goal's draft reached a terminal closed state without being
+    /// applied through the normal review flow — either genuinely abandoned,
+    /// or the underlying work shipped through an external path (a
+    /// hand-merged PR/commit) that TA never applied itself (v0.17.6.3.2).
+    ///
+    /// `applied_externally_ref` mirrors `DraftStatus::Closed`'s distinction:
+    /// `None` means abandoned, `Some(ref)` means the work landed via an
+    /// external PR/commit reference. Kept on the goal (not just the draft)
+    /// so goal-level views (`ta goal list`, `ta doctor`) don't need to
+    /// cross-reference the draft record to know a goal is truly done.
+    Closed {
+        reason: Option<String>,
+        applied_externally_ref: Option<String>,
+    },
+
     /// PR/review was merged and main branch was synced (v0.12.0.1).
     /// The full run→draft→apply→merge→sync loop is complete.
     Merged,
@@ -139,6 +154,14 @@ impl fmt::Display for GoalRunState {
             GoalRunState::UnderReview => write!(f, "under_review"),
             GoalRunState::Approved { .. } => write!(f, "approved"),
             GoalRunState::Applied => write!(f, "applied"),
+            // Deliberately a single short form regardless of
+            // `applied_externally_ref` — this string is used for
+            // machine-comparable state matching (`ta goal purge --state
+            // closed`, `GoalRunStore::list_by_state`), not just display.
+            // The abandoned-vs-applied-externally distinction is surfaced
+            // separately (e.g. `ta goal diagnose`), mirroring how
+            // `DraftStatus::Closed`'s Display is also a fixed "closed".
+            GoalRunState::Closed { .. } => write!(f, "closed"),
             GoalRunState::Merged => write!(f, "merged"),
             GoalRunState::Completed => write!(f, "completed"),
             GoalRunState::AwaitingInput { .. } => write!(f, "awaiting_input"),
@@ -199,6 +222,12 @@ impl GoalRunState {
                 // without explicit approve step).
                 | (GoalRunState::PrReady, GoalRunState::Applied)
                 | (GoalRunState::UnderReview, GoalRunState::Applied)
+                // v0.17.6.3.2: `ta draft close` (abandoned or applied-externally)
+                // transitions the goal to a matching terminal state instead of
+                // leaving it stranded at whichever review state it was in.
+                | (GoalRunState::PrReady, GoalRunState::Closed { .. })
+                | (GoalRunState::UnderReview, GoalRunState::Closed { .. })
+                | (GoalRunState::Approved { .. }, GoalRunState::Closed { .. })
                 | (GoalRunState::Applied, GoalRunState::Completed)
                 // PR merged and main synced (v0.12.0.1)
                 | (GoalRunState::Applied, GoalRunState::Merged)

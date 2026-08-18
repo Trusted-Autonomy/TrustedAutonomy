@@ -761,7 +761,10 @@ fn phase_to_candidate(
         g.plan_phase.as_deref() == Some(&phase.id)
             && !matches!(
                 g.state,
-                GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
+                GoalRunState::Applied
+                    | GoalRunState::Completed
+                    | GoalRunState::Failed { .. }
+                    | GoalRunState::Closed { .. }
             )
     });
 

@@ -953,6 +953,14 @@ pub enum DraftStatus {
         closed_at: DateTime<Utc>,
         reason: Option<String>,
         closed_by: String,
+        /// Set when the underlying work actually shipped through an external
+        /// path (`ta draft close --applied-externally <ref>`) rather than
+        /// being abandoned — a PR/commit reference. `None` means a genuine
+        /// abandon (the default `ta draft close` behavior). Distinguishing
+        /// the two matters because only the abandon case should reset the
+        /// plan phase back to `pending` (v0.17.6.3.2).
+        #[serde(default)]
+        applied_externally_ref: Option<String>,
     },
 }
 
@@ -1456,6 +1464,7 @@ mod tests {
             closed_at: Utc::now(),
             reason: Some("Hand-merged upstream".to_string()),
             closed_by: "human-reviewer".to_string(),
+            applied_externally_ref: None,
         };
         assert_eq!(status.to_string(), "closed");
         let json = serde_json::to_string(&status).unwrap();
@@ -1471,10 +1480,42 @@ mod tests {
             closed_at: Utc::now(),
             reason: None,
             closed_by: "human-reviewer".to_string(),
+            applied_externally_ref: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let restored: DraftStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, status);
+    }
+
+    #[test]
+    fn draft_status_closed_applied_externally_serialization() {
+        let status = DraftStatus::Closed {
+            closed_at: Utc::now(),
+            reason: Some("landed via PR #579".to_string()),
+            closed_by: "human-reviewer".to_string(),
+            applied_externally_ref: Some("PR#579".to_string()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("PR#579"));
+        let restored: DraftStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, status);
+    }
+
+    #[test]
+    fn draft_status_closed_deserializes_legacy_json_without_applied_externally_ref() {
+        // Pre-v0.17.6.3.2 drafts on disk never wrote `applied_externally_ref` —
+        // it must default to `None` rather than fail to deserialize.
+        let legacy_json = r#"{"status":"closed","closed_at":"2026-01-01T00:00:00Z","reason":null,"closed_by":"human-reviewer"}"#;
+        let restored: DraftStatus = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            restored,
+            DraftStatus::Closed {
+                closed_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+                reason: None,
+                closed_by: "human-reviewer".to_string(),
+                applied_externally_ref: None,
+            }
+        );
     }
 
     #[test]
@@ -2099,6 +2140,7 @@ mod tests {
                 closed_at: Utc::now(),
                 reason: None,
                 closed_by: "human".to_string(),
+                applied_externally_ref: None,
             },
         ];
 
