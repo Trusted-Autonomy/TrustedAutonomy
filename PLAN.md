@@ -10147,7 +10147,7 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.6.3.2 — `ta draft close` Must Not Assume "Closed" Means "Abandoned"
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Why this exists**: found live 2026-08-14 closing out v0.17.6.3's own draft immediately after its manual-worktree PR (#579) was merge-armed but had not yet actually landed and been pulled locally. `close_package` (`apps/ta-cli/src/commands/draft.rs:9562-9568`) calls `reset_phase_if_in_progress` — correctly named, it only touches a phase whose *local* status is currently `in_progress` — the same helper `deny` uses (line 4529-4542), where that's the right behavior since the work really is being rejected. The bug is a race, not a blanket bug: when a manual-worktree fix is in flight, local `main`'s `PLAN.md` genuinely still reads `in_progress` until the PR merges and gets pulled, so a `draft close` run in that window correctly-by-its-own-logic, but wrongly-in-fact, resets a phase whose real work already shipped. Confirmed narrow: re-running the same close on 4 older drafts (v0.17.5.1/5.2/5.3, v0.17.6.1) whose PRs had long since merged and synced produced *no* `PLAN.md` change at all, since those phases already read `done` locally — only the just-merged, not-yet-synced case is affected. Caught this time only because the diff was checked before committing; a less careful close would have pushed the regression to `main`.
