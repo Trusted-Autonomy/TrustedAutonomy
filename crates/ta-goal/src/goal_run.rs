@@ -257,6 +257,14 @@ impl GoalRunState {
                 | (GoalRunState::DraftPending { .. }, GoalRunState::Finalizing { .. })
                 // DraftPending → Running (manual recovery / restart)
                 | (GoalRunState::DraftPending { .. }, GoalRunState::Running)
+                // v0.17.6.3.1: Draft Rebuild Window. `ta draft build` on a goal already
+                // at `pr_ready`/`approved` re-diffs the still-live staging workspace
+                // (e.g. after a reviewer hand-edits a small fix) instead of requiring a
+                // fresh agent run. PrReady → PrReady is a self-loop (rebuild produces
+                // another pr_ready draft); Approved → PrReady sends the new draft back
+                // through review since its diff is no longer exactly what was approved.
+                | (GoalRunState::PrReady, GoalRunState::PrReady)
+                | (GoalRunState::Approved { .. }, GoalRunState::PrReady)
         )
     }
 }
@@ -715,6 +723,48 @@ mod tests {
                 tag: "conflict_resolution".to_string()
             }
         );
+    }
+
+    /// v0.17.6.3.1: `ta draft build` rebuilding against a goal already at `pr_ready`
+    /// re-transitions PrReady -> PrReady (a self-loop, not a no-op skip).
+    #[test]
+    fn can_rebuild_self_loop_from_pr_ready() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        assert_eq!(gr.state, GoalRunState::PrReady);
+    }
+
+    /// v0.17.6.3.1: rebuilding from `approved` sends the goal back to `pr_ready` —
+    /// the rebuilt draft's diff is no longer exactly what was approved.
+    #[test]
+    fn can_rebuild_from_approved_back_to_pr_ready() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::UnderReview).unwrap();
+        gr.transition(GoalRunState::Approved {
+            approved_by: "reviewer".to_string(),
+        })
+        .unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        assert_eq!(gr.state, GoalRunState::PrReady);
+    }
+
+    /// A goal that has moved past the rebuild window (e.g. `applied`) must not accept
+    /// a rebuild transition back to `pr_ready` — only `pr_ready`/`approved` do.
+    #[test]
+    fn cannot_rebuild_from_applied() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::Applied).unwrap();
+        let result = gr.transition(GoalRunState::PrReady);
+        assert!(matches!(result, Err(GoalError::InvalidTransition { .. })));
     }
 
     #[test]

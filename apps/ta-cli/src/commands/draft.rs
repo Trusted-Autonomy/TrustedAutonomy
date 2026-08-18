@@ -16,8 +16,8 @@ use ta_changeset::draft_package::{
     assess_risk, AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType,
     ApplyProvenance, ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType,
     Changes, DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal,
-    Iteration, Plan, Provenance, RequestedAction, ReviewRequests, Signatures, Summary,
-    VerificationWarning, WorkspaceRef,
+    Iteration, Plan, Provenance, RebuildProvenance, RequestedAction, ReviewRequests, Signatures,
+    Summary, VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
 use ta_changeset::output_renderers::{
@@ -53,14 +53,22 @@ pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatter
 #[derive(Debug, Subcommand)]
 pub enum DraftCommands {
     /// Build a draft package from overlay workspace diffs.
+    ///
+    /// Also rebuilds an existing draft (v0.17.6.3.1): running this again against a
+    /// goal already at `pr_ready`/`approved` re-diffs the still-live staging
+    /// workspace — e.g. after hand-editing a small fix a reviewer found — instead of
+    /// requiring a fresh agent run. The prior draft is marked superseded and the new
+    /// one records `rebuilt_from` provenance so `ta draft view` shows it was rebuilt
+    /// from a non-running goal state.
     Build {
-        /// Goal run ID (omit with --latest to use most recent running goal).
+        /// Goal run ID (omit with --latest to use most recent running/rebuildable goal).
         #[arg(default_value = "")]
         goal_id: String,
         /// Summary of what changed and why.
         #[arg(long, default_value = "Changes from agent work")]
         summary: String,
-        /// Use the most recent running goal instead of specifying an ID.
+        /// Use the most recent running goal, or the most recent pr_ready/approved
+        /// goal if none is running, instead of specifying an ID.
         #[arg(long)]
         latest: bool,
         /// Path to a JSON context file to patch into the draft after building
@@ -1959,13 +1967,33 @@ pub(crate) fn build_package(
     let goal_store = GoalRunStore::new(&config.goals_dir)?;
 
     // Resolve the goal — either by ID or by finding the latest running goal.
+    // v0.17.6.3.1: if no goal is actively Running, fall back to the most recently
+    // updated pr_ready/approved goal as a rebuild candidate — `--latest` should
+    // resolve a rebuild target the same way an explicit `--goal <id>` would.
     let goal = if latest || goal_id.is_empty() {
         let goals = goal_store.list()?;
         goals
-            .into_iter()
+            .iter()
             .find(|g| matches!(g.state, GoalRunState::Running))
+            .cloned()
+            .or_else(|| {
+                let mut candidates: Vec<_> = goals
+                    .iter()
+                    .filter(|g| {
+                        matches!(
+                            g.state,
+                            GoalRunState::PrReady | GoalRunState::Approved { .. }
+                        )
+                    })
+                    .collect();
+                candidates.sort_by_key(|g| Reverse(g.updated_at));
+                candidates.into_iter().next().cloned()
+            })
             .ok_or_else(|| {
-                anyhow::anyhow!("No running goal found (use a goal ID or start a goal first)")
+                anyhow::anyhow!(
+                    "No running goal found, and no pr_ready/approved goal available to \
+                     rebuild (use a goal ID or start a goal first)"
+                )
             })?
     } else {
         let goal_uuid = resolve_goal_id_from_store(goal_id, &goal_store)?;
@@ -1978,15 +2006,74 @@ pub(crate) fn build_package(
     // v0.13.17.2: Accept both Running and Finalizing — the Finalizing state means
     // ta run exited and is building the draft; manual `ta draft build` during recovery
     // should work without requiring a state transition back to Running.
+    //
+    // v0.17.6.3.1: Draft Rebuild Window — also accept `pr_ready`/`approved`. Review
+    // happens after a goal reaches `pr_ready`, so a small bug found in review was
+    // previously architecturally unfixable through TA's own build/apply path (the
+    // only recovery was a manual git-worktree bypass entirely outside TA). Rebuilding
+    // re-diffs the still-live staging workspace instead of requiring a fresh agent run.
+    let is_rebuild = matches!(
+        goal.state,
+        GoalRunState::PrReady | GoalRunState::Approved { .. }
+    );
+
     if !matches!(
         goal.state,
         GoalRunState::Running | GoalRunState::Finalizing { .. }
-    ) {
+    ) && !is_rebuild
+    {
         anyhow::bail!(
-            "Goal is in {} state (must be running or finalizing to build draft)",
-            goal.state
+            "Goal {} is in {} state, which does not support building or rebuilding a draft.\n\
+            \n\
+            Draft build/rebuild only works from these states:\n\
+            - running / finalizing — the agent is actively working or just exited\n\
+            - pr_ready / approved — a draft already exists and can be rebuilt from staging\n\
+            \n\
+            This goal has moved past the rebuild window (e.g. applied, merged, completed, \
+            denied, or failed) — its staging workspace may no longer reflect anything \
+            reviewable. To make further changes, start a follow-up goal:\n\
+            ta run \"<title>\" --follow-up-goal {}",
+            goal_id,
+            goal.state,
+            goal_id
         );
     }
+
+    if is_rebuild && !goal.workspace_path.exists() {
+        anyhow::bail!(
+            "Goal {} is in {} state but its staging workspace ({}) no longer exists — \
+            nothing to rebuild. The goal genuinely finished its lifecycle and was torn \
+            down (this is different from a goal that could still support a rebuild but \
+            doesn't yet — that case proceeds automatically). To make further changes, \
+            start a follow-up goal:\n\
+            ta run \"<title>\" --follow-up-goal {}",
+            goal_id,
+            goal.state,
+            goal.workspace_path.display(),
+            goal_id
+        );
+    }
+
+    // v0.17.6.3.1: Trust-boundary marker — a rebuild's diff may contain edits a human
+    // reviewer made directly to staging (the agent process has already exited by the
+    // time a goal reaches pr_ready/approved), not just agent-authored changes. Recorded
+    // on the new draft so `ta draft view` never silently blends the two provenances.
+    let rebuild_provenance = if is_rebuild {
+        let previous_state = goal.state.to_string();
+        println!(
+            "[rebuild] Goal {} is in {} state — rebuilding draft from the existing staging \
+             workspace. This diff may include edits made directly to staging (e.g. by a \
+             reviewer), not just agent-authored changes.",
+            goal_id, previous_state
+        );
+        Some(RebuildProvenance {
+            previous_goal_state: previous_state,
+            superseded_draft_id: goal.pr_package_id,
+            rebuilt_at: Utc::now(),
+        })
+    } else {
+        None
+    };
 
     let source_dir_buf: std::path::PathBuf = goal
         .source_dir
@@ -2033,6 +2120,7 @@ pub(crate) fn build_package(
                 memory_entries,
                 source_dir,
                 summary,
+                rebuild_provenance,
             );
         }
 
@@ -2452,6 +2540,7 @@ pub(crate) fn build_package(
         draft_seq: 0,               // Set below with display_id (v0.14.7.3).
         plan_phase: goal.plan_phase.clone(), // Inherit from GoalRun (v0.15.15.2).
         plan_md_base: None,         // Set below if plan_base.md exists in staging (v0.15.24.5).
+        rebuilt_from: rebuild_provenance.clone(), // v0.17.6.3.1.
     };
 
     // v0.15.24.5: Capture PLAN.md base snapshot for 3-way merge on apply.
@@ -2819,6 +2908,11 @@ pub(crate) fn build_package(
     // Save the draft package.
     save_package(config, &pkg)?;
 
+    // v0.17.6.3.1: If this is a rebuild, mark the draft it supersedes so provenance
+    // is never silently blended — the old (agent-authored-only) draft record stays
+    // intact but visibly superseded by this (possibly reviewer-amended) one.
+    supersede_previous_draft_if_rebuild(config, &rebuild_provenance, package_id);
+
     // Update the goal run.
     let mut goal = goal;
     goal.pr_package_id = Some(package_id);
@@ -2855,6 +2949,44 @@ pub(crate) fn build_package(
     Ok(())
 }
 
+/// v0.17.6.3.1: When `rebuild_provenance` names a prior draft, mark that draft
+/// `Superseded` by the freshly-built one. Best-effort — a missing or already-terminal
+/// prior draft (already applied/closed/superseded) is left untouched, since only an
+/// unresolved draft record needs to be redirected to the rebuild.
+fn supersede_previous_draft_if_rebuild(
+    config: &GatewayConfig,
+    rebuild_provenance: &Option<RebuildProvenance>,
+    new_package_id: Uuid,
+) {
+    let Some(prov) = rebuild_provenance else {
+        return;
+    };
+    let Some(prev_id) = prov.superseded_draft_id else {
+        return;
+    };
+    let Ok(mut prev_pkg) = load_package(config, prev_id) else {
+        return;
+    };
+    if matches!(
+        prev_pkg.status,
+        DraftStatus::Superseded { .. } | DraftStatus::Applied { .. } | DraftStatus::Closed { .. }
+    ) {
+        return;
+    }
+    prev_pkg.status = DraftStatus::Superseded {
+        superseded_by: new_package_id,
+    };
+    if save_package(config, &prev_pkg).is_ok() {
+        println!(
+            "[rebuild] Previous draft {} superseded by this rebuild.",
+            prev_pkg
+                .display_id
+                .clone()
+                .unwrap_or_else(|| prev_id.to_string())
+        );
+    }
+}
+
 /// Build a draft package for a goal run that wrote memory entries but no file changes (v0.15.13.2).
 ///
 /// Called by `build_package` when the overlay diff is empty but memory entries were found
@@ -2868,6 +3000,7 @@ fn build_memory_only_draft(
     memory_entries: Vec<ta_memory::store::MemoryEntry>,
     source_dir: &std::path::Path,
     summary: &str,
+    rebuild_provenance: Option<RebuildProvenance>,
 ) -> anyhow::Result<()> {
     use ta_changeset::draft_package::{
         AgentIdentity, Changes, Goal, Iteration, Plan, Provenance, RequestedAction, ReviewRequests,
@@ -3042,6 +3175,7 @@ fn build_memory_only_draft(
         draft_seq: 0,
         plan_phase: None,
         plan_md_base: None,
+        rebuilt_from: rebuild_provenance.clone(), // v0.17.6.3.1.
     };
 
     // Set display_id and shortref/seq (mirrors build_package logic).
@@ -3059,6 +3193,7 @@ fn build_memory_only_draft(
     }
 
     save_package(config, &pkg)?;
+    supersede_previous_draft_if_rebuild(config, &rebuild_provenance, package_id);
 
     // Update goal: record memory entry IDs and transition to PrReady.
     let mut goal = goal;
@@ -12453,6 +12588,228 @@ fn run() {
         let updated_goal = goal_store.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(updated_goal.state, GoalRunState::PrReady);
         assert!(updated_goal.pr_package_id.is_some());
+    }
+
+    /// v0.17.6.3.1: A goal that reaches `pr_ready`, gets a staging edit (simulating a
+    /// reviewer fixing a small issue by hand), and calls `ta draft build` again produces
+    /// an updated draft reflecting the edit — without requiring a new goal run.
+    #[test]
+    fn rebuild_draft_from_pr_ready_picks_up_staging_edit() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Test rebuild".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test draft rebuild from pr_ready".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // First build: agent-authored change, goal transitions Running -> PrReady.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Agent Change\n").unwrap();
+        build_package(&config, &goal_id, "Agent's change", false).unwrap();
+
+        let after_first = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(after_first.state, GoalRunState::PrReady);
+        let first_draft_id = after_first.pr_package_id.unwrap();
+
+        // Reviewer hand-edits staging directly (the agent process has already exited).
+        std::fs::write(
+            goal.workspace_path.join("README.md"),
+            "# Reviewer Fixed Change\n",
+        )
+        .unwrap();
+
+        // Rebuild — this must succeed even though the goal is not Running/Finalizing.
+        build_package(&config, &goal_id, "Reviewer's fix", false).unwrap();
+
+        // Goal stays in the pr_ready window after a rebuild (self-loop transition).
+        let after_rebuild = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(after_rebuild.state, GoalRunState::PrReady);
+        let second_draft_id = after_rebuild.pr_package_id.unwrap();
+        assert_ne!(
+            first_draft_id, second_draft_id,
+            "rebuild must produce a new draft"
+        );
+
+        // New draft reflects the reviewer's edit, not the agent's original content.
+        let new_pkg = load_package(&config, second_draft_id).unwrap();
+        let diff = &new_pkg.changes.artifacts[0];
+        assert_eq!(diff.resource_uri, "fs://workspace/README.md");
+
+        // New draft records rebuild provenance pointing at the superseded draft.
+        let rebuilt_from = new_pkg.rebuilt_from.as_ref().expect("rebuild provenance");
+        assert_eq!(rebuilt_from.previous_goal_state, "pr_ready");
+        assert_eq!(rebuilt_from.superseded_draft_id, Some(first_draft_id));
+
+        // Old draft is marked superseded, not silently overwritten or left ambiguous.
+        let old_pkg = load_package(&config, first_draft_id).unwrap();
+        assert_eq!(
+            old_pkg.status,
+            DraftStatus::Superseded {
+                superseded_by: second_draft_id
+            }
+        );
+    }
+
+    /// v0.17.6.3.1: Rebuilding from `approved` is also allowed — the resulting draft
+    /// goes back to `pr_ready` since its diff is no longer exactly what was approved.
+    #[test]
+    fn rebuild_draft_from_approved_returns_to_pr_ready() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Test rebuild from approved".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test draft rebuild from approved".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Change\n").unwrap();
+        build_package(&config, &goal_id, "Agent's change", false).unwrap();
+
+        goal_store
+            .transition(goal.goal_run_id, GoalRunState::UnderReview)
+            .unwrap();
+        goal_store
+            .transition(
+                goal.goal_run_id,
+                GoalRunState::Approved {
+                    approved_by: "reviewer@example.com".to_string(),
+                },
+            )
+            .unwrap();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Amended\n").unwrap();
+        build_package(&config, &goal_id, "Reviewer's amendment", false).unwrap();
+
+        let after_rebuild = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(after_rebuild.state, GoalRunState::PrReady);
+
+        let pkg = load_package(&config, after_rebuild.pr_package_id.unwrap()).unwrap();
+        let rebuilt_from = pkg.rebuilt_from.as_ref().expect("rebuild provenance");
+        assert_eq!(rebuilt_from.previous_goal_state, "approved");
+    }
+
+    /// v0.17.6.3.1 item 3: distinguish "goal genuinely finished/torn down, nothing to
+    /// rebuild" from "goal is in a state that could support a rebuild but doesn't yet".
+    /// This test covers the torn-down-workspace case.
+    #[test]
+    fn rebuild_fails_with_actionable_error_when_workspace_torn_down() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Test torn-down workspace".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test rebuild error on torn-down workspace".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Change\n").unwrap();
+        build_package(&config, &goal_id, "Agent's change", false).unwrap();
+
+        // Simulate the staging workspace having been torn down after the goal finished.
+        std::fs::remove_dir_all(&goal.workspace_path).unwrap();
+
+        let err = build_package(&config, &goal_id, "Rebuild attempt", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no longer exists") && msg.contains("nothing to rebuild"),
+            "error should distinguish a torn-down workspace from a state that could \
+             still support rebuild, got: {}",
+            msg
+        );
+    }
+
+    /// v0.17.6.3.1 item 3: the other half of the same distinction — a goal that has
+    /// moved past the rebuild window entirely (e.g. `applied`) gets a different,
+    /// clearly-worded error than the torn-down-workspace case.
+    #[test]
+    fn build_fails_with_actionable_error_from_unsupported_state() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Test unsupported state".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test rebuild error from unsupported state".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Change\n").unwrap();
+        build_package(&config, &goal_id, "Agent's change", false).unwrap();
+
+        goal_store
+            .transition(goal.goal_run_id, GoalRunState::Applied)
+            .unwrap();
+
+        let err = build_package(&config, &goal_id, "Rebuild attempt", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not support building or rebuilding")
+                && !msg.contains("no longer exists"),
+            "error should distinguish an unsupported state from a torn-down workspace, \
+             got: {}",
+            msg
+        );
     }
 
     #[test]

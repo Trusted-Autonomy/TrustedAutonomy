@@ -1635,6 +1635,7 @@ fn create_constitution_amend_draft(
         draft_seq: 1,
         plan_phase: None,
         plan_md_base: None,
+        rebuilt_from: None,
     };
 
     super::draft::save_package(config, &pkg)
@@ -2443,6 +2444,7 @@ fn create_review_draft(
         draft_seq: 1,
         plan_phase: None,
         plan_md_base: None,
+        rebuilt_from: None,
     };
 
     super::draft::save_package(config, &pkg)

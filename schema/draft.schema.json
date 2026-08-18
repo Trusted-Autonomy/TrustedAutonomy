@@ -1159,6 +1159,33 @@
       ],
       "type": "object"
     },
+    "RebuildProvenance": {
+      "description": "Records that a draft was produced by rebuilding from a goal state where the\nagent process had already exited (`pr_ready`/`approved`), rather than from a\nfresh `Running`/`Finalizing` build (v0.17.6.3.1 — Draft Rebuild Window).\n\nThis is the trust-boundary marker: a rebuild's diff may contain edits a human\nreviewer made directly to the staging workspace, not just agent-authored\nchanges. `ta draft view` surfaces this distinctly so provenance is never\nsilently blended between \"agent wrote this\" and \"reviewer amended this\".",
+      "properties": {
+        "previous_goal_state": {
+          "description": "The goal's lifecycle state at the moment `ta draft build` was re-run\n(e.g. `\"pr_ready\"`, `\"approved\"`).",
+          "type": "string"
+        },
+        "rebuilt_at": {
+          "description": "When the rebuild happened.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "superseded_draft_id": {
+          "description": "The prior draft package this rebuild superseded, if one existed.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "previous_goal_state",
+        "rebuilt_at"
+      ],
+      "type": "object"
+    },
     "RequestedAction": {
       "properties": {
         "action": {
@@ -1684,6 +1711,17 @@
     },
     "provenance": {
       "$ref": "#/$defs/Provenance"
+    },
+    "rebuilt_from": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RebuildProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Rebuild provenance (v0.17.6.3.1).\n\n`Some` when this draft was produced by rebuilding from `pr_ready`/`approved`\n(the agent process had already exited) rather than from a live `Running`/\n`Finalizing` goal. `None` for a normal first build. See `RebuildProvenance`."
     },
     "review_requests": {
       "$ref": "#/$defs/ReviewRequests"
