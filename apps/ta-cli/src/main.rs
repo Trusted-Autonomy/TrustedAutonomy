@@ -703,11 +703,17 @@ enum Commands {
     /// Run this once after installation to get started.
     #[command(hide = true)]
     Install,
-    /// Initialize a new TA-managed project from a template.
+    /// One-command project onboarding: makes the current directory a TA-managed project.
+    ///
+    /// Bare `ta init` (also reachable via the curated `ta project create`) creates `.ta/`
+    /// scaffolding, a starter `CLAUDE.md`, a project-scoped `.mcp.json`, and runs VCS setup
+    /// — in one call, safe to re-run. For template-driven setup (language detection,
+    /// game-engine templates, BMAD), use `ta init run --template <name>` or
+    /// `ta init templates` to list options.
     #[command(hide = true)]
     Init {
         #[command(subcommand)]
-        command: commands::init::InitCommands,
+        command: Option<commands::init::InitCommands>,
     },
     /// Create a new project through conversational bootstrapping.
     ///
@@ -1790,7 +1796,7 @@ fn dispatch_raw(
         Commands::Adapter { command } => commands::adapter::execute(command, project_root),
         Commands::Install => commands::install::execute(project_root),
         Commands::Setup { command } => commands::setup::execute(command, config),
-        Commands::Init { command } => commands::init::execute(command, config),
+        Commands::Init { command } => commands::init::execute(command.as_ref(), config),
         Commands::New { command } => commands::new::execute(command, config),
         Commands::Release { command } => commands::release::execute(command, config),
         Commands::Shell {
@@ -2053,6 +2059,26 @@ mod verb_dispatch_tests {
             .expect("spawn command-build thread")
             .join()
             .expect("command-build thread panicked")
+    }
+
+    /// v0.17.9: bare `ta init` (no subcommand) must parse successfully with
+    /// `command: None` — this is the one-command onboarding entry point.
+    /// `ta init run --template ...` must still work unchanged.
+    #[test]
+    fn bare_init_parses_with_no_subcommand() {
+        assert!(matches!(parse(&["init"]), Commands::Init { command: None }));
+        assert!(matches!(
+            parse(&["init", "run", "--template", "rust-workspace"]),
+            Commands::Init {
+                command: Some(commands::init::InitCommands::Run { .. })
+            }
+        ));
+        assert!(matches!(
+            parse(&["init", "templates"]),
+            Commands::Init {
+                command: Some(commands::init::InitCommands::Templates)
+            }
+        ));
     }
 
     #[test]

@@ -25,24 +25,24 @@ which = { workspace = true }
 toml = { workspace = true }
 
 # Internal crates
-ta-audit = { path = "../ta-audit", version = "0.17.8-alpha" }
-ta-events = { path = "../ta-events", version = "0.17.8-alpha" }
-ta-memory = { path = "../ta-memory", version = "0.17.8-alpha" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.8-alpha" }
-ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.8-alpha" }
-ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.8-alpha" }
-ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.8-alpha" }
-ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.8-alpha" }
-ta-goal = { path = "../ta-goal", version = "0.17.8-alpha" }
-ta-policy = { path = "../ta-policy", version = "0.17.8-alpha" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.8-alpha" }
-ta-workflow = { path = "../ta-workflow", version = "0.17.8-alpha" }
-ta-actions = { path = "../ta-actions", version = "0.17.8-alpha" }
-ta-submit = { path = "../ta-submit", version = "0.17.8-alpha" }
-ta-decision = { path = "../ta-decision", version = "0.17.8-alpha" }
-ta-credentials = { path = "../ta-credentials", version = "0.17.8-alpha" }
-ta-session = { path = "../ta-session", version = "0.17.8-alpha" }
-ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.8-alpha" }
+ta-audit = { path = "../ta-audit", version = "0.17.9-alpha" }
+ta-events = { path = "../ta-events", version = "0.17.9-alpha" }
+ta-memory = { path = "../ta-memory", version = "0.17.9-alpha" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.9-alpha" }
+ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.9-alpha" }
+ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.9-alpha" }
+ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.9-alpha" }
+ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.9-alpha" }
+ta-goal = { path = "../ta-goal", version = "0.17.9-alpha" }
+ta-policy = { path = "../ta-policy", version = "0.17.9-alpha" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.9-alpha" }
+ta-workflow = { path = "../ta-workflow", version = "0.17.9-alpha" }
+ta-actions = { path = "../ta-actions", version = "0.17.9-alpha" }
+ta-submit = { path = "../ta-submit", version = "0.17.9-alpha" }
+ta-decision = { path = "../ta-decision", version = "0.17.9-alpha" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.9-alpha" }
+ta-session = { path = "../ta-session", version = "0.17.9-alpha" }
+ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.9-alpha" }
 
 
 [dev-dependencies]

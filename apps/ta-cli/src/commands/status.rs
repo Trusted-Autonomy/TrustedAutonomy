@@ -12,6 +12,11 @@ use ta_goal::{GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
 
 pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
+    if !ta_init::is_initialized(&config.workspace_root) {
+        println!("This project hasn't been set up for TA yet. Run `ta init` to get started.");
+        return Ok(());
+    }
+
     let project_name = config
         .workspace_root
         .file_name()
@@ -766,6 +771,29 @@ mod tests {
         assert!(!is_terminal_reviewer_goal(&make_goal(
             "Review draft abc123 for some other workflow"
         )));
+    }
+
+    #[test]
+    fn execute_reports_uninitialized_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(dir.path());
+        // No .ta/workflow.toml — must not error, and must not touch goal
+        // storage or the daemon (it should short-circuit immediately).
+        let result = execute(&config, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn execute_works_after_ta_init() {
+        let dir = tempfile::tempdir().unwrap();
+        ta_init::init_project(&ta_init::ProjectInitOptions {
+            project_root: dir.path(),
+            name: "TestProject",
+        })
+        .unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(dir.path());
+        let result = execute(&config, false);
+        assert!(result.is_ok());
     }
 
     #[test]

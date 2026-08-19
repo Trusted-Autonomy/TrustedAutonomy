@@ -268,7 +268,14 @@ pub struct ProjectInitRequest {
 
 /// `POST /api/project/init` — Create a new TA project at a given path.
 ///
-/// Creates `.ta/`, writes starter `workflow.toml` and empty `PLAN.md`.
+/// Delegates to `ta_init::init_project` — the same shared onboarding function
+/// `ta init` (CLI) calls — so a project created from Studio's "New Project"
+/// form gets identical `.ta/` scaffolding, a starter `CLAUDE.md`, and a
+/// correct project-scoped `.mcp.json` (v0.17.9). Previously this handler had
+/// its own thin, divergent copy of the logic that skipped `CLAUDE.md` and
+/// `.mcp.json` entirely, which left Studio-created projects with no
+/// project-scoped MCP config — silently falling back to whatever
+/// global/user-scope `ta` MCP config happened to be configured.
 pub async fn init_project(
     State(_state): State<Arc<AppState>>,
     Json(body): Json<ProjectInitRequest>,
@@ -289,89 +296,166 @@ pub async fn init_project(
     }
 
     let project_path = std::path::PathBuf::from(body.path.trim());
-    let ta_dir = project_path.join(".ta");
+    let name = body.name.trim();
 
-    // Create .ta/ directory structure.
-    for sub in &[
-        "goals",
-        "pr_packages",
-        "memory",
-        "events",
-        "personas",
-        "workflows",
-    ] {
-        if let Err(e) = std::fs::create_dir_all(ta_dir.join(sub)) {
+    let opts = ta_init::ProjectInitOptions {
+        project_root: &project_path,
+        name,
+    };
+    let outcome = match ta_init::init_project(&opts) {
+        Ok(o) => o,
+        Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
-                    "error": format!("Could not create .ta/{}: {}", sub, e),
+                    "error": format!("Project init failed: {}", e),
                 })),
             )
                 .into_response();
         }
-    }
+    };
 
-    // Write a starter PLAN.md.
-    let plan_content = format!(
-        "# {name} — Development Plan\n\n\
-         ## Versioning\n\n\
-         Version format: `MAJOR.MINOR.PATCH-alpha`. Phases map directly to semver.\n\n\
-         ---\n\
-         <!-- Add phases below using `ta plan add` or the Plan tab in Studio. -->\n",
-        name = body.name.trim()
-    );
-    let plan_path = project_path.join("PLAN.md");
-    if let Err(e) = std::fs::write(&plan_path, &plan_content) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("Could not write PLAN.md: {}", e),
-            })),
-        )
-            .into_response();
-    }
-
-    // Write a starter workflow.toml.
-    let workflow_toml = format!(
-        "[workflow]\n\
-         name = \"{name}\"\n\
-         enforce_phase_order = \"warn\"\n\
-         context_budget_chars = 0\n\n\
-         [build]\n\
-         # commands = [\"cargo build\"]\n\n\
-         [verify]\n\
-         # commands = [\"cargo test\", \"cargo clippy\"]\n\
-         # on_failure = \"block\"\n",
-        name = body.name.trim()
-    );
-    if let Err(e) = std::fs::write(ta_dir.join("workflow.toml"), workflow_toml) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("Could not write workflow.toml: {}", e),
-            })),
-        )
-            .into_response();
-    }
+    let gitignore_updated = run_vcs_setup_best_effort(&project_path);
 
     tracing::info!(
         path = %project_path.display(),
-        name = %body.name,
+        name = %name,
+        already_initialized = outcome.already_initialized,
+        created = outcome.created.len(),
+        gitignore_updated,
         "New project initialized via Studio"
     );
 
     Json(serde_json::json!({
         "ok": true,
         "path": project_path.display().to_string(),
-        "name": body.name.trim(),
+        "name": name,
+        "already_initialized": outcome.already_initialized,
+        "created": outcome.created,
+        "gitignore_updated": gitignore_updated,
     }))
     .into_response()
+}
+
+/// VCS setup for `POST /api/project/init` — mirrors what `ta init` (CLI)
+/// does via `ta setup vcs`, so a project created from Studio also gets TA's
+/// local-state block in `.gitignore`, not just the CLI path (v0.17.9 item 1).
+/// Git-only (Studio's "New Project" form targets ordinary local directories,
+/// where git is the overwhelmingly common case); Perforce/SVN users can still
+/// run `ta setup vcs` themselves. Best-effort: a write failure is logged and
+/// swallowed rather than failing project init, since the `.ta/` scaffolding
+/// has already succeeded by the time this runs. Returns whether `.gitignore`
+/// was created or modified.
+fn run_vcs_setup_best_effort(project_path: &std::path::Path) -> bool {
+    if ta_workspace::partitioning::VcsBackend::detect(project_path)
+        != ta_workspace::partitioning::VcsBackend::Git
+    {
+        return false;
+    }
+
+    let gitignore_path = project_path.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let (updated, changed, _unregistered) =
+        ta_workspace::partitioning::update_gitignore(&existing, false);
+    if !changed {
+        return false;
+    }
+
+    match std::fs::write(&gitignore_path, &updated) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                path = %gitignore_path.display(),
+                error = %e,
+                "Could not write .gitignore during Studio project init"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// v0.17.9 item 4 regression guard: `init_project` (this handler, backing
+    /// Studio's "New Project" form) must produce the same baseline `.ta/`
+    /// output as `ta init` (CLI) for the same inputs — both call
+    /// `ta_init::init_project`, the single shared onboarding function, so
+    /// this test exercises exactly what the handler above delegates to.
+    #[test]
+    fn studio_init_matches_cli_init_shared_function_output() {
+        let dir = tempdir().unwrap();
+        let opts = ta_init::ProjectInitOptions {
+            project_root: dir.path(),
+            name: "StudioProject",
+        };
+        let outcome = ta_init::init_project(&opts).unwrap();
+
+        assert!(!outcome.already_initialized);
+        assert!(ta_init::is_initialized(dir.path()));
+        assert!(dir.path().join(".ta/workflow.toml").exists());
+        assert!(dir.path().join("PLAN.md").exists());
+        // These two were previously missing from the Studio path entirely —
+        // the root cause of the item-1a TA_IS_STAGING inheritance bug.
+        assert!(
+            dir.path().join("CLAUDE.md").exists(),
+            "Studio-created projects must get a starter CLAUDE.md"
+        );
+        assert!(
+            dir.path().join(".mcp.json").exists(),
+            "Studio-created projects must get a project-scoped .mcp.json"
+        );
+
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["ta"]["env"]["TA_CALLER_MODE"],
+            "orchestrator"
+        );
+    }
+
+    #[test]
+    fn studio_init_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let opts = ta_init::ProjectInitOptions {
+            project_root: dir.path(),
+            name: "StudioProject",
+        };
+        ta_init::init_project(&opts).unwrap();
+        let second = ta_init::init_project(&opts).unwrap();
+        assert!(second.already_initialized);
+        assert!(second.created.is_empty());
+    }
+
+    #[test]
+    fn vcs_setup_writes_gitignore_for_git_repo() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let updated = run_vcs_setup_best_effort(dir.path());
+        assert!(updated);
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(!gitignore.is_empty());
+    }
+
+    #[test]
+    fn vcs_setup_is_noop_without_git() {
+        let dir = tempdir().unwrap();
+        let updated = run_vcs_setup_best_effort(dir.path());
+        assert!(!updated);
+        assert!(!dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn vcs_setup_is_idempotent() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(run_vcs_setup_best_effort(dir.path()));
+        // Second call: TA block already present, nothing to change.
+        assert!(!run_vcs_setup_best_effort(dir.path()));
+    }
 
     #[test]
     fn recent_projects_add_deduplicates() {

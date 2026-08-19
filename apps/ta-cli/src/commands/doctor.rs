@@ -224,6 +224,11 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // key fell back to a file instead of the OS keychain (v0.17.6.2).
     results.push(check_credential_vault_key_custody(config));
 
+    // 27. Project-scoped .mcp.json missing while the global MCP config
+    // carries TA_IS_STAGING=1 — silently inherited by every such project
+    // and causes a confusing "re-entrant call" refusal (v0.17.9 item 1a).
+    results.push(check_missing_project_mcp_config_with_staging_global(config));
+
     results
 }
 
@@ -2174,6 +2179,86 @@ fn check_credential_vault_key_custody(config: &GatewayConfig) -> CheckResult {
     }
 }
 
+/// Detect the specific misconfiguration found live 2026-08-15 (v0.17.9 item
+/// 1a): a project with no project-scoped `.mcp.json` falls back to whatever
+/// global/user-scope `ta` MCP config the Claude Code CLI resolves — if that
+/// global config carries `TA_IS_STAGING=1` (a mistake a prior session
+/// recommended and has since been corrected), `ta_goal_start` is refused for
+/// *every* such project with a confusing "re-entrant call" error that has
+/// nothing to do with the real cause.
+///
+/// `ta init` (item 1) writes a correct project-scoped `.mcp.json`, closing
+/// this for any project it has been run on. This check catches the case
+/// where it hasn't: it inspects Claude Code's global config
+/// (`~/.claude.json`) for `mcpServers.ta.env.TA_IS_STAGING`. If the global
+/// config can't be found or parsed, this check is silently skipped (`ok`)
+/// rather than risk a false alarm from a schema this doesn't fully control.
+fn check_missing_project_mcp_config_with_staging_global(config: &GatewayConfig) -> CheckResult {
+    let project_mcp = config.workspace_root.join(".mcp.json");
+    if project_mcp.exists() {
+        return CheckResult::ok(
+            "Project MCP config",
+            "project-scoped .mcp.json present — not affected by global config",
+        );
+    }
+
+    let global_path = match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(home) => Path::new(&home).join(".claude.json"),
+        None => {
+            return CheckResult::ok(
+                "Project MCP config",
+                "no project-scoped .mcp.json, but home directory is unknown — cannot check global config",
+            );
+        }
+    };
+
+    let content = match std::fs::read_to_string(&global_path) {
+        Ok(c) => c,
+        Err(_) => {
+            return CheckResult::ok(
+                "Project MCP config",
+                "no project-scoped .mcp.json (no global Claude config found to cross-check)",
+            );
+        }
+    };
+
+    let global: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => {
+            return CheckResult::ok(
+                "Project MCP config",
+                "no project-scoped .mcp.json (global Claude config could not be parsed)",
+            );
+        }
+    };
+
+    let is_staging = global
+        .pointer("/mcpServers/ta/env/TA_IS_STAGING")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "1")
+        .unwrap_or(false);
+
+    if is_staging {
+        CheckResult::warn(
+            "Project MCP config",
+            format!(
+                "no project-scoped .mcp.json — this project inherits the global `ta` MCP \
+                 config at {}, which has TA_IS_STAGING=1. Every goal-start call in this \
+                 project will be refused with a confusing \"re-entrant call\" error.",
+                global_path.display()
+            ),
+            "Run `ta init` to write a correct project-scoped .mcp.json, or remove \
+             TA_IS_STAGING from the global config's `ta` server entry (it should only \
+             be set on the .mcp.json TA writes inside an agent's own staging workspace).",
+        )
+    } else {
+        CheckResult::ok(
+            "Project MCP config",
+            "no project-scoped .mcp.json, but the global config does not carry TA_IS_STAGING",
+        )
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2184,6 +2269,16 @@ mod tests {
 
     fn test_config(dir: &TempDir) -> GatewayConfig {
         GatewayConfig::for_project(dir.path())
+    }
+
+    #[test]
+    fn project_mcp_check_ok_when_mcp_json_present() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".mcp.json"), "{}").unwrap();
+        let config = test_config(&dir);
+        let result = check_missing_project_mcp_config_with_staging_global(&config);
+        assert_eq!(result.status, CheckStatus::Ok);
+        assert!(result.detail.contains("present"));
     }
 
     #[test]

@@ -43,9 +43,10 @@ pub enum InitCommands {
     Templates,
 }
 
-pub fn execute(command: &InitCommands, config: &GatewayConfig) -> anyhow::Result<()> {
+pub fn execute(command: Option<&InitCommands>, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
-        InitCommands::Run {
+        None => run_onboard(config),
+        Some(InitCommands::Run {
             template,
             detect: _,
             name,
@@ -53,7 +54,7 @@ pub fn execute(command: &InitCommands, config: &GatewayConfig) -> anyhow::Result
             remote,
             non_interactive,
             overwrite,
-        } => run_init(
+        }) => run_init(
             config,
             template.as_deref(),
             name.as_deref(),
@@ -62,8 +63,87 @@ pub fn execute(command: &InitCommands, config: &GatewayConfig) -> anyhow::Result
             *non_interactive,
             *overwrite,
         ),
-        InitCommands::Templates => list_templates(),
+        Some(InitCommands::Templates) => list_templates(),
     }
+}
+
+/// Bare `ta init` — one-command onboarding (v0.17.9).
+///
+/// Calls the shared `ta_init::init_project` function (also used by Studio's
+/// "New Project" form via `POST /api/project/init`) to create baseline
+/// `.ta/` scaffolding, a starter `CLAUDE.md`, and a project-scoped
+/// `.mcp.json`, then runs VCS setup. Safe to re-run: every write is
+/// skip-if-exists and an already-initialized project is reported as such
+/// rather than reset.
+///
+/// For language-aware templates (Rust/TypeScript/Python/Go/game-engine),
+/// use `ta init run --template <name>` instead.
+fn run_onboard(config: &GatewayConfig) -> anyhow::Result<()> {
+    let project_root = &config.workspace_root;
+    let name = ta_init::default_project_name(project_root);
+
+    let opts = ta_init::ProjectInitOptions {
+        project_root,
+        name: &name,
+    };
+    let outcome = ta_init::init_project(&opts)?;
+
+    if outcome.already_initialized {
+        println!("Project '{}' is already initialized for TA.", name);
+        if !outcome.created.is_empty() {
+            println!("Filled in missing pieces:");
+            for f in &outcome.created {
+                println!("  {}", f);
+            }
+        } else {
+            println!("Nothing to do — run `ta status` to see current state.");
+        }
+        return Ok(());
+    }
+
+    println!("Initializing TA project: {}", name);
+    println!();
+    println!("Created:");
+    for f in &outcome.created {
+        println!("  {}", f);
+    }
+    if !outcome.skipped.is_empty() {
+        println!("Already present (left untouched):");
+        for f in &outcome.skipped {
+            println!("  {}", f);
+        }
+    }
+
+    // Run VCS setup (best-effort — logs a warning and continues on failure,
+    // per the Observability Mandate: never fail silently, always say what to
+    // do next).
+    {
+        use super::setup::{execute as setup_execute, SetupCommands};
+        let vcs_cmd = SetupCommands::Vcs {
+            force: false,
+            dry_run: false,
+            vcs: None,
+            project_type: None,
+        };
+        if let Err(e) = setup_execute(&vcs_cmd, config) {
+            println!();
+            println!("  Warning: VCS setup encountered an issue: {}", e);
+            println!("  Run `ta setup vcs` manually to retry.");
+        }
+    }
+
+    println!();
+    println!("TA project initialized successfully!");
+    println!();
+    println!("Next steps:");
+    println!("  ta status               — check project status");
+    println!("  ta plan new \"description of your project\"  — generate your development plan");
+    println!("  ta run \"your first task\"                    — run your first goal");
+    println!();
+    println!("For a language-aware template (Rust/TypeScript/Python/Go/game-engine),");
+    println!("re-run with: ta init run --template <name>  (see `ta init templates`)");
+
+    Ok(())
 }
 
 /// Available templates.
@@ -2209,6 +2289,59 @@ members = [
         assert!(content.contains("PlatformerGame"));
         assert!(content.contains("Unity"));
         assert!(content.contains("*.cs"));
+    }
+
+    // --- Bare `ta init` onboarding tests (v0.17.9) ---
+
+    #[test]
+    fn bare_init_onboards_a_fresh_directory() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        execute(None, &config).unwrap();
+
+        assert!(dir.path().join(".ta/workflow.toml").exists());
+        assert!(dir.path().join("PLAN.md").exists());
+        assert!(dir.path().join("CLAUDE.md").exists());
+        assert!(dir.path().join(".mcp.json").exists());
+        assert!(ta_init::is_initialized(dir.path()));
+    }
+
+    #[test]
+    fn bare_init_on_git_repo_updates_gitignore() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let config = test_config(&dir);
+        execute(None, &config).unwrap();
+
+        assert!(dir.path().join(".ta/workflow.toml").exists());
+        assert!(dir.path().join("CLAUDE.md").exists());
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            !gitignore.is_empty(),
+            "ta init on a git repo should write TA's local-state block to .gitignore"
+        );
+    }
+
+    #[test]
+    fn bare_init_is_idempotent_and_reports_already_initialized() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        execute(None, &config).unwrap();
+        // Second call must not error and must not clobber anything.
+        execute(None, &config).unwrap();
+        let claude_md = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("TODO"));
+    }
+
+    #[test]
+    fn bare_init_never_overwrites_edited_claude_md() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        execute(None, &config).unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# hand-edited\n").unwrap();
+        execute(None, &config).unwrap();
+        let claude_md = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(claude_md, "# hand-edited\n");
     }
 
     // --- CLAUDE.md generation tests ---
