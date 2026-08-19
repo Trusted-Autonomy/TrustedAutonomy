@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use super::{weighted_average, ConsensusAlgorithm, ConsensusInput, ConsensusResult};
-use crate::WorkflowError;
+use super::{weighted_average, write_audit_entry, ConsensusAlgorithm, ConsensusError};
+use super::{ConsensusInput, ConsensusResult};
 
 // ── Message types ─────────────────────────────────────────────────────────────
 
@@ -92,8 +92,8 @@ struct PaxosAuditLog {
 }
 
 impl PaxosAuditLog {
-    fn open(run_dir: &std::path::Path, run_id: &str) -> Result<Self, WorkflowError> {
-        std::fs::create_dir_all(run_dir).map_err(|e| WorkflowError::IoError {
+    fn open(run_dir: &std::path::Path, run_id: &str) -> Result<Self, ConsensusError> {
+        std::fs::create_dir_all(run_dir).map_err(|e| ConsensusError::Io {
             path: run_dir.display().to_string(),
             source: e,
         })?;
@@ -104,7 +104,7 @@ impl PaxosAuditLog {
         })
     }
 
-    fn write(&mut self, event: PaxosEvent) -> Result<(), WorkflowError> {
+    fn write(&mut self, event: PaxosEvent) -> Result<(), ConsensusError> {
         let entry = PaxosLogEntry {
             index: self.next_index,
             timestamp: Utc::now().to_rfc3339(),
@@ -112,20 +112,20 @@ impl PaxosAuditLog {
         };
         self.next_index += 1;
         let json =
-            serde_json::to_string(&entry).map_err(|e| WorkflowError::Other(e.to_string()))?;
+            serde_json::to_string(&entry).map_err(|e| ConsensusError::Serde(e.to_string()))?;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .map_err(|e| WorkflowError::IoError {
+            .map_err(|e| ConsensusError::Io {
                 path: self.path.display().to_string(),
                 source: e,
             })?;
-        writeln!(f, "{}", json).map_err(|e| WorkflowError::IoError {
+        writeln!(f, "{}", json).map_err(|e| ConsensusError::Io {
             path: self.path.display().to_string(),
             source: e,
         })?;
-        f.flush().map_err(|e| WorkflowError::IoError {
+        f.flush().map_err(|e| ConsensusError::Io {
             path: self.path.display().to_string(),
             source: e,
         })
@@ -139,7 +139,10 @@ impl PaxosAuditLog {
 // ── run ───────────────────────────────────────────────────────────────────────
 
 /// Execute single-decree Paxos consensus.
-pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
+///
+/// Persistence of the phase-by-phase audit log is opt-in, mirroring Raft: it
+/// only happens when the caller supplies both `run_dir` and `run_id`.
+pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, ConsensusError> {
     let active_votes: Vec<_> = input.votes.iter().filter(|v| !v.timed_out).collect();
     let timed_out_roles: Vec<String> = input
         .votes
@@ -151,15 +154,20 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let n = active_votes.len();
     let quorum = n / 2 + 1;
 
-    let mut log = PaxosAuditLog::open(&input.run_dir, &input.run_id)?;
+    let mut log = match (&input.run_dir, &input.run_id) {
+        (Some(run_dir), Some(run_id)) => Some(PaxosAuditLog::open(run_dir, run_id)?),
+        _ => None,
+    };
     let ballot: Ballot = 1;
 
     // ── Phase 1: Prepare ──────────────────────────────────────────────────────
-    log.write(PaxosEvent::Prepare {
-        ballot,
-        reviewer_count: n,
-        quorum,
-    })?;
+    if let Some(log) = log.as_mut() {
+        log.write(PaxosEvent::Prepare {
+            ballot,
+            reviewer_count: n,
+            quorum,
+        })?;
+    }
 
     // In single-process mode, all active reviewers immediately promise.
     // (They have not seen a higher ballot — this is the first and only proposal.)
@@ -168,12 +176,14 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let mut highest_prior_value: Option<PaxosValue> = None;
 
     for vote in &active_votes {
-        log.write(PaxosEvent::Promise {
-            from: vote.role.clone(),
-            ballot,
-            prior_ballot: None,
-            prior_value: None,
-        })?;
+        if let Some(log) = log.as_mut() {
+            log.write(PaxosEvent::Promise {
+                from: vote.role.clone(),
+                ballot,
+                prior_ballot: None,
+                prior_value: None,
+            })?;
+        }
         promises += 1;
         let _ = (highest_prior_ballot, highest_prior_value.take()); // no prior values
     }
@@ -204,18 +214,22 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
         }
     };
 
-    log.write(PaxosEvent::Accept {
-        ballot,
-        value: proposed_value.clone(),
-    })?;
+    if let Some(log) = log.as_mut() {
+        log.write(PaxosEvent::Accept {
+            ballot,
+            value: proposed_value.clone(),
+        })?;
+    }
 
     // ── Phase 3: Accepted ─────────────────────────────────────────────────────
     let mut accepted = 0usize;
     for vote in &active_votes {
-        log.write(PaxosEvent::Accepted {
-            from: vote.role.clone(),
-            ballot,
-        })?;
+        if let Some(log) = log.as_mut() {
+            log.write(PaxosEvent::Accepted {
+                from: vote.role.clone(),
+                ballot,
+            })?;
+        }
         accepted += 1;
     }
 
@@ -232,84 +246,39 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let final_override = !final_proceed_raw && input.override_reason.is_some();
     let final_proceed = final_proceed_raw || final_override;
 
-    log.write(PaxosEvent::Decided {
-        ballot,
-        value: PaxosValue {
-            score: final_score,
-            proceed: final_proceed,
-        },
-        override_active: final_override,
-        timed_out: timed_out_roles.clone(),
-    })?;
-
-    // ── Write audit entry to .ta/audit.jsonl BEFORE cleanup ──────────────────
-    // Constitution §1.5: per-reviewer votes must be durable in the append-only
-    // audit log regardless of whether the caller retains ConsensusResult.
-    {
-        // Climb up from run_dir to find the .ta directory.
-        // run_dir is typically <workspace_root>/.ta/workflow-runs/<run-id>/
-        // so run_dir.parent().parent() = <workspace_root>/.ta
-        let audit_path = input
-            .run_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|ta_dir| ta_dir.join("audit.jsonl"))
-            .unwrap_or_else(|| input.run_dir.join("audit.jsonl"));
-
-        let scores_json: serde_json::Value = active_votes
-            .iter()
-            .map(|v| (v.role.clone(), serde_json::Value::from(v.score)))
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-
-        let mut entry = serde_json::json!({
-            "event": "consensus_complete",
-            "run_id": input.run_id,
-            "algorithm": "paxos",
-            "score": final_score,
-            "proceed": final_proceed,
-            "override_active": final_override,
-            "timed_out_roles": timed_out_roles,
-            "scores_by_role": scores_json,
-            "timestamp": Utc::now().to_rfc3339(),
-        });
-
-        if let Some(reason) = &input.override_reason {
-            entry["override_reason"] = serde_json::Value::String(reason.clone());
-        }
-
-        if let Some(parent) = audit_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&audit_path)
-        {
-            let _ = writeln!(f, "{}", entry);
-        }
-
-        // Item 4: separate override entry for queryability.
-        if final_override {
-            let override_entry = serde_json::json!({
-                "event": "consensus_override",
-                "run_id": input.run_id,
-                "reason": input.override_reason.as_deref().unwrap_or(""),
-                "score_before_override": final_score,
-                "timestamp": Utc::now().to_rfc3339(),
-            });
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&audit_path)
-            {
-                let _ = writeln!(f, "{}", override_entry);
-            }
-        }
+    if let Some(log) = log.as_mut() {
+        log.write(PaxosEvent::Decided {
+            ballot,
+            value: PaxosValue {
+                score: final_score,
+                proceed: final_proceed,
+            },
+            override_active: final_override,
+            timed_out: timed_out_roles.clone(),
+        })?;
     }
 
-    log.cleanup();
+    // ── Write audit entry (opt-in — only when the caller supplied a sink) ────
+    if let Some(audit_sink) = &input.audit_sink {
+        let scores_by_role: HashMap<String, f64> = active_votes
+            .iter()
+            .map(|v| (v.role.clone(), v.score))
+            .collect();
+        write_audit_entry(
+            audit_sink,
+            "paxos",
+            input,
+            final_score,
+            final_proceed,
+            final_override,
+            &timed_out_roles,
+            &scores_by_role,
+        );
+    }
+
+    if let Some(log) = log.as_ref() {
+        log.cleanup();
+    }
 
     // Collect per-role data.
     let mut scores_by_role = HashMap::new();
@@ -408,10 +377,11 @@ mod tests {
             weights: HashMap::new(),
             threshold,
             algorithm: ConsensusAlgorithm::Paxos,
-            run_id: "paxos-test".to_string(),
-            run_dir: dir.to_path_buf(),
+            run_id: Some("paxos-test".to_string()),
+            run_dir: Some(dir.to_path_buf()),
             require_all: false,
             override_reason: None,
+            audit_sink: None,
         }
     }
 
@@ -505,10 +475,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Paxos,
-            run_id: "paxos-audit-test".to_string(),
-            run_dir: run_dir.clone(),
+            run_id: Some("paxos-audit-test".to_string()),
+            run_dir: Some(run_dir.clone()),
             require_all: false,
             override_reason: None,
+            audit_sink: Some(ta_dir.join("audit.jsonl")),
         };
         run(&input).unwrap();
 
@@ -543,10 +514,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Paxos,
-            run_id: "paxos-override-audit".to_string(),
-            run_dir: run_dir.clone(),
+            run_id: Some("paxos-override-audit".to_string()),
+            run_dir: Some(run_dir.clone()),
             require_all: false,
             override_reason: Some("emergency paxos fix approved by CTO".to_string()),
+            audit_sink: Some(ta_dir.join("audit.jsonl")),
         };
         let result = run(&input).unwrap();
         assert!(result.proceed);
@@ -574,5 +546,67 @@ mod tests {
             override_entry["reason"],
             "emergency paxos fix approved by CTO"
         );
+    }
+
+    #[test]
+    fn runs_correctly_with_no_run_dir_or_run_id() {
+        // Item 7: persistence is optional for Paxos too.
+        let input = ConsensusInput {
+            votes: vec![vote("architect", 0.9), vote("security", 0.8)],
+            weights: HashMap::new(),
+            threshold: 0.75,
+            algorithm: ConsensusAlgorithm::Paxos,
+            run_id: None,
+            run_dir: None,
+            require_all: false,
+            override_reason: None,
+            audit_sink: None,
+        };
+        let result = run(&input).unwrap();
+        assert!(result.proceed);
+        assert!((result.score - 0.85).abs() < 1e-9);
+    }
+
+    // ── Item 8: even-reviewer-count quorum coverage ───────────────────────────
+
+    #[test]
+    fn four_reviewers_evenly_split_score_resolves_by_weighted_average() {
+        let dir = tempdir().unwrap();
+        // n=4 → quorum = 4/2 + 1 = 3. All 4 promise/accept, well above
+        // quorum; the score tie (two high, two low) must resolve via
+        // weighted_average, independent of the quorum check itself.
+        let input = make_input(
+            dir.path(),
+            vec![
+                vote("architect", 0.9),
+                vote("security", 0.9),
+                vote("principal", 0.4),
+                vote("pm", 0.4),
+            ],
+            0.75,
+        );
+        let result = run(&input).unwrap();
+        assert!(
+            result.summary.contains("4/4"),
+            "expected 4/4 accepted, got: {}",
+            result.summary
+        );
+        assert!((result.score - 0.65).abs() < 1e-9);
+        assert!(!result.proceed);
+    }
+
+    #[test]
+    fn two_reviewers_majority_requires_both_to_commit() {
+        let dir = tempdir().unwrap();
+        // n=2 → quorum = 2/2 + 1 = 2: both active reviewers must promise and
+        // accept for the round to decide.
+        let input = make_input(
+            dir.path(),
+            vec![vote("architect", 0.9), vote("security", 0.85)],
+            0.75,
+        );
+        let result = run(&input).unwrap();
+        assert!(result.summary.contains("2/2"), "{}", result.summary);
+        assert!(result.proceed);
     }
 }

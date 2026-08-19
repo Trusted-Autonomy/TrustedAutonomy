@@ -187,6 +187,15 @@ impl From<crate::WorkflowError> for GraphError {
     }
 }
 
+impl From<crate::consensus::ConsensusError> for GraphError {
+    fn from(err: crate::consensus::ConsensusError) -> Self {
+        GraphError::NodeExecution {
+            node_id: "decision".to_string(),
+            message: err.to_string(),
+        }
+    }
+}
+
 // ── Node traits ───────────────────────────────────────────────────────────
 
 /// Blocks/polls until the event fires; returns a typed payload.

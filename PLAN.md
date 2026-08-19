@@ -10361,40 +10361,39 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 ---
 ### v0.17.10 — Extract `decision-gate` + `consensus-panel` as Standalone OSS Crates, with a Configurable Adapter Between Them
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: Extract two independently-useful decision-making primitives out of TA into standalone public crates for external reuse (primarily by Wayfinder, the user's AI-first PM system, for task triage/dispatch-planning/prioritization review), following the exact extraction shape already proven twice this session (`task-graph`, v0.17.8). Four ordered parts — later parts depend on earlier ones landing first, so this phase must be worked sequentially, not in parallel with itself.
 
 **Part 1 — Extract `ta-decision` as `decision-gate`** (do first: Part 3's adapter needs a real published crate to depend on, not an in-tree path dependency).
-1. [ ] New public repo `Trusted-Autonomy/decision-gate`. Port `crates/ta-decision/` (`gate.rs`/`meter.rs`, 427 lines) verbatim — `decide(input: &DecisionInput, thresholds: &DecisionThresholds) -> Decision` (`Verdict`→`Decision::{Commit,Reject,Rework,Escalate}`) plus `Meter`/`ActionRecord`. Correct the `Cargo.toml` `repository`/`homepage` fields (currently a stale placeholder, `github.com/trustedautonomy/ta`) to point at the new repo. Apache-2.0, README with the same input/output/algorithm rigor as `task-graph`'s (external reader, zero TA context assumed).
-2. [ ] Tag `v0.1.0`.
-3. [ ] TA-side integration: every crate currently depending on in-tree `ta-decision` (draft-apply, `ta_human_verify`, the v0.17.6.3 connector broker, etc.) switches to the published git dependency. Full workspace test suite passes unchanged (regression guard — behavior must not change, only location).
+1. [x] New public repo `Trusted-Autonomy/decision-gate`. Port `crates/ta-decision/` (`gate.rs`/`meter.rs`, 427 lines) verbatim — `decide(input: &DecisionInput, thresholds: &DecisionThresholds) -> Decision` (`Verdict`→`Decision::{Commit,Reject,Rework,Escalate}`) plus `Meter`/`ActionRecord`. Correct the `Cargo.toml` `repository`/`homepage` fields (currently a stale placeholder, `github.com/trustedautonomy/ta`) to point at the new repo. Apache-2.0, README with the same input/output/algorithm rigor as `task-graph`'s (external reader, zero TA context assumed).
+2. [x] Tag `v0.1.0`.
+3. [x] TA-side integration: every crate currently depending on in-tree `ta-decision` (draft-apply, `ta_human_verify`, the v0.17.6.3 connector broker, etc.) switches to the published git dependency. Full workspace test suite passes unchanged (regression guard — behavior must not change, only location).
 
 **Part 2 — Fix 5 confirmed issues in `crates/ta-workflow/src/consensus/`** (raft.rs/paxos.rs/weighted.rs/mod.rs, predates 0.17 as v0.15.15) before extracting it.
-4. [ ] Replace the directory-climbing audit-path inference in `raft.rs`/`paxos.rs` (`input.run_dir.parent().parent()` guessing at `.ta/audit.jsonl`) with an explicit caller-supplied audit sink (path or trait) — the hardcoded TA-specific directory convention silently writes to the wrong place for any other caller.
-5. [ ] Make the audit write opt-in rather than unconditional — a general-purpose engine shouldn't hardwire one consumer's compliance policy (currently justified in-comment by TA's own "Constitution §1.5").
-6. [ ] Replace `Result<_, crate::WorkflowError>` (ta-workflow's large, TA-specific error enum) with a local `ConsensusError` type across `raft.rs`/`paxos.rs`/`weighted.rs`/`mod.rs` — same pattern as `task-graph`'s own `WaveError`.
-7. [ ] Make persistence config (`run_dir`/`run_id`) optional on `ConsensusInput` — confirmed `weighted::run()` never touches either field ("no log files, no round-trips" per its own comment), but every caller is currently forced to supply both regardless of algorithm.
-8. [ ] Add dedicated tests for Raft's quorum/tie-break math with even reviewer counts (untested edge case, not a confirmed bug, but needs coverage before external consumers rely on it for real prioritization decisions).
+4. [x] Replace the directory-climbing audit-path inference in `raft.rs`/`paxos.rs` (`input.run_dir.parent().parent()` guessing at `.ta/audit.jsonl`) with an explicit caller-supplied audit sink (path or trait) — the hardcoded TA-specific directory convention silently writes to the wrong place for any other caller.
+5. [x] Make the audit write opt-in rather than unconditional — a general-purpose engine shouldn't hardwire one consumer's compliance policy (currently justified in-comment by TA's own "Constitution §1.5").
+6. [x] Replace `Result<_, crate::WorkflowError>` (ta-workflow's large, TA-specific error enum) with a local `ConsensusError` type across `raft.rs`/`paxos.rs`/`weighted.rs`/`mod.rs` — same pattern as `task-graph`'s own `WaveError`.
+7. [x] Make persistence config (`run_dir`/`run_id`) optional on `ConsensusInput` — confirmed `weighted::run()` never touches either field ("no log files, no round-trips" per its own comment), but every caller is currently forced to supply both regardless of algorithm.
+8. [x] Add dedicated tests for Raft's quorum/tie-break math with even reviewer counts (untested edge case, not a confirmed bug, but needs coverage before external consumers rely on it for real prioritization decisions).
 
 **Part 3 — Build the consensus→decision-gate adapter.** Consensus and decision-gate are a pipeline (N reviewer votes → one aggregated score → policy thresholds → a 4-way decision), not two implementations of one interface — confirmed via direct review of both APIs' actual signatures.
-9. [ ] Add an optional, feature-flagged bridge (`--features decision-gate` on the soon-to-be-extracted consensus-panel crate, pulling in the real published `decision-gate` crate from Part 1) — not baked into either crate's core, and not a redesign of `ConsensusResult`'s own score/proceed vocabulary (that would break the standalone-scoring use case, e.g. ranking task priority with no Commit/Reject notion at all).
-10. [ ] `ConsensusDecisionPolicy` (configurable): `timeout_risk_weight`, `variance_risk_weight`, `override_confidence_floor`. `to_decision_input(result: &ConsensusResult, policy: &ConsensusDecisionPolicy) -> DecisionInput`.
-11. [ ] The adapter produces an *honest* `DecisionInput` only — it does not special-case outcomes (no "override_active forces Commit", no "near-threshold forces Rework"). `verdict` = Pass if proceed and no timeouts, Warn otherwise (never Block — consensus has no basis for a hard veto); `confidence` = score dampened by variance across `scores_by_role`; `risk_score` derived from `timed_out_roles.len()` and score variance, with `override_active` lowering risk rather than bypassing the gate. Every decision — single-role, rule-matched, or panel — terminates at the same `decide()` call with one vocabulary; the adapter must not become a side-channel around it.
-12. [ ] Tests: adapter output for a clean unanimous panel, a split/high-variance panel, a panel with timeouts, and an override-active panel, each verified against `decide()`'s actual resulting `Decision` (not just the intermediate `DecisionInput`).
+9. [x] Add an optional, feature-flagged bridge (`--features decision-gate` on the soon-to-be-extracted consensus-panel crate, pulling in the real published `decision-gate` crate from Part 1) — not baked into either crate's core, and not a redesign of `ConsensusResult`'s own score/proceed vocabulary (that would break the standalone-scoring use case, e.g. ranking task priority with no Commit/Reject notion at all).
+10. [x] `ConsensusDecisionPolicy` (configurable): `timeout_risk_weight`, `variance_risk_weight`, `override_confidence_floor`. `to_decision_input(result: &ConsensusResult, policy: &ConsensusDecisionPolicy) -> DecisionInput`.
+11. [x] The adapter produces an *honest* `DecisionInput` only — it does not special-case outcomes (no "override_active forces Commit", no "near-threshold forces Rework"). `verdict` = Pass if proceed and no timeouts, Warn otherwise (never Block — consensus has no basis for a hard veto); `confidence` = score dampened by variance across `scores_by_role`; `risk_score` derived from `timed_out_roles.len()` and score variance, with `override_active` lowering risk rather than bypassing the gate. Every decision — single-role, rule-matched, or panel — terminates at the same `decide()` call with one vocabulary; the adapter must not become a side-channel around it.
+12. [x] Tests: adapter output for a clean unanimous panel, a split/high-variance panel, a panel with timeouts, and an override-active panel, each verified against `decide()`'s actual resulting `Decision` (not just the intermediate `DecisionInput`).
 
 **Part 4 — Extract consensus as `consensus-panel`.**
-13. [ ] New public repo `Trusted-Autonomy/consensus-panel`. Port the now-fixed `consensus/` module (raft/paxos/weighted algorithms, `ConsensusInput`/`ConsensusResult`/`ReviewerVote`/`ConsensusAlgorithm`) plus the Part 3 adapter as an optional feature. Apache-2.0, README covering standalone usage and the optional decision-gate bridge.
-14. [ ] Tag `v0.1.0`.
-15. [ ] TA-side integration: `graph/nodes/weighted_decision.rs`, `graph/types.rs` (`pub use consensus::ConsensusResult as Decision`), and the two CLI command files with test-fixture references switch to the published git dependency. Full workspace test suite passes unchanged.
-16. [ ] USAGE.md: note both extractions and link to the standalone repos, mirroring `task-graph`'s own USAGE.md entry.
+13. [x] New public repo `Trusted-Autonomy/consensus-panel`. Port the now-fixed `consensus/` module (raft/paxos/weighted algorithms, `ConsensusInput`/`ConsensusResult`/`ReviewerVote`/`ConsensusAlgorithm`) plus the Part 3 adapter as an optional feature. Apache-2.0, README covering standalone usage and the optional decision-gate bridge.
+14. [x] Tag `v0.1.0`.
+15. [x] TA-side integration: `graph/nodes/weighted_decision.rs`, `graph/types.rs` (`pub use consensus::ConsensusResult as Decision`), and the two CLI command files with test-fixture references switch to the published git dependency. Full workspace test suite passes unchanged.
+16. [x] USAGE.md: note both extractions and link to the standalone repos, mirroring `task-graph`'s own USAGE.md entry.
 
 **Explicitly out of scope for this phase**: the SA-boundary virtual-team extraction (that's v0.17.11, the true last phase of 0.17, and depends on this phase completing first).
 
 #### Version: `0.17.10-alpha`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

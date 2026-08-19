@@ -42,8 +42,10 @@ pub mod yaml_engine;
 pub use artifact_dag::{render_ascii, render_dot, MissingInput, ResolvedDag};
 pub use artifact_store::{artifact_key, run_prefix, stage_prefix, ArtifactStore, StoredArtifact};
 pub use concurrent::run_concurrently;
+pub use consensus::decision_bridge::{to_decision, to_decision_input, ConsensusDecisionPolicy};
 pub use consensus::{
-    run_consensus, ConsensusAlgorithm, ConsensusInput, ConsensusResult, ReviewerVote,
+    run_consensus, ConsensusAlgorithm, ConsensusError, ConsensusInput, ConsensusResult,
+    ReviewerVote,
 };
 pub use definition::{
     FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowBudget, WorkflowCatalog,

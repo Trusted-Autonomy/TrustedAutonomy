@@ -43,10 +43,11 @@ impl DecisionNode for WeightedDecisionNode {
             weights: self.weights.clone(),
             threshold: self.threshold,
             algorithm: self.algorithm.clone(),
-            run_id: ctx.run_id.clone(),
-            run_dir: ctx.run_dir.clone(),
+            run_id: Some(ctx.run_id.clone()),
+            run_dir: Some(ctx.run_dir.clone()),
             require_all: self.require_all,
             override_reason: None,
+            audit_sink: Some(ctx.workspace_root.join(".ta").join("audit.jsonl")),
         };
         Ok(run_consensus(&input)?)
     }
