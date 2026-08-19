@@ -67,6 +67,7 @@ Ranked for the assumed architecture (daemon shells out to a service running your
 2. Current Wan 2.1/2.2 license terms if used beyond what's already been cleared elsewhere.
 3. Fly.io's actual current GPU pricing — this pass found no reliable data; don't rank it against RunPod/Modal without real numbers.
 4. Whether Together.ai (or a similar managed-catalog service) is worth using for the *LLM role* workloads specifically, as a way to avoid running GPU infra for those roles at all — separate decision from the world-model hosting question above.
+5. **TODO**: review [colibri](https://github.com/JustVugg/colibri) for running foundation models more cheaply — not yet evaluated against the RunPod/Modal/Baseten comparison above; check whether it's a hosting alternative, a serving-layer optimization, or something that stacks with one of the ranked platforms.
 
 ---
 
