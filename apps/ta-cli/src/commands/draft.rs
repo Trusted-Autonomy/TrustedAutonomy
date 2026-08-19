@@ -13499,7 +13499,12 @@ fn run() {
     /// guard only ever snapshotted PLAN.md + the draft's artifact files, so
     /// version-bump files (written later in the same apply) were never
     /// captured and survived the "rollback" corrupted.
+    ///
+    /// Unix-only: forces the pre-submit verification failure via a chmod'd
+    /// shell script, which has no direct Windows equivalent. The production
+    /// fix under test (the rollback guard) is not itself platform-specific.
     #[test]
+    #[cfg(unix)]
     fn apply_rollback_restores_version_bump_files_on_verification_failure() {
         let project = TempDir::new().unwrap();
 
