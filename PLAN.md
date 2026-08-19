@@ -10397,7 +10397,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 ---
 ### v0.17.10.1 — Fix Three Apply-Pipeline Bugs Found Live This Session (Silent False-Completion, Working-Tree Corruption, Version Regression)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: Fix three distinct, confirmed bugs in `ta draft apply`'s phase-completion/version-bump automation, all found live while applying v0.17.6.3.1/.3.2/.9/.10 this session. All three share a common flaw: the automation treats the `--phase` argument (or the fact that a goal is linked to a phase at all) as sufficient grounds to mark that phase `done` and bump the version, without checking whether the *applied diff's own content* actually supports that conclusion. This matters more than a normal bug because it's exactly the kind of silent, unattended failure mode a persistent virtual-team session (v0.17.5.1, and the planned v0.17.11 SA-boundary work) would hit with no human reviewing every apply the way this session did.
