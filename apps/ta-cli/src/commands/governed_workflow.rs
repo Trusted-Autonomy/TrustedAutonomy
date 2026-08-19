@@ -2538,10 +2538,11 @@ fn stage_consensus(
         weights,
         threshold,
         algorithm,
-        run_id: run_id.clone(),
-        run_dir,
+        run_id: Some(run_id.clone()),
+        run_dir: Some(run_dir),
         require_all,
         override_reason,
+        audit_sink: Some(opts.workspace_root.join(".ta").join("audit.jsonl")),
     };
 
     let result =

@@ -7,14 +7,34 @@
 //
 // Auto-degrades to Weighted when only one reviewer is active.
 
+pub mod decision_bridge;
 pub mod paxos;
 pub mod raft;
 pub mod weighted;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+// ── ConsensusError ───────────────────────────────────────────────────────────
+
+/// Errors from running a consensus step. Local to the consensus engine —
+/// deliberately not `ta-workflow`'s much larger `WorkflowError`, so this
+/// module can be extracted as a standalone crate without dragging its host's
+/// error surface along (mirrors `task-graph`'s own `WaveError`).
+#[derive(Debug, thiserror::Error)]
+pub enum ConsensusError {
+    #[error("I/O error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("serialization error: {0}")]
+    Serde(String),
+}
 
 // ── ConsensusAlgorithm ───────────────────────────────────────────────────────
 
@@ -83,7 +103,7 @@ pub struct ReviewerVote {
 // ── ConsensusInput ───────────────────────────────────────────────────────────
 
 /// All inputs required to run a consensus step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConsensusInput {
     /// Votes from each reviewer (timed-out slots have `timed_out=true`).
     pub votes: Vec<ReviewerVote>,
@@ -93,15 +113,23 @@ pub struct ConsensusInput {
     pub threshold: f64,
     /// Algorithm to use.
     pub algorithm: ConsensusAlgorithm,
-    /// Unique run identifier (used for log file paths).
-    pub run_id: String,
-    /// Directory for persisted state (`.ta/workflow-runs/<run-id>/`).
-    pub run_dir: PathBuf,
+    /// Unique run identifier, used to name Raft/Paxos log files. Only
+    /// consulted when `run_dir` is also set — `Weighted` never touches
+    /// either field, and Raft/Paxos run without crash-recovery persistence
+    /// (in-memory only) when either is `None`.
+    pub run_id: Option<String>,
+    /// Directory for Raft/Paxos crash-recovery log files. See `run_id`.
+    pub run_dir: Option<PathBuf>,
     /// If true, a timeout from any reviewer causes the run to fail rather than
     /// reducing the quorum.
     pub require_all: bool,
     /// When set, override any `proceed = false` decision with an audit entry.
     pub override_reason: Option<String>,
+    /// Explicit, caller-supplied path to append a durable audit record to
+    /// (one JSON line per run, plus a second line when an override fires).
+    /// No write happens when `None` — audit logging is opt-in, not a
+    /// hardcoded side effect of running consensus.
+    pub audit_sink: Option<PathBuf>,
 }
 
 // ── ConsensusResult ──────────────────────────────────────────────────────────
@@ -133,7 +161,7 @@ pub struct ConsensusResult {
 ///
 /// Auto-degrades to `Weighted` when:
 /// - The `algorithm` is `Raft` or `Paxos`, but there is only one non-timed-out reviewer.
-pub fn run_consensus(input: &ConsensusInput) -> Result<ConsensusResult, crate::WorkflowError> {
+pub fn run_consensus(input: &ConsensusInput) -> Result<ConsensusResult, ConsensusError> {
     let active_votes: Vec<&ReviewerVote> = input.votes.iter().filter(|v| !v.timed_out).collect();
 
     // Degrade to Weighted for single-reviewer panels — no coordination overhead.
@@ -169,6 +197,75 @@ pub(crate) fn weighted_average(scores: &[(&str, f64)], weights: &HashMap<String,
         0.0
     } else {
         total_score / total_weight
+    }
+}
+
+// ── audit sink ────────────────────────────────────────────────────────────────
+
+/// Append a `consensus_complete` record (and, when an override fired, a
+/// second `consensus_override` record) to `audit_sink`. Best-effort: a
+/// failure to write the audit trail must not fail the consensus decision
+/// itself, so I/O errors here are swallowed rather than propagated.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_audit_entry(
+    audit_sink: &Path,
+    algorithm: &str,
+    input: &ConsensusInput,
+    score: f64,
+    proceed: bool,
+    override_active: bool,
+    timed_out_roles: &[String],
+    scores_by_role: &HashMap<String, f64>,
+) {
+    let scores_json: serde_json::Value = scores_by_role
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::from(*v)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+
+    let mut entry = serde_json::json!({
+        "event": "consensus_complete",
+        "algorithm": algorithm,
+        "score": score,
+        "proceed": proceed,
+        "override_active": override_active,
+        "timed_out_roles": timed_out_roles,
+        "scores_by_role": scores_json,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Some(run_id) = &input.run_id {
+        entry["run_id"] = serde_json::Value::String(run_id.clone());
+    }
+    if let Some(reason) = &input.override_reason {
+        entry["override_reason"] = serde_json::Value::String(reason.clone());
+    }
+
+    if let Some(parent) = audit_sink.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_sink)
+    {
+        let _ = writeln!(f, "{}", entry);
+    }
+
+    if override_active {
+        let override_entry = serde_json::json!({
+            "event": "consensus_override",
+            "run_id": input.run_id.clone().unwrap_or_default(),
+            "reason": input.override_reason.as_deref().unwrap_or(""),
+            "score_before_override": score,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(audit_sink)
+        {
+            let _ = writeln!(f, "{}", override_entry);
+        }
     }
 }
 
@@ -268,10 +365,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Raft, // would normally use Raft
-            run_id: "test-degrade-1".to_string(),
-            run_dir: dir.path().to_path_buf(),
+            run_id: Some("test-degrade-1".to_string()),
+            run_dir: Some(dir.path().to_path_buf()),
             require_all: false,
             override_reason: None,
+            audit_sink: None,
         };
         let result = run_consensus(&input).unwrap();
         assert_eq!(result.algorithm_used, ConsensusAlgorithm::Weighted);
@@ -287,10 +385,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Paxos,
-            run_id: "test-degrade-2".to_string(),
-            run_dir: dir.path().to_path_buf(),
+            run_id: Some("test-degrade-2".to_string()),
+            run_dir: Some(dir.path().to_path_buf()),
             require_all: false,
             override_reason: None,
+            audit_sink: None,
         };
         let result = run_consensus(&input).unwrap();
         assert_eq!(result.algorithm_used, ConsensusAlgorithm::Weighted);
@@ -305,10 +404,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Raft,
-            run_id: "test-timeout-1".to_string(),
-            run_dir: dir.path().to_path_buf(),
+            run_id: Some("test-timeout-1".to_string()),
+            run_dir: Some(dir.path().to_path_buf()),
             require_all: false,
             override_reason: None,
+            audit_sink: None,
         };
         // All timed out → 0 active votes → degrades to Weighted → score 0.0
         let result = run_consensus(&input).unwrap();
@@ -324,14 +424,79 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Weighted,
-            run_id: "test-override-1".to_string(),
-            run_dir: dir.path().to_path_buf(),
+            run_id: Some("test-override-1".to_string()),
+            run_dir: Some(dir.path().to_path_buf()),
             require_all: false,
             override_reason: Some("emergency hotfix — approved by tech lead".to_string()),
+            audit_sink: None,
         };
         let result = run_consensus(&input).unwrap();
         assert!(result.proceed, "override should force proceed=true");
         assert!(result.override_active);
         assert!(result.summary.contains("OVERRIDE"));
+    }
+
+    #[test]
+    fn raft_and_paxos_run_without_persistence_when_run_dir_is_none() {
+        // Item 7: run_dir/run_id are optional — Raft/Paxos must still compute
+        // a correct result, just without crash-recovery log persistence.
+        for algorithm in [ConsensusAlgorithm::Raft, ConsensusAlgorithm::Paxos] {
+            let input = ConsensusInput {
+                votes: vec![vote("architect", 0.9), vote("security", 0.8)],
+                weights: HashMap::new(),
+                threshold: 0.75,
+                algorithm: algorithm.clone(),
+                run_id: None,
+                run_dir: None,
+                require_all: false,
+                override_reason: None,
+                audit_sink: None,
+            };
+            let result = run_consensus(&input).unwrap();
+            assert!(result.proceed, "{algorithm} should proceed with no run_dir");
+            assert!((result.score - 0.85).abs() < 1e-9, "{algorithm}");
+        }
+    }
+
+    #[test]
+    fn audit_sink_is_opt_in_no_write_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = ConsensusInput {
+            votes: vec![vote("architect", 0.9)],
+            weights: HashMap::new(),
+            threshold: 0.75,
+            algorithm: ConsensusAlgorithm::Weighted,
+            run_id: None,
+            run_dir: None,
+            require_all: false,
+            override_reason: None,
+            audit_sink: None,
+        };
+        run_consensus(&input).unwrap();
+        // No audit_sink supplied — nothing in the tempdir should be written.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn audit_sink_writes_to_exact_caller_supplied_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit_path = dir.path().join("nested").join("audit.jsonl");
+        let input = ConsensusInput {
+            votes: vec![vote("architect", 0.9)],
+            weights: HashMap::new(),
+            threshold: 0.75,
+            algorithm: ConsensusAlgorithm::Weighted,
+            run_id: Some("audit-sink-test".to_string()),
+            run_dir: None,
+            require_all: false,
+            override_reason: None,
+            audit_sink: Some(audit_path.clone()),
+        };
+        run_consensus(&input).unwrap();
+        assert!(audit_path.exists());
+        let content = std::fs::read_to_string(&audit_path).unwrap();
+        let entry: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(entry["event"], "consensus_complete");
+        assert_eq!(entry["run_id"], "audit-sink-test");
     }
 }

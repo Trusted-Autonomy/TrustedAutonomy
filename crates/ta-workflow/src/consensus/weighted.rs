@@ -9,11 +9,10 @@
 
 use std::collections::HashMap;
 
-use super::{weighted_average, ConsensusInput, ConsensusResult};
-use crate::WorkflowError;
+use super::{weighted_average, write_audit_entry, ConsensusError, ConsensusInput, ConsensusResult};
 
 /// Run the weighted threshold consensus algorithm.
-pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
+pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, ConsensusError> {
     let active_votes: Vec<_> = input.votes.iter().filter(|v| !v.timed_out).collect();
     let timed_out_roles: Vec<String> = input
         .votes
@@ -43,6 +42,19 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let proceed = proceed_raw || override_active;
 
     let summary = build_summary(score, proceed, override_active, &timed_out_roles, input);
+
+    if let Some(audit_sink) = &input.audit_sink {
+        write_audit_entry(
+            audit_sink,
+            "weighted",
+            input,
+            score,
+            proceed,
+            override_active,
+            &timed_out_roles,
+            &scores_by_role,
+        );
+    }
 
     Ok(ConsensusResult {
         score,
@@ -105,13 +117,9 @@ mod tests {
     fn make_input(votes: Vec<ReviewerVote>, threshold: f64) -> ConsensusInput {
         ConsensusInput {
             votes,
-            weights: HashMap::new(),
             threshold,
             algorithm: super::super::ConsensusAlgorithm::Weighted,
-            run_id: "wt-test".to_string(),
-            run_dir: std::path::PathBuf::from("/tmp"),
-            require_all: false,
-            override_reason: None,
+            ..Default::default()
         }
     }
 
@@ -148,10 +156,7 @@ mod tests {
             weights,
             threshold: 0.75,
             algorithm: super::super::ConsensusAlgorithm::Weighted,
-            run_id: "wt-security".to_string(),
-            run_dir: std::path::PathBuf::from("/tmp"),
-            require_all: false,
-            override_reason: None,
+            ..Default::default()
         };
         let result = run(&input).unwrap();
         assert!(!result.proceed);

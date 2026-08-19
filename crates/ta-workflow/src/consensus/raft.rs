@@ -26,8 +26,8 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use super::{weighted_average, ConsensusAlgorithm, ConsensusInput, ConsensusResult};
-use crate::WorkflowError;
+use super::{weighted_average, write_audit_entry, ConsensusAlgorithm, ConsensusError};
+use super::{ConsensusInput, ConsensusResult};
 
 // ── Log entry types ───────────────────────────────────────────────────────────
 
@@ -83,8 +83,8 @@ pub struct RaftLog {
 
 impl RaftLog {
     /// Open (or create) the log file for this run.
-    pub fn open(run_dir: &std::path::Path, run_id: &str) -> Result<Self, WorkflowError> {
-        std::fs::create_dir_all(run_dir).map_err(|e| WorkflowError::IoError {
+    pub fn open(run_dir: &std::path::Path, run_id: &str) -> Result<Self, ConsensusError> {
+        std::fs::create_dir_all(run_dir).map_err(|e| ConsensusError::Io {
             path: run_dir.display().to_string(),
             source: e,
         })?;
@@ -95,13 +95,13 @@ impl RaftLog {
         let mut current_term = 1u64;
 
         if path.exists() {
-            let f = std::fs::File::open(&path).map_err(|e| WorkflowError::IoError {
+            let f = std::fs::File::open(&path).map_err(|e| ConsensusError::Io {
                 path: path.display().to_string(),
                 source: e,
             })?;
             let reader = BufReader::new(f);
             for line in reader.lines() {
-                let line = line.map_err(|e| WorkflowError::IoError {
+                let line = line.map_err(|e| ConsensusError::Io {
                     path: path.display().to_string(),
                     source: e,
                 })?;
@@ -129,24 +129,24 @@ impl RaftLog {
     }
 
     /// Append a new entry, flushing to disk immediately for crash recovery.
-    pub fn append(&mut self, mut entry: RaftLogEntry) -> Result<(), WorkflowError> {
+    pub fn append(&mut self, mut entry: RaftLogEntry) -> Result<(), ConsensusError> {
         entry.index = self.next_index;
         entry.term = self.current_term;
         let json =
-            serde_json::to_string(&entry).map_err(|e| WorkflowError::Other(e.to_string()))?;
+            serde_json::to_string(&entry).map_err(|e| ConsensusError::Serde(e.to_string()))?;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .map_err(|e| WorkflowError::IoError {
+            .map_err(|e| ConsensusError::Io {
                 path: self.path.display().to_string(),
                 source: e,
             })?;
-        writeln!(f, "{}", json).map_err(|e| WorkflowError::IoError {
+        writeln!(f, "{}", json).map_err(|e| ConsensusError::Io {
             path: self.path.display().to_string(),
             source: e,
         })?;
-        f.flush().map_err(|e| WorkflowError::IoError {
+        f.flush().map_err(|e| ConsensusError::Io {
             path: self.path.display().to_string(),
             source: e,
         })?;
@@ -182,7 +182,12 @@ impl RaftLog {
 // ── run ───────────────────────────────────────────────────────────────────────
 
 /// Execute Raft-based consensus.
-pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
+///
+/// Crash-recovery log persistence is opt-in: it only happens when the caller
+/// supplies both `run_dir` and `run_id`. Without them, the algorithm still
+/// runs correctly (append+commit is atomic in single-coordinator mode either
+/// way) — it simply has nothing to replay if the process crashes mid-run.
+pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, ConsensusError> {
     let active_votes: Vec<_> = input.votes.iter().filter(|v| !v.timed_out).collect();
     let timed_out_roles: Vec<String> = input
         .votes
@@ -194,25 +199,29 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let n = active_votes.len();
     let majority = n / 2 + 1;
 
-    let run_dir = &input.run_dir;
-    let mut log = RaftLog::open(run_dir, &input.run_id)?;
+    let mut log = match (&input.run_dir, &input.run_id) {
+        (Some(run_dir), Some(run_id)) => Some(RaftLog::open(run_dir, run_id)?),
+        _ => None,
+    };
 
     // ── Leader election ───────────────────────────────────────────────────────
     // If log is empty, start fresh as the initial leader.
     // If log has prior entries (crash recovery), increment term and continue.
-    let recovered = !log.entries.is_empty();
-    if recovered {
-        let new_term = log.increment_term();
-        let mut entry = RaftLogEntry::new(0, new_term, RaftEventKind::LeaderElected);
-        entry.detail = format!("Recovered from crash — new term {}", new_term);
-        log.append(entry)?;
-    } else {
-        let mut entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::LeaderElected);
-        entry.detail = format!(
-            "Leader elected — {} reviewers, majority threshold {}",
-            n, majority
-        );
-        log.append(entry)?;
+    if let Some(log) = log.as_mut() {
+        let recovered = !log.entries.is_empty();
+        if recovered {
+            let new_term = log.increment_term();
+            let mut entry = RaftLogEntry::new(0, new_term, RaftEventKind::LeaderElected);
+            entry.detail = format!("Recovered from crash — new term {}", new_term);
+            log.append(entry)?;
+        } else {
+            let mut entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::LeaderElected);
+            entry.detail = format!(
+                "Leader elected — {} reviewers, majority threshold {}",
+                n, majority
+            );
+            log.append(entry)?;
+        }
     }
 
     // ── Append + commit each reviewer's entry ─────────────────────────────────
@@ -223,13 +232,15 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let mut findings_by_role: HashMap<String, Vec<String>> = HashMap::new();
 
     // Check if we have recovered committed entries from a prior partial run.
-    for prior in log.committed_reviewer_entries() {
-        if let (Some(role), Some(score)) = (&prior.role, prior.score) {
-            scores_by_role.insert(role.clone(), score);
-            if !prior.findings.is_empty() {
-                findings_by_role.insert(role.clone(), prior.findings.clone());
+    if let Some(log) = log.as_ref() {
+        for prior in log.committed_reviewer_entries() {
+            if let (Some(role), Some(score)) = (&prior.role, prior.score) {
+                scores_by_role.insert(role.clone(), score);
+                if !prior.findings.is_empty() {
+                    findings_by_role.insert(role.clone(), prior.findings.clone());
+                }
+                committed_count += 1;
             }
-            committed_count += 1;
         }
     }
 
@@ -238,30 +249,35 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
         if scores_by_role.contains_key(&vote.role) {
             continue; // already committed in a recovered log
         }
-        // Append
-        let mut append_entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::EntryAppended);
-        append_entry.role = Some(vote.role.clone());
-        append_entry.score = Some(vote.score);
-        append_entry.findings = vote.findings.clone();
-        append_entry.detail = format!(
-            "Reviewer '{}' vote appended (score={:.2})",
-            vote.role, vote.score
-        );
-        log.append(append_entry)?;
+        if let Some(log) = log.as_mut() {
+            // Append
+            let mut append_entry =
+                RaftLogEntry::new(0, log.current_term, RaftEventKind::EntryAppended);
+            append_entry.role = Some(vote.role.clone());
+            append_entry.score = Some(vote.score);
+            append_entry.findings = vote.findings.clone();
+            append_entry.detail = format!(
+                "Reviewer '{}' vote appended (score={:.2})",
+                vote.role, vote.score
+            );
+            log.append(append_entry)?;
 
-        // Commit (coordinator acknowledges immediately)
-        let mut commit_entry =
-            RaftLogEntry::new(0, log.current_term, RaftEventKind::EntryCommitted);
-        commit_entry.role = Some(vote.role.clone());
-        commit_entry.score = Some(vote.score);
-        commit_entry.findings = vote.findings.clone();
+            // Commit (coordinator acknowledges immediately)
+            let mut commit_entry =
+                RaftLogEntry::new(0, log.current_term, RaftEventKind::EntryCommitted);
+            commit_entry.role = Some(vote.role.clone());
+            commit_entry.score = Some(vote.score);
+            commit_entry.findings = vote.findings.clone();
+            commit_entry.detail = format!(
+                "Committed log entry {}/{} (majority: {})",
+                committed_count + 1,
+                n,
+                majority
+            );
+            log.append(commit_entry)?;
+        }
+
         committed_count += 1;
-        commit_entry.detail = format!(
-            "Committed log entry {}/{} (majority: {})",
-            committed_count, n, majority
-        );
-        log.append(commit_entry)?;
-
         scores_by_role.insert(vote.role.clone(), vote.score);
         if !vote.findings.is_empty() {
             findings_by_role.insert(vote.role.clone(), vote.findings.clone());
@@ -278,100 +294,53 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
     let score = weighted_average(&score_pairs, &input.weights);
 
     // ── Log quorum event ──────────────────────────────────────────────────────
-    let mut quorum_entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::QuorumReached);
-    quorum_entry.detail = format!(
-        "[Raft] Committed log entry {committed}/{n} (majority: {majority}), \
-        score={score:.2}, threshold={threshold:.2}, quorum_met={quorum_met}",
-        committed = committed_count,
-        n = n,
-        majority = majority,
-        score = score,
-        threshold = input.threshold,
-        quorum_met = quorum_met,
-    );
-    log.append(quorum_entry)?;
+    if let Some(log) = log.as_mut() {
+        let mut quorum_entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::QuorumReached);
+        quorum_entry.detail = format!(
+            "[Raft] Committed log entry {committed}/{n} (majority: {majority}), \
+            score={score:.2}, threshold={threshold:.2}, quorum_met={quorum_met}",
+            committed = committed_count,
+            n = n,
+            majority = majority,
+            score = score,
+            threshold = input.threshold,
+            quorum_met = quorum_met,
+        );
+        log.append(quorum_entry)?;
+    }
 
     // ── Final decision ────────────────────────────────────────────────────────
     let proceed_raw = quorum_met && score >= input.threshold;
     let override_active = !proceed_raw && input.override_reason.is_some();
     let proceed = proceed_raw || override_active;
 
-    let mut complete_entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::RunComplete);
-    complete_entry.detail = format!(
-        "proceed={proceed}, override={override_active}, timed_out=[{timed_out}]",
-        timed_out = timed_out_roles.join(", ")
-    );
-    log.append(complete_entry)?;
+    if let Some(log) = log.as_mut() {
+        let mut complete_entry = RaftLogEntry::new(0, log.current_term, RaftEventKind::RunComplete);
+        complete_entry.detail = format!(
+            "proceed={proceed}, override={override_active}, timed_out=[{timed_out}]",
+            timed_out = timed_out_roles.join(", ")
+        );
+        log.append(complete_entry)?;
+    }
 
-    // ── Write audit entry to .ta/audit.jsonl BEFORE cleanup ──────────────────
-    // Constitution §1.5: per-reviewer votes must be durable in the append-only
-    // audit log regardless of whether the caller retains ConsensusResult.
-    {
-        // Climb up from run_dir to find the .ta directory.
-        // run_dir is typically <workspace_root>/.ta/workflow-runs/<run-id>/
-        // so run_dir.parent().parent() = <workspace_root>/.ta
-        let audit_path = input
-            .run_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|ta_dir| ta_dir.join("audit.jsonl"))
-            .unwrap_or_else(|| input.run_dir.join("audit.jsonl"));
-
-        let scores_json: serde_json::Value = scores_by_role
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::from(*v)))
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-
-        let mut entry = serde_json::json!({
-            "event": "consensus_complete",
-            "run_id": input.run_id,
-            "algorithm": "raft",
-            "score": score,
-            "proceed": proceed,
-            "override_active": override_active,
-            "timed_out_roles": timed_out_roles,
-            "scores_by_role": scores_json,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-
-        if let Some(reason) = &input.override_reason {
-            entry["override_reason"] = serde_json::Value::String(reason.clone());
-        }
-
-        if let Some(parent) = audit_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&audit_path)
-        {
-            let _ = writeln!(f, "{}", entry);
-        }
-
-        // Item 4: separate override entry for queryability.
-        if override_active {
-            let override_entry = serde_json::json!({
-                "event": "consensus_override",
-                "run_id": input.run_id,
-                "reason": input.override_reason.as_deref().unwrap_or(""),
-                "score_before_override": score,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            });
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&audit_path)
-            {
-                let _ = writeln!(f, "{}", override_entry);
-            }
-        }
+    // ── Write audit entry (opt-in — only when the caller supplied a sink) ────
+    if let Some(audit_sink) = &input.audit_sink {
+        write_audit_entry(
+            audit_sink,
+            "raft",
+            input,
+            score,
+            proceed,
+            override_active,
+            &timed_out_roles,
+            &scores_by_role,
+        );
     }
 
     // Clean up the log on success.
-    log.cleanup();
+    if let Some(log) = log.as_ref() {
+        log.cleanup();
+    }
 
     let summary = build_summary(
         score,
@@ -460,10 +429,11 @@ mod tests {
             weights: HashMap::new(),
             threshold,
             algorithm: ConsensusAlgorithm::Raft,
-            run_id: "raft-test".to_string(),
-            run_dir: dir.to_path_buf(),
+            run_id: Some("raft-test".to_string()),
+            run_dir: Some(dir.to_path_buf()),
             require_all: false,
             override_reason: None,
+            audit_sink: None,
         }
     }
 
@@ -590,16 +560,38 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Raft,
-            run_id: "recover-test".to_string(),
-            run_dir: dir.path().to_path_buf(),
+            run_id: Some("recover-test".to_string()),
+            run_dir: Some(dir.path().to_path_buf()),
             require_all: false,
             override_reason: None,
+            audit_sink: None,
         };
         let result = run(&input).unwrap();
         assert!(result.proceed);
         // architect recovered from prior log, security newly committed
         assert!(result.scores_by_role.contains_key("architect"));
         assert!(result.scores_by_role.contains_key("security"));
+    }
+
+    #[test]
+    fn runs_correctly_with_no_run_dir_or_run_id() {
+        // Item 7: persistence is optional — omitting run_dir/run_id must not
+        // change the computed result, only skip crash-recovery logging.
+        let input = ConsensusInput {
+            votes: vec![vote("architect", 0.9), vote("security", 0.8)],
+            weights: HashMap::new(),
+            threshold: 0.75,
+            algorithm: ConsensusAlgorithm::Raft,
+            run_id: None,
+            run_dir: None,
+            require_all: false,
+            override_reason: None,
+            audit_sink: None,
+        };
+        let result = run(&input).unwrap();
+        assert!(result.proceed);
+        assert!((result.score - 0.85).abs() < 1e-9);
+        assert_eq!(result.scores_by_role.len(), 2);
     }
 
     #[test]
@@ -636,10 +628,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Raft,
-            run_id: "audit-test".to_string(),
-            run_dir: run_dir.clone(),
+            run_id: Some("audit-test".to_string()),
+            run_dir: Some(run_dir.clone()),
             require_all: false,
             override_reason: None,
+            audit_sink: Some(ta_dir.join("audit.jsonl")),
         };
         run(&input).unwrap();
 
@@ -674,10 +667,11 @@ mod tests {
             weights: HashMap::new(),
             threshold: 0.75,
             algorithm: ConsensusAlgorithm::Raft,
-            run_id: "override-audit".to_string(),
-            run_dir: run_dir.clone(),
+            run_id: Some("override-audit".to_string()),
+            run_dir: Some(run_dir.clone()),
             require_all: false,
             override_reason: Some("emergency fix approved by CTO".to_string()),
+            audit_sink: Some(ta_dir.join("audit.jsonl")),
         };
         let result = run(&input).unwrap();
         assert!(result.proceed);
@@ -702,5 +696,90 @@ mod tests {
             .find(|e| e["event"] == "consensus_override")
             .unwrap();
         assert_eq!(override_entry["reason"], "emergency fix approved by CTO");
+    }
+
+    // ── Item 8: even-reviewer-count quorum/tie-break coverage ────────────────
+    //
+    // majority = n/2 + 1, so for even n the "majority" already exceeds a
+    // 50/50 split — there is no tie state in Raft's quorum math itself (it
+    // counts committed entries, not vote direction), but a tied *score*
+    // split (half reviewers high, half low) must still resolve deterministically
+    // from the weighted average, not from commit order.
+
+    #[test]
+    fn two_reviewers_majority_requires_both_to_commit() {
+        let dir = tempdir().unwrap();
+        // n=2 → majority = 2/2 + 1 = 2: both active reviewers must commit,
+        // unlike odd-n panels where a bare majority is less than n.
+        let input = make_input(
+            dir.path(),
+            vec![vote("architect", 0.9), vote("security", 0.85)],
+            0.75,
+        );
+        let result = run(&input).unwrap();
+        assert!(result.summary.contains("2/2"), "{}", result.summary);
+        assert!(result.proceed);
+    }
+
+    #[test]
+    fn two_reviewers_one_timeout_majority_of_one_still_commits() {
+        let dir = tempdir().unwrap();
+        // n_active=1 (one of 2 timed out) → majority = 1/2 + 1 = 1: the lone
+        // active reviewer alone meets quorum.
+        let input = make_input(
+            dir.path(),
+            vec![vote("architect", 0.9), timeout_vote("security")],
+            0.75,
+        );
+        let result = run(&input).unwrap();
+        assert_eq!(result.timed_out_roles, vec!["security"]);
+        assert!(result.summary.contains("1/1"), "{}", result.summary);
+        assert!(result.proceed);
+    }
+
+    #[test]
+    fn four_reviewers_evenly_split_score_resolves_by_weighted_average() {
+        let dir = tempdir().unwrap();
+        // n=4 → majority = 4/2 + 1 = 3. All 4 commit (no timeouts), so
+        // quorum is met regardless of the score split; the tie in *scores*
+        // (two high, two low) must resolve via weighted_average, not by
+        // which votes committed first.
+        let input = make_input(
+            dir.path(),
+            vec![
+                vote("architect", 0.9),
+                vote("security", 0.9),
+                vote("principal", 0.4),
+                vote("pm", 0.4),
+            ],
+            0.75,
+        );
+        let result = run(&input).unwrap();
+        assert!(result.summary.contains("4/4"), "{}", result.summary);
+        // avg = (0.9+0.9+0.4+0.4)/4 = 0.65 < threshold 0.75 → blocks despite
+        // full quorum, since quorum and score-threshold are independent gates.
+        assert!((result.score - 0.65).abs() < 1e-9);
+        assert!(!result.proceed);
+    }
+
+    #[test]
+    fn four_reviewers_one_timeout_majority_of_three_still_needs_three() {
+        let dir = tempdir().unwrap();
+        // n_active=3 (one of 4 timed out) → majority = 3/2 + 1 = 2. All 3
+        // active reviewers commit, well above the 2-entry majority floor —
+        // exercises the even-original-panel-size / odd-active-count boundary.
+        let input = make_input(
+            dir.path(),
+            vec![
+                vote("architect", 0.9),
+                vote("security", 0.8),
+                vote("principal", 0.85),
+                timeout_vote("pm"),
+            ],
+            0.75,
+        );
+        let result = run(&input).unwrap();
+        assert!(result.summary.contains("3/3"), "{}", result.summary);
+        assert!(result.proceed);
     }
 }
