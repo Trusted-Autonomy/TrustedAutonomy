@@ -10361,7 +10361,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 ---
 ### v0.17.10 — Extract `decision-gate` + `consensus-panel` as Standalone OSS Crates, with a Configurable Adapter Between Them
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: Extract two independently-useful decision-making primitives out of TA into standalone public crates for external reuse (primarily by Wayfinder, the user's AI-first PM system, for task triage/dispatch-planning/prioritization review), following the exact extraction shape already proven twice this session (`task-graph`, v0.17.8). Four ordered parts — later parts depend on earlier ones landing first, so this phase must be worked sequentially, not in parallel with itself.
