@@ -10361,7 +10361,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 ---
 ### v0.17.10 — Extract `decision-gate` + `consensus-panel` as Standalone OSS Crates, with a Configurable Adapter Between Them
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: Extract two independently-useful decision-making primitives out of TA into standalone public crates for external reuse (primarily by Wayfinder, the user's AI-first PM system, for task triage/dispatch-planning/prioritization review), following the exact extraction shape already proven twice this session (`task-graph`, v0.17.8). Four ordered parts — later parts depend on earlier ones landing first, so this phase must be worked sequentially, not in parallel with itself.
@@ -10369,7 +10369,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 **Part 1 — Extract `ta-decision` as `decision-gate`** (do first: Part 3's adapter needs a real published crate to depend on, not an in-tree path dependency).
 1. [x] New public repo `Trusted-Autonomy/decision-gate`. Port `crates/ta-decision/` (`gate.rs`/`meter.rs`, 427 lines) verbatim — `decide(input: &DecisionInput, thresholds: &DecisionThresholds) -> Decision` (`Verdict`→`Decision::{Commit,Reject,Rework,Escalate}`) plus `Meter`/`ActionRecord`. Correct the `Cargo.toml` `repository`/`homepage` fields (currently a stale placeholder, `github.com/trustedautonomy/ta`) to point at the new repo. Apache-2.0, README with the same input/output/algorithm rigor as `task-graph`'s (external reader, zero TA context assumed).
 2. [x] Tag `v0.1.0`.
-3. [ ] TA-side integration: every crate currently depending on in-tree `ta-decision` (draft-apply, `ta_human_verify`, the v0.17.6.3 connector broker, etc.) switches to the published git dependency. Full workspace test suite passes unchanged (regression guard — behavior must not change, only location). **Not yet done as of 2026-08-19** — `decision-gate` v0.1.0 is published and CI-green, but TA still depends on the in-tree `crates/ta-decision` copy. Corrected from an incorrect `[x]`/phase-`done` mark that `ta draft apply --phase` applied despite the originating draft explicitly leaving this item unchecked with a deferred-items note — see work_queue.md for the bug writeup.
+3. [x] TA-side integration: every crate currently depending on in-tree `ta-decision` (draft-apply, `ta_human_verify`, the v0.17.6.3 connector broker, etc.) switches to the published git dependency. Full workspace test suite passes unchanged (regression guard — behavior must not change, only location). Done via Cargo's dependency-renaming (`ta-decision = { git = ..., package = "decision-gate" }`) in each of the 6 consuming crates' `Cargo.toml` — every `use ta_decision::...` import across 18 Rust files kept working unchanged, no source-level rename needed. `crates/ta-decision/` deleted, removed from workspace members. Full workspace build/test/clippy/fmt verified clean.
 
 **Part 2 — Fix 5 confirmed issues in `crates/ta-workflow/src/consensus/`** (raft.rs/paxos.rs/weighted.rs/mod.rs, predates 0.17 as v0.15.15) before extracting it.
 4. [x] Replace the directory-climbing audit-path inference in `raft.rs`/`paxos.rs` (`input.run_dir.parent().parent()` guessing at `.ta/audit.jsonl`) with an explicit caller-supplied audit sink (path or trait) — the hardcoded TA-specific directory convention silently writes to the wrong place for any other caller.
@@ -10385,11 +10385,11 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 12. [x] Tests: adapter output for a clean unanimous panel, a split/high-variance panel, a panel with timeouts, and an override-active panel, each verified against `decide()`'s actual resulting `Decision` (not just the intermediate `DecisionInput`).
 
 **Part 4 — Extract consensus as `consensus-panel`.**
-13. [ ] New public repo `Trusted-Autonomy/consensus-panel`. Port the now-fixed `consensus/` module (raft/paxos/weighted algorithms, `ConsensusInput`/`ConsensusResult`/`ReviewerVote`/`ConsensusAlgorithm`) plus the Part 3 adapter as an optional feature. Apache-2.0, README covering standalone usage and the optional decision-gate bridge. **Not yet done as of 2026-08-19** — the repo does not exist yet.
-14. [ ] Tag `v0.1.0`.
-15. [ ] TA-side integration: `graph/nodes/weighted_decision.rs`, `graph/types.rs` (`pub use consensus::ConsensusResult as Decision`), and the two CLI command files with test-fixture references switch to the published git dependency. Full workspace test suite passes unchanged.
-16. [ ] USAGE.md: note both extractions and link to the standalone repos, mirroring `task-graph`'s own USAGE.md entry.
-**Correction, 2026-08-19**: items 13-16 above (and item 3) were incorrectly marked `[x]` and this phase incorrectly marked `<!-- status: done -->` by `ta draft apply --phase v0.17.10`, despite the applied draft's own diff explicitly leaving these items unchecked with a note explaining they were deferred pending human confirmation on external repo creation. This is a confirmed bug in the apply pipeline's phase-completion automation — see work_queue.md for the writeup and the two other related version-bump bugs found in this same pipeline earlier in the session.
+13. [x] New public repo `Trusted-Autonomy/consensus-panel`. Port the now-fixed `consensus/` module (raft/paxos/weighted algorithms, `ConsensusInput`/`ConsensusResult`/`ReviewerVote`/`ConsensusAlgorithm`) plus the Part 3 adapter as an optional feature. Apache-2.0, README covering standalone usage and the optional decision-gate bridge.
+14. [x] Tag `v0.1.0`.
+15. [x] TA-side integration: `graph/nodes/weighted_decision.rs`, `graph/types.rs` (`pub use consensus::ConsensusResult as Decision`), and the two CLI command files with test-fixture references switch to the published git dependency. Full workspace test suite passes unchanged. Done via `pub use consensus_panel as consensus;` in `ta-workflow/src/lib.rs` — every `crate::consensus::*`/`ta_workflow::consensus::*` reference across all 4 consumer files kept working unchanged, no source-level rename needed. `crates/ta-workflow/src/consensus/` deleted.
+16. [x] USAGE.md: note both extractions and link to the standalone repos, mirroring `task-graph`'s own USAGE.md entry.
+**Note, 2026-08-19**: items 13-16 (and item 3) were briefly, incorrectly marked `[x]` by `ta draft apply --phase v0.17.10` despite the applied draft's own diff leaving them unchecked with a deferred note — caught, reverted to accurate `[ ]` state, and now genuinely completed via direct implementation (see commit history). Root-cause bug in the apply pipeline's phase-completion automation tracked in work_queue.md alongside two related version-bump bugs found earlier this session.
 
 **Explicitly out of scope for this phase**: the SA-boundary virtual-team extraction (that's v0.17.11, the true last phase of 0.17, and depends on this phase completing first).
 

@@ -14,7 +14,6 @@
 pub mod artifact_dag;
 pub mod artifact_store;
 pub mod concurrent;
-pub mod consensus;
 pub mod definition;
 pub mod error;
 pub mod graph;
@@ -42,8 +41,15 @@ pub mod yaml_engine;
 pub use artifact_dag::{render_ascii, render_dot, MissingInput, ResolvedDag};
 pub use artifact_store::{artifact_key, run_prefix, stage_prefix, ArtifactStore, StoredArtifact};
 pub use concurrent::run_concurrently;
-pub use consensus::decision_bridge::{to_decision, to_decision_input, ConsensusDecisionPolicy};
-pub use consensus::{
+// Extracted to the standalone `consensus-panel` crate (v0.17.10 Part 4) --
+// re-exported under the same `consensus` path so every existing
+// `crate::consensus::*` / `ta_workflow::consensus::*` reference keeps working
+// unchanged.
+pub use consensus_panel as consensus;
+pub use consensus_panel::decision_bridge::{
+    to_decision, to_decision_input, ConsensusDecisionPolicy,
+};
+pub use consensus_panel::{
     run_consensus, ConsensusAlgorithm, ConsensusError, ConsensusInput, ConsensusResult,
     ReviewerVote,
 };

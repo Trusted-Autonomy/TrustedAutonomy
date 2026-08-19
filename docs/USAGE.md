@@ -4509,6 +4509,8 @@ agents:
 
 ### Decision Gate Auto-Approval Thresholds
 
+**The Decision gate is a standalone crate.** As of v0.17.10, the `decide()` function and its `DecisionInput`/`DecisionThresholds`/`Decision` types below live in [`Trusted-Autonomy/decision-gate`](https://github.com/Trusted-Autonomy/decision-gate), a public, offline, dependency-light Rust crate — TA's own crates depend on it rather than carrying an in-tree copy. It's the one gate every Write → Review → Decision → Commit/Reject pipeline in TA calls, and it's reusable outside TA for the same purpose — see the crate's README for the full policy and API.
+
 Separate from the condition-based policy above, `ta draft apply` also runs every `PendingReview` draft through a shared **Decision gate** whenever a supervisor review is present. This is what decides whether "apply implies approval" (`[draft] approval_required = false`, the default single-author flow) is actually safe for *this* draft, based on the supervisor's verdict, its confidence, and the draft's risk score — not just a blanket yes.
 
 Configure the thresholds in `.ta/workflow.toml`:
@@ -12418,6 +12420,8 @@ roles:
 ```
 
 ### Multi-Agent Consensus Review
+
+**The consensus algorithms are a standalone crate.** As of v0.17.10, the Raft/Paxos/weighted-average aggregation below lives in [`Trusted-Autonomy/consensus-panel`](https://github.com/Trusted-Autonomy/consensus-panel), a public, dependency-light Rust crate — TA's own `ta-workflow` depends on it rather than carrying an in-tree copy. It ships an optional `decision-gate` feature that bridges a `ConsensusResult` into [`decision-gate`](https://github.com/Trusted-Autonomy/decision-gate)'s `Commit`/`Reject`/`Rework`/`Escalate` policy gate — the same pipeline TA uses internally. Reach for it directly if you need N-reviewer score aggregation outside TA — see the crate's README for the full API and the honest-limits section on what it deliberately doesn't decide for you.
 
 The `code-review-consensus` workflow runs a panel of specialist agents in parallel — architect, security, principal engineer, and PM — and aggregates their scores into a single readiness score. Apply is blocked when the score falls below a configurable threshold.
 
