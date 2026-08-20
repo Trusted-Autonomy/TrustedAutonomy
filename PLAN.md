@@ -10418,7 +10418,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.10-alpha.1`
 
-
 ### v0.17.10.2 — Concurrent-Goal Staging Isolation Fix (Same-`source` Overlay Bypass)
 <!-- status: in_progress -->
 **Depends on**: v0.17.10.1 (apply-pipeline fixes — unrelated bug, but this phase should land after that one applies cleanly)
@@ -10435,7 +10434,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.10-alpha.2`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

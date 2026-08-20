@@ -2467,6 +2467,27 @@ pub fn execute(
         super::health_signals::print_preflight_banner(&signals);
     }
 
+    // v0.17.10.2 item 3: serialize the staging-create + pre-staging
+    // plan-phase-claim steps below against any other `ta run` process
+    // targeting the same source directory (e.g. several `ta_goal_start` MCP
+    // calls launched back-to-back against one project). Without this,
+    // concurrent processes race on the same real git working tree —
+    // committing/pushing PLAN.md and creating overlays with no coordination.
+    // Released right after the goal/overlay is created below (see the
+    // matching `drop` call) — the agent's own (potentially long) work runs
+    // unlocked, so independent goals still proceed in parallel once each is
+    // safely staged.
+    let source_stage_lock = {
+        let lock_root = source
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| config.workspace_root.clone());
+        super::source_lock::SourceStageLock::acquire_blocking(
+            &lock_root,
+            existing_goal_id.unwrap_or(title),
+            std::time::Duration::from_secs(120),
+        )?
+    };
+
     // v0.15.22.1: Auto-commit .ta/ audit trail jsonl files if dirty.
     // These files are updated by TA itself and should not pollute the staging copy
     // with uncommitted state. Committing them here prevents the working-tree warning.
@@ -2642,6 +2663,10 @@ pub fn execute(
             .clone()
     };
 
+    // v0.17.10.2 item 3: staging + pre-staging phase claim are done — release
+    // the source-stage lock so other goals against this source can proceed.
+    drop(source_stage_lock);
+
     // Mark as macro goal if --macro was specified, and store heartbeat_required (v0.13.14).
     {
         let mut updated_goal = goal.clone();
@@ -2654,6 +2679,34 @@ pub fn execute(
 
     let goal_id = goal.goal_run_id.to_string();
     let staging_path = goal.workspace_path.clone();
+
+    // v0.17.10.2 item 2: hard runtime guard. Refuse to launch the implementation
+    // agent unless `staging_path` is a real, goal-scoped `.ta/staging/<goal_id>`
+    // overlay directory — never fall back to launching against the source tree.
+    // This is the last line of defense against the concurrent-goal isolation
+    // bug documented in PLAN.md v0.17.10.2: a headless subprocess whose
+    // `config.workspace_root`/staging resolution went wrong must fail loudly
+    // here instead of silently running the agent unisolated against real files.
+    {
+        let guard_source_dir = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+        ta_workspace::verify_staging_isolation(&staging_path, guard_source_dir, &goal_id).map_err(
+            |e| {
+                anyhow::anyhow!(
+                    "Refusing to launch agent for goal {goal_id}: {e}\n\
+                     This guard exists to prevent an agent from ever running directly \
+                     against the real source tree instead of an isolated overlay copy \
+                     (see PLAN.md v0.17.10.2).\n\
+                     Staging path: {}\n\
+                     Source dir:   {}\n\
+                     This usually means `--project-root`/`--source` were not resolved \
+                     consistently for this run. Check how this `ta run` invocation was \
+                     launched (e.g. from `ta_goal_start`) and retry.",
+                    staging_path.display(),
+                    guard_source_dir.display()
+                )
+            },
+        )?;
+    }
 
     // v0.15.24.2 / v0.15.28.2: Claim the plan phase before launching the agent.
     // Pre-staging claim (v0.15.28.2) has already written in_progress and pushed
@@ -4300,6 +4353,16 @@ pub fn execute(
     // 7c. Auto-capture goal completion into memory (v0.5.6).
     if draft_built {
         auto_capture_goal_completion(config, &goal, &staging_path);
+    }
+
+    // 7d. v0.17.10.2 item 4: post-goal-completion stale-ephemeral-file check.
+    // Runs `ta doctor`'s existing stale-.ta-decisions.json-in-root detection
+    // automatically for every goal, not only when someone happens to run
+    // `ta doctor` on-demand — this class of isolation-loss corruption should
+    // surface immediately.
+    {
+        let doctor_source_dir = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+        super::doctor::warn_on_stale_decisions_after_goal(doctor_source_dir);
     }
 
     // 8. Mark interactive session as completed.

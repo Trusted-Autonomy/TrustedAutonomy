@@ -470,6 +470,12 @@ impl OverlayWorkspace {
         &self.staging_dir
     }
 
+    /// Verify this workspace's own staging/source pair is properly isolated.
+    /// See [`verify_staging_isolation`] for what is checked.
+    pub fn verify_isolation(&self) -> Result<(), WorkspaceError> {
+        verify_staging_isolation(&self.staging_dir, &self.source_dir, &self.goal_id)
+    }
+
     /// Statistics from staging creation: strategy used, duration, file count, bytes.
     /// Returns `None` for workspaces opened from disk (not freshly created).
     pub fn copy_stat(&self) -> Option<&CopyStat> {
@@ -1757,6 +1763,80 @@ fn delete_ephemeral_staging_files(staging_dir: &Path) {
             }
         }
     }
+}
+
+/// Hard runtime guard (v0.17.10.2): verify that `staging_path` is a real,
+/// goal-scoped `.ta/staging/<some-goal-id>` overlay directory and not —
+/// through a misconfigured caller, a lost `--source`/CWD argument, or any
+/// other bug — the source directory itself.
+///
+/// Checks, in order:
+/// 1. `staging_path` does not canonicalize to the same location as `source_dir`.
+/// 2. `staging_path`'s final path component parses as a UUID (goal IDs are
+///    always UUIDs). Deliberately does **not** require it to equal the
+///    caller's own `goal_id` exactly: follow-up goals (`--follow-up-goal`)
+///    and macro sub-goals intentionally reuse a *different* goal's staging
+///    directory by design, so an exact-match check would reject legitimate
+///    staging reuse, not just the isolation-loss bug this guards against.
+/// 3. `staging_path`'s parent directory is named `staging` (i.e. the path
+///    has the shape `.../staging/<goal-id>`).
+///
+/// `goal_id` (the caller's own goal, not necessarily the directory owner) is
+/// used only to make error messages actionable — it plays no role in the
+/// pass/fail decision.
+///
+/// Callers must run this immediately before launching an implementation
+/// agent process into `staging_path`, and treat any `Err` as fatal — never
+/// fall back to launching against `staging_path` anyway. See PLAN.md
+/// v0.17.10.2 for the concurrent-goal data-loss incident this guards
+/// against: agents ending up isolated overlay copies and instead running
+/// directly against the real, shared source tree.
+pub fn verify_staging_isolation(
+    staging_path: &Path,
+    source_dir: &Path,
+    goal_id: &str,
+) -> Result<(), WorkspaceError> {
+    let staging_canon = staging_path
+        .canonicalize()
+        .unwrap_or_else(|_| staging_path.to_path_buf());
+    let source_canon = source_dir
+        .canonicalize()
+        .unwrap_or_else(|_| source_dir.to_path_buf());
+
+    if staging_canon == source_canon {
+        return Err(WorkspaceError::IsolationViolation {
+            staging_path: staging_path.to_path_buf(),
+            source_dir: source_dir.to_path_buf(),
+            reason: "staging path is identical to the source directory — the agent would run \
+                     directly against the real project tree instead of an isolated overlay copy"
+                .to_string(),
+        });
+    }
+
+    let name_is_a_goal_id = staging_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| uuid::Uuid::parse_str(n).is_ok());
+    let parent_is_staging = staging_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("staging");
+
+    if !name_is_a_goal_id || !parent_is_staging {
+        return Err(WorkspaceError::IsolationViolation {
+            staging_path: staging_path.to_path_buf(),
+            source_dir: source_dir.to_path_buf(),
+            reason: format!(
+                "staging path '{}' is not a well-formed '.ta/staging/<goal-id>' overlay \
+                 directory (checked on behalf of goal {})",
+                staging_path.display(),
+                goal_id
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Check if a path should be skipped when diffing.
@@ -3180,6 +3260,122 @@ mod tests {
         assert!(
             !overlay.staging_dir().join(".ta-decisions.json").exists(),
             ".ta-decisions.json from source must not carry over into new goal's staging"
+        );
+    }
+
+    /// v0.17.10.2 item 2/5: a freshly-created overlay must always pass its own
+    /// isolation check — this is the non-degenerate baseline the guard protects.
+    #[test]
+    fn verify_isolation_passes_for_real_overlay() {
+        let source = create_source_project();
+        // Mirror the real `.ta/staging` layout: the guard requires the
+        // staging root's directory name to be `staging`.
+        let ta_root = TempDir::new().unwrap();
+        let staging_root = ta_root.path().join("staging");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let goal_id = "11111111-1111-1111-1111-111111111111";
+        let overlay = OverlayWorkspace::create(
+            goal_id,
+            source.path(),
+            &staging_root,
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        assert!(overlay.verify_isolation().is_ok());
+        assert!(verify_staging_isolation(
+            overlay.staging_dir(),
+            overlay.source_dir(),
+            overlay.goal_id()
+        )
+        .is_ok());
+    }
+
+    /// v0.17.10.2 item 5: a follow-up goal (`--follow-up-goal`) or macro
+    /// sub-goal intentionally reuses a *different* goal's staging directory
+    /// by design — the guard must accept this, not just an exact match on
+    /// the caller's own goal id, or it would break that legitimate feature.
+    #[test]
+    fn verify_isolation_accepts_staging_dir_owned_by_a_different_goal() {
+        let source = create_source_project();
+        let ta_root = TempDir::new().unwrap();
+        let staging_root = ta_root.path().join("staging");
+        fs::create_dir_all(&staging_root).unwrap();
+
+        let parent_goal_id = "22222222-2222-2222-2222-222222222222";
+        let overlay = OverlayWorkspace::create(
+            parent_goal_id,
+            source.path(),
+            &staging_root,
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // A follow-up goal with its OWN id checks against the PARENT's
+        // reused staging directory — must still pass.
+        let follow_up_goal_id = "33333333-3333-3333-3333-333333333333";
+        assert!(verify_staging_isolation(
+            overlay.staging_dir(),
+            overlay.source_dir(),
+            follow_up_goal_id
+        )
+        .is_ok());
+    }
+
+    /// v0.17.10.2 item 2/5: the hard runtime guard must refuse to accept a
+    /// staging path that has degenerated to equal the source directory —
+    /// this is the exact failure mode from the concurrent-goal data-loss
+    /// incident (agent launched with CWD == source_dir instead of an overlay).
+    #[test]
+    fn verify_isolation_rejects_staging_path_equal_to_source() {
+        let source = create_source_project();
+
+        let result = verify_staging_isolation(
+            source.path(),
+            source.path(),
+            "44444444-4444-4444-4444-444444444444",
+        );
+
+        assert!(
+            result.is_err(),
+            "staging path identical to source must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("identical to the source directory"),
+            "error must explain the isolation violation, got: {}",
+            err
+        );
+    }
+
+    /// v0.17.10.2 item 2/5: a staging path that isn't a well-formed
+    /// `.ta/staging/<goal-id>` directory (e.g. a non-UUID final component, or
+    /// not nested under a `staging/` directory) must also be rejected, even
+    /// when it happens to differ from `source_dir`.
+    #[test]
+    fn verify_isolation_rejects_malformed_staging_path() {
+        let source = create_source_project();
+        let other_root = TempDir::new().unwrap();
+        let goal_id = "55555555-5555-5555-5555-555555555555";
+
+        // Right shape, but the final component isn't a UUID at all — this is
+        // exactly what `source_dir`'s own directory name looks like.
+        let non_uuid_name = other_root.path().join("staging").join("not-a-uuid");
+        fs::create_dir_all(&non_uuid_name).unwrap();
+        let result = verify_staging_isolation(&non_uuid_name, source.path(), goal_id);
+        assert!(
+            result.is_err(),
+            "non-UUID final path component must be rejected"
+        );
+
+        // Valid UUID final component, but not nested under a `staging/` directory.
+        let wrong_parent = other_root.path().join("not-staging").join(goal_id);
+        fs::create_dir_all(&wrong_parent).unwrap();
+        let result = verify_staging_isolation(&wrong_parent, source.path(), goal_id);
+        assert!(
+            result.is_err(),
+            "staging path not nested under 'staging/' must be rejected"
         );
     }
 

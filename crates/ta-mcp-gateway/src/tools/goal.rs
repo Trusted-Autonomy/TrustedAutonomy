@@ -407,11 +407,26 @@ fn launch_goal_agent(
         // v0.9.5.1: Pass the existing goal_run_id so `ta run` reuses it
         // instead of creating a duplicate goal record.
         .arg("--goal-id")
-        .arg(goal_id.to_string());
+        .arg(goal_id.to_string())
+        // v0.17.10.2 item 1: `ta`'s `--project-root` defaults to the process's
+        // own CWD (`.`), NOT `--source`. Without this, every headless
+        // subprocess spawned here inherits the gateway daemon's own CWD as
+        // its `config.workspace_root` — identical across all concurrently
+        // launched goals regardless of each goal's individual `--source`.
+        // Pin it explicitly so this subprocess's config is unambiguously
+        // scoped to the goal's actual source directory.
+        .arg("--project-root")
+        .arg(source_dir);
 
     if let Some(phase) = phase {
         cmd.arg("--phase").arg(phase);
     }
+
+    // v0.17.10.2 item 1: also set the subprocess's CWD to `source_dir` as a
+    // second, independent layer of defense — anything in the call chain that
+    // still relies on ambient CWD instead of `--project-root`/`--source`
+    // resolves to the correct directory rather than an arbitrary one.
+    cmd.current_dir(source_dir);
 
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -484,11 +499,18 @@ fn launch_sub_goal_agent(
         .arg("--headless")
         // v0.9.5.1: Pass existing sub-goal ID to avoid duplicate creation.
         .arg("--goal-id")
-        .arg(sub_id.to_string());
+        .arg(sub_id.to_string())
+        // v0.17.10.2 item 1: pin `--project-root` to the macro goal's source
+        // directory — see the matching comment in `launch_goal_agent` above.
+        .arg("--project-root")
+        .arg(&source_dir);
 
     if let Some(phase) = phase {
         cmd.arg("--phase").arg(phase);
     }
+
+    // v0.17.10.2 item 1: second layer of defense — CWD matches --project-root.
+    cmd.current_dir(&source_dir);
 
     // Detach: redirect output to null, don't inherit stdin.
     cmd.stdin(std::process::Stdio::null())

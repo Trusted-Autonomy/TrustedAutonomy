@@ -49,6 +49,22 @@ pub enum WorkspaceError {
         .conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
     )]
     SharedFileConflicts { conflicts: Vec<SharedFileConflict> },
+
+    /// A staging path is not a properly isolated, goal-scoped overlay
+    /// directory (v0.17.10.2). Either it resolves to the same location as
+    /// the source directory, or it isn't a well-formed `.ta/staging/<goal_id>`
+    /// path. Returned by `verify_staging_isolation` as a hard guard against
+    /// launching an agent unisolated against the real source tree.
+    #[error(
+        "staging path is not isolated from source: {reason} (staging: {}, source: {})",
+        .staging_path.display(),
+        .source_dir.display()
+    )]
+    IsolationViolation {
+        staging_path: PathBuf,
+        source_dir: PathBuf,
+        reason: String,
+    },
 }
 
 /// A shared file whose apply-time 3-way merge left conflict markers.

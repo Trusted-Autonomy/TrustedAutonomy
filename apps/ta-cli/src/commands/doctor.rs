@@ -672,15 +672,55 @@ fn check_version_consistency(config: &GatewayConfig) -> Vec<CheckResult> {
 }
 
 fn check_stale_ephemeral(config: &GatewayConfig) -> CheckResult {
-    let stale = config.workspace_root.join(".ta-decisions.json");
+    check_stale_ephemeral_in(&config.workspace_root)
+}
+
+/// Check for a stale `.ta-decisions.json` directly in `root`.
+///
+/// Split out from `check_stale_ephemeral` (v0.17.10.2 item 4) so it can be
+/// run against an arbitrary source directory — not just `config.workspace_root`
+/// — as an automatic post-goal-completion check, not only on-demand via
+/// `ta doctor`. A `.ta-decisions.json` in a project root is always a staging
+/// artifact that leaked (see PLAN.md v0.17.10.2): agents write it relative to
+/// their own CWD, so its presence in the real source tree means the agent's
+/// CWD was the source directory instead of an isolated overlay.
+pub(crate) fn check_stale_ephemeral_in(root: &Path) -> CheckResult {
+    let stale = root.join(".ta-decisions.json");
     if stale.exists() {
         CheckResult::warn(
             "Ephemeral files",
-            ".ta-decisions.json found in project root".to_string(),
-            "Remove it: rm .ta-decisions.json",
+            format!(".ta-decisions.json found in {}", root.display()),
+            format!(
+                "Remove it: rm {}\n\
+                 This file should only ever exist inside a goal's staging \
+                 overlay — its presence in the source tree means an agent ran \
+                 unisolated against the real project. Fix: ta doctor --fix-ephemeral",
+                stale.display()
+            ),
         )
     } else {
         CheckResult::ok("Ephemeral files", "clean".to_string())
+    }
+}
+
+/// Run the stale-`.ta-decisions.json` check against `source_dir` immediately
+/// after a goal completes, and print a loud warning if it fires (v0.17.10.2
+/// item 4). Previously this only ran on-demand via `ta doctor`, so this class
+/// of isolation-loss corruption could sit undetected for a long time.
+pub fn warn_on_stale_decisions_after_goal(source_dir: &Path) {
+    let result = check_stale_ephemeral_in(source_dir);
+    if result.status != CheckStatus::Ok {
+        eprintln!();
+        eprintln!("[doctor] WARNING — {}: {}", result.name, result.detail);
+        for line in result.fix.lines() {
+            eprintln!("[doctor]   Fix: {}", line);
+        }
+        eprintln!();
+        tracing::warn!(
+            source_dir = %source_dir.display(),
+            detail = %result.detail,
+            "post-goal-completion doctor check found stale .ta-decisions.json in source root"
+        );
     }
 }
 
@@ -2269,6 +2309,37 @@ mod tests {
 
     fn test_config(dir: &TempDir) -> GatewayConfig {
         GatewayConfig::for_project(dir.path())
+    }
+
+    // ── v0.17.10.2 item 4: post-goal-completion stale-decisions check ────
+
+    #[test]
+    fn check_stale_ephemeral_in_ok_when_clean() {
+        let dir = TempDir::new().unwrap();
+        let result = check_stale_ephemeral_in(dir.path());
+        assert_eq!(result.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn check_stale_ephemeral_in_warns_when_decisions_file_present() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".ta-decisions.json"),
+            r#"[{"decision":"leaked"}]"#,
+        )
+        .unwrap();
+        let result = check_stale_ephemeral_in(dir.path());
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert!(result.detail.contains(".ta-decisions.json"));
+        assert!(result.fix.contains("ta doctor --fix-ephemeral"));
+    }
+
+    /// `warn_on_stale_decisions_after_goal` must not panic or error on a
+    /// clean source directory — it only prints/logs when it finds something.
+    #[test]
+    fn warn_on_stale_decisions_after_goal_is_a_noop_when_clean() {
+        let dir = TempDir::new().unwrap();
+        warn_on_stale_decisions_after_goal(dir.path());
     }
 
     #[test]

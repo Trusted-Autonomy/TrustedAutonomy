@@ -41,7 +41,9 @@ pub use log_rotation::{
     force_rotate as force_rotate_daemon_log, rotate_if_needed as rotate_daemon_log_if_needed,
     RotationOutcome,
 };
-pub use overlay::{ExcludePatterns, OverlayStagingMode, OverlayWorkspace};
+pub use overlay::{
+    verify_staging_isolation, ExcludePatterns, OverlayStagingMode, OverlayWorkspace,
+};
 pub use partitioning::{
     git_is_ignored, gitignore_block, p4_is_ignored, p4ignore_block, update_gitignore,
     update_p4ignore, VcsBackend, GITIGNORE_MARKER, LOCAL_TA_PATHS, P4IGNORE_MARKER,
