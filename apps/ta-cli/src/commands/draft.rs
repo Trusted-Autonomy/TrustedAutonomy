@@ -1738,11 +1738,31 @@ fn close_github_pr_superseded(review_url: &str, child_display_id: &str) {
 /// Used to produce a diagnostic hint when `diff_all()` returns empty — if the
 /// working tree has uncommitted changes the overlay will mirror them, making the
 /// staging↔source diff empty even though real work exists.
+/// Build a `git` subprocess command scoped to `cwd`, with `GIT_DIR`,
+/// `GIT_WORK_TREE`, and `GIT_CEILING_DIRECTORIES` stripped from the
+/// environment.
+///
+/// Without this, an inherited `GIT_DIR`/`GIT_WORK_TREE` (set by an outer
+/// process — e.g. an agent runtime or sandbox tracking its own repo) silently
+/// redirects git operations to a DIFFERENT repository regardless of
+/// `current_dir`. Confirmed live (v0.17.10.1 item 2 investigation): with
+/// these env vars set, `git checkout HEAD -- <path>` run with
+/// `current_dir(target_dir)` still operated on the ambient `GIT_DIR`'s
+/// working tree instead of `target_dir` — exactly the mechanism by which a
+/// "rollback" can end up mutating an unrelated repository's uncommitted
+/// work. Every git subprocess spawned during apply must go through this.
+fn git_in(cwd: &Path, args: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args)
+        .current_dir(cwd)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES");
+    cmd
+}
+
 fn count_working_tree_changes(source_dir: &Path) -> usize {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(source_dir)
-        .output();
+    let output = git_in(source_dir, &["status", "--porcelain"]).output();
     match output {
         Ok(out) if out.status.success() => std::str::from_utf8(&out.stdout)
             .unwrap_or("")
@@ -1820,18 +1840,13 @@ fn strip_ta_injection_from_staging(staging_path: &Path) -> anyhow::Result<bool> 
 /// Only actual git command failures are surfaced as errors.
 fn check_and_clean_working_tree(target_dir: &std::path::Path) {
     let run_git = |args: &[&str]| -> Option<String> {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(target_dir)
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    std::str::from_utf8(&out.stdout).ok().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
+        git_in(target_dir, args).output().ok().and_then(|out| {
+            if out.status.success() {
+                std::str::from_utf8(&out.stdout).ok().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
     };
 
     let status_output = match run_git(&["status", "--porcelain"]) {
@@ -1897,10 +1912,7 @@ fn check_and_clean_working_tree(target_dir: &std::path::Path) {
             // changes to CLAUDE.md so VCS operations are unblocked.
             if !stripped || claude_md.exists() {
                 // `git restore` discards unstaged changes.
-                let _ = std::process::Command::new("git")
-                    .args(["restore", "CLAUDE.md"])
-                    .current_dir(target_dir)
-                    .output();
+                let _ = git_in(target_dir, &["restore", "CLAUDE.md"]).output();
                 if !stripped {
                     eprintln!(
                         "[apply] Discarded working-tree changes to CLAUDE.md \
@@ -5000,6 +5012,11 @@ pub enum BumpResult {
     /// This is an error — the regex failed to match, so we cannot know whether
     /// the version is correct. The string payload contains an actionable message.
     NoMatch(String),
+    /// The derived version is lower than the current workspace version — this
+    /// looks like an out-of-order phase completion (a higher-numbered phase
+    /// already landed). The bump was skipped to avoid regressing the version;
+    /// the string payload contains an actionable message.
+    Skipped(String),
 }
 
 /// Called automatically by `draft apply --phase` after the plan update so that
@@ -5020,6 +5037,31 @@ pub fn bump_workspace_version(
     new_version: &str,
 ) -> anyhow::Result<BumpResult> {
     let mut modified = Vec::new();
+
+    // --- Monotonic guard (v0.17.10.1 item 3) ---
+    // Compare the derived version against whatever Cargo.toml currently has
+    // and refuse to regress it. This catches out-of-order phase completion
+    // (e.g. applying v0.17.6.3.2 after v0.17.8 already landed) without
+    // requiring the caller to know the current version in advance. Falls
+    // through to the normal bump when Cargo.toml is absent or either version
+    // fails to parse — those cases are handled by the existing NoMatch path.
+    if let Some(current_version) = read_cargo_version(workspace_dir) {
+        if let (Ok(current_ver), Ok(new_ver)) = (
+            semver::Version::parse(&current_version),
+            semver::Version::parse(new_version),
+        ) {
+            if new_ver < current_ver {
+                let msg = format!(
+                    "Skipped version bump: derived version {new_version} is lower than \
+                     the current workspace version {current_version} — this looks like an \
+                     out-of-order phase completion (a higher-numbered phase already landed). \
+                     Version left unchanged. If this bump is intentional, run \
+                     ./scripts/bump-version.sh {new_version} manually."
+                );
+                return Ok(BumpResult::Skipped(msg));
+            }
+        }
+    }
 
     // --- Cargo.toml ---
     let cargo_path = workspace_dir.join("Cargo.toml");
@@ -5777,13 +5819,34 @@ struct ApplyRollbackGuard {
     /// apply and should be deleted on rollback.
     snapshots: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
     committed: bool,
+    /// Root of the git working tree containing the apply, if any. When set,
+    /// rollback also restores every git-tracked file left modified relative
+    /// to `HEAD` — not just the paths explicitly passed to `snapshot_file`.
+    /// This is the safety net for files written by code paths that forgot
+    /// (or were added later, e.g. version-bump files) to call
+    /// `snapshot_file` before writing (v0.17.10.1 item 2).
+    git_root: Option<std::path::PathBuf>,
 }
 
 impl ApplyRollbackGuard {
-    fn new() -> Self {
+    /// Probes whether `target_dir` is inside a git work tree. When it is,
+    /// rollback restores ALL git-tracked files modified relative to `HEAD`
+    /// via `git checkout`, in addition to the explicitly snapshotted paths —
+    /// a real git-level restore rather than re-deriving state, per
+    /// v0.17.10.1 item 2.
+    fn with_git_root(target_dir: &std::path::Path) -> Self {
+        let is_git_repo = git_in(target_dir, &["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         ApplyRollbackGuard {
             snapshots: Vec::new(),
             committed: false,
+            git_root: if is_git_repo {
+                Some(target_dir.to_path_buf())
+            } else {
+                None
+            },
         }
     }
 
@@ -5804,7 +5867,10 @@ impl ApplyRollbackGuard {
         self.committed = true;
     }
 
-    /// Restore all snapshotted files to their pre-apply state.
+    /// Restore all snapshotted files to their pre-apply state, then (when
+    /// `git_root` is set) restore any OTHER git-tracked file left modified
+    /// relative to `HEAD` — the catch-all for files written by code paths
+    /// that never called `snapshot_file` (v0.17.10.1 item 2).
     /// Returns the number of paths successfully restored.
     fn rollback(&self) -> usize {
         let mut count = 0;
@@ -5826,6 +5892,43 @@ impl ApplyRollbackGuard {
                     "[rollback] Warning: could not restore {}: {}",
                     path.display(),
                     e
+                ),
+            }
+        }
+        count += self.rollback_other_git_tracked_changes();
+        count
+    }
+
+    /// Restore every git-tracked file that still differs from `HEAD` via a
+    /// real `git checkout HEAD -- <path>` — a true git-level restore, not a
+    /// re-derivation of state. Paths already restored by the snapshot loop
+    /// above are harmlessly re-checked-out (git checkout is idempotent).
+    /// Returns the number of paths successfully restored.
+    fn rollback_other_git_tracked_changes(&self) -> usize {
+        let Some(root) = &self.git_root else {
+            return 0;
+        };
+        let output = git_in(root, &["diff", "--name-only", "HEAD", "--"]).output();
+        let Ok(output) = output else {
+            return 0;
+        };
+        if !output.status.success() {
+            return 0;
+        }
+        let modified = String::from_utf8_lossy(&output.stdout);
+        let mut count = 0;
+        for rel in modified.lines().filter(|l| !l.is_empty()) {
+            let result = git_in(root, &["checkout", "HEAD", "--", rel]).output();
+            match result {
+                Ok(o) if o.status.success() => count += 1,
+                Ok(o) => eprintln!(
+                    "[rollback] Warning: could not restore {} via git: {}",
+                    rel,
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+                Err(e) => eprintln!(
+                    "[rollback] Warning: could not restore {} via git: {}",
+                    rel, e
                 ),
             }
         }
@@ -6454,10 +6557,7 @@ fn apply_package(
                         // Stage PLAN.md so the modification travels onto the feature branch
                         // (git checkout -b carries staged changes without conflict risk).
                         if git_commit {
-                            let _ = std::process::Command::new("git")
-                                .args(["add", "PLAN.md"])
-                                .current_dir(&target_dir)
-                                .status();
+                            let _ = git_in(&target_dir, &["add", "PLAN.md"]).status();
                             tracing::debug!(
                                 "[apply] Staged PLAN.md after plan patch for branch carry-over."
                             );
@@ -6629,14 +6729,8 @@ fn apply_package(
                 // and are included in the apply commit by auto_stage_critical_files().
                 if let Err(e) = adapter.prepare(&CommitContext::from(goal), &wf_config.submit) {
                     // Roll back staged PLAN.md if pre-flight fails.
-                    let _ = std::process::Command::new("git")
-                        .args(["restore", "--staged", "PLAN.md"])
-                        .current_dir(&target_dir)
-                        .status();
-                    let _ = std::process::Command::new("git")
-                        .args(["restore", "PLAN.md"])
-                        .current_dir(&target_dir)
-                        .status();
+                    let _ = git_in(&target_dir, &["restore", "--staged", "PLAN.md"]).status();
+                    let _ = git_in(&target_dir, &["restore", "PLAN.md"]).status();
                     return Err(anyhow::anyhow!(
                         "VCS pre-flight failed: could not create feature branch before writing files.\n\
                          Aborted with no changes made to the source tree.\n\
@@ -6705,7 +6799,7 @@ fn apply_package(
     // ── Transactional rollback guard (v0.12.2.2) ─────────────────────────────
     // Snapshot working-tree files before any writes so we can restore them
     // atomically if pre-submit verification fails (or any other error occurs).
-    let mut rollback_guard = ApplyRollbackGuard::new();
+    let mut rollback_guard = ApplyRollbackGuard::with_git_root(&target_dir);
     // PLAN.md is touched twice: once by the artifact apply (if the agent
     // modified it) and once by the plan-phase status update below. Snapshot
     // it now — before either write — so rollback restores the true original.
@@ -7635,6 +7729,23 @@ fn apply_package(
                     old_status,
                 );
 
+                // v0.17.10.1 item 1: only force status to `done` when the draft's
+                // own diff content actually shows the phase complete. Otherwise
+                // leave whatever the draft itself wrote (status marker + item
+                // states) — forcing `done` here would silently paper over
+                // incomplete work with no reviewer able to tell.
+                if ta_changeset::plan_merge::phase_has_unchecked_items(&content, phase) {
+                    eprintln!(
+                        "[plan-update] WARNING: phase {} has unchecked item(s) in its own \
+                         diff content — skipping the force-done status bump. Leaving the \
+                         draft's own status marker and item states as written. If this \
+                         phase is genuinely complete, mark it done manually.",
+                        phase
+                    );
+                    last_phase_id = phase.clone();
+                    continue;
+                }
+
                 let updated = super::plan::update_phase_status(
                     &content,
                     phase,
@@ -7744,15 +7855,22 @@ fn apply_package(
                         // causing the version-check CI job to fail with a mismatch.
                         for bumped_path in &bumped {
                             if let Ok(rel) = bumped_path.strip_prefix(&target_dir) {
-                                let _ = std::process::Command::new("git")
-                                    .args(["add", &rel.to_string_lossy()])
-                                    .current_dir(&target_dir)
-                                    .output();
+                                let _ =
+                                    git_in(&target_dir, &["add", &rel.to_string_lossy()]).output();
                             }
                         }
                     }
                     Ok(BumpResult::AlreadyCurrent) => {
                         // Already at target version — no change needed.
+                    }
+                    Ok(BumpResult::Skipped(msg)) => {
+                        tracing::warn!(
+                            phase = %last_phase_id,
+                            version = %new_ver,
+                            "version bump skipped (would regress): {}",
+                            msg
+                        );
+                        eprintln!("[version] Warning: {}", msg);
                     }
                     Ok(BumpResult::NoMatch(msg)) => {
                         tracing::warn!(
@@ -8006,6 +8124,25 @@ fn apply_package(
                                 old_status,
                             );
 
+                            // v0.17.10.1 item 1: only force status to `done` when the
+                            // draft's own diff content actually shows the phase complete.
+                            // Otherwise leave whatever the draft itself wrote (status
+                            // marker + item states) — forcing `done` here would silently
+                            // paper over incomplete work with no reviewer able to tell.
+                            if ta_changeset::plan_merge::phase_has_unchecked_items(&content, phase)
+                            {
+                                eprintln!(
+                                    "[plan-update] WARNING: phase {} has unchecked item(s) in \
+                                     its own diff content — skipping the force-done status \
+                                     bump. Leaving the draft's own status marker and item \
+                                     states as written. If this phase is genuinely complete, \
+                                     mark it done manually.",
+                                    phase
+                                );
+                                last_phase_id = phase.clone();
+                                continue;
+                            }
+
                             let updated = super::plan::update_phase_status(
                                 &content,
                                 phase,
@@ -8057,10 +8194,7 @@ fn apply_package(
                                 }
                                 std::fs::write(&plan_path, corrected.as_bytes())?;
                                 // Stage the corrected PLAN.md so adapter.commit() includes it.
-                                let _ = std::process::Command::new("git")
-                                    .args(["add", "PLAN.md"])
-                                    .current_dir(&target_dir)
-                                    .output();
+                                let _ = git_in(&target_dir, &["add", "PLAN.md"]).output();
                             }
 
                             // Hard validation: fail apply if any done phase still has unchecked items.
@@ -8107,14 +8241,24 @@ fn apply_package(
                                     // Stage bumped files so adapter.commit() picks them up.
                                     for bumped_path in &bumped {
                                         if let Ok(rel) = bumped_path.strip_prefix(&target_dir) {
-                                            let _ = std::process::Command::new("git")
-                                                .args(["add", &rel.to_string_lossy()])
-                                                .current_dir(&target_dir)
-                                                .output();
+                                            let _ = git_in(
+                                                &target_dir,
+                                                &["add", &rel.to_string_lossy()],
+                                            )
+                                            .output();
                                         }
                                     }
                                 }
                                 Ok(BumpResult::AlreadyCurrent) => {}
+                                Ok(BumpResult::Skipped(msg)) => {
+                                    tracing::warn!(
+                                        phase = %last_phase_id,
+                                        version = %new_ver,
+                                        "version bump skipped (would regress): {}",
+                                        msg
+                                    );
+                                    eprintln!("[version] Warning: {}", msg);
+                                }
                                 Ok(BumpResult::NoMatch(msg)) => {
                                     tracing::warn!(
                                         phase = %last_phase_id,
@@ -13346,6 +13490,165 @@ fn run() {
         );
     }
 
+    /// v0.17.10.1 item 2 — Rollback-on-verification-failure corrupts the
+    /// working tree instead of restoring it: when a phase-linked apply bumps
+    /// the workspace version (Cargo.toml, CLAUDE.md, subcrate Cargo.toml
+    /// pins) and pre-submit verification then fails, those version-bump
+    /// files must be restored to their pre-apply committed state exactly
+    /// like the draft's own artifacts are. Confirmed live: the rollback
+    /// guard only ever snapshotted PLAN.md + the draft's artifact files, so
+    /// version-bump files (written later in the same apply) were never
+    /// captured and survived the "rollback" corrupted.
+    ///
+    /// Unix-only: forces the pre-submit verification failure via a chmod'd
+    /// shell script, which has no direct Windows equivalent. The production
+    /// fix under test (the rollback guard) is not itself platform-specific.
+    #[test]
+    #[cfg(unix)]
+    fn apply_rollback_restores_version_bump_files_on_verification_failure() {
+        let project = TempDir::new().unwrap();
+
+        for cmd_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "# Plan\n\n### v0.99.6 — Rollback version-bump test phase\n<!-- status: pending -->\n\n#### Items\n\n1. [x] Do the thing\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.99.5-alpha\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Instructions\n\n**Current version**: `0.99.5-alpha`\n",
+        )
+        .unwrap();
+
+        for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Rollback version-bump test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test version-bump files are rolled back too".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.6".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        // Failing pre-submit verification command.
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        use std::io::Write;
+        let fail_script = project.path().join(".ta/fail_check.sh");
+        let mut f = std::fs::File::create(&fail_script).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "echo 'check failed intentionally'").unwrap();
+        writeln!(f, "exit 1").unwrap();
+        drop(f);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&fail_script, perms).unwrap();
+        }
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            format!("[verify]\ncommands = [\"sh {}\"]\n", fail_script.display()),
+        )
+        .unwrap();
+
+        build_package(&config, &goal_id, "Modified README, phase v0.99.6", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let result = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            true,  // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        );
+
+        assert!(
+            result.is_err(),
+            "apply_package should fail when verification fails"
+        );
+
+        // ── The version-bump files must be restored to their pre-apply state ──
+        let cargo_content = std::fs::read_to_string(project.path().join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_content.contains("version = \"0.99.5-alpha\""),
+            "Cargo.toml must be rolled back to its pre-apply version, got:\n{}",
+            cargo_content
+        );
+        let claude_content = std::fs::read_to_string(project.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            claude_content.contains("0.99.5-alpha"),
+            "CLAUDE.md must be rolled back to its pre-apply version, got:\n{}",
+            claude_content
+        );
+
+        // ── The whole tracked tree must be clean — no leftover version-bump dirt ──
+        let status = clear_git_env(
+            std::process::Command::new("git")
+                .args(["status", "--porcelain", "--untracked-files=no"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
+        let status_output = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status_output.trim().is_empty(),
+            "tracked files are dirty after rollback:\n{status_output}"
+        );
+    }
+
     /// v0.17.0.12.7: A real conflict on a shared file (memory/notes.md — both
     /// staging and source edit the same line differently) must not silently
     /// overwrite or corrupt either side. `apply_package` should error, write a
@@ -15900,11 +16203,15 @@ fn run() {
             .unwrap();
         }
 
-        // Write a minimal PLAN.md with a pending phase.
+        // Write a minimal PLAN.md with a pending phase whose item is already
+        // checked (v0.17.10.1 item 1: force-done now requires the phase's own
+        // content to show completion — PLAN.md is a protected/shared file not
+        // copied via the generic overlay diff, so its committed content here,
+        // not the staging copy, is what the plan-update code actually reads).
         // Uses the "### v<version> — Title" format matched by the default schema pattern 2.
         std::fs::write(
             project.path().join("PLAN.md"),
-            "# Plan\n\n### v0.99.0 — Bug D test phase\n<!-- status: pending -->\n\n#### Items\n\n1. [ ] Do the thing\n",
+            "# Plan\n\n### v0.99.0 — Bug D test phase\n<!-- status: pending -->\n\n#### Items\n\n1. [x] Do the thing\n",
         )
         .unwrap();
         std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
@@ -16014,6 +16321,136 @@ fn run() {
         assert!(
             plan_content.contains("status: done"),
             "PLAN.md on the feature branch should be updated to done, got:\n{}",
+            plan_content
+        );
+    }
+
+    /// v0.17.10.1 item 1 — Silent false-completion: a draft whose own PLAN.md
+    /// content leaves items unchecked (with its own `in_progress` marker) must
+    /// NOT be force-flipped to `done` just because a `--phase` was passed.
+    #[test]
+    #[cfg(unix)]
+    fn apply_does_not_force_done_when_diff_leaves_items_unchecked() {
+        let project = TempDir::new().unwrap();
+
+        for cmd_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "# Plan\n\n### v0.99.5 — Silent false-completion test phase\n<!-- status: pending -->\n\n#### Items\n\n1. [ ] Do the thing\n2. [ ] Do another thing\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Silent false-completion test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test that unchecked items block force-done".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.5".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent completes item 1 but leaves item 2 unchecked, and its own
+        // in_progress marker in place — matching the confirmed-live v0.17.10
+        // scenario (deferred items note, status left in_progress).
+        std::fs::write(
+            goal.workspace_path.join("PLAN.md"),
+            "# Plan\n\n### v0.99.5 — Silent false-completion test phase\n<!-- status: in_progress -->\n\n#### Items\n\n1. [x] Do the thing\n2. [ ] Do another thing (deferred — see notes)\n",
+        )
+        .unwrap();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        build_package(&config, &goal_id, "Partially completed phase", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            true,  // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap();
+
+        let branches = clear_git_env(
+            std::process::Command::new("git")
+                .args(["branch", "--list", "ta/*"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
+        let branch_name = String::from_utf8_lossy(&branches.stdout)
+            .trim()
+            .trim_start_matches("* ")
+            .to_string();
+
+        let plan_on_branch = clear_git_env(
+            std::process::Command::new("git")
+                .args(["show", &format!("{}:PLAN.md", branch_name)])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
+        let plan_content = String::from_utf8_lossy(&plan_on_branch.stdout);
+        assert!(
+            !plan_content.contains("status: done"),
+            "phase with unchecked items must NOT be force-flipped to done, got:\n{}",
+            plan_content
+        );
+        assert!(
+            plan_content.contains("status: in_progress"),
+            "the draft's own in_progress marker should be preserved, got:\n{}",
+            plan_content
+        );
+        assert!(
+            plan_content.contains("2. [ ] Do another thing"),
+            "the draft's own unchecked item must not be auto-checked, got:\n{}",
             plan_content
         );
     }
@@ -16588,6 +17025,106 @@ fn run() {
                 msg
             );
         }
+    }
+
+    /// v0.17.10.1 item 3 — Out-of-order phase completion regresses the
+    /// version: applying a lower-numbered phase after a higher-numbered one
+    /// has already landed must leave the version untouched, not regress it.
+    #[test]
+    fn bump_version_skips_when_derived_version_is_lower_than_current() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.17.8-alpha\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "- **Current version**: `0.17.8-alpha`\n",
+        )
+        .unwrap();
+
+        let result = bump_workspace_version(dir.path(), "0.17.6-alpha.3.2").unwrap();
+
+        assert!(
+            matches!(result, BumpResult::Skipped(_)),
+            "expected Skipped when derived version regresses, got {:?}",
+            result
+        );
+        if let BumpResult::Skipped(msg) = result {
+            assert!(
+                msg.contains("0.17.6-alpha.3.2") && msg.contains("0.17.8-alpha"),
+                "Skipped message should name both versions: {}",
+                msg
+            );
+        }
+
+        let cargo_content = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_content.contains("version = \"0.17.8-alpha\""),
+            "Cargo.toml version must be left untouched, got:\n{}",
+            cargo_content
+        );
+        let claude_content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            claude_content.contains("0.17.8-alpha"),
+            "CLAUDE.md version must be left untouched, got:\n{}",
+            claude_content
+        );
+    }
+
+    /// v0.17.10.1 item 3 (open question): the monotonic guard sits before ALL
+    /// file writes in `bump_workspace_version`, including the subcrate
+    /// Cargo.toml internal-dep-version rewrite — so a skipped bump leaves
+    /// those ~24 cross-reference pins untouched too, not just the root
+    /// Cargo.toml/CLAUDE.md.
+    #[test]
+    fn bump_version_skip_also_protects_subcrate_cargo_toml_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.17.8-alpha\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/ta-audit")).unwrap();
+        std::fs::write(
+            dir.path().join("crates/ta-audit/Cargo.toml"),
+            "[package]\nname = \"ta-audit\"\n\n[dependencies]\nta-events = { path = \"../ta-events\", version = \"0.17.8-alpha\" }\n",
+        )
+        .unwrap();
+
+        let result = bump_workspace_version(dir.path(), "0.17.6-alpha.3.2").unwrap();
+        assert!(matches!(result, BumpResult::Skipped(_)));
+
+        let subcrate_content =
+            std::fs::read_to_string(dir.path().join("crates/ta-audit/Cargo.toml")).unwrap();
+        assert!(
+            subcrate_content.contains("version = \"0.17.8-alpha\""),
+            "subcrate internal-dep version pin must be left untouched, got:\n{}",
+            subcrate_content
+        );
+    }
+
+    /// Regression guard: normal ascending-order phase completion still bumps
+    /// the version exactly as before the monotonic guard was added.
+    #[test]
+    fn bump_version_still_bumps_in_ascending_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.17.8-alpha\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+
+        let result = bump_workspace_version(dir.path(), "0.17.9-alpha").unwrap();
+
+        assert!(
+            matches!(result, BumpResult::Bumped(_)),
+            "expected Bumped for ascending version, got {:?}",
+            result
+        );
+        let cargo_content = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(cargo_content.contains("version = \"0.17.9-alpha\""));
     }
 
     // ── read_cargo_version / validate_cargo_version ───────────────────

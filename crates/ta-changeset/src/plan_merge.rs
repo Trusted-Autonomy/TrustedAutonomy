@@ -899,6 +899,23 @@ pub fn auto_correct_done_phase_items(content: &str) -> (String, Vec<(String, usi
     (out, corrections)
 }
 
+/// Returns true if `phase_id`'s own section in `content` has any unchecked
+/// `[ ]` item, regardless of that section's own status marker.
+///
+/// Used to gate the force-`done` status bump in `ta draft apply` (v0.17.10.1
+/// item 1): forcing a phase to `done` when its own diff content still shows
+/// unchecked items would silently paper over incomplete work. Returns `false`
+/// (safe to bump) when the phase is not found in `content` at all — the
+/// absence of the phase gives no evidence of incompleteness.
+pub fn phase_has_unchecked_items(content: &str, phase_id: &str) -> bool {
+    let norm_target = phase_id.strip_prefix('v').unwrap_or(phase_id);
+    parse_plan_sections(content)
+        .iter()
+        .find(|s| s.id.strip_prefix('v').unwrap_or(s.id.as_str()) == norm_target)
+        .map(|s| s.raw_body.lines().any(|l| is_unchecked_item(l.trim())))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,5 +1232,47 @@ mod tests {
         let (corrected, corrections) = auto_correct_done_phase_items(&plan);
         assert!(corrections.is_empty());
         assert_eq!(corrected, plan);
+    }
+
+    // v0.17.10.1 item 1: gate the force-`done` status bump on the phase's own
+    // diff content, not just on the fact that `--phase` was passed.
+    #[test]
+    fn phase_has_unchecked_items_true_for_bullet_style() {
+        let plan = make_plan(&[(
+            "v0.17.10.1",
+            "in_progress",
+            &["- [x] done item", "- [ ] not done item"],
+        )]);
+        assert!(phase_has_unchecked_items(&plan, "v0.17.10.1"));
+    }
+
+    #[test]
+    fn phase_has_unchecked_items_true_for_numbered_style() {
+        // Real PLAN.md phases use "1. [ ]" numbered items, not "- [ ]" bullets.
+        let plan = "### v0.17.10.1 — Title\n<!-- status: in_progress -->\n\
+                     1. [x] done item\n2. [ ] not done item\n\n---\n\n";
+        assert!(phase_has_unchecked_items(plan, "v0.17.10.1"));
+    }
+
+    #[test]
+    fn phase_has_unchecked_items_false_when_all_checked() {
+        let plan = make_plan(&[(
+            "v0.17.10.1",
+            "in_progress",
+            &["- [x] done item", "- [x] also done"],
+        )]);
+        assert!(!phase_has_unchecked_items(&plan, "v0.17.10.1"));
+    }
+
+    #[test]
+    fn phase_has_unchecked_items_false_when_phase_not_found() {
+        let plan = make_plan(&[("v0.1.0", "in_progress", &["- [ ] item a"])]);
+        assert!(!phase_has_unchecked_items(&plan, "v9.9.9"));
+    }
+
+    #[test]
+    fn phase_has_unchecked_items_matches_id_without_leading_v() {
+        let plan = make_plan(&[("v0.17.10.1", "in_progress", &["- [ ] item a"])]);
+        assert!(phase_has_unchecked_items(&plan, "0.17.10.1"));
     }
 }
