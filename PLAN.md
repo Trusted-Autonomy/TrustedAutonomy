@@ -10420,7 +10420,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 
 ### v0.17.10.2 — Concurrent-Goal Staging Isolation Fix (Same-`source` Overlay Bypass)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.10.1 (apply-pipeline fixes — unrelated bug, but this phase should land after that one applies cleanly)
 
 **Goal**: Fix a real data-loss bug found live in a sibling project (`cinepipe-license-server`), reported 2026-08-19: running 5-6 concurrent `ta_goal_start` MCP calls against the same `source` directory caused goals to share and clobber the same underlying git working tree instead of each getting an isolated `.ta/staging/<goal_id>` overlay copy. Consequences observed: deleted files that were already committed, working-tree content reverted to a stale/partial state relative to `HEAD`, a shared `.ta-decisions.json` where only the last-writing goal's entries survived, and empty `.ta/audit.jsonl`/`.ta/change_summary.json` despite substantial real activity across 11 completed goals. This must be fixed before v0.17.11 (SA-boundary/virtual-team work) — that phase assumes goals can safely run concurrently.
