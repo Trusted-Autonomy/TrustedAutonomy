@@ -991,7 +991,27 @@ struct ChangeSummaryEntry {
 ///
 /// Agents write this file to record non-obvious implementation choices.
 /// Format: JSON array of `{ decision, alternatives, rationale, confidence? }` objects.
-fn load_agent_decisions(staging_path: &std::path::Path) -> Vec<DecisionLogEntry> {
+///
+/// v0.17.10.2 item 4: `staging_path` must pass the same isolation check used
+/// to gate agent launches before we trust anything found in it. Reading
+/// `.ta-decisions.json` from an unverified path risks attributing another
+/// goal's decisions (or none at all) to this draft — exactly the
+/// last-writer-wins collision documented in PLAN.md v0.17.10.2. Never rely
+/// solely on the caller having passed the correct directory.
+fn load_agent_decisions(
+    staging_path: &std::path::Path,
+    source_dir: &std::path::Path,
+    goal_id: &str,
+) -> Vec<DecisionLogEntry> {
+    if let Err(e) = ta_workspace::verify_staging_isolation(staging_path, source_dir, goal_id) {
+        eprintln!(
+            "Warning: refusing to read .ta-decisions.json for goal {}: {}\n\
+             Skipping the agent decision log for this draft rather than risking \
+             attribution to the wrong goal or the shared source tree.",
+            goal_id, e
+        );
+        return vec![];
+    }
     let path = staging_path.join(".ta-decisions.json");
     if !path.exists() {
         return vec![];
@@ -2417,7 +2437,15 @@ pub(crate) fn build_package(
     }
 
     // v0.14.7: Load agent-authored decision log from .ta-decisions.json.
-    let mut agent_decision_log = load_agent_decisions(&goal.workspace_path);
+    let decisions_source_dir = goal
+        .source_dir
+        .clone()
+        .unwrap_or_else(|| config.workspace_root.clone());
+    let mut agent_decision_log = load_agent_decisions(
+        &goal.workspace_path,
+        &decisions_source_dir,
+        &goal.goal_run_id.to_string(),
+    );
     if !agent_decision_log.is_empty() {
         println!(
             "Agent decision log: {} decision(s) captured from .ta-decisions.json",
@@ -12531,6 +12559,101 @@ mod tests {
         cmd.env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_CEILING_DIRECTORIES")
+    }
+
+    // ── v0.17.10.2 item 4: goal-id-qualified .ta-decisions.json guard ────
+
+    /// A well-formed `.ta/staging/<goal-id>` overlay directory must still
+    /// have its decisions read normally — the guard must not break the
+    /// happy path.
+    #[test]
+    fn load_agent_decisions_reads_from_verified_staging_path() {
+        let source = TempDir::new().unwrap();
+        let ta_root = TempDir::new().unwrap();
+        let goal_id = "11111111-1111-1111-1111-111111111111";
+        let staging_path = ta_root.path().join("staging").join(goal_id);
+        std::fs::create_dir_all(&staging_path).unwrap();
+        std::fs::write(
+            staging_path.join(".ta-decisions.json"),
+            r#"[{"decision":"used Ed25519","rationale":"faster","alternatives":[],"confidence":0.9}]"#,
+        )
+        .unwrap();
+
+        let entries = load_agent_decisions(&staging_path, source.path(), goal_id);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].decision, "used Ed25519");
+    }
+
+    /// A follow-up goal legitimately reuses its parent's staging directory
+    /// (a different goal id than its own) — decisions must still be read
+    /// normally in that case, since this is intentional staging reuse, not
+    /// an isolation violation.
+    #[test]
+    fn load_agent_decisions_reads_when_staging_owned_by_a_different_goal() {
+        let source = TempDir::new().unwrap();
+        let ta_root = TempDir::new().unwrap();
+        let parent_goal_id = "22222222-2222-2222-2222-222222222222";
+        let staging_path = ta_root.path().join("staging").join(parent_goal_id);
+        std::fs::create_dir_all(&staging_path).unwrap();
+        std::fs::write(
+            staging_path.join(".ta-decisions.json"),
+            r#"[{"decision":"from parent goal","rationale":"r","alternatives":[],"confidence":0.5}]"#,
+        )
+        .unwrap();
+
+        let follow_up_goal_id = "33333333-3333-3333-3333-333333333333";
+        let entries = load_agent_decisions(&staging_path, source.path(), follow_up_goal_id);
+        assert_eq!(entries.len(), 1);
+    }
+
+    /// If `staging_path` has degenerated to equal `source_dir` — the exact
+    /// isolation-loss failure mode from PLAN.md v0.17.10.2 — decisions must
+    /// NOT be read from it, even if a `.ta-decisions.json` happens to be
+    /// sitting there. Reading it would risk attributing another goal's (or
+    /// no goal's) decisions to this draft.
+    #[test]
+    fn load_agent_decisions_refuses_when_staging_equals_source() {
+        let source = TempDir::new().unwrap();
+        std::fs::write(
+            source.path().join(".ta-decisions.json"),
+            r#"[{"decision":"leaked from another goal"}]"#,
+        )
+        .unwrap();
+
+        let entries = load_agent_decisions(
+            source.path(),
+            source.path(),
+            "44444444-4444-4444-4444-444444444444",
+        );
+        assert!(
+            entries.is_empty(),
+            "must refuse to read decisions when staging_path == source_dir"
+        );
+    }
+
+    /// A staging path whose final component isn't even a valid goal-id
+    /// (UUID) — e.g. a stray non-overlay directory — must also be refused.
+    #[test]
+    fn load_agent_decisions_refuses_non_uuid_staging_path() {
+        let source = TempDir::new().unwrap();
+        let ta_root = TempDir::new().unwrap();
+        let staging_path = ta_root.path().join("staging").join("not-a-uuid");
+        std::fs::create_dir_all(&staging_path).unwrap();
+        std::fs::write(
+            staging_path.join(".ta-decisions.json"),
+            r#"[{"decision":"in a bogus directory"}]"#,
+        )
+        .unwrap();
+
+        let entries = load_agent_decisions(
+            &staging_path,
+            source.path(),
+            "55555555-5555-5555-5555-555555555555",
+        );
+        assert!(
+            entries.is_empty(),
+            "must refuse to read decisions from a non-goal-id-shaped staging path"
+        );
     }
 
     // ── Constitution §4 scan tests (v0.11.5 item 8) ──────────────

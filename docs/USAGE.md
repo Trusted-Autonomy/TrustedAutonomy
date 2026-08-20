@@ -1302,7 +1302,7 @@ ta draft view <id> --json
 
 These are surfaced in `ta draft view` under "Agent Decision Log" and in the HTML output as collapsible sections. In the HTML view, section open/closed state is persisted in `localStorage` between page loads.
 
-> **`.ta-decisions.json` is ephemeral.** It is scoped to a single goal run and is automatically deleted from the staging workspace at the start of each new goal. It is excluded from the overlay diff and is never applied back to the source tree. If `ta doctor` reports a stale copy in your project root, remove it with `rm .ta-decisions.json`.
+> **`.ta-decisions.json` is ephemeral.** It is scoped to a single goal run and is automatically deleted from the staging workspace at the start of each new goal. It is excluded from the overlay diff and is never applied back to the source tree. If `ta doctor` reports a stale copy in your project root, remove it with `rm .ta-decisions.json`. This check now also runs automatically right after every goal finishes (not only when you run `ta doctor` on-demand), so a stale copy is flagged immediately instead of sitting undetected — a stale copy in the project root means an agent ran directly against your real project tree instead of an isolated staging copy, which is always a bug worth investigating.
 
 Agents can also populate the Design Decisions section by passing an `alternatives` array to the `ta_pr_build` MCP tool. Each entry has `option`, `rationale`, and `chosen` fields.
 
@@ -2767,6 +2767,8 @@ You interact with it using natural language:
 - "context search X" — search project memory
 
 When the orchestrator launches a goal via the MCP `ta_goal_start` tool, TA spawns `ta run --headless` as a background process. This performs the full lifecycle: overlay workspace copy, CLAUDE.md injection, agent spawn, draft build on exit, and event emission. The orchestrator can then poll for completion using `ta_event_subscribe`.
+
+**Concurrent goals against the same source.** Several `ta_goal_start` calls against the same `--source` directory are safe to launch back-to-back. Each headless subprocess is pinned to the correct project root explicitly (independent of the gateway daemon's own working directory), staging-create and the pre-staging plan-phase claim/commit/push serialize per source directory via an advisory lock, and a hard runtime guard refuses to launch any agent whose resolved staging path isn't a real, isolated overlay directory — failing loudly instead of silently running an agent against your real project tree.
 
 The dev-loop agent config lives at `agents/dev-loop.yaml` and can be overridden per-project (`.ta/agents/dev-loop.yaml`) or per-user (`~/.config/ta/agents/dev-loop.yaml`).
 
