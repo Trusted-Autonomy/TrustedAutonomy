@@ -10437,7 +10437,7 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 ---
 
 ### v0.17.10.3 — Fix Stale-Staging-vs-Concurrently-Advanced-Main Apply Bugs (Ghost Deletion, Checkbox Reversion)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.10.2 (the bug that exposed this — a goal ran long enough for direct-to-main commits to land during it)
 
 **Goal**: Fix a real bug found live during v0.17.10.2's own apply, 2026-08-20: while that goal ran in the background, two unrelated commits landed directly on `main` (`docs/design/agent-coordination-whiteboard.md` added; a PLAN.md phase-addition). When the draft was applied hours later, the apply (a) genuinely **deleted** `agent-coordination-whiteboard.md` even though it was never touched by the agent, and (b) **reverted all 5 of v0.17.10.2's own PLAN.md checkboxes** from `[x]` back to `[ ]`, despite the draft being independently verified (all 4 mandated checks + full manual diff review) before approval. Both were caught before merge and manually corrected in a follow-up commit (`ad645ed596` on PR #595) rather than shipping wrong history. This must be fixed properly — any goal that runs long enough for main to advance concurrently (increasingly likely as virtual-team/concurrent-goal work in v0.17.11 lands) will hit this again.
