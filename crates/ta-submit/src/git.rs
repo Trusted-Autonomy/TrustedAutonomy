@@ -269,6 +269,53 @@ impl GitAdapter {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Run a `git checkout` (or `checkout -b`) command that may move HEAD to a
+    /// different commit than the one currently checked out, while preserving
+    /// uncommitted working-tree changes (v0.17.10.3 item 2).
+    ///
+    /// `ta draft apply` writes the apply's file output — including the PLAN.md
+    /// 3-way merge result — directly into the working tree *before* `prepare()`
+    /// creates the feature branch. A plain `git checkout` only does a blob-level
+    /// equality check per file, not a real content merge: if a file both changed
+    /// between the currently-checked-out commit and the checkout target (e.g. a
+    /// concurrent commit landed on `main` while the goal ran) *and* has
+    /// uncommitted local modifications, git refuses outright ("local changes
+    /// would be overwritten by checkout") instead of merging — leaving the
+    /// apply's file writes stranded with no branch to commit them on. Stashing
+    /// before the checkout and popping after routes the reconciliation through
+    /// `git stash pop`'s real (line-level) 3-way merge instead, which correctly
+    /// combines the uncommitted apply output with the new branch's content.
+    fn checkout_preserving_worktree(&self, args: &[&str]) -> Result<()> {
+        let status = self.git_cmd(&["status", "--porcelain"])?;
+        if status.trim().is_empty() {
+            self.git_cmd(args)?;
+            return Ok(());
+        }
+
+        self.git_cmd(&["stash", "push", "-u", "-m", "ta-draft-apply-prepare"])?;
+
+        if let Err(e) = self.git_cmd(args) {
+            // Checkout itself failed — restore the stash before propagating so
+            // the working tree isn't left in a "changes stashed, branch not
+            // created" state that later steps (or a human) would have to
+            // untangle blind.
+            let _ = self.git_cmd(&["stash", "pop"]);
+            return Err(e);
+        }
+
+        self.git_cmd(&["stash", "pop"]).map_err(|e| {
+            SubmitError::VcsError(format!(
+                "checkout succeeded but restoring the apply's stashed working-tree \
+                 changes failed: {}. The changes are not lost — run `git stash pop` \
+                 manually in {} to recover them, resolving any conflicts.",
+                e,
+                self.work_dir.display()
+            ))
+        })?;
+
+        Ok(())
+    }
+
     /// Check if gh CLI is available
     fn has_gh_cli(&self) -> bool {
         run_gh_bounded(&["--version"], &self.work_dir, Duration::from_secs(5))
@@ -541,7 +588,7 @@ impl SourceAdapter for GitAdapter {
         // Check if branch already exists — if so, just switch to it.
         let branches = self.git_cmd(&["branch", "--list", &branch_name])?;
         if !branches.is_empty() {
-            self.git_cmd(&["checkout", &branch_name])?;
+            self.checkout_preserving_worktree(&["checkout", &branch_name])?;
             return Ok(());
         }
 
@@ -553,8 +600,9 @@ impl SourceAdapter for GitAdapter {
         // fetch the feature branch diverges from origin/main, causing conflicts
         // on `git pull --rebase` after the PR merges.
         //
-        // Staged and unstaged working-tree changes carry over to the new branch
-        // regardless of the start point, so the apply files are not lost.
+        // v0.17.10.3 item 2: staged and unstaged working-tree changes do NOT
+        // reliably carry over to the new branch when the start point differs
+        // from the currently-checked-out commit — see checkout_preserving_worktree.
         //
         // If the fetch fails (offline, no remote configured), fall back to
         // branching from local HEAD with a warning.
@@ -568,7 +616,7 @@ impl SourceAdapter for GitAdapter {
                     branch_name,
                     start_point
                 );
-                self.git_cmd(&["checkout", "-b", &branch_name, &start_point])?;
+                self.checkout_preserving_worktree(&["checkout", "-b", &branch_name, &start_point])?;
             }
             Err(e) => {
                 tracing::warn!(
@@ -576,7 +624,7 @@ impl SourceAdapter for GitAdapter {
                     error = %e,
                     "GitAdapter: fetch failed — branching from local HEAD instead"
                 );
-                self.git_cmd(&["checkout", "-b", &branch_name])?;
+                self.checkout_preserving_worktree(&["checkout", "-b", &branch_name])?;
             }
         }
 
@@ -2234,6 +2282,148 @@ mod tests {
 
         // Verify the file is now present locally.
         assert!(local_dir.path().join("new_file.txt").exists());
+    }
+
+    /// Commit all changes in `dir` with the given message (test helper).
+    fn commit_all(dir: &Path, message: &str) {
+        let clear_git_env = |cmd: &mut Command| {
+            cmd.env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_CEILING_DIRECTORIES");
+        };
+        let mut cmd = Command::new("git");
+        cmd.args(["add", "."]).current_dir(dir);
+        clear_git_env(&mut cmd);
+        assert!(cmd.output().unwrap().status.success());
+
+        let mut cmd = Command::new("git");
+        cmd.args(["commit", "-m", message]).current_dir(dir);
+        clear_git_env(&mut cmd);
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore)] // local-path git clone is unreliable on Windows CI
+    fn test_prepare_preserves_uncommitted_changes_when_local_head_is_stale() {
+        // Reproduces the v0.17.10.2 live incident (v0.17.10.3 item 2): while a
+        // goal ran, someone committed directly to origin's target branch,
+        // concurrently advancing PLAN.md with an unrelated new phase. By the
+        // time `ta draft apply --git-commit` runs, local HEAD is stale
+        // relative to the fetched remote target branch, and the apply
+        // pipeline has already written its own uncommitted PLAN.md changes
+        // (the agent's checked-off items) into the working tree — this
+        // happens in draft.rs's artifact-apply loop, which runs before
+        // `prepare()`. `prepare()` must not lose those uncommitted changes
+        // when it fetches and branches from the target branch.
+        let remote_dir = tempdir().unwrap();
+        let mut cmd = Command::new("git");
+        cmd.args(["-c", "safe.directory=*", "init", "-b", "main"])
+            .current_dir(remote_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES");
+        assert!(cmd.output().unwrap().status.success());
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(remote_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(remote_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        std::fs::write(
+            remote_dir.path().join("PLAN.md"),
+            "### v0.1.0 — Title\n<!-- status: in_progress -->\n- [ ] item a\n\n---\n",
+        )
+        .unwrap();
+        commit_all(remote_dir.path(), "add PLAN.md");
+
+        let local_dir = tempdir().unwrap();
+        Command::new("git")
+            .args(["clone", &remote_dir.path().to_string_lossy(), "."])
+            .current_dir(local_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(local_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(local_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+
+        // Someone commits directly to the remote's target branch while the
+        // goal is running — local HEAD does not yet know about this.
+        std::fs::write(
+            remote_dir.path().join("PLAN.md"),
+            "### v0.1.0 — Title\n<!-- status: in_progress -->\n- [ ] item a\n\n---\n\
+             ### v0.1.1 — New phase\n<!-- status: pending -->\n- [ ] new phase item\n\n---\n",
+        )
+        .unwrap();
+        commit_all(remote_dir.path(), "add v0.1.1 phase directly to main");
+
+        // Apply pipeline writes its own uncommitted merge output to the
+        // working tree BEFORE prepare() runs (matches draft.rs's actual
+        // write order — see build_package's artifact-apply loop).
+        std::fs::write(
+            local_dir.path().join("PLAN.md"),
+            "### v0.1.0 — Title\n<!-- status: in_progress -->\n- [x] item a\n\n---\n",
+        )
+        .unwrap();
+
+        let adapter = GitAdapter::new(local_dir.path());
+        let goal = GoalRun::new(
+            "Test Goal",
+            "Test",
+            "test-agent",
+            local_dir.path().to_path_buf(),
+            local_dir.path().join("store"),
+        );
+        let config = SubmitConfig::default();
+
+        adapter
+            .prepare(&CommitContext::from(&goal), &config)
+            .expect(
+                "prepare() must not fail when local HEAD is stale relative to the fetched \
+                 target branch and uncommitted apply changes exist",
+            );
+
+        let final_content = std::fs::read_to_string(local_dir.path().join("PLAN.md")).unwrap();
+        assert!(
+            final_content.contains("- [x] item a"),
+            "uncommitted checked item must survive prepare(): {}",
+            final_content
+        );
+        assert!(
+            final_content.contains("v0.1.1"),
+            "concurrently-added phase from the remote must survive prepare(): {}",
+            final_content
+        );
     }
 
     #[test]

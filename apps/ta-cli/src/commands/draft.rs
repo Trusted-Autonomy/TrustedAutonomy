@@ -2123,8 +2123,24 @@ pub(crate) fn build_package(
     // Open the overlay workspace and compute diffs.
     // V1 TEMPORARY: Load exclude patterns, merging VCS adapter patterns.
     let excludes = load_excludes_with_adapter(source_dir);
-    let overlay =
+    let mut overlay =
         OverlayWorkspace::open(goal_id.clone(), source_dir, &goal.workspace_path, excludes);
+
+    // v0.17.10.3 (root cause A): restore the pre-agent base snapshot (captured
+    // from source_dir at staging-creation time, persisted on the goal record)
+    // so diff_all() can tell a concurrent addition to source_dir (made by
+    // someone else while this goal ran) apart from a genuine agent deletion.
+    // Without this, `OverlayWorkspace::open()` has no base at all and diff_all()
+    // falls back to a naive two-way diff that misclassifies concurrent
+    // additions as Deleted.
+    if let Some(snapshot_json) = &goal.source_snapshot {
+        if let Ok(snapshot) =
+            serde_json::from_value::<ta_workspace::SourceSnapshot>(snapshot_json.clone())
+        {
+            overlay.set_snapshot(snapshot);
+        }
+    }
+
     let changes = overlay.diff_all().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if changes.is_empty() {
@@ -6979,11 +6995,24 @@ fn apply_package(
         // v0.13.17.2: Pre-apply artifact safety checks — catch destructive changes
         // before they reach the filesystem. Blocked by --force-apply.
         if !force_apply && !dry_run {
+            // v0.17.10.3 item 3: defensive backstop against ghost deletions /
+            // reverted content, even if the diff_all() base-snapshot fix (item 1)
+            // or the PLAN.md merge fix (item 2) miss an edge case. Restore the
+            // goal's pre-agent base snapshot (the same one used by diff_all()
+            // above) and cross-check every artifact this apply is about to
+            // delete or overwrite against it.
+            let base_snapshot: Option<ta_workspace::SourceSnapshot> = goal
+                .source_snapshot
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+
             if let Err(e) = run_apply_safety_checks(
+                &pkg.changes.artifacts,
                 &artifact_uris,
                 &goal.workspace_path,
                 &target_dir,
                 &pkg.goal.title,
+                base_snapshot.as_ref(),
             ) {
                 eprintln!("[safety] {}", e);
                 eprintln!(
@@ -9773,13 +9802,71 @@ const CRITICAL_FILES: &[&str] = &[
 /// Checks:
 /// 1. Dramatic shrinkage: file shrinks >80% in line count.
 /// 2. Critical file replacement: known-critical file loses >50% of content.
+/// 3. (v0.17.10.3 item 3) Stale-staging-vs-concurrent-main: a `Delete` artifact
+///    whose target either wasn't part of the pre-agent base snapshot, or whose
+///    live source content no longer matches what that base snapshot recorded,
+///    is about to delete or discard content a concurrent, unrelated commit
+///    introduced after staging began. This is a defensive backstop for the
+///    same class of bug diff_all()'s base-aware deletion check (item 1) fixes
+///    — it catches it even if that fix has a gap.
 fn run_apply_safety_checks(
+    artifacts: &[Artifact],
     artifact_uris: &[String],
     workspace_path: &std::path::Path,
     target_dir: &std::path::Path,
     goal_title: &str,
+    base_snapshot: Option<&ta_workspace::SourceSnapshot>,
 ) -> Result<(), String> {
     let mut violations: Vec<String> = Vec::new();
+
+    if let Some(base) = base_snapshot {
+        use sha2::Digest as _;
+        for artifact in artifacts {
+            if artifact.change_type != ChangeType::Delete {
+                continue;
+            }
+            let Some(rel) = artifact.resource_uri.strip_prefix("fs://workspace/") else {
+                continue;
+            };
+
+            let source_path = target_dir.join(rel);
+            let source_exists = source_path.exists();
+            let base_entry = base.files.get(rel);
+
+            let source_hash = if source_exists {
+                std::fs::read(&source_path)
+                    .ok()
+                    .map(|b| format!("{:x}", sha2::Sha256::digest(&b)))
+            } else {
+                None
+            };
+
+            let suspicious = match base_entry {
+                // Never in the pre-agent base at all, yet source has it now and
+                // the draft wants it deleted — this is exactly the ghost-deletion
+                // shape: a file added to source_dir after staging began.
+                None => source_exists,
+                // Was in the base, but source's current content no longer
+                // matches what the base recorded — someone changed it directly
+                // in source_dir after staging began; deleting it now would
+                // discard that concurrent change.
+                Some(base_snap) => {
+                    source_exists && source_hash.as_deref() != Some(base_snap.content_hash.as_str())
+                }
+            };
+
+            if suspicious {
+                violations.push(format!(
+                    "Artifact '{}' is about to be deleted, but its content in source \
+                     does not match the pre-agent base snapshot taken when staging began \
+                     — it looks like a concurrent, unrelated commit added or modified this \
+                     file directly in source_dir after the goal started. Deleting it now \
+                     would discard that concurrent change.",
+                    rel
+                ));
+            }
+        }
+    }
 
     for uri in artifact_uris {
         let Some(rel) = uri.strip_prefix("fs://workspace/") else {

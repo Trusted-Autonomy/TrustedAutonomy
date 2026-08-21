@@ -962,6 +962,51 @@ mod tests {
     }
 
     #[test]
+    fn debug_repro_v17_10_3_item2_scenario() {
+        // Reproduces the v0.17.10.2 live incident: base == source for the
+        // affected phase's section (no concurrent edit to it), staging has
+        // items newly checked with status deliberately left in_progress
+        // (the documented agent convention), and source additionally has a
+        // brand-new phase appended (added directly to main while the goal
+        // ran) that neither base nor staging know about.
+        let base = make_plan(&[(
+            "v0.17.10.2",
+            "in_progress",
+            &["- [ ] item a", "- [ ] item b"],
+        )]);
+        let staging = make_plan(&[(
+            "v0.17.10.2",
+            "in_progress",
+            &["- [x] item a", "- [x] item b"],
+        )]);
+        let source = make_plan(&[
+            (
+                "v0.17.10.2",
+                "in_progress",
+                &["- [ ] item a", "- [ ] item b"],
+            ),
+            ("v0.17.10.3", "pending", &["- [ ] new phase item"]),
+        ]);
+
+        let result = merge_plan_md(&base, &staging, &source);
+
+        eprintln!("MERGED:\n{}", result.merged);
+        eprintln!("conflicts: {:?}", result.conflicts);
+        eprintln!("silent_fixes: {:?}", result.silent_fixes);
+        eprintln!("agent_additions: {:?}", result.agent_additions);
+
+        let checked = result.merged.matches("- [x]").count();
+        assert_eq!(
+            checked, 2,
+            "expected both v0.17.10.2 items to remain checked after merge"
+        );
+        assert!(
+            result.merged.contains("v0.17.10.3"),
+            "expected the concurrently-added v0.17.10.3 phase to survive the merge"
+        );
+    }
+
+    #[test]
     fn both_changed_same_status_conflict() {
         let base = make_plan(&[("v0.1.0", "pending", &[])]);
         let staging = make_plan(&[("v0.1.0", "done", &[])]);

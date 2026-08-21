@@ -10417,7 +10417,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 8. [x] Tests: applying an out-of-order lower-numbered phase after a higher-numbered one has already landed must leave the version untouched (with a clear log message), not regress it. Applying phases in normal ascending order still bumps exactly as today (regression guard).
 
 #### Version: `0.17.10-alpha.1`
-
 ### v0.17.10.2 — Concurrent-Goal Staging Isolation Fix (Same-`source` Overlay Bypass)
 <!-- status: done -->
 **Depends on**: v0.17.10.1 (apply-pipeline fixes — unrelated bug, but this phase should land after that one applies cleanly)
@@ -10435,7 +10434,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 #### Version: `0.17.10-alpha.2`
 
 ---
-
 ### v0.17.10.3 — Fix Stale-Staging-vs-Concurrently-Advanced-Main Apply Bugs (Ghost Deletion, Checkbox Reversion)
 <!-- status: in_progress -->
 **Depends on**: v0.17.10.2 (the bug that exposed this — a goal ran long enough for direct-to-main commits to land during it)
@@ -10454,7 +10452,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.10-alpha.3`
 
----
 
 > **Focus**: Live runtime coordination between concurrently-running virtual-team agents. Complements `task-graph`'s static, plan-time wave scheduling with a live presence/discovery/handoff layer for cases where conflicts aren't knowable in advance — exactly the class of gap that caused v0.17.10.2's data-loss incident.
 ### v0.17.11 — Agent Coordination Whiteboard (`ta-agent-whiteboard`)
@@ -10478,7 +10475,6 @@ One shipped implementation, `GoalDispatchAction`, wraps `ta run`/`ta goal start`
 
 #### Version: `0.17.11-alpha`
 
----
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
