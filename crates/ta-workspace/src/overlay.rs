@@ -591,13 +591,38 @@ impl OverlayWorkspace {
         }
 
         // Check for deleted files (in source but not in staging).
+        //
+        // v0.17.10.3 (root cause A): this is a genuine deletion only if the file
+        // also existed in the pre-agent base snapshot (`self.source_snapshot`,
+        // captured from `source_dir` at staging-creation time). A file present in
+        // the *live* `source_dir` but absent from that base was added directly to
+        // source by someone else — concurrently, after staging began — and must
+        // never be classified as `Deleted`, regardless of whether staging has it.
+        // Only base-present + staging-absent is a real agent deletion. When no
+        // base snapshot is available at all (e.g. a workspace reopened via
+        // `open()` without `set_snapshot`), fall back to the legacy two-way
+        // comparison — callers that need base-aware safety must call
+        // `set_snapshot` before `diff_all()`.
         for path in &source_files {
             if should_skip_for_diff(path, &self.excludes) {
                 continue;
             }
             let staging_path = self.staging_dir.join(path);
             if !staging_path.exists() {
-                changes.push(OverlayChange::Deleted { path: path.clone() });
+                let is_genuine_deletion = match &self.source_snapshot {
+                    Some(base) => base.files.contains_key(path),
+                    None => true,
+                };
+                if is_genuine_deletion {
+                    changes.push(OverlayChange::Deleted { path: path.clone() });
+                } else {
+                    tracing::debug!(
+                        goal_id = %self.goal_id,
+                        path = %path,
+                        "diff_all: file present in source but absent from base snapshot — \
+                         added concurrently after staging began, not classified as Deleted"
+                    );
+                }
             }
         }
 
@@ -2084,6 +2109,177 @@ mod tests {
             }
             other => panic!("expected Deleted, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn diff_does_not_classify_concurrent_source_addition_as_deleted() {
+        // v0.17.10.3 item 1 / item 4a: a file added directly to source_dir
+        // *after* staging was created (e.g. a concurrent commit landed on
+        // main while the goal ran) must never show up as `Deleted` just
+        // because staging (a snapshot from before that commit) doesn't have
+        // it. Only files present in the base snapshot but absent from
+        // staging are genuine deletions.
+        let source = create_source_project();
+        let staging_root = TempDir::new().unwrap();
+
+        let overlay = OverlayWorkspace::create(
+            "goal-1",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // Simulate a concurrent, unrelated commit landing directly on
+        // source_dir after staging was captured — staging has no knowledge
+        // of this file at all.
+        fs::write(
+            source.path().join("docs-added-concurrently.md"),
+            "added directly to main while the goal ran\n",
+        )
+        .unwrap();
+
+        let changes = overlay.diff_all().unwrap();
+
+        for change in &changes {
+            if let OverlayChange::Deleted { path } = change {
+                assert_ne!(
+                    path, "docs-added-concurrently.md",
+                    "concurrently-added source file must never be classified as Deleted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diff_still_detects_genuine_deletion_alongside_concurrent_addition() {
+        // v0.17.10.3 item 4c: the base-snapshot-aware deletion check must not
+        // regress real deletion detection — a file present in both base and
+        // staging that the agent genuinely removed is still `Deleted`, even
+        // when a concurrent addition is also present in source_dir.
+        let source = create_source_project();
+        let staging_root = TempDir::new().unwrap();
+
+        let overlay = OverlayWorkspace::create(
+            "goal-1",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // Agent genuinely deletes a file that existed at staging-creation time.
+        fs::remove_file(overlay.staging_dir().join("src/lib.rs")).unwrap();
+
+        // Concurrent, unrelated addition directly to source_dir.
+        fs::write(
+            source.path().join("docs-added-concurrently.md"),
+            "added directly to main while the goal ran\n",
+        )
+        .unwrap();
+
+        let changes = overlay.diff_all().unwrap();
+
+        let deleted_paths: Vec<&str> = changes
+            .iter()
+            .filter_map(|c| match c {
+                OverlayChange::Deleted { path } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            deleted_paths,
+            vec!["src/lib.rs"],
+            "genuine agent deletion must still be detected, and the concurrent \
+             addition must not be misclassified as deleted"
+        );
+    }
+
+    #[test]
+    fn regression_replay_v17_10_2_concurrent_main_advance_during_apply() {
+        // v0.17.10.3 item 5: replay the actual v0.17.10.2 live incident end to
+        // end. While a goal runs, two things land directly on source_dir with
+        // no agent involvement: a brand-new doc file (never touched by the
+        // agent) and — separately, per item 5's scope — no PLAN.md changes
+        // outside the goal's own phase (that combined-with-a-PLAN.md-edit
+        // case is covered by the plan_merge tests). The agent, meanwhile,
+        // checks off PLAN.md items in its own phase in staging. Applying the
+        // draft back to source_dir must NOT delete the concurrently-added
+        // doc file, and MUST carry the agent's checked-off items through.
+        let source = TempDir::new().unwrap();
+        fs::write(
+            source.path().join("PLAN.md"),
+            "### v0.17.10.2 — Title\n<!-- status: in_progress -->\n\
+             - [ ] item a\n- [ ] item b\n\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source.path().join("src")).unwrap();
+        fs::write(source.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let staging_root = TempDir::new().unwrap();
+        let overlay = OverlayWorkspace::create(
+            "goal-1",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // Agent checks off its phase's items in staging.
+        fs::write(
+            overlay.staging_dir().join("PLAN.md"),
+            "### v0.17.10.2 — Title\n<!-- status: in_progress -->\n\
+             - [x] item a\n- [x] item b\n\n---\n",
+        )
+        .unwrap();
+
+        // Concurrently, someone adds a new doc file directly to source_dir —
+        // the agent never saw this file; it doesn't exist in staging at all.
+        fs::create_dir_all(source.path().join("docs/design")).unwrap();
+        fs::write(
+            source
+                .path()
+                .join("docs/design/agent-coordination-whiteboard.md"),
+            "unrelated doc added directly to main while the goal ran\n",
+        )
+        .unwrap();
+
+        let changes = overlay.diff_all().unwrap();
+        assert!(
+            !changes.iter().any(|c| matches!(
+                c,
+                OverlayChange::Deleted { path }
+                    if path == "docs/design/agent-coordination-whiteboard.md"
+            )),
+            "concurrently-added file must never be classified as Deleted: {:?}",
+            changes
+        );
+
+        // Apply back onto source_dir itself, exactly as `ta draft apply` does.
+        let applied = overlay.apply_to(source.path()).unwrap();
+        assert!(
+            !applied.iter().any(
+                |(p, kind)| p == "docs/design/agent-coordination-whiteboard.md"
+                    && *kind == "deleted"
+            ),
+            "apply must not delete the concurrently-added file: {:?}",
+            applied
+        );
+
+        // The concurrently-added file must still exist after apply.
+        assert!(source
+            .path()
+            .join("docs/design/agent-coordination-whiteboard.md")
+            .exists());
+
+        // The agent's checked-off items must have made it through.
+        let final_plan = fs::read_to_string(source.path().join("PLAN.md")).unwrap();
+        assert!(
+            final_plan.contains("- [x] item a") && final_plan.contains("- [x] item b"),
+            "checked items must survive apply: {}",
+            final_plan
+        );
     }
 
     #[test]
