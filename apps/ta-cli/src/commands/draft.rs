@@ -16665,6 +16665,278 @@ fn run() {
         );
     }
 
+    /// Shared setup for the two v0.17.10.3 root-cause-B full-pipeline
+    /// regression tests below. Builds a project with a numbered-item phase
+    /// (the format every real PLAN.md phase actually uses — the bullet-item
+    /// `apply_does_not_force_done_when_diff_leaves_items_unchecked` test above
+    /// does NOT exercise the bug), starts a goal against it, checks off both
+    /// items in staging (matching the actual v0.17.10.2 incident, where the
+    /// agent had checked *all* of that phase's items), then lands a
+    /// concurrent commit directly on the project's checked-out branch that
+    /// touches an *unrelated* phase only — so `base == source` for the goal's
+    /// own phase section, exactly as the incident's root-cause note
+    /// describes. Returns `(config, goal_id)`.
+    ///
+    /// Note: both items are checked (not left partially unchecked) so that
+    /// `run_plan_review`'s separate code-coverage auto-correction pass
+    /// (v0.15.24.1, `ta_goal::verify_phase_completion`) never has an
+    /// unmarked item to act on — that pass is self-referential (PLAN.md's
+    /// own diff content always "covers" any item's own text), which would
+    /// otherwise auto-check a deliberately-left-unchecked item before this
+    /// test's real target (the numbered-item merge bug) is even exercised.
+    /// That is a separate, pre-existing quirk, not part of root cause B.
+    fn setup_v17_10_3_root_cause_b_repro(project: &TempDir) -> (GatewayConfig, String) {
+        for cmd_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        // Numbered-item format — matches every real PLAN.md phase in this repo.
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "# Plan\n\n### v0.99.7 — Root cause B repro phase\n<!-- status: in_progress -->\n\n1. [ ] First item\n2. [ ] Second item\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // Start a goal linked to the phase — this snapshots plan_base.md.
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Root cause B repro".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test numbered-item checkbox survival across apply".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.7".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent's real work: check both items (matching the actual
+        // v0.17.10.2 incident, which checked all 5 of that phase's items),
+        // keep status in_progress in staging (the draft's own status write —
+        // whether apply's separate force-done logic bumps it afterward is a
+        // different, already-tested feature, not part of root cause B).
+        std::fs::write(
+            goal.workspace_path.join("PLAN.md"),
+            "# Plan\n\n### v0.99.7 — Root cause B repro phase\n<!-- status: in_progress -->\n\n1. [x] First item\n2. [x] Second item\n",
+        )
+        .unwrap();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        // Concurrent commit directly to the project's checked-out branch —
+        // simulates another PR merging to main while the goal ran. Touches
+        // only an unrelated phase; v0.99.7's own section is untouched, so
+        // base == source for the affected section (exactly the incident's
+        // documented precondition).
+        let current_plan = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        let with_concurrent_phase = format!(
+            "{}\n### v0.99.8 — Unrelated concurrent phase\n<!-- status: pending -->\n\n1. [ ] Unrelated item\n",
+            current_plan
+        );
+        std::fs::write(project.path().join("PLAN.md"), with_concurrent_phase).unwrap();
+        for cmd_args in &[
+            vec!["add", "-A"],
+            vec![
+                "commit",
+                "-m",
+                "concurrent: unrelated phase added directly to main",
+            ],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
+        }
+
+        (config, goal_id)
+    }
+
+    /// Asserts the post-apply PLAN.md on the feature branch reflects: both
+    /// items still checked (the actual bug reverted them to unchecked) and
+    /// the concurrently-added phase survived.
+    fn assert_v17_10_3_root_cause_b_repro_result(project: &TempDir) {
+        let branches = clear_git_env(
+            std::process::Command::new("git")
+                .args(["branch", "--list", "ta/*"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
+        let branch_name = String::from_utf8_lossy(&branches.stdout)
+            .trim()
+            .trim_start_matches("* ")
+            .to_string();
+        assert!(
+            !branch_name.is_empty(),
+            "Feature branch should have been created by apply"
+        );
+
+        let plan_on_branch = clear_git_env(
+            std::process::Command::new("git")
+                .args(["show", &format!("{}:PLAN.md", branch_name)])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
+        let plan_content = String::from_utf8_lossy(&plan_on_branch.stdout);
+
+        assert!(
+            plan_content.contains("1. [x] First item"),
+            "v0.17.10.3 root-cause-B: item 1 (checked by the agent in staging) must \
+             survive apply as checked, got:\n{}",
+            plan_content
+        );
+        assert!(
+            plan_content.contains("2. [x] Second item"),
+            "v0.17.10.3 root-cause-B: item 2 (checked by the agent in staging) must \
+             survive apply as checked — NOT reverted to unchecked. This is the exact \
+             bug from the v0.17.10.2/v0.17.10.3 incidents. Got:\n{}",
+            plan_content
+        );
+        assert!(
+            plan_content.contains("v0.99.7"),
+            "the goal's own phase must survive the merge, got:\n{}",
+            plan_content
+        );
+        assert!(
+            plan_content.contains("v0.99.8") && plan_content.contains("Unrelated item"),
+            "the concurrently-added v0.99.8 phase must survive the merge, got:\n{}",
+            plan_content
+        );
+    }
+
+    /// v0.17.10.3 root-cause-B, Variant A: the working tree is on a protected
+    /// branch (the repo's default branch) when `apply_package` runs, so the
+    /// VCS pre-flight block's `adapter.prepare()` call fires *before* any
+    /// files are written, creating the feature branch first. The submit
+    /// closure's later `adapter.prepare()` call then hits the
+    /// already-on-this-branch fast path.
+    ///
+    /// This reproduces the actual v0.17.10.2/v0.17.10.3 incidents' most
+    /// likely invocation shape (a human/agent running `ta draft apply
+    /// --git-commit` from whatever branch was checked out, most commonly the
+    /// default branch after a prior PR merged).
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "v0.17.10.3 root cause B not yet fixed — this test reliably reproduces the \
+                bug (checked PLAN.md items revert to unchecked during apply_package()). \
+                Un-ignore once the fix lands; see PLAN.md v0.17.10.3 item 2."]
+    fn v17_10_3_root_cause_b_repro_variant_a_preflight_branch() {
+        let project = TempDir::new().unwrap();
+        let (config, goal_id) = setup_v17_10_3_root_cause_b_repro(&project);
+
+        build_package(&config, &goal_id, "Root cause B repro (variant A)", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            true,  // git_commit = true
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap();
+
+        assert_v17_10_3_root_cause_b_repro_result(&project);
+    }
+
+    /// v0.17.10.3 root-cause-B, Variant B: the working tree has already been
+    /// switched to a non-protected branch *before* `apply_package` runs (no
+    /// prior goal's cleanup ran `git checkout main`, so a stale feature
+    /// branch from an earlier goal is still checked out). The pre-flight
+    /// block's `on_protected` check is false, so it does NOT call
+    /// `adapter.prepare()` — the submit closure's `adapter.prepare()` call is
+    /// then the *first* one to run, creating the feature branch after all
+    /// files (including the merged PLAN.md) are already written to disk.
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "v0.17.10.3 root cause B not yet fixed — this test reliably reproduces the \
+                bug (checked PLAN.md items revert to unchecked during apply_package()). \
+                Un-ignore once the fix lands; see PLAN.md v0.17.10.3 item 2."]
+    fn v17_10_3_root_cause_b_repro_variant_b_no_preflight() {
+        let project = TempDir::new().unwrap();
+        let (config, goal_id) = setup_v17_10_3_root_cause_b_repro(&project);
+
+        // Switch the working tree to a non-protected branch before apply —
+        // this skips the pre-flight prepare() call entirely.
+        let status = clear_git_env(
+            std::process::Command::new("git")
+                .args(["checkout", "-b", "stale-feature-branch"])
+                .current_dir(project.path()),
+        )
+        .status()
+        .unwrap();
+        assert!(status.success(), "failed to switch to non-protected branch");
+
+        build_package(&config, &goal_id, "Root cause B repro (variant B)", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            true,  // git_commit = true
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap();
+
+        assert_v17_10_3_root_cause_b_repro_result(&project);
+    }
+
     // ── v0.13.15: version backward bump check ─────────────────────
 
     #[test]
