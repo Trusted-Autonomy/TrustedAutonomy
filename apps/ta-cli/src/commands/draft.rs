@@ -16685,6 +16685,9 @@ fn run() {
     /// otherwise auto-check a deliberately-left-unchecked item before this
     /// test's real target (the numbered-item merge bug) is even exercised.
     /// That is a separate, pre-existing quirk, not part of root cause B.
+    ///
+    /// Unix-only: only used by the `#[cfg(unix)]`-gated tests below.
+    #[cfg(unix)]
     fn setup_v17_10_3_root_cause_b_repro(project: &TempDir) -> (GatewayConfig, String) {
         for cmd_args in &[
             vec!["init"],
@@ -16786,6 +16789,9 @@ fn run() {
     /// Asserts the post-apply PLAN.md on the feature branch reflects: both
     /// items still checked (the actual bug reverted them to unchecked) and
     /// the concurrently-added phase survived.
+    ///
+    /// Unix-only: only used by the `#[cfg(unix)]`-gated tests below.
+    #[cfg(unix)]
     fn assert_v17_10_3_root_cause_b_repro_result(project: &TempDir) {
         let branches = clear_git_env(
             std::process::Command::new("git")
