@@ -1534,77 +1534,6 @@ fn build_unified_diff(original: &str, modified: &str, label: &str) -> String {
     patch
 }
 
-/// Apply the plan patch from a ReviewReport to target PLAN.md.
-///
-/// The merged content is derived by re-running the merge logic using the
-/// report's patch to understand intent. Since the patch is a simple diff,
-/// we use the merged content from the report rather than applying a patch format.
-/// This is safe because the report was generated against source and the merge
-/// is deterministic.
-fn apply_plan_patch(
-    plan_md_path: &std::path::Path,
-    report: &ta_changeset::review_report::ReviewReport,
-) -> anyhow::Result<()> {
-    // We rebuild the merged content by re-running the three-way merge.
-    // This is safe — the merge is deterministic and idempotent.
-    // The plan_patch in the report is informational only; we use it to detect
-    // whether there's anything to do, and apply the merge by reconstructing
-    // from scratch with the same inputs.
-    //
-    // Simplified approach: the plan_patch is a line-by-line diff. We apply
-    // it by parsing the - and + lines and updating the target file.
-    if !plan_md_path.exists() {
-        return Ok(());
-    }
-
-    if let Some(ref patch) = report.plan_patch {
-        if patch.is_empty() {
-            return Ok(());
-        }
-
-        let current = std::fs::read_to_string(plan_md_path)?;
-        let mut lines: Vec<String> = current.lines().map(|l| l.to_string()).collect();
-        let mut patch_lines = patch.lines().peekable();
-
-        // Skip the --- and +++ header lines.
-        let mut changed = false;
-        while let Some(line) = patch_lines.next() {
-            if line.starts_with("---") || line.starts_with("+++") {
-                continue;
-            }
-            if let Some(orig) = line.strip_prefix('-') {
-                if let Some(new_line) = patch_lines.next() {
-                    if let Some(repl) = new_line.strip_prefix('+') {
-                        // Status marker lines are source-authoritative — staging never
-                        // wins on them. Skip any hunk that would replace a
-                        // `<!-- status: done -->` marker with `---` (the common
-                        // regression when staging predates manual marker additions).
-                        let orig_is_done = orig.trim() == "<!-- status: done -->";
-                        let repl_is_separator = repl.trim() == "---";
-                        if orig_is_done && repl_is_separator {
-                            tracing::debug!(
-                                "plan-patch: skipping hunk that would demote \
-                                 '<!-- status: done -->' to '---' (source is authoritative)"
-                            );
-                            continue;
-                        }
-
-                        if let Some(pos) = lines.iter().position(|l| l == orig) {
-                            lines[pos] = repl.to_string();
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if changed {
-            std::fs::write(plan_md_path, lines.join("\n"))?;
-        }
-    }
-    Ok(())
-}
-
 /// Look up a change summary entry by path and populate artifact fields.
 fn enrich_artifact(artifact: &mut Artifact, summary: &ChangeSummary) {
     // Extract the relative path from fs://workspace/<path>.
@@ -6584,29 +6513,29 @@ fn apply_package(
                 }
             }
 
-            // Apply the plan patch to target PLAN.md (non-conflict resolutions).
+            // v0.17.10.4: report.plan_patch is informational-only. It used to be
+            // applied here via apply_plan_patch(), a naive first-match-anywhere
+            // line-text replace with no position/context awareness — on a large
+            // PLAN.md with repeated status markers and similar checkbox text, it
+            // could silently mutate the WRONG line, and that mutation was never
+            // validated because it wrote directly to target_dir/PLAN.md before the
+            // real, git-HEAD-sourced 3-way merge pipeline (below, in this same
+            // function) ran. When that later pipeline found staging == HEAD source
+            // and correctly concluded there was nothing to merge, it skipped
+            // writing PLAN.md entirely — leaving apply_plan_patch's bad write as
+            // the final, uncorrected, committed content. Root cause of the
+            // "checkbox reversion" corruption (v0.17.10.3 item 2). The 3-way merge
+            // pipeline below is the sole writer of PLAN.md now; this block only
+            // reports the counts it already computed at build time.
             if let Some(ref patch) = report.plan_patch {
                 if !patch.is_empty() && !dry_run {
-                    let plan_md_path = target_dir.join("PLAN.md");
-                    if let Err(e) = apply_plan_patch(&plan_md_path, &report) {
-                        tracing::warn!("Failed to apply plan patch: {}", e);
-                        eprintln!("[review] Warning: could not apply plan patch: {}", e);
-                    } else {
-                        let n = report.silent_fixes.len();
-                        let m = report.agent_additions.len();
-                        eprintln!(
-                            "[apply] Plan patch applied: {} regressions fixed, {} items recovered.",
-                            n, m
-                        );
-                        // Stage PLAN.md so the modification travels onto the feature branch
-                        // (git checkout -b carries staged changes without conflict risk).
-                        if git_commit {
-                            let _ = git_in(&target_dir, &["add", "PLAN.md"]).status();
-                            tracing::debug!(
-                                "[apply] Staged PLAN.md after plan patch for branch carry-over."
-                            );
-                        }
-                    }
+                    let n = report.silent_fixes.len();
+                    let m = report.agent_additions.len();
+                    eprintln!(
+                        "[review] Plan patch on file: {} regression(s), {} item(s) recovered \
+                         (applied by the 3-way merge below, not here).",
+                        n, m
+                    );
                 }
             }
         }
@@ -7226,6 +7155,19 @@ fn apply_package(
                                         }
                                     }
 
+                                    // v0.17.10.4: Baseline consistency count, taken from the
+                                    // known-good git-HEAD source, before any branch below runs.
+                                    // Compared against the final on-disk state after this whole
+                                    // block finishes (see the unconditional check further down)
+                                    // so pre-existing PLAN.md debt elsewhere in the file never
+                                    // blocks an apply — only NEW inconsistencies introduced by
+                                    // this apply do.
+                                    let pre_apply_issue_count =
+                                        ta_changeset::plan_merge::check_done_phase_item_consistency(
+                                            &source_str,
+                                        )
+                                        .len();
+
                                     if staging_str != source_str {
                                         if let Some(ref base_str) = pkg.plan_md_base {
                                             use ta_changeset::plan_merge::merge_plan_md;
@@ -7359,6 +7301,70 @@ fn apply_package(
                                         );
                                         }
                                     }
+                                    // v0.17.10.4: Unconditional post-write consistency
+                                    // hard-check. Runs no matter which branch above executed
+                                    // (merged-and-wrote / no-op / legacy-kept-unchanged),
+                                    // because corruption can already be sitting on disk from
+                                    // an earlier, unrelated write (root cause B: a prior write
+                                    // to this same source_path before this pipeline ran) even
+                                    // when THIS pipeline correctly concluded there was nothing
+                                    // to merge. The old consistency check only ran inside the
+                                    // merge-and-wrote branch, so it never caught corruption
+                                    // this pipeline itself left alone. Compares against the
+                                    // pre-apply baseline so unrelated pre-existing PLAN.md
+                                    // debt never blocks an apply — only regressions do.
+                                    if let Ok(final_on_disk) = std::fs::read_to_string(&source_path)
+                                    {
+                                        let post_apply_issues =
+                                            ta_changeset::plan_merge::check_done_phase_item_consistency(
+                                                &final_on_disk,
+                                            );
+                                        if post_apply_issues.len() > pre_apply_issue_count {
+                                            let fail_path = config.workspace_root.join(".ta").join(
+                                                format!("plan-corrupt-{}.md", goal.goal_run_id),
+                                            );
+                                            let _ = std::fs::write(
+                                                &fail_path,
+                                                final_on_disk.as_bytes(),
+                                            );
+                                            tracing::error!(
+                                                goal_id = %goal.goal_run_id,
+                                                fail_path = %fail_path.display(),
+                                                pre_apply_issue_count,
+                                                post_apply_issue_count = post_apply_issues.len(),
+                                                "PLAN.md post-write consistency check found new \
+                                                 issues introduced by this apply — aborting before commit"
+                                            );
+                                            anyhow::bail!(
+                                                "PLAN.md apply safety check failed: this apply \
+                                                 introduced {} new inconsistency issue(s) (was {}, \
+                                                 now {}) — a done phase has an unchecked item, or \
+                                                 similar.\n\
+                                                 A snapshot of the resulting file was written to: {}\n\
+                                                 This is a hard-stop safety check (v0.17.10.4) — the \
+                                                 apply is aborting BEFORE any commit, but PLAN.md on \
+                                                 disk at {} may already reflect the bad content above.\n\
+                                                 Restore it (git checkout -- PLAN.md) or fix it \
+                                                 manually, then re-run:\n  ta draft apply {} --skip-plan-merge\n\n\
+                                                 New/total issues:\n{}",
+                                                post_apply_issues.len() - pre_apply_issue_count,
+                                                pre_apply_issue_count,
+                                                post_apply_issues.len(),
+                                                fail_path.display(),
+                                                source_path.display(),
+                                                &package_id.to_string()[..8],
+                                                post_apply_issues
+                                                    .iter()
+                                                    .map(|w| format!(
+                                                        "  [{}] {}",
+                                                        w.section_id, w.description
+                                                    ))
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n")
+                                            );
+                                        }
+                                    }
+
                                     // Always skip overlay for PLAN.md — either we wrote the
                                     // merged version above, or staging == source (no-op), or
                                     // we kept source unchanged. In all cases the git adapter
@@ -19241,67 +19247,59 @@ fn run() {
         assert!(p.is_none(), "root-dir component must be rejected");
     }
 
-    // ── plan-patch marker regression tests (v0.15.22.1) ─────────────────────
-
-    fn make_review_report(patch: Option<String>) -> ta_changeset::review_report::ReviewReport {
-        ta_changeset::review_report::ReviewReport {
-            draft_id: uuid::Uuid::new_v4(),
-            generated_at: chrono::Utc::now(),
-            silent_fixes: vec![],
-            agent_additions: vec![],
-            conflicts: vec![],
-            coverage_gaps: vec![],
-            plan_patch: patch,
-            source_verified: false,
-            prior_denial: false,
-        }
-    }
+    // ── PLAN.md post-write consistency hard-check tests (v0.17.10.4) ────────
+    //
+    // v0.17.10.3 root cause B: apply_plan_patch() used to write directly to
+    // target_dir/PLAN.md via a naive first-match-anywhere line-text replace,
+    // *before* the real git-HEAD-sourced 3-way merge pipeline ran later in
+    // apply_package(). When that later pipeline found staging == HEAD source
+    // and correctly concluded there was nothing to merge, it skipped writing
+    // PLAN.md entirely — leaving apply_plan_patch's bad write as the final,
+    // uncorrected, committed content. apply_plan_patch has been removed
+    // entirely (redundant with the always-correct merge pipeline); these
+    // tests cover the unconditional post-write hard-check added as a
+    // defense-in-depth backstop against this whole class of bug, regardless
+    // of what wrote the bad content.
 
     #[test]
-    fn plan_patch_skips_hunk_demoting_done_marker_to_separator() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
-        let plan_path = dir.path().join("PLAN.md");
+    fn plan_consistency_check_flags_new_regression_in_done_phase() {
+        use ta_changeset::plan_merge::check_done_phase_item_consistency;
 
-        // Source PLAN.md already has <!-- status: done -->
-        std::fs::write(
-            &plan_path,
-            "### Phase v1.0\n<!-- status: done -->\n\nSome content.\n",
-        )
-        .unwrap();
+        let before = "### v1.0 — Phase\n<!-- status: done -->\n- [x] Item one\n- [x] Item two\n";
+        // Simulates a stray write (e.g. the old apply_plan_patch bug) flipping
+        // an unrelated line's checkbox off in an already-done phase.
+        let after = "### v1.0 — Phase\n<!-- status: done -->\n- [ ] Item one\n- [x] Item two\n";
 
-        // Patch tries to replace `<!-- status: done -->` with `---` (the regression).
-        let patch = "--- a/PLAN.md\n+++ b/PLAN.md\n-<!-- status: done -->\n+---\n";
-        let report = make_review_report(Some(patch.to_string()));
+        let pre_issues = check_done_phase_item_consistency(before).len();
+        let post_issues = check_done_phase_item_consistency(after);
 
-        apply_plan_patch(&plan_path, &report).unwrap();
-
-        let after = std::fs::read_to_string(&plan_path).unwrap();
+        assert_eq!(pre_issues, 0, "clean source must have no issues");
         assert!(
-            after.contains("<!-- status: done -->"),
-            "status marker must survive: got {after:?}"
+            post_issues.len() > pre_issues,
+            "regression introduced by a stray write must be detected: {post_issues:?}"
         );
     }
 
     #[test]
-    fn plan_patch_applies_normal_hunks() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
-        let plan_path = dir.path().join("PLAN.md");
+    fn plan_consistency_check_ignores_preexisting_unrelated_debt() {
+        use ta_changeset::plan_merge::check_done_phase_item_consistency;
 
-        std::fs::write(&plan_path, "### Phase v1.0\n<!-- status: pending -->\n").unwrap();
+        // Pre-existing, unrelated inconsistency already present before this apply ran.
+        let before = "### v0.9 — Phase\n<!-- status: done -->\n- [ ] Stale unrelated item\n";
+        // Same file, untouched by this apply — count must not grow.
+        let after = before;
 
-        // Normal hunk: change pending → in_progress (not a status-marker regression).
-        let patch =
-            "--- a/PLAN.md\n+++ b/PLAN.md\n-<!-- status: pending -->\n+<!-- status: in_progress -->\n";
-        let report = make_review_report(Some(patch.to_string()));
+        let pre_issues = check_done_phase_item_consistency(before).len();
+        let post_issues = check_done_phase_item_consistency(after);
 
-        apply_plan_patch(&plan_path, &report).unwrap();
-
-        let after = std::fs::read_to_string(&plan_path).unwrap();
-        assert!(
-            after.contains("<!-- status: in_progress -->"),
-            "normal marker update must be applied: got {after:?}"
+        assert_eq!(
+            pre_issues, 1,
+            "pre-existing debt should be visible on its own"
+        );
+        assert_eq!(
+            post_issues.len(),
+            pre_issues,
+            "an apply that doesn't touch the file must not be blocked by pre-existing debt"
         );
     }
 }
