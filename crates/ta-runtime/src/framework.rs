@@ -432,6 +432,20 @@ impl AgentFrameworkManifest {
         None
     }
 
+    /// The user-level global agents directory: `<home>/.config/ta/agents`.
+    ///
+    /// Deliberately the literal `~/.config/ta` path, not the platform-native
+    /// `dirs::config_dir()` (which resolves to `~/Library/Application Support`
+    /// on macOS) — TA uses `~/.config/ta` as its established convention
+    /// everywhere else (docs, `ta_config_dir()` in `apps/ta-cli/src/commands/agent.rs`,
+    /// the config/secrets/workflows paths documented in USAGE.md). Using
+    /// `dirs::config_dir()` here previously orphaned every custom framework
+    /// manifest written to `~/.config/ta/agents/` on macOS — `ta agent
+    /// framework-new`'s own default output path was never found by `discover()`.
+    fn global_agents_dir(home: &Path) -> PathBuf {
+        home.join(".config").join("ta").join("agents")
+    }
+
     /// Discover custom framework manifests from well-known paths.
     ///
     /// Search order:
@@ -442,12 +456,22 @@ impl AgentFrameworkManifest {
     /// backwards compatibility with user-provided project-local manifests.
     /// When both `<name>.yaml` and `<name>.toml` exist, YAML takes precedence.
     pub fn discover(project_root: &Path) -> Vec<AgentFrameworkManifest> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self::discover_with_global_dir(project_root, &Self::global_agents_dir(&home))
+    }
+
+    /// Same search/parse logic as [`discover`], but with the user-level
+    /// global agents directory passed explicitly rather than derived from
+    /// the real `$HOME` — lets tests isolate from whatever real manifests
+    /// happen to exist on the machine running the test suite.
+    fn discover_with_global_dir(
+        project_root: &Path,
+        global_agents_dir: &Path,
+    ) -> Vec<AgentFrameworkManifest> {
         let mut manifests = Vec::new();
         let search_dirs = [
             project_root.join(".ta/agents"),
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("~/.config"))
-                .join("ta/agents"),
+            global_agents_dir.to_path_buf(),
         ];
         for dir in &search_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -742,8 +766,21 @@ mod tests {
     #[test]
     fn discover_empty_dir() {
         let dir = tempdir().unwrap();
-        let manifests = AgentFrameworkManifest::discover(dir.path());
+        let global = tempdir().unwrap();
+        let manifests = AgentFrameworkManifest::discover_with_global_dir(dir.path(), global.path());
         assert!(manifests.is_empty());
+    }
+
+    #[test]
+    fn global_agents_dir_uses_literal_dot_config_not_platform_native_dir() {
+        // Regression test: this must be `<home>/.config/ta/agents`, matching
+        // `ta_config_dir()` (apps/ta-cli/src/commands/agent.rs) and every path
+        // documented in USAGE.md — NOT `dirs::config_dir()`'s platform-native
+        // result, which on macOS is `~/Library/Application Support/ta/agents`
+        // and would silently never match what `framework-new` writes to.
+        let home = Path::new("/Users/example");
+        let dir = AgentFrameworkManifest::global_agents_dir(home);
+        assert_eq!(dir, Path::new("/Users/example/.config/ta/agents"));
     }
 
     #[test]
@@ -759,7 +796,9 @@ command = "my-agent-bin"
 args = ["--headless"]
 "#;
         std::fs::write(agents_dir.join("my-custom-agent.toml"), manifest_toml).unwrap();
-        let discovered = AgentFrameworkManifest::discover(dir.path());
+        let global = tempdir().unwrap();
+        let discovered =
+            AgentFrameworkManifest::discover_with_global_dir(dir.path(), global.path());
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].name, "my-custom-agent");
         assert!(!discovered[0].builtin);
@@ -779,7 +818,9 @@ args:
   - "--headless"
 "#;
         std::fs::write(agents_dir.join("my-yaml-agent.yaml"), manifest_yaml).unwrap();
-        let discovered = AgentFrameworkManifest::discover(dir.path());
+        let global = tempdir().unwrap();
+        let discovered =
+            AgentFrameworkManifest::discover_with_global_dir(dir.path(), global.path());
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].name, "my-yaml-agent");
         assert_eq!(discovered[0].command, "my-yaml-agent-bin");
@@ -796,7 +837,9 @@ args:
         let toml = "name = \"priority-agent\"\ncommand = \"from-toml\"\n";
         std::fs::write(agents_dir.join("priority-agent.yaml"), yaml).unwrap();
         std::fs::write(agents_dir.join("priority-agent.toml"), toml).unwrap();
-        let discovered = AgentFrameworkManifest::discover(dir.path());
+        let global = tempdir().unwrap();
+        let discovered =
+            AgentFrameworkManifest::discover_with_global_dir(dir.path(), global.path());
         // Should discover exactly one manifest (YAML wins).
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].command, "from-yaml");
