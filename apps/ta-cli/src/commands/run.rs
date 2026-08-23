@@ -331,9 +331,21 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
 /// hardcoded `builtin_agent_config()` values which have richer headless_args etc.
 fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> AgentLaunchConfig {
     use ta_runtime::ContextInjectMode;
-    // Append {prompt} placeholder after the manifest's fixed args.
     let mut args_template = manifest.args.clone();
-    args_template.push("{prompt}".to_string());
+    // Append {prompt} as a trailing positional only for frameworks that
+    // actually expect the goal text as a bare CLI argument (Prepend/None
+    // mode, e.g. claude-code, codex). Env/Arg-mode frameworks (e.g.
+    // ta-agent-ollama) receive the goal via $TA_GOAL_CONTEXT or an explicit
+    // --context flag instead — appending {prompt} here as well breaks any
+    // agent binary with a strict CLI parser that rejects unknown positionals
+    // (confirmed against ta-agent-ollama, whose clap parser only accepts
+    // --model/--base-url/--context-file/etc., no bare prompt argument).
+    if matches!(
+        manifest.context_inject,
+        ContextInjectMode::Prepend | ContextInjectMode::None
+    ) {
+        args_template.push("{prompt}".to_string());
+    }
     let injects_context_file = matches!(manifest.context_inject, ContextInjectMode::Prepend);
     AgentLaunchConfig {
         command: manifest.command.clone(),
@@ -2963,6 +2975,7 @@ pub fn execute(
             {
                 let context_text = build_goal_context_text(
                     title,
+                    objective,
                     &goal_id,
                     goal.plan_phase.as_deref(),
                     config,
@@ -7905,9 +7918,13 @@ fn count_changed_recursive(staging_root: &Path, dir: &Path, source_root: &Path) 
 // ── v0.13.8: Memory bridge helper functions ─────────────────────────────────
 
 /// Build a plain goal context text string for env/arg-mode injection.
-/// (Simpler than the full CLAUDE.md prepend — just goal ID, title, plan phase.)
+/// (Simpler than the full CLAUDE.md prepend — just goal ID, title, objective,
+/// plan phase.) Env/Arg-mode frameworks never receive `{prompt}` as a CLI
+/// argument (see `framework_to_launch_config`), so `objective` must be
+/// included here or that information is silently lost for those frameworks.
 fn build_goal_context_text(
     title: &str,
+    objective: &str,
     goal_id: &str,
     plan_phase: Option<&str>,
     config: &GatewayConfig,
@@ -7916,6 +7933,11 @@ fn build_goal_context_text(
     let phase_line = plan_phase
         .map(|p| format!("\n**Plan Phase:** {}", p))
         .unwrap_or_default();
+    let objective_line = if objective.is_empty() {
+        String::new()
+    } else {
+        format!("\n**Objective:** {}", objective)
+    };
     let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
     let community_section = if let Some(src) = source_dir {
         super::community::build_community_context_section(src)
@@ -7923,8 +7945,8 @@ fn build_goal_context_text(
         String::new()
     };
     format!(
-        "# TA Goal Context\n\n**Goal:** {}\n**Goal ID:** {}{}\n{}{}",
-        title, goal_id, phase_line, memory_section, community_section
+        "# TA Goal Context\n\n**Goal:** {}\n**Goal ID:** {}{}{}\n{}{}",
+        title, goal_id, phase_line, objective_line, memory_section, community_section
     )
 }
 
@@ -8615,6 +8637,91 @@ fn inject_compression_url(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ── framework_to_launch_config / build_goal_context_text tests ─────────
+    //
+    // Regression coverage for a real bug found live: framework_to_launch_config
+    // unconditionally appended {prompt} as a trailing positional CLI argument
+    // for every custom framework, including Env/Arg-mode ones (e.g.
+    // ta-agent-ollama) whose binaries don't accept a bare prompt positional
+    // at all and reject it with a clap parse error. Env/Arg-mode frameworks
+    // must receive the goal via $TA_GOAL_CONTEXT / --context instead, and
+    // build_goal_context_text must include the objective text so it isn't
+    // silently dropped for those frameworks once {prompt} is no longer appended.
+
+    fn manifest_with_context_inject(mode_toml: &str) -> ta_runtime::AgentFrameworkManifest {
+        let toml = format!(
+            r#"
+name = "test-agent"
+command = "test-agent-bin"
+args = ["--model", "test-model"]
+context_inject = "{mode_toml}"
+"#
+        );
+        toml::from_str(&toml).unwrap()
+    }
+
+    #[test]
+    fn framework_to_launch_config_omits_prompt_arg_for_env_mode() {
+        let manifest = manifest_with_context_inject("env");
+        let config = framework_to_launch_config(&manifest);
+        assert_eq!(config.args_template, vec!["--model", "test-model"]);
+        assert!(
+            !config.args_template.contains(&"{prompt}".to_string()),
+            "Env-mode frameworks must not receive {{prompt}} as a positional arg: {:?}",
+            config.args_template
+        );
+    }
+
+    #[test]
+    fn framework_to_launch_config_omits_prompt_arg_for_arg_mode() {
+        let manifest = manifest_with_context_inject("arg");
+        let config = framework_to_launch_config(&manifest);
+        assert!(!config.args_template.contains(&"{prompt}".to_string()));
+    }
+
+    #[test]
+    fn framework_to_launch_config_keeps_prompt_arg_for_prepend_mode() {
+        let manifest = manifest_with_context_inject("prepend");
+        let config = framework_to_launch_config(&manifest);
+        assert_eq!(
+            config.args_template,
+            vec!["--model", "test-model", "{prompt}"]
+        );
+    }
+
+    #[test]
+    fn framework_to_launch_config_keeps_prompt_arg_for_none_mode() {
+        let manifest = manifest_with_context_inject("none");
+        let config = framework_to_launch_config(&manifest);
+        assert!(config.args_template.contains(&"{prompt}".to_string()));
+    }
+
+    #[test]
+    fn build_goal_context_text_includes_objective_when_present() {
+        let project = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let text = build_goal_context_text(
+            "Write hello.txt",
+            "Create a file named hello.txt containing the text hello",
+            "goal-123",
+            None,
+            &config,
+            None,
+        );
+        assert!(text.contains("**Goal:** Write hello.txt"));
+        assert!(
+            text.contains("**Objective:** Create a file named hello.txt containing the text hello")
+        );
+    }
+
+    #[test]
+    fn build_goal_context_text_omits_objective_line_when_empty() {
+        let project = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let text = build_goal_context_text("Write hello.txt", "", "goal-123", None, &config, None);
+        assert!(!text.contains("**Objective:**"));
+    }
 
     // ── v0.12.6 count_changed_files tests ───────────────────────
 

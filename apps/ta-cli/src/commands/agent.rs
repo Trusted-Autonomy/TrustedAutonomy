@@ -1094,7 +1094,7 @@ fn framework_new(
              description = \"Ollama agent using {model_name}\"\n\
              type        = \"process\"\n\
              command     = \"ta-agent-ollama\"\n\
-             args        = [\"--model\", \"{model_str}\", \"--base-url\", \"http://localhost:11434\"]\n\
+             args        = [\"--model\", \"{model_name}\", \"--base-url\", \"http://localhost:11434\"]\n\
              sentinel    = \"[goal started]\"\n\
              \n\
              context_file   = \"CLAUDE.md\"\n\
@@ -1119,7 +1119,10 @@ version     = "1.0.0"
 description = "Ollama-backed agent — set --model to your local model"
 type        = "process"
 command     = "ta-agent-ollama"
-args        = ["--model", "ollama/qwen2.5-coder:7b", "--base-url", "http://localhost:11434"]
+# Model name as Ollama itself knows it (no "ollama/" prefix — that prefix is
+# only TA's own `--model ollama/<name>` CLI shorthand, not part of the model
+# identifier Ollama's API expects).
+args        = ["--model", "qwen2.5-coder:7b", "--base-url", "http://localhost:11434"]
 sentinel    = "[goal started]"
 
 context_file   = "CLAUDE.md"
@@ -2325,6 +2328,30 @@ mod tests {
 
     fn test_config(dir: &TempDir) -> GatewayConfig {
         GatewayConfig::for_project(dir.path())
+    }
+
+    #[test]
+    fn framework_new_strips_ollama_prefix_from_model_arg() {
+        // Regression test for a real bug: the generated manifest's `args`
+        // passed the raw "ollama/<model>" shorthand straight through to
+        // ta-agent-ollama's --model flag, which forwards it verbatim to
+        // Ollama's own API — but Ollama's model names never have that
+        // prefix (it's only TA's own CLI shorthand for selecting the
+        // ollama framework). This caused every generated manifest to fail
+        // with a 404 "model not found" at actual run time.
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let output_path = dir.path().join("qwen3-14b.toml");
+        framework_new(Some("ollama/qwen3:14b"), None, Some(&output_path), &config).unwrap();
+        let content = std::fs::read_to_string(&output_path).unwrap();
+        assert!(
+            content.contains(r#"args        = ["--model", "qwen3:14b", "#),
+            "manifest args must use the bare model name, not the ollama/ shorthand: {content}"
+        );
+        assert!(
+            !content.contains(r#""ollama/qwen3:14b""#),
+            "manifest args must not contain the unstripped ollama/ prefix: {content}"
+        );
     }
 
     #[test]
