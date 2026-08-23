@@ -2342,13 +2342,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
         let output_path = dir.path().join("qwen3-14b.toml");
-        framework_new(
-            Some("ollama/qwen3:14b"),
-            None,
-            Some(&output_path),
-            &config,
-        )
-        .unwrap();
+        framework_new(Some("ollama/qwen3:14b"), None, Some(&output_path), &config).unwrap();
         let content = std::fs::read_to_string(&output_path).unwrap();
         assert!(
             content.contains(r#"args        = ["--model", "qwen3:14b", "#),
