@@ -31,6 +31,7 @@ members = [
     "crates/ta-workflow",
     "crates/ta-build",
     "crates/ta-output-schema",
+    "crates/ta-plan",
     "crates/ta-plugin",
     "crates/ta-runtime",
     "crates/ta-actions",

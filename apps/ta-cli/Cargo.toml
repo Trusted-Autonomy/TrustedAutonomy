@@ -70,6 +70,7 @@ ta-submit = { path = "../../crates/ta-submit", version = "0.17.10-alpha.4" }
 ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
 ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.10-alpha.4" }
 ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.10-alpha.4" }
+ta-plan = { path = "../../crates/ta-plan", version = "0.17.10-alpha.4" }
 ta-build = { path = "../../crates/ta-build", version = "0.17.10-alpha.4" }
 ta-output-schema = { path = "../../crates/ta-output-schema", version = "0.17.10-alpha.4" }
 ta-runtime = { path = "../../crates/ta-runtime", version = "0.17.10-alpha.4" }
