@@ -10478,6 +10478,10 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 
 > **Focus**: Live runtime coordination between concurrently-running virtual-team agents. Complements `task-graph`'s static, plan-time wave scheduling with a live presence/discovery/handoff layer for cases where conflicts aren't knowable in advance — exactly the class of gap that caused v0.17.10.2's data-loss incident.
+
+### v0.17.10.3.1 — Create a new empty Rust crate at crates/ta-plan/. Steps: (1) create crates/ta-plan/Cargo.toml with name = "ta-plan", version matching the workspace version, and edition = "2021". (2) create crates/ta-plan/src/lib.rs containing only a doc comment, no logic. (3) add "crates/ta-plan" to the [workspace] members list in the root Cargo.toml. Do not implement any PlanStore logic yet -- this task is only crate scaffolding, nothing else.
+<!-- status: in_progress -->
+*Inserted goal — not in original plan.*
 ### v0.17.11.1 — TA-Side Plan Storage Abstraction (`PlanStore` trait)
 <!-- status: pending -->
 **Depends on**: v0.17.10.3/v0.17.10.4 (apply-pipeline correctness — this phase touches the same PLAN.md write paths those fixes hardened, must land on top of them, not before)
