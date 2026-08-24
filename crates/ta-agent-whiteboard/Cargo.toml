@@ -1,0 +1,30 @@
+[package]
+name = "ta-agent-whiteboard"
+version.workspace = true
+edition = "2021"
+description = "Live coordination substrate for concurrently-running TA agents — presence, discovery, task claiming, and durable handoff (v0.17.11.2)"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "autonomy", "coordination", "nats"]
+categories = ["development-tools", "asynchronous"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+glob = { workspace = true }
+toml = { workspace = true }
+async-trait = "0.1"
+async-nats = "0.50"
+bytes = "1"
+futures-util = "0.3"
+ta-session = { path = "../ta-session", version = "0.17.10-alpha.4" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -35,6 +35,7 @@ pub mod server;
 pub mod tools;
 pub mod validation;
 pub mod verify_audit;
+pub mod whiteboard_check;
 
 pub use config::GatewayConfig;
 pub use error::GatewayError;

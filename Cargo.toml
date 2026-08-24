@@ -49,6 +49,7 @@ members = [
     "crates/ta-connectors/unity",
     "apps/ta-cli",
     "crates/ta-agent-ollama",
+    "crates/ta-agent-whiteboard",
     "crates/ta-extension",
     "crates/ta-init",
     "crates/ta-governed-paths",
