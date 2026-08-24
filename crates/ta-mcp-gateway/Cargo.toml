@@ -34,6 +34,7 @@ ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.10-alp
 ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.10-alpha.4" }
 ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.10-alpha.4" }
 ta-goal = { path = "../ta-goal", version = "0.17.10-alpha.4" }
+ta-plan = { path = "../ta-plan", version = "0.17.10-alpha.4" }
 ta-policy = { path = "../ta-policy", version = "0.17.10-alpha.4" }
 ta-workspace = { path = "../ta-workspace", version = "0.17.10-alpha.4" }
 ta-workflow = { path = "../ta-workflow", version = "0.17.10-alpha.4" }

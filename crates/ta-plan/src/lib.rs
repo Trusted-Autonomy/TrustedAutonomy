@@ -14,6 +14,7 @@
 //! with `FilePlanStore` (item 4) as its sole implementation for now.
 
 pub mod history;
+pub mod memory_store;
 pub mod parse;
 pub mod query;
 pub mod schema;
@@ -23,6 +24,7 @@ pub use history::{
     insert_adhoc_phase, load_history, mark_phase_in_source, record_history,
     reset_phase_if_in_progress,
 };
+pub use memory_store::InMemoryPlanStore;
 pub use parse::{
     load_plan, parse_plan, parse_plan_with_schema, phase_ids_match, update_phase_status,
     update_phase_status_with_schema,
@@ -37,4 +39,4 @@ pub use query::{
 pub use schema::{
     default_doc_search_dirs, default_statuses, PhasePattern, PlanPhase, PlanSchema, PlanStatus,
 };
-pub use store::{FilePlanStore, PlanStore, PlanStoreCapabilities};
+pub use store::{ChangeCursor, ChangeSet, FilePlanStore, PlanStore, PlanStoreCapabilities};

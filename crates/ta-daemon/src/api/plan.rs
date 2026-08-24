@@ -818,10 +818,33 @@ pub async fn claim_phase(
             .into_response();
     }
 
-    // Step 3: write `in_progress` marker to PLAN.md.
-    if let Some(ref content) = plan_content {
-        let updated = update_phase_status_in_content(content, &phase_id, "in_progress");
-        if let Err(e) = std::fs::write(&plan_path, &updated) {
+    // Steps 3+4: write the `in_progress` marker to PLAN.md and record the
+    // transition in plan_history.jsonl — via `PlanStore` (v0.17.11.1.2 item
+    // 1) rather than this handler's own ad hoc write + manual JSONL append,
+    // which duplicated `ta_plan::history::mark_phase_in_source`. Routing
+    // through the trait here (not just `ta_plan`'s free functions directly)
+    // means this call site never needs touching again once a non-file
+    // `PlanStore` backend lands. Note: `mark_phase_in_source` additionally
+    // guards against downgrading an already-`done` phase back to
+    // `in_progress` — strictly safer than this handler's prior unconditional
+    // write, not a behavior loss.
+    if plan_content.is_some() {
+        let store: Box<dyn ta_plan::PlanStore> =
+            match ta_plan::FilePlanStore::new(&state.project_root, &state.goals_dir) {
+                Ok(s) => Box::new(s),
+                Err(e) => {
+                    state.phase_claims.release(&phase_id);
+                    return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        serde_json::json!({ "error": format!("Failed to open PlanStore: {}", e) }),
+                    ),
+                )
+                    .into_response();
+                }
+            };
+        if let Err(e) = store.update_phase_status(&phase_id, ta_plan::PlanStatus::InProgress, None)
+        {
             state.phase_claims.release(&phase_id);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -829,24 +852,6 @@ pub async fn claim_phase(
             )
                 .into_response();
         }
-    }
-
-    // Step 4: record in plan_history.jsonl.
-    let history_path = state.project_root.join(".ta/plan_history.jsonl");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&history_path)
-    {
-        use std::io::Write as _;
-        let entry = serde_json::json!({
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "phase_id": phase_id,
-            "old_status": "pending",
-            "new_status": "in_progress",
-            "source": "daemon_claim",
-        });
-        let _ = writeln!(file, "{}", entry);
     }
 
     (
@@ -895,46 +900,6 @@ pub async fn release_phase(
         })),
     )
         .into_response()
-}
-
-/// Update a phase status marker in PLAN.md content.
-fn update_phase_status_in_content(content: &str, phase_id: &str, new_status: &str) -> String {
-    let status_re = regex::Regex::new(r"<!--\s*status:\s*\w+\s*-->").expect("static regex");
-    // Phase header patterns (same as parse_plan_phases).
-    let phase_re = regex::Regex::new(
-        r"(?m)^(?:##\s+Phase[\s\u{00a0}]+([0-9a-z.]+)\s+[—\-]|###\s+(v[\d.]+[a-z]?)\s+[—\-])",
-    )
-    .expect("static regex");
-
-    let lines: Vec<&str> = content.lines().collect();
-    let mut result = Vec::with_capacity(lines.len());
-    let mut in_target = false;
-    let mut replaced = false;
-
-    for line in &lines {
-        if phase_re.is_match(line) {
-            // Extract the ID from this header.
-            let header_id = if let Some(caps) = phase_re.captures(line) {
-                caps.get(1)
-                    .or_else(|| caps.get(2))
-                    .map(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            } else {
-                String::new()
-            };
-            in_target = ids_match(&header_id, phase_id);
-            replaced = false;
-        }
-        if in_target && !replaced && status_re.is_match(line) {
-            result.push(format!("<!-- status: {} -->", new_status));
-            replaced = true;
-            in_target = false;
-            continue;
-        }
-        result.push(line.to_string());
-    }
-    result.join("\n")
 }
 
 // ── Goal start ─────────────────────────────────────────────────
@@ -1347,6 +1312,7 @@ pub async fn plan_new(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ta_plan::PlanStore as _;
 
     const SAMPLE_PLAN: &str = r#"# Project Plan
 
@@ -1658,6 +1624,9 @@ Future work.
 
     #[test]
     fn denied_draft_resets_planmd_to_pending() {
+        // Exercises the same scenario via `PlanStore` (v0.17.11.1.2 item 1)
+        // now that `claim_phase`'s write path routes through it rather than
+        // the daemon's own now-removed `update_phase_status_in_content`.
         let dir = tempfile::tempdir().unwrap();
         let plan_path = dir.path().join("PLAN.md");
         std::fs::write(
@@ -1665,13 +1634,13 @@ Future work.
             "### v0.1.0 — Test\n<!-- status: in_progress -->\n",
         )
         .unwrap();
+        let goals_dir = dir.path().join(".ta/goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
 
-        let updated = update_phase_status_in_content(
-            &std::fs::read_to_string(&plan_path).unwrap(),
-            "v0.1.0",
-            "pending",
-        );
-        std::fs::write(&plan_path, &updated).unwrap();
+        let store = ta_plan::FilePlanStore::new(dir.path(), &goals_dir).unwrap();
+        store
+            .update_phase_status("v0.1.0", ta_plan::PlanStatus::Pending, Some("denied"))
+            .unwrap();
 
         let content = std::fs::read_to_string(&plan_path).unwrap();
         assert!(
@@ -1763,6 +1732,9 @@ Future work.
 
     #[test]
     fn applied_draft_marks_phase_done() {
+        // Exercises the same scenario via `PlanStore` (v0.17.11.1.2 item 1)
+        // now that `claim_phase`'s write path routes through it rather than
+        // the daemon's own now-removed `update_phase_status_in_content`.
         let dir = tempfile::tempdir().unwrap();
         let plan_path = dir.path().join("PLAN.md");
         std::fs::write(
@@ -1770,13 +1742,13 @@ Future work.
             "### v0.3.0 — Apply Test\n<!-- status: in_progress -->\n",
         )
         .unwrap();
+        let goals_dir = dir.path().join(".ta/goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
 
-        let updated = update_phase_status_in_content(
-            &std::fs::read_to_string(&plan_path).unwrap(),
-            "v0.3.0",
-            "done",
-        );
-        std::fs::write(&plan_path, &updated).unwrap();
+        let store = ta_plan::FilePlanStore::new(dir.path(), &goals_dir).unwrap();
+        store
+            .update_phase_status("v0.3.0", ta_plan::PlanStatus::Done, None)
+            .unwrap();
 
         let content = std::fs::read_to_string(&plan_path).unwrap();
         assert!(
