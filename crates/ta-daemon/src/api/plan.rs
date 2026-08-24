@@ -165,6 +165,24 @@ pub struct ApiPlanPhase {
 ///
 /// Extracts id, title, status, description (first paragraph / Goal line),
 /// checklist items (`- [ ]` / `- [x]`), and depends_on comments.
+///
+/// **Deliberately kept separate from `ta_plan::parse_plan_with_schema`**
+/// (v0.17.11.1's PLAN.md schema/parse extraction), not an oversight or an
+/// un-migrated duplicate: `ApiPlanPhase` is a genuinely different,
+/// API-response-shaped type — it extracts per-item checklist state
+/// (`items: Vec<PlanItem>`, done/text) and a free-text `description` that
+/// `ta_plan::PlanPhase` does not track at all, and its dependency lookahead
+/// window (8 lines) already differs from `ta_plan`'s (5 lines) even before
+/// this decision, meaning the two were never trivially identical to begin
+/// with. This function backs the live `/api/plan/phases` endpoint Studio's
+/// UI polls — merging it into a `ta_plan`-delegating implementation is a
+/// real, non-trivial refactor (matching lookahead windows, verifying the
+/// item/description extraction layers correctly on top) that risks a
+/// user-visible regression in a live-used endpoint if rushed. Evaluated and
+/// consciously deferred rather than attempted under time pressure; a
+/// future pass can migrate this to delegate to `ta_plan` for the
+/// header/status/depends_on extraction specifically, once it can be done
+/// with a proper behavior-parity test proving no drift.
 pub fn parse_plan_phases(content: &str) -> Vec<ApiPlanPhase> {
     // Matches either:
     //   ## Phase 4b — Title
