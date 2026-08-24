@@ -363,6 +363,32 @@ async fn probe_tool_support(client: &OllamaClient, system_prompt: &str) -> bool 
     }
 }
 
+/// Whether a tool call represents real work (a filesystem/shell mutation) as
+/// opposed to read-only inspection (file_read/file_list/web_fetch/memory_*).
+/// Both loops use this to detect the "read everything, then summarize instead
+/// of acting" failure mode: a model that calls only read tools and then stops
+/// has not actually done the task, even though it "called tools."
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(name, "file_write" | "bash_exec")
+}
+
+/// How many times a loop will nudge a model that stopped without using a
+/// mutating tool, before accepting the turn as genuinely complete. Bounded
+/// so a goal that legitimately requires no changes doesn't loop forever.
+const MAX_NO_ACTION_NUDGES: usize = 2;
+
+const NO_ACTION_NUDGE: &str = "You have not made any file changes or run any commands yet. \
+If the goal requires modifying files or running commands, use the file_write or bash_exec \
+tool now — do not just describe what you would do. If the goal genuinely requires no changes, \
+reply with a one-line confirmation that no changes are needed and briefly explain why.";
+
+/// Whether a loop that stopped calling tools this turn should be nudged to
+/// keep going rather than accepted as complete. True only when no mutating
+/// tool has fired yet in this run and the nudge budget isn't exhausted.
+fn should_nudge(mutating_tool_used: bool, nudges_remaining: usize) -> bool {
+    !mutating_tool_used && nudges_remaining > 0
+}
+
 /// Run the full function-calling tool-use loop.
 async fn run_tool_loop(
     client: &OllamaClient,
@@ -372,6 +398,8 @@ async fn run_tool_loop(
 ) -> Result<()> {
     let tool_defs = tools.definitions();
     let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut mutating_tool_used = false;
+    let mut nudges_remaining = MAX_NO_ACTION_NUDGES;
 
     // Seed the conversation with the user goal from the system prompt (already injected).
     messages.push(serde_json::json!({
@@ -417,8 +445,25 @@ async fn run_tool_loop(
             .unwrap_or_default();
 
         if tool_calls.is_empty() {
-            // No tool calls — agent is done.
-            tracing::debug!(finish_reason, "No tool calls — agent complete");
+            if should_nudge(mutating_tool_used, nudges_remaining) {
+                nudges_remaining -= 1;
+                tracing::debug!(
+                    nudges_remaining,
+                    "No tool calls and no mutating tool used yet — nudging model"
+                );
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": NO_ACTION_NUDGE
+                }));
+                continue;
+            }
+            // No tool calls (and either a mutating tool already ran, or the
+            // nudge budget is exhausted) — agent is done.
+            tracing::debug!(
+                finish_reason,
+                mutating_tool_used,
+                "No tool calls — agent complete"
+            );
             break;
         }
 
@@ -443,6 +488,10 @@ async fn run_tool_loop(
                 .unwrap_or_default();
 
             eprintln!("[ta-agent-ollama] tool: {} {:?}", fn_name, fn_args);
+
+            if is_mutating_tool(fn_name) {
+                mutating_tool_used = true;
+            }
 
             let result = tools.call(fn_name, &fn_args).await;
             let result_content = match result {
@@ -482,6 +531,8 @@ async fn run_cot_loop(
     );
 
     let mut history = String::new();
+    let mut mutating_tool_used = false;
+    let mut nudges_remaining = MAX_NO_ACTION_NUDGES;
 
     for turn in 0..max_turns {
         tracing::debug!(turn, "CoT loop turn");
@@ -513,6 +564,11 @@ async fn run_cot_loop(
                         .unwrap_or("unknown");
                     let args = call.get("args").cloned().unwrap_or_default();
                     eprintln!("[ta-agent-ollama] cot-tool: {} {:?}", name, args);
+
+                    if is_mutating_tool(name) {
+                        mutating_tool_used = true;
+                    }
+
                     let result = tools.call(name, &args).await;
                     let result_str = match result {
                         Ok(v) => v.to_string(),
@@ -524,8 +580,18 @@ async fn run_cot_loop(
             }
         }
 
-        // If no tool calls, the agent is done.
         if !called_any {
+            if should_nudge(mutating_tool_used, nudges_remaining) {
+                nudges_remaining -= 1;
+                tracing::debug!(
+                    nudges_remaining,
+                    "No tool calls and no mutating tool used yet — nudging model"
+                );
+                history.push_str(&format!("System: {}\n\n", NO_ACTION_NUDGE));
+                continue;
+            }
+            // No tool calls (and either a mutating tool already ran, or the
+            // nudge budget is exhausted) — agent is done.
             break;
         }
     }
@@ -620,5 +686,45 @@ mod tests {
         std::fs::write(&ctx_path, "# Goal\nDo something.").unwrap();
         let result = load_context(Some(&ctx_path)).unwrap();
         assert_eq!(result, "# Goal\nDo something.");
+    }
+
+    #[test]
+    fn is_mutating_tool_flags_file_write_and_bash_exec() {
+        assert!(is_mutating_tool("file_write"));
+        assert!(is_mutating_tool("bash_exec"));
+    }
+
+    #[test]
+    fn is_mutating_tool_excludes_read_only_tools() {
+        assert!(!is_mutating_tool("file_read"));
+        assert!(!is_mutating_tool("file_list"));
+        assert!(!is_mutating_tool("web_fetch"));
+        assert!(!is_mutating_tool("memory_read"));
+        assert!(!is_mutating_tool("memory_write"));
+        assert!(!is_mutating_tool("memory_search"));
+        assert!(!is_mutating_tool("unknown"));
+    }
+
+    #[test]
+    fn should_nudge_when_no_mutating_tool_and_budget_remains() {
+        assert!(should_nudge(false, MAX_NO_ACTION_NUDGES));
+        assert!(should_nudge(false, 1));
+    }
+
+    #[test]
+    fn should_not_nudge_once_a_mutating_tool_has_fired() {
+        // This is the core regression case: a model that only called
+        // file_read/memory_search and then stopped used to be accepted as
+        // "done" with zero code changes. Once file_write/bash_exec has
+        // fired, though, stopping is legitimate and must not be nudged.
+        assert!(!should_nudge(true, MAX_NO_ACTION_NUDGES));
+        assert!(!should_nudge(true, 0));
+    }
+
+    #[test]
+    fn should_not_nudge_once_budget_is_exhausted() {
+        // Bounded: a goal that genuinely requires no changes must not loop
+        // forever just because the model never calls a mutating tool.
+        assert!(!should_nudge(false, 0));
     }
 }
