@@ -42,10 +42,10 @@ ta-workflow = { path = "../ta-workflow", version = "0.17.11-alpha.3" }
 ta-actions = { path = "../ta-actions", version = "0.17.11-alpha.3" }
 ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.3" }
 ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
-ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.4" }
-ta-session = { path = "../ta-session", version = "0.17.11-alpha.4" }
-ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.4" }
-ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.4" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.3" }
+ta-session = { path = "../ta-session", version = "0.17.11-alpha.3" }
+ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.3" }
+ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.3" }
 
 
 [dev-dependencies]
