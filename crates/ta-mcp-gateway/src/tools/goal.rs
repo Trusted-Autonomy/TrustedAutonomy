@@ -394,6 +394,21 @@ fn launch_goal_agent(
     source_dir: &str,
     phase: Option<&str>,
 ) -> bool {
+    // v0.17.11.2 item 6: live pre-launch visibility into who else is
+    // already active on this source_dir, complementing task-graph's static
+    // wave planning. Advisory only — logged, never blocking; a no-op
+    // unless the project has opted into [whiteboard] coordination.
+    let concurrent = crate::whiteboard_check::other_active_agents_on(source_dir);
+    if !concurrent.is_empty() {
+        tracing::warn!(
+            goal_id = %goal_id,
+            source_dir,
+            "whiteboard: {} other agent(s) already active on this source_dir: {}",
+            concurrent.len(),
+            concurrent.join(", ")
+        );
+    }
+
     let mut cmd = std::process::Command::new("ta");
     cmd.arg("run")
         .arg(title)

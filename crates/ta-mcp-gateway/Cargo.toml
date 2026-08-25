@@ -45,6 +45,7 @@ ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag =
 ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.5" }
 ta-session = { path = "../ta-session", version = "0.17.11-alpha.5" }
 ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.5" }
+ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.5" }
 
 
 [dev-dependencies]
