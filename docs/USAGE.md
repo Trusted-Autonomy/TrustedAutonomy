@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.11-alpha.4
+**Version**: 0.17.11-alpha.5
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -704,6 +704,28 @@ sudo cp ta ta-daemon /usr/local/bin/
 ```
 
 > **Note**: If `ta-daemon` is not found, commands that require the daemon (e.g. `ta daemon start`, `ta run`, `ta shell`) will fail with a "daemon binary not found" error. Ensure both binaries are on your `$PATH` or in the same directory.
+
+**Verifying a release.** Options A and B (the installer and the one-line script) verify checksums automatically, plus the release manifest's cryptographic signature when `cosign` is installed. For Option C (manual download), verify independently before trusting a binary that runs with your full filesystem and credential-vault access:
+
+```bash
+# Download the release's checksum manifest and its cosign signature bundle
+curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest/download/SHA256SUMS.txt
+curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest/download/SHA256SUMS.txt.bundle
+
+# Verify the manifest was signed by this repo's own GitHub Actions release workflow
+# (install cosign first: https://docs.sigstore.dev/system_config/installation/)
+cosign verify-blob \
+  --bundle SHA256SUMS.txt.bundle \
+  --certificate-identity-regexp '^https://github.com/Trusted-Autonomy/TrustedAutonomy/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS.txt
+
+# Then verify your downloaded archive against the now-trusted manifest
+sha256sum -c SHA256SUMS.txt --ignore-missing   # Linux
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing  # macOS
+```
+
+Signing is keyless (Sigstore, via the release workflow's own GitHub Actions OIDC identity) — there's no long-lived signing key to separately trust or verify against; `cosign` itself checks the certificate chain against Sigstore's public transparency log.
 
 #### Windows platform notes
 

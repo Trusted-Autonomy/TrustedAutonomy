@@ -17,6 +17,10 @@ on:
 
 permissions:
   contents: write
+  # Required for cosign's keyless signing (Sigstore) — exchanges this
+  # workflow's own OIDC identity for a short-lived signing certificate,
+  # no long-lived signing key to manage or leak (v0.17.11.5).
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -459,6 +463,27 @@ jobs:
           cat SHA256SUMS-*.txt > SHA256SUMS.txt
           rm -f SHA256SUMS-*.txt
 
+      # Sigstore/cosign keyless signing (v0.17.11.5, closing red-team finding
+      # TA-05: a checksum published next to the file it checksums proves
+      # nothing against a compromised release step or account). Signs the
+      # merged SHA256SUMS.txt manifest, not every individual binary — the
+      # manifest already commits to every artifact's hash, so one signature
+      # covers the whole release. Keyless: exchanges this workflow's own
+      # GitHub Actions OIDC identity for a short-lived signing certificate
+      # (see the `id-token: write` permission above) — no long-lived signing
+      # key for this repo to manage, rotate, or leak. The `.bundle` file
+      # written into `artifacts/` is picked up automatically by the
+      # existing `gh release upload artifacts/*` step below.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums with cosign (keyless)
+        run: |
+          cd artifacts
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.txt.bundle \
+            SHA256SUMS.txt
+
       - name: Build release body
         id: release_body
         run: |
@@ -543,6 +568,7 @@ jobs:
             "ta-${TAG}-x86_64-pc-windows-msvc.zip"
             "ta-${TAG}-x86_64-pc-windows-msvc.msi"
             "SHA256SUMS.txt"
+            "SHA256SUMS.txt.bundle"
           )
           MISSING=()
           for f in "${REQUIRED[@]}"; do
@@ -641,6 +667,7 @@ jobs:
             "ta-${TAG}-x86_64-pc-windows-msvc.zip"
             "ta-${TAG}-x86_64-pc-windows-msvc.msi"
             "SHA256SUMS.txt"
+            "SHA256SUMS.txt.bundle"
           )
 
           MISSING=()

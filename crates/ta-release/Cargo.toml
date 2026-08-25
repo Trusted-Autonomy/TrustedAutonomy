@@ -18,7 +18,7 @@ toml = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["multipart"] }
-ta-plugin = { path = "../ta-plugin", version = "0.17.11-alpha.4" }
+ta-plugin = { path = "../ta-plugin", version = "0.17.11-alpha.5" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
