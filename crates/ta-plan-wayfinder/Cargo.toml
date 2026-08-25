@@ -19,10 +19,10 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 url = "2"
-ta-plan = { path = "../ta-plan", version = "0.17.11-alpha.3" }
-ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.3" }
-ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.3" }
-ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.3" }
+ta-plan = { path = "../ta-plan", version = "0.17.11-alpha.4" }
+ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.4" }
+ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.4" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.4" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
