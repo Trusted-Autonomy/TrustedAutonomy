@@ -152,6 +152,14 @@ async fn main() -> Result<()> {
     // Load daemon configuration.
     let daemon_config = config::DaemonConfig::load(&project_root);
 
+    // Refuse to start with a non-loopback bind and no token requirement
+    // (v0.17.11.4, TA-01b) — unlike the warn-only checks below, this one
+    // aborts: the gap it closes is full unauthenticated Admin API access,
+    // not an optional feature that might be unused.
+    if let Err(e) = config::validate_auth_posture(&daemon_config.server, &daemon_config.auth) {
+        anyhow::bail!("Refusing to start: {e}");
+    }
+
     // Validate security-sensitive config fields at startup (v0.17.0.9).
     // Warn on misconfiguration; don't abort — the field may be unused if the watchdog
     // is disabled or no wake-event has occurred.
@@ -433,8 +441,10 @@ async fn main() -> Result<()> {
         if let Some(web_port) = cli.web_port {
             let gateway_config = GatewayConfig::for_project(&project_root);
             let dir = gateway_config.pr_packages_dir.clone();
+            let root = project_root.clone();
+            let auth = daemon_config.auth.clone();
             tokio::spawn(async move {
-                if let Err(e) = web::serve_web_ui(dir, web_port).await {
+                if let Err(e) = web::serve_web_ui(dir, web_port, root, auth).await {
                     tracing::error!("Web UI server error: {}", e);
                 }
             });
@@ -460,8 +470,10 @@ async fn main() -> Result<()> {
         // Spawn optional web UI server.
         if let Some(port) = web_port {
             let dir = pr_packages_dir.clone();
+            let root = project_root.clone();
+            let auth = daemon_config.auth.clone();
             tokio::spawn(async move {
-                if let Err(e) = web::serve_web_ui(dir, port).await {
+                if let Err(e) = web::serve_web_ui(dir, port, root, auth).await {
                     tracing::error!("Web UI server error: {}", e);
                 }
             });

@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.11-alpha.3
+**Version**: 0.17.11-alpha.4
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -9028,6 +9028,8 @@ config_path = ".ta/sandbox.toml"   # Optional — uses built-in defaults if omit
 ```
 
 When enabled, the daemon loads the sandbox config and validates commands against the allowlist before execution. See the `ta-sandbox` crate for the sandbox configuration format.
+
+**This is a different mechanism from [Agent Sandboxing (`[sandbox]`)](#agent-sandboxing-sandbox) above, and the two shouldn't be conflated.** The `ta-sandbox` crate enforces a command-name allowlist, a working-directory convention, and pattern-matched argument/network-target checks — application-level policy, not an OS-enforced boundary (no seccomp/Landlock/namespaces). It's what backs this orchestrator command validation and the DB proxy's connection-target checks (`NetworkPolicy::for_db_proxy`). An allowed command that itself has a plugin or config-execution surface (a linter's plugin loader, a test runner's setup hook, a build script) has no OS-level barrier stopping it from writing outside the intended directory or reaching a network target the policy meant to deny — the allowlist stops an agent from running something disallowed directly, not what an allowed "trusted" tool can be made to do internally. For genuine OS-level process isolation, use `[sandbox]` above (`sandbox-exec`/`bwrap`/AppContainer), which this command-validation layer doesn't provide and isn't a substitute for.
 
 #### Input Routing
 

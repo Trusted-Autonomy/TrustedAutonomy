@@ -999,6 +999,25 @@ pub struct AuthConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<ApiKeyEntry>,
+    /// Peer IP addresses allowed to present `X-Forwarded-For` (v0.17.11.4,
+    /// TA-02). Empty by default — every request's locality is decided by
+    /// its raw TCP peer address alone, exactly as before this field
+    /// existed. Populate this with a reverse proxy's own address (commonly
+    /// `127.0.0.1` for a same-host proxy) to have `auth_middleware` trust
+    /// *that specific peer's* `X-Forwarded-For` header for the real
+    /// client address, instead of treating the proxy's own loopback
+    /// connection as "the caller is local." Never set this to a value an
+    /// untrusted party could also present as their own peer address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
+    /// Explicit, honestly-named escape hatch for `validate_auth_posture`
+    /// (v0.17.11.4, TA-01b) — set `true` to allow the daemon to start
+    /// bound to a non-loopback address with `require_token = false`
+    /// anyway (e.g. a deliberately open lab/demo instance). Default
+    /// `false`: refuse to start in that combination rather than silently
+    /// serving full Admin access to the network.
+    #[serde(default)]
+    pub allow_insecure_bind: bool,
 }
 
 impl Default for AuthConfig {
@@ -1008,6 +1027,8 @@ impl Default for AuthConfig {
             local_bypass: true,
             users: Vec::new(),
             api_keys: Vec::new(),
+            trusted_proxies: Vec::new(),
+            allow_insecure_bind: false,
         }
     }
 }
@@ -1912,6 +1933,39 @@ pub fn validate_connectivity_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses (unlike `validate_connectivity_url`'s warn-only posture — this
+/// gap is a live admin-access exposure, not an optional watchdog feature)
+/// the combination of a non-loopback `[server] bind` with `[auth]
+/// require_token = false` (v0.17.11.4, TA-01b). That combination serves
+/// the daemon's full API — including draft apply, which writes to the real
+/// project — to anyone who can reach the bound port with zero
+/// authentication. `allow_insecure_bind = true` is the explicit, honestly-
+/// named escape hatch for a deliberately open instance.
+pub fn validate_auth_posture(server: &ServerConfig, auth: &AuthConfig) -> Result<(), String> {
+    if auth.allow_insecure_bind {
+        return Ok(());
+    }
+    let is_loopback_bind = server
+        .bind
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or_else(|_| server.bind.eq_ignore_ascii_case("localhost"));
+    if !is_loopback_bind && !auth.require_token {
+        return Err(format!(
+            "[server] bind = \"{bind}\" is not loopback-only, but [auth] require_token = false. \
+             This would serve the full daemon API — including draft apply, which writes to the \
+             real project — to anyone who can reach {bind}:{port} with zero authentication. Fix \
+             by either setting [auth] require_token = true (and creating a token with `ta token \
+             create`), or setting [server] bind back to \"127.0.0.1\" for local-only use. If this \
+             is a deliberately open instance, set [auth] allow_insecure_bind = true to proceed \
+             anyway.",
+            bind = server.bind,
+            port = server.port
+        ));
+    }
+    Ok(())
+}
+
 /// Experimental feature flags — all default `false`.
 ///
 /// Add `[experimental]` to `.ta/config.toml` to opt in:
@@ -2181,6 +2235,75 @@ mod tests {
         assert!(config.auth.local_bypass);
         assert_eq!(config.commands.timeout_secs, 120);
         assert_eq!(config.agent.max_sessions, 3);
+    }
+
+    #[test]
+    fn validate_auth_posture_rejects_non_loopback_bind_with_no_token_required() {
+        let server = ServerConfig {
+            bind: "0.0.0.0".to_string(),
+            ..Default::default()
+        };
+        let auth = AuthConfig {
+            require_token: false,
+            ..Default::default()
+        };
+        let err = validate_auth_posture(&server, &auth).unwrap_err();
+        assert!(err.contains("require_token"));
+    }
+
+    #[test]
+    fn validate_auth_posture_allows_non_loopback_bind_with_token_required() {
+        let server = ServerConfig {
+            bind: "0.0.0.0".to_string(),
+            ..Default::default()
+        };
+        let auth = AuthConfig {
+            require_token: true,
+            ..Default::default()
+        };
+        assert!(validate_auth_posture(&server, &auth).is_ok());
+    }
+
+    #[test]
+    fn validate_auth_posture_allows_default_loopback_bind_regardless_of_token_setting() {
+        let server = ServerConfig::default();
+        let auth = AuthConfig {
+            require_token: false,
+            ..Default::default()
+        };
+        assert!(validate_auth_posture(&server, &auth).is_ok());
+    }
+
+    #[test]
+    fn validate_auth_posture_escape_hatch_allows_insecure_bind() {
+        let server = ServerConfig {
+            bind: "0.0.0.0".to_string(),
+            ..Default::default()
+        };
+        let auth = AuthConfig {
+            require_token: false,
+            allow_insecure_bind: true,
+            ..Default::default()
+        };
+        assert!(validate_auth_posture(&server, &auth).is_ok());
+    }
+
+    #[test]
+    fn validate_auth_posture_treats_ipv6_loopback_and_localhost_as_safe() {
+        let auth_open = AuthConfig {
+            require_token: false,
+            ..Default::default()
+        };
+        for bind in ["::1", "localhost"] {
+            let server = ServerConfig {
+                bind: bind.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                validate_auth_posture(&server, &auth_open).is_ok(),
+                "bind={bind} should be treated as loopback-safe"
+            );
+        }
     }
 
     #[test]
