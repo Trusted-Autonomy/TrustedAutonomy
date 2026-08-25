@@ -74,6 +74,8 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "human-verify-invocations.jsonl", // ta_human_verify invocation log (v0.17.0.12.26)
     "verify-audit-reviewed.jsonl", // ta_human_verify review cursor (v0.17.0.12.26)
     "verify-threshold-proposals.jsonl", // ta_human_verify threshold proposals (v0.17.0.12.26)
+    "credentials.json", // ta-credentials vault — age-encrypted at rest, but the ciphertext itself must never be committed (pre-existing gap, caught by this test v0.17.11.3)
+    "wayfinder_cache.json", // ta-plan-wayfinder local sync cache/outbox (v0.17.11.3) — machine-local, not shared plan state
     // Glob patterns — gitignore prefixes these with .ta/ so they match .ta/*.log etc.
     "*.log",
     "*.pid",

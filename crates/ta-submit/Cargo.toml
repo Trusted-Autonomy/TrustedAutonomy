@@ -16,10 +16,10 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.17.10-alpha.4" }
-ta-goal = { path = "../ta-goal", version = "0.17.10-alpha.4" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.10-alpha.4" }
-ta-plugin = { path = "../ta-plugin", version = "0.17.10-alpha.4" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.11-alpha.3" }
+ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.3" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.11-alpha.3" }
+ta-plugin = { path = "../ta-plugin", version = "0.17.11-alpha.3" }
 ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
 toml = "0.8"
 

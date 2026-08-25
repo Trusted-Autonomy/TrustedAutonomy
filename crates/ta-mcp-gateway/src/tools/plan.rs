@@ -3,7 +3,6 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use regex::Regex;
 use rmcp::model::*;
 use rmcp::ErrorData as McpError;
 
@@ -112,108 +111,30 @@ pub fn handle_plan(
 
 // ── ta_plan_status: lazy on-demand plan checklist (v0.14.3.2) ────────────────
 
-/// A parsed plan phase (minimal representation for the status tool).
-#[derive(Debug, Clone)]
-struct PlanPhase {
-    id: String,
-    title: String,
-    status: PlanStatus,
-}
+use ta_plan::{PlanPhase, PlanStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PlanStatus {
-    Done,
-    InProgress,
-    Deferred,
-    Pending,
-}
-
-impl PlanStatus {
-    fn checkbox(&self) -> &'static str {
-        match self {
-            PlanStatus::Done => "[x]",
-            PlanStatus::InProgress => "[~]",
-            PlanStatus::Deferred => "[-]",
-            PlanStatus::Pending => "[ ]",
-        }
-    }
-
-    fn as_str(&self) -> &'static str {
-        match self {
-            PlanStatus::Done => "done",
-            PlanStatus::InProgress => "in_progress",
-            PlanStatus::Deferred => "deferred",
-            PlanStatus::Pending => "pending",
-        }
+/// Checklist-box glyph for a phase status. A free function rather than an
+/// inherent method since `PlanStatus` is `ta_plan`'s type, not this crate's
+/// (v0.17.11.1.2 item 1: this tool used to carry its own local `PlanPhase`/
+/// `PlanStatus`/parser, a third independent reimplementation of PLAN.md
+/// parsing alongside `ta-cli`'s and `ta-daemon`'s — replaced with `ta_plan`
+/// directly, via `PlanStore::list_phases()`, since this tool's read-only
+/// windowed-checklist use case has no daemon-response-shape reason to stay
+/// separate the way `ta-daemon`'s parser deliberately does).
+fn checkbox_for(status: &PlanStatus) -> &'static str {
+    match status {
+        PlanStatus::Done => "[x]",
+        PlanStatus::InProgress => "[~]",
+        PlanStatus::Deferred => "[-]",
+        PlanStatus::Pending => "[ ]",
     }
 }
 
-/// Parse PLAN.md content into phases using the built-in default schema patterns.
-/// Mirrors the logic in `apps/ta-cli/src/commands/plan.rs`.
-fn parse_plan_phases(content: &str) -> Vec<PlanPhase> {
-    // Phase header patterns (same as PlanSchema::default_schema()).
-    let phase_patterns: Vec<Regex> = vec![
-        // "## Phase 4b — Title"
-        Regex::new(r"(?m)^##\s+Phase[\s\u{a0}]+([0-9a-z.]+)\s+[—\-]\s+(.+)$").unwrap(),
-        // "### v0.3.1 — Title"
-        Regex::new(r"(?m)^###\s+(v[\d.]+[a-z]?)\s+[—\-]\s+(.+)$").unwrap(),
-    ];
-    let status_re = Regex::new(r"<!--\s*status:\s*(\w+)\s*-->").unwrap();
-
-    let lines: Vec<&str> = content.lines().collect();
-    let mut phases = Vec::new();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-        for pattern in &phase_patterns {
-            if let Some(caps) = pattern.captures(line) {
-                let id = caps
-                    .get(1)
-                    .map(|m| m.as_str().trim().to_string())
-                    .unwrap_or_default();
-                let title = caps
-                    .get(2)
-                    .map(|m| m.as_str().trim().to_string())
-                    .unwrap_or_default();
-                if id.is_empty() {
-                    break;
-                }
-                // Strip trailing markup from title.
-                let title = title.trim_end_matches(['*', '(', ')']).trim().to_string();
-                // Look at the next line for a status marker.
-                let status = if i + 1 < lines.len() {
-                    let next = lines[i + 1].trim();
-                    if let Some(sc) = status_re.captures(next) {
-                        match sc.get(1).map(|m| m.as_str().trim()).unwrap_or("") {
-                            "done" => PlanStatus::Done,
-                            "in_progress" => PlanStatus::InProgress,
-                            "deferred" => PlanStatus::Deferred,
-                            _ => PlanStatus::Pending,
-                        }
-                    } else {
-                        PlanStatus::Pending
-                    }
-                } else {
-                    PlanStatus::Pending
-                };
-                phases.push(PlanPhase { id, title, status });
-                break;
-            }
-        }
-        i += 1;
-    }
-    phases
-}
-
-/// Compare phase IDs, normalising the optional `v` prefix.
+/// Compare phase IDs, normalising the optional `v` prefix. Re-exported by
+/// `ta_plan` too (`phase_ids_match`) — kept as a thin local wrapper so the
+/// rest of this file's call sites don't change.
 fn phase_ids_match(parsed_id: &str, phase_id: &str) -> bool {
-    if parsed_id == phase_id {
-        return true;
-    }
-    let norm_parsed = parsed_id.strip_prefix('v').unwrap_or(parsed_id);
-    let norm_phase = phase_id.strip_prefix('v').unwrap_or(phase_id);
-    norm_parsed == norm_phase
+    ta_plan::phase_ids_match(parsed_id, phase_id)
 }
 
 /// Format a windowed plan checklist (mirrors `format_plan_checklist_windowed`).
@@ -228,7 +149,7 @@ fn format_windowed_checklist(
             // No current phase — show all.
             return phases
                 .iter()
-                .map(|p| format!("- {} Phase {} — {}", p.status.checkbox(), p.id, p.title))
+                .map(|p| format!("- {} Phase {} — {}", checkbox_for(&p.status), p.id, p.title))
                 .collect::<Vec<_>>()
                 .join("\n");
         }
@@ -240,7 +161,7 @@ fn format_windowed_checklist(
             // Phase not found — show all.
             return phases
                 .iter()
-                .map(|p| format!("- {} Phase {} — {}", p.status.checkbox(), p.id, p.title))
+                .map(|p| format!("- {} Phase {} — {}", checkbox_for(&p.status), p.id, p.title))
                 .collect::<Vec<_>>()
                 .join("\n");
         }
@@ -295,7 +216,7 @@ fn format_windowed_checklist(
     // Current phase (bolded + marker).
     lines.push(format!(
         "- {} **Phase {} — {}** <-- current",
-        current.status.checkbox(),
+        checkbox_for(&current.status),
         current.id,
         current.title
     ));
@@ -313,7 +234,7 @@ fn format_windowed_checklist(
         };
         lines.push(format!(
             "- {} Phase {} — {}{}",
-            phase.status.checkbox(),
+            checkbox_for(&phase.status),
             phase.id,
             phase.title,
             deferred
@@ -349,10 +270,16 @@ pub fn handle_plan_status(
         ]));
     }
 
-    let content = std::fs::read_to_string(&plan_path)
+    // v0.17.11.3: `select_plan_store` returns `FilePlanStore` unless
+    // `.ta/workflow.toml`'s `[plan] backend = "wayfinder"` opts in.
+    let store =
+        ta_plan_wayfinder::select_plan_store(&state.config.workspace_root, &state.config.goals_dir)
+            .map_err(|e| {
+                McpError::internal_error(format!("failed to open PlanStore: {}", e), None)
+            })?;
+    let phases = store
+        .list_phases()
         .map_err(|e| McpError::internal_error(format!("failed to read PLAN.md: {}", e), None))?;
-
-    let phases = parse_plan_phases(&content);
 
     let done_window = params.done_window.unwrap_or(5) as usize;
     let pending_window = params.pending_window.unwrap_or(5) as usize;
@@ -367,7 +294,7 @@ pub fn handle_plan_status(
                     serde_json::json!({
                         "id": p.id,
                         "title": p.title,
-                        "status": p.status.as_str(),
+                        "status": p.status.to_string(),
                     })
                 })
                 .collect();
@@ -412,33 +339,24 @@ pub fn handle_plan_status(
 mod tests {
     use super::*;
 
+    fn phase(id: &str, title: &str, status: PlanStatus) -> PlanPhase {
+        PlanPhase {
+            id: id.to_string(),
+            title: title.to_string(),
+            status,
+            depends_on: Vec::new(),
+            human_review_items: Vec::new(),
+            api_impact: Vec::new(),
+        }
+    }
+
     fn make_phases() -> Vec<PlanPhase> {
         vec![
-            PlanPhase {
-                id: "v0.1".to_string(),
-                title: "Alpha".to_string(),
-                status: PlanStatus::Done,
-            },
-            PlanPhase {
-                id: "v0.2".to_string(),
-                title: "Beta".to_string(),
-                status: PlanStatus::Done,
-            },
-            PlanPhase {
-                id: "v0.3".to_string(),
-                title: "Current".to_string(),
-                status: PlanStatus::Pending,
-            },
-            PlanPhase {
-                id: "v0.4".to_string(),
-                title: "Next".to_string(),
-                status: PlanStatus::Pending,
-            },
-            PlanPhase {
-                id: "v0.5".to_string(),
-                title: "Future".to_string(),
-                status: PlanStatus::Pending,
-            },
+            phase("v0.1", "Alpha", PlanStatus::Done),
+            phase("v0.2", "Beta", PlanStatus::Done),
+            phase("v0.3", "Current", PlanStatus::Pending),
+            phase("v0.4", "Next", PlanStatus::Pending),
+            phase("v0.5", "Future", PlanStatus::Pending),
         ]
     }
 
@@ -478,7 +396,7 @@ mod tests {
         // JSON format: verify the list structure.
         let phase_list: Vec<serde_json::Value> = phases
             .iter()
-            .map(|p| serde_json::json!({ "id": p.id, "title": p.title, "status": p.status.as_str() }))
+            .map(|p| serde_json::json!({ "id": p.id, "title": p.title, "status": p.status.to_string() }))
             .collect();
         assert_eq!(phase_list.len(), 5);
         assert_eq!(phase_list[0]["status"], "done");
@@ -494,7 +412,7 @@ mod tests {
 ### v0.2 — Beta Phase\n\
 <!-- status: pending -->\n\
 ";
-        let phases = parse_plan_phases(plan_md);
+        let phases = ta_plan::parse_plan(plan_md);
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[0].id, "v0.1");
         assert_eq!(phases[0].status, PlanStatus::Done);

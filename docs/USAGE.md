@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.10-alpha.4
+**Version**: 0.17.11-alpha.3
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -2848,6 +2848,31 @@ To trigger compaction automatically before each release, add to `.ta/workflow.to
 compact_plan = true
 compact_through = "v0.14"  # optional: compact only up to this milestone
 ```
+
+#### Wayfinder-Backed Plan Storage (`ta-plan-wayfinder`)
+
+By default TA tracks plan state entirely in local files (PLAN.md + `.ta/goals/`). Projects using [Wayfinder](https://github.com/Trusted-Autonomy/wayfinder) as their PM system can opt a project into syncing phase/goal status to Wayfinder as a human-visible, cross-tool mirror — PLAN.md remains the structural source of truth (phase list, titles, dependency graph); Wayfinder becomes a synced status view other tools and teammates can see.
+
+1. In Wayfinder, create a `service_account_token` for this project (Settings → Service Accounts). `member` role is enough for ordinary sync; `owner` role is required only if you also want the one-time bootstrap export (below). Copy the secret shown — it's shown once.
+2. Store the secret in TA's credential vault (never in `workflow.toml`):
+   ```bash
+   ta credential add wayfinder:<org_id>:<project_id> wayfinder <secret>
+   ```
+3. Add to `.ta/workflow.toml`:
+   ```toml
+   [plan]
+   backend = "wayfinder"
+
+   [plan.wayfinder]
+   base_url = "https://wayfinder.example.com"   # https:// required (http:// only for localhost)
+   org_id = "org_..."
+   project_id = "proj_..."
+   credential_name = "wayfinder:org_...:proj_..."  # must match the `ta credential add` name above
+   ```
+
+Once enabled, every `ta plan claim`/status transition and every goal-run state change is written to PLAN.md/`.ta/goals/` first (authoritative, always succeeds locally) and then best-effort pushed to Wayfinder as a task — a PLAN.md phase becomes a synthetic "gate" task (`ta-phase-gate:<phase_id>`, dependency-chained to mirror `Depends on` declarations), and a goal run becomes a real task (`ta-goal:<goal_id>`) wired as a dependent of its phase's gate. If Wayfinder is unreachable, the write stays queued locally and retries automatically on the next sync poll — it never blocks TA's own execution.
+
+If a human changes a synced task's status directly in the Wayfinder UI, TA logs it as an override (`tracing::warn!`) and keeps its own local value authoritative on the next push — Wayfinder sync is one-directional for status (TA → Wayfinder), not a live two-way editor.
 
 #### Plan Lint
 

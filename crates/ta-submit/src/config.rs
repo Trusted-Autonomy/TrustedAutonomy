@@ -703,6 +703,42 @@ pub struct PlanConfig {
     /// When absent, defaults to all milestones with minor version < current release minor. (v0.15.24.3)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_through: Option<String>,
+    /// Which `PlanStore` backend to use: `"file"` (default, PLAN.md +
+    /// `GoalRunStore` JSON) or `"wayfinder"` (v0.17.11.3). Mirrors
+    /// `[submit] adapter = "git"`'s selection shape. Selecting `"wayfinder"`
+    /// without a `[plan.wayfinder]` table is a config error, caught by
+    /// `ta_plan_wayfinder::select_plan_store` at startup, not silently
+    /// ignored.
+    #[serde(default = "default_plan_backend")]
+    pub backend: String,
+    /// Wayfinder backend settings — only consulted when `backend =
+    /// "wayfinder"`. The service-account secret itself is never stored
+    /// here; `credential_name` names a `ta_credentials::FileVault` entry
+    /// looked up at runtime (see `ta credential add`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wayfinder: Option<WayfinderPlanBackendConfig>,
+}
+
+/// `[plan.wayfinder]` — connection settings for the Wayfinder-backed
+/// `PlanStore` (v0.17.11.3). Plain data only (no HTTP/credential logic) so
+/// this crate doesn't need to depend on `ta-plan-wayfinder` — the reverse
+/// dependency (`ta-plan-wayfinder` depends on `ta-submit` for this type)
+/// avoids a cycle, since `ta-plan` already depends on `ta-submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WayfinderPlanBackendConfig {
+    /// Base URL of the Wayfinder deployment, e.g.
+    /// `"https://wayfinder.example.com"`. Must be `https://`, or `http://`
+    /// only for `localhost`/`127.0.0.1`/`::1` (local dev) — enforced by
+    /// `ta-plan-wayfinder`, not here, since that's a runtime check against
+    /// a parsed `Url`, not something this plain-data struct should own.
+    pub base_url: String,
+    pub org_id: String,
+    pub project_id: String,
+    /// Name of the `ta_credentials::Credential` holding the
+    /// `service_account_token` secret (`service` field is always
+    /// `"wayfinder"`). Set once via `ta credential add <name> wayfinder
+    /// <secret>`.
+    pub credential_name: String,
 }
 
 impl Default for PlanConfig {
@@ -712,12 +748,18 @@ impl Default for PlanConfig {
             strict_transitions: false,
             compact_plan: false,
             compact_through: None,
+            backend: default_plan_backend(),
+            wayfinder: None,
         }
     }
 }
 
 fn default_plan_file() -> String {
     "PLAN.md".to_string()
+}
+
+fn default_plan_backend() -> String {
+    "file".to_string()
 }
 
 /// Resolve the plan file path given a workspace root and workflow config.
@@ -2763,9 +2805,7 @@ exclude_paths = ["staging/", "goals/"]
     fn plan_config_custom_file_resolves_path() {
         let config = PlanConfig {
             file: "ROADMAP.md".to_string(),
-            strict_transitions: false,
-            compact_plan: false,
-            compact_through: None,
+            ..Default::default()
         };
         let workflow = WorkflowConfig {
             plan: config,

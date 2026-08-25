@@ -19,13 +19,14 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use uuid::Uuid;
 
 use crate::history;
 use crate::parse;
 use crate::query;
-use crate::schema::{PlanPhase, PlanStatus};
+use crate::schema::{PlanPhase, PlanSchema, PlanStatus};
 
 /// What a `PlanStore` implementation can and can't do — callers use this to
 /// degrade gracefully rather than assume every backend is equally capable.
@@ -42,6 +43,50 @@ pub struct PlanStoreCapabilities {
     /// Whether goal/phase creation is idempotent (safe to retry without
     /// risk of duplicate creation).
     pub supports_idempotent_create: bool,
+    /// Whether `poll_changes` reports a true item-level delta (e.g. a
+    /// future `WayfinderPlanStore`, backed by `updated_at`-filtered
+    /// queries) or only "something changed, re-fetch everything" (`false`
+    /// — `FilePlanStore`'s honest answer, since flat-file PLAN.md has no
+    /// per-phase change timestamp to diff against).
+    pub supports_granular_changes: bool,
+}
+
+/// Opaque position marker for [`PlanStore::poll_changes`]. Callers must
+/// treat this as backend-specific and opaque — persist it verbatim between
+/// polls, never construct or parse one by hand. `FilePlanStore` uses a
+/// content hash; a future `WayfinderPlanStore` would use an `updated_at`
+/// watermark against the delta-sync endpoint from the TA↔Wayfinder design
+/// doc's §7.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChangeCursor(pub(crate) String);
+
+impl ChangeCursor {
+    /// A cursor representing "nothing seen yet" — the first `poll_changes`
+    /// call with this cursor reports every phase/goal as changed.
+    pub fn initial() -> Self {
+        Self::default()
+    }
+
+    /// Build a cursor from a backend-computed digest — `pub(crate)` since
+    /// only `PlanStore` implementations inside this crate construct real
+    /// (non-initial) cursors; external callers only ever receive one from
+    /// `poll_changes` and pass it back verbatim.
+    pub(crate) fn from_digest(digest: String) -> Self {
+        Self(digest)
+    }
+
+    pub(crate) fn digest(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What changed since a given [`ChangeCursor`], plus the cursor to persist
+/// for the next poll.
+#[derive(Debug, Clone)]
+pub struct ChangeSet {
+    pub changed_phase_ids: Vec<String>,
+    pub changed_goal_ids: Vec<Uuid>,
+    pub next_cursor: ChangeCursor,
 }
 
 /// The plan/goal storage abstraction. `FilePlanStore` is the sole
@@ -90,6 +135,17 @@ pub trait PlanStore: Send + Sync {
 
     /// All goal runs whose `plan_phase` matches `phase_id`.
     fn list_goals_for_phase(&self, phase_id: &str) -> anyhow::Result<Vec<GoalRun>>;
+
+    // ── Change awareness ─────────────────────────────────────────────
+
+    /// What's changed since `since`. Required because a future
+    /// Wayfinder-backed implementation has no webhook/push mechanism (see
+    /// the TA↔Wayfinder design doc §1.4) and must poll — but every backend
+    /// implements this, including `FilePlanStore`, so callers never need to
+    /// special-case "this backend can't tell me what changed." Check
+    /// `capabilities().supports_granular_changes` to know whether the
+    /// result is a true delta or a "re-fetch everything" signal.
+    fn poll_changes(&self, since: &ChangeCursor) -> anyhow::Result<ChangeSet>;
 }
 
 /// The default, and currently sole, `PlanStore` implementation: PLAN.md on
@@ -116,6 +172,45 @@ impl FilePlanStore {
             goal_store: GoalRunStore::new(goals_dir)?,
         })
     }
+
+    /// Shared implementation for `Done`/`Deferred` transitions — mirrors
+    /// `apps/ta-cli`'s `mark_done_batch` (read → transform → write →
+    /// record) rather than duplicating that logic, per the project's own
+    /// "reuse before reinventing" convention.
+    fn write_terminal_status(
+        &self,
+        id: &str,
+        new_status: PlanStatus,
+        note: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let schema = PlanSchema::load_or_default(&self.project_root);
+        let plan_path = self.project_root.join(&schema.source);
+        let content = std::fs::read_to_string(&plan_path)?;
+
+        let old_status = parse::parse_plan_with_schema(&content, &schema)
+            .into_iter()
+            .find(|p| parse::phase_ids_match(&p.id, id))
+            .map(|p| p.status)
+            .ok_or_else(|| anyhow::anyhow!("FilePlanStore: phase {} not found", id))?;
+
+        let updated =
+            parse::update_phase_status_with_schema(&content, id, new_status.clone(), &schema);
+        std::fs::write(&plan_path, &updated)?;
+
+        // Best-effort — a failed history write must not roll back the
+        // status change that already landed on disk, matching
+        // `mark_done_batch`'s own `let _ = record_history(...)` treatment.
+        let _ = history::record_history(&self.project_root, id, &old_status, &new_status);
+        if note.is_some() {
+            tracing::debug!(
+                phase = id,
+                "FilePlanStore::update_phase_status: note is ignored for Done/Deferred \
+                 transitions — record_history's note field is reserved for reset/deny reasons, \
+                 matching mark_done_batch's own behavior"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl PlanStore for FilePlanStore {
@@ -128,6 +223,7 @@ impl PlanStore for FilePlanStore {
             supports_native_phase_grouping: false,
             supports_webhooks: false,
             supports_idempotent_create: true,
+            supports_granular_changes: false,
         }
     }
 
@@ -155,19 +251,7 @@ impl PlanStore for FilePlanStore {
                     .map(|_| ())
             }
             PlanStatus::Done | PlanStatus::Deferred => {
-                // Not currently reachable through a dedicated ta-plan helper
-                // (the CLI's `mark_done_batch`/apply-pipeline paths write
-                // status transitions to `Done` directly via
-                // `update_phase_status_with_schema` today, outside this
-                // trait). Left as an explicit, honest error rather than a
-                // silent no-op, so a future caller relying on this path
-                // finds out immediately rather than assuming it worked.
-                anyhow::bail!(
-                    "FilePlanStore::update_phase_status: transition to {} is not yet \
-                     implemented via PlanStore (id: {})",
-                    new_status,
-                    id
-                )
+                self.write_terminal_status(id, new_status, note)
             }
         }
     }
@@ -200,6 +284,50 @@ impl PlanStore for FilePlanStore {
             .into_iter()
             .filter(|g| g.plan_phase.as_deref() == Some(phase_id))
             .collect())
+    }
+
+    /// Honest, cheap, non-granular: hashes PLAN.md content plus every
+    /// goal's `(id, updated_at)` pair into one digest. If the digest
+    /// matches `since`, nothing changed. If it doesn't, every current
+    /// phase and goal id is reported as changed — `FilePlanStore` has no
+    /// per-item timestamp to diff against (unlike a future
+    /// `WayfinderPlanStore` polling `updated_since`), so "something
+    /// changed" can only mean "assume everything did." Cheap either way:
+    /// one file read plus one directory listing, no parsing beyond what
+    /// `list_phases`/`list_goals_for_phase`-equivalent calls already do.
+    fn poll_changes(&self, since: &ChangeCursor) -> anyhow::Result<ChangeSet> {
+        let phases = self.list_phases()?;
+        let goals = self.goal_store.list().map_err(anyhow::Error::from)?;
+
+        let mut hasher = Sha256::new();
+        for phase in &phases {
+            hasher.update(phase.id.as_bytes());
+            hasher.update(phase.status.to_string().as_bytes());
+        }
+        let mut goal_ids: Vec<Uuid> = goals.iter().map(|g| g.goal_run_id).collect();
+        goal_ids.sort();
+        for id in &goal_ids {
+            hasher.update(id.as_bytes());
+        }
+        for goal in &goals {
+            hasher.update(goal.updated_at.to_rfc3339().as_bytes());
+        }
+        let digest = format!("{:x}", hasher.finalize());
+        let next_cursor = ChangeCursor(digest.clone());
+
+        if since.0 == digest {
+            return Ok(ChangeSet {
+                changed_phase_ids: Vec::new(),
+                changed_goal_ids: Vec::new(),
+                next_cursor,
+            });
+        }
+
+        Ok(ChangeSet {
+            changed_phase_ids: phases.into_iter().map(|p| p.id).collect(),
+            changed_goal_ids: goal_ids,
+            next_cursor,
+        })
     }
 }
 
@@ -306,5 +434,101 @@ mod tests {
         assert!(!caps.supports_native_phase_grouping);
         assert!(!caps.supports_webhooks);
         assert!(caps.supports_idempotent_create);
+        assert!(!caps.supports_granular_changes);
+    }
+
+    #[test]
+    fn file_plan_store_poll_changes_from_initial_cursor_reports_everything() {
+        let (_dir, store) = setup();
+        let changes = store.poll_changes(&ChangeCursor::initial()).unwrap();
+        assert_eq!(changes.changed_phase_ids.len(), 2);
+    }
+
+    #[test]
+    fn file_plan_store_poll_changes_is_empty_when_nothing_changed() {
+        let (_dir, store) = setup();
+        let first = store.poll_changes(&ChangeCursor::initial()).unwrap();
+        let second = store.poll_changes(&first.next_cursor).unwrap();
+        assert!(second.changed_phase_ids.is_empty());
+        assert!(second.changed_goal_ids.is_empty());
+        assert_eq!(second.next_cursor, first.next_cursor);
+    }
+
+    #[test]
+    fn file_plan_store_poll_changes_detects_a_status_transition() {
+        let (_dir, store) = setup();
+        let baseline = store.poll_changes(&ChangeCursor::initial()).unwrap();
+        store
+            .update_phase_status("v0.2.0", PlanStatus::InProgress, None)
+            .unwrap();
+        let after = store.poll_changes(&baseline.next_cursor).unwrap();
+        assert!(after.changed_phase_ids.contains(&"v0.2.0".to_string()));
+        assert_ne!(after.next_cursor, baseline.next_cursor);
+    }
+
+    #[test]
+    fn file_plan_store_poll_changes_detects_a_new_goal() {
+        let (dir, store) = setup();
+        let baseline = store.poll_changes(&ChangeCursor::initial()).unwrap();
+
+        let goal = GoalRun::new(
+            "new goal",
+            "objective",
+            "claude-code",
+            dir.path().join("workspace"),
+            dir.path().join(".ta/goals"),
+        );
+        let goal_id = goal.goal_run_id;
+        store.save_goal(&goal).unwrap();
+
+        let after = store.poll_changes(&baseline.next_cursor).unwrap();
+        assert!(after.changed_goal_ids.contains(&goal_id));
+    }
+
+    #[test]
+    fn file_plan_store_marks_a_phase_done() {
+        let (_dir, store) = setup();
+        store
+            .update_phase_status("v0.2.0", PlanStatus::Done, None)
+            .unwrap();
+        assert_eq!(
+            store.get_phase("v0.2.0").unwrap().unwrap().status,
+            PlanStatus::Done
+        );
+    }
+
+    #[test]
+    fn file_plan_store_marks_a_phase_deferred() {
+        let (_dir, store) = setup();
+        store
+            .update_phase_status("v0.2.0", PlanStatus::Deferred, None)
+            .unwrap();
+        assert_eq!(
+            store.get_phase("v0.2.0").unwrap().unwrap().status,
+            PlanStatus::Deferred
+        );
+    }
+
+    #[test]
+    fn file_plan_store_done_transition_is_recorded_in_history() {
+        let (dir, store) = setup();
+        store
+            .update_phase_status("v0.2.0", PlanStatus::Done, None)
+            .unwrap();
+        let history = crate::history::load_history(dir.path()).unwrap();
+        assert!(history
+            .iter()
+            .any(
+                |e| e.get("phase_id").and_then(|p| p.as_str()) == Some("v0.2.0")
+                    && e.get("new_status").and_then(|s| s.as_str()) == Some("done")
+            ));
+    }
+
+    #[test]
+    fn file_plan_store_done_transition_fails_for_unknown_phase() {
+        let (_dir, store) = setup();
+        assert!(store
+            .update_phase_status("v9.9.9", PlanStatus::Done, None)
+            .is_err());
     }
 }
