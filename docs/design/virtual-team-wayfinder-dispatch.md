@@ -1,6 +1,6 @@
 # Virtual Team ↔ Wayfinder Dispatch — Design Options & Recommendation
 
-> Design spike, 2026-08-25. Rev 2 (same day) folds in a Wayfinder-side review grounded in that repo's just-completed auth/rate-limit hardening work — see the changelog note at the end. Triggered by: "Wayfinder will definitely push tasks to the virtual team through the project manager or chief of staff... I expect there needs to be a push mechanism too... Red team come up with a plan, examining wayfinder and considering Studio. Do we need a central command and control Amplified Office dashboard?" Scope: how a private-repo virtual team receives Wayfinder-assigned work, executes it, reports back, and how humans stay in the loop. This is a planning document — no code in this repo implements it.
+> Design spike, 2026-08-25. Rev 2 folds in a Wayfinder-side review grounded in that repo's just-completed auth/rate-limit hardening work; Rev 3 replaces explicit recipient-addressing with topic-based, registration-driven consumption — see the changelog notes at the end. Triggered by: "Wayfinder will definitely push tasks to the virtual team through the project manager or chief of staff... I expect there needs to be a push mechanism too... Red team come up with a plan, examining wayfinder and considering Studio. Do we need a central command and control Amplified Office dashboard?" Scope: how a private-repo virtual team receives Wayfinder-assigned work, executes it, reports back, and how humans stay in the loop. This is a planning document — no code in this repo implements it.
 
 ---
 
@@ -37,9 +37,9 @@ You described "Wayfinder pushes tasks." Wayfinder cannot push anything today —
 
 **Option A — Build real push into Wayfinder.** Webhook delivery on task-ready/assignee-changed, or an SSE stream. Correct long-term, but it's new Wayfinder-side infrastructure (delivery retries, signing, dead-lettering — the same class of problem TA's own webhook routes already solve once), and it makes the virtual team depend on Wayfinder's uptime for *every* new task, not just status sync.
 
-**Option B — A thin polling adapter, on the TA/virtual-team side, that *feels* like push to the team.** The adapter polls Wayfinder's existing `/api/dispatch` + ready-queue endpoints (same bearer/service-account auth pattern `ta-plan-wayfinder` already uses) on a short interval. The moment it sees new or reassigned work, **it does not call the chief-of-staff persona directly — no RPC, no direct call.** It publishes an ordinary message onto the already-built, already-durable `ta-agent-whiteboard` handoff channel (JetStream-backed, durable, exactly built for "get this to the right peer even if they're not listening right now"); the chief-of-staff persona consumes it the same way it would consume any other whiteboard message, with no special-cased path. From the team member's point of view further downstream, it *is* a push — they receive a handoff message, same as they would from a sibling agent today. Reporting back (completion, blockers, new work discovered) goes the other way through the same adapter, via plain REST calls to Wayfinder (`PATCH` task status, `POST` new tasks with `external_id` for idempotent upsert — that endpoint already exists per the wayfinder work merged this session).
+**Option B — A thin polling adapter, on the TA/virtual-team side, that *feels* like push to the team.** The adapter polls Wayfinder's existing `/api/dispatch` + ready-queue endpoints (same bearer/service-account auth pattern `ta-plan-wayfinder` already uses) on a short interval. The moment it sees new or reassigned work, **it does not call the chief-of-staff persona directly — no RPC, no direct call, and as of Rev 3 (§4) not even an explicit named recipient.** It publishes an ordinary, *topic-tagged* message onto a durable stream built on top of `ta-agent-whiteboard`'s already-built transport primitives (JetStream-backed, durable, the same substrate `handoff.rs` already proves out — exactly built for "get this to the right peer even if they're not listening right now"); the chief-of-staff persona consumes it because it has separately **registered itself** as the consumer for that topic, not because the poller named it. From the team member's point of view further downstream, it *is* a push — they receive a handoff message, same as they would from a sibling agent today. Reporting back (completion, blockers, new work discovered) goes the other way through the same adapter, via plain REST calls to Wayfinder (`PATCH` task status, `POST` new tasks with `external_id` for idempotent upsert — that endpoint already exists per the wayfinder work merged this session).
 
-Keeping the poller and the persona mutually unaware of each other — connected only by the message on the whiteboard, never a direct call — is the actual independence property this design is after: either side can be swapped, scaled, or duplicated without the other needing to change. (An earlier pass of this document blurred that line; §4/§5 below are now consistent with this framing throughout.)
+Keeping the poller and the persona mutually unaware of each other — connected only by a topic both sides independently agree on, never a direct call or a hardcoded recipient — is the actual independence property this design is after: either side can be swapped, scaled, or duplicated without the other needing to change, and a topic can gain or lose its consumer without the publisher ever being touched. (An earlier pass of this document blurred that line, and a later pass still addressed messages by an explicit `requested_role` field; §4/§5/§8.5 below are now consistent with topic-based, registration-driven consumption throughout.)
 
 **Recommendation: B.** It needs zero new Wayfinder-side infrastructure — Wayfinder stays exactly what it is today, a REST API with real auth and a real UI. It reuses two already-solid, already-tested TA primitives (`ta-plan-wayfinder`'s client/auth pattern, `ta-agent-whiteboard`'s handoff) instead of building a third delivery mechanism. And it fails safe: if the poller is down, nothing breaks except *new* task pickup — in-flight work and existing status keep working, unlike Option A where a Wayfinder outage would break live delivery. Revisit Option A only if polling latency (whatever interval you pick — seconds-to-low-minutes is the realistic range) turns out to be a real product problem, not before.
 
@@ -52,6 +52,15 @@ Split it into two layers, because they have different failure/judgment character
 1. **The poller (Option B above)** — deterministic, no LLM, lives in the new private repo. Its only job: notice Wayfinder state changes, translate a Wayfinder `Task` into a handoff-message candidate, and translate handoff outcomes back into Wayfinder REST calls. This is the "simple" part — a REST client and a JetStream publisher, maybe a few hundred lines. It should not make judgment calls.
 
    The Wayfinder-client half and the whiteboard-publisher half of the poller should only communicate through one small internal type — a `TaskCandidate` struct, not the raw Wayfinder DTO passed straight through. This is an anti-corruption layer: if Wayfinder's `Task` shape changes, or the wire schema published onto the whiteboard changes (§8.5), only the construction of `TaskCandidate` moves, not the whole poller.
+
+   **Addressing is by topic, not by naming a recipient — and there are two independent tag vocabularies, not one.** The poller does not know "chief-of-staff" as an identity, doesn't hardcode a `RoleRef`, and doesn't look anyone up before publishing. All Wayfinder-sourced missives — regardless of which of Wayfinder's own tags they carry — land on **one well-known external-intake stream**, and the chief-of-staff persona is the **sole registered consumer of it**. This is deliberate, not an oversight: it's the direct implementation of "the single orchestration role" from the original ask — every external missive passes through one gate before anything local happens, so there is exactly one place that ever has to reconcile "what is Wayfinder asking for right now," not N independently-addressed consumers each seeing a partial view.
+
+   - **Wayfinder's tag vocabulary** (`task-delegation`, `research-request`, `status-report`, `escalation`, ... — a known, published set, owned by Wayfinder, same ownership rule as the priority enum in §6) travels *inside* the message payload as classification metadata, not as separate stream addresses. It tells the chief-of-staff persona what kind of external missive this is so it can triage appropriately, but it never determines "who receives this" — that's always the chief-of-staff, unconditionally, for anything Wayfinder-sourced.
+   - **The project's own tag vocabulary** — locally defined per virtual team, in `.ta/team.toml`, mirroring the same `handles_verbs`-style convention Wayfinder's own `TeamRole` already uses — is what the chief-of-staff persona consults *after* triage, to decide which local team member actually does the work. This is an internal decision, not an external contract, so it reuses the *existing* `handoff.rs` RoleRef-addressed mechanism exactly as already built (point-to-point, no new primitive needed) — the chief-of-staff persona is simply another caller of `send_handoff`, addressing a specific `RoleRef` it has picked using its own judgment plus the project's local tag config.
+
+   The intake side (Wayfinder tags → the single external-intake stream) is built entirely on `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (`stream_append`/`stream_read_next`/`stream_ack` for the stream itself, `kv_put`/`kv_list` with TTL for the registration record — the exact pattern `presence.rs` already establishes for liveness) — **no change to `ta-agent-whiteboard` is needed**; a small `topics.rs` + `registration.rs` pair lives in the private repo, built purely as a consumer of the crate's already-public surface. Because there's exactly one intended consumer, registration here isn't doing multi-consumer routing — it exists so (a) the persona formally binds to the stream without the poller ever hardcoding its identity, and (b) it's observable: "the external-intake stream has messages piling up and nobody is currently registered to drain it" is a real, detectable condition (chief-of-staff crashed, misconfigured, or never started), not a silent stall.
+
+   **Future flexibility, not default architecture**: nothing about the wire format forces every Wayfinder tag through chief-of-staff forever. If a project later wants, say, `status-report` missives drained by a different, dedicated role without passing through chief-of-staff, that's a deliberate re-registration (a different `RoleRef` registers for that one Wayfinder tag specifically) — the tag is already on the wire, so splitting the intake later doesn't require touching the schema, only the registration config. Don't build that split up front; the single-gate design is the right default for a small team.
 
    The poller also owns its own **audit trail**: every Wayfinder write it makes gets correlated back to the `candidate_id`/persona decision that caused it (the `candidate`/`outcome` schema in §8.5 carries this by construction). With three hops — Wayfinder ↔ poller ↔ whiteboard ↔ persona — a wrong status update needs to be attributable to "poller bug" vs. "bad persona judgment" vs. "Wayfinder API behavior" without guesswork after the fact.
 
@@ -70,19 +79,24 @@ Wayfinder (task backlog, REST, no push)
     │  poll: ready-queue / dispatch
     ▼
 Poller  ──────────────────────────────► Wayfinder Task → TaskCandidate (internal type)
-    │
-    ▼  publish `candidate` message (§8.5 schema) — no direct call
-Whiteboard handoff (durable, JetStream)
-    │  consumed independently, same as any other message
+    │                                    tagged with Wayfinder's classification vocabulary
+    │                                    (task-delegation / research-request / status-report / ...)
+    ▼  publish `candidate` message (§8.5 schema) — no direct call, no named recipient
+External-intake stream (single, durable — topics.rs on top of WhiteboardTransport)
+    │  drained by whoever is registered — by design, chief-of-staff, always
     ▼
 Chief-of-staff persona (ta run, highest reasoning tier)
-    │  routes + writes brief
+    │  triages using Wayfinder's tag, then routes using the PROJECT's own
+    │  local tag vocabulary (.ta/team.toml, mirrors Wayfinder's handles_verbs)
+    │  writes the goal brief
     ▼
-Whiteboard handoff  ──► Team member (ordinary ta run goal, role-appropriate lower-cost tier)
+Whiteboard handoff, RoleRef-addressed (existing handoff.rs, unchanged)
+    │──► Team member (ordinary ta run goal, role-appropriate lower-cost tier)
     │                                              │
     │        ◄── completion / blocked / new-work ──┘  (handoff reply, peer→peer)
     ▼
-Chief-of-staff persona reacts, publishes `outcome` message (§8.5 schema):
+Chief-of-staff persona reacts, publishes `outcome` message (§8.5 schema) back onto
+the same external-intake channel (or a paired outcome stream — implementation detail):
     - done          → poller PATCHes Wayfinder task status
     - blocked        → poller PATCHes status + raises escalation; if it needs a human,
                        falls into §6 below
@@ -135,8 +149,9 @@ This matches a pattern already used twice in this codebase (`task-graph` OSS ext
 |---|---|---|
 | `ta-plan-wayfinder` | done, v0.17.11.3 | TA core (this repo) — local plan → Wayfinder status mirror. Unrelated direction; don't conflate. |
 | `ta-agent-whiteboard` | done, v0.17.11.2 | TA core (this repo) — peer presence/handoff among TA agents. Reused as-is, unmodified. |
-| **Wayfinder dispatch poller** | new | **Private virtual-team repo** — thin REST client (dispatch/ready-queue poll, task PATCH/POST), publishes/consumes whiteboard handoffs via the §8.5 schema. No LLM, no judgment logic. Authenticates as a Wayfinder service account at **`member` role**, never `owner`. Owns its own poll-interval/backoff discipline — Wayfinder's rate limiter on these routes is structurally inert (§2), so nothing backstops the poller from the other side. |
-| **Chief-of-staff persona** | new (config + prompt, not new runtime) | Private repo's `.ta/team.toml` + a goal brief template — executed via TA's existing `ta run`/goal machinery, `model_tier: highest`. No new agent-execution code needed. |
+| **Wayfinder dispatch poller** | new | **Private virtual-team repo** — thin REST client (dispatch/ready-queue poll, task PATCH/POST), publishes candidates onto the external-intake stream via the §8.5 schema, tagged with Wayfinder's classification vocabulary. No LLM, no judgment logic, no knowledge of who consumes the stream. Authenticates as a Wayfinder service account at **`member` role**, never `owner`. Owns its own poll-interval/backoff discipline — Wayfinder's rate limiter on these routes is structurally inert (§2), so nothing backstops the poller from the other side. |
+| **`topics.rs` + `registration.rs`** | new, small | **Private virtual-team repo** — the external-intake stream and the (single-consumer-by-design) registration record, built entirely on `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (§4). No `ta-agent-whiteboard` changes needed; a candidate to upstream later if a second use case wants the same pattern. |
+| **Chief-of-staff persona** | new (config + prompt, not new runtime) | Private repo's `.ta/team.toml` + a goal brief template — executed via TA's existing `ta run`/goal machinery, `model_tier: highest`. Sole registered consumer of the external-intake stream; routes onward to team members via the existing `handoff.rs` (unchanged), using the project's own locally-defined tag vocabulary. No new agent-execution code needed. |
 | Human escalation glue (v1) | new, small | Poller adds a comment/status write on `ta_ask_human` events — a few dozen lines, not a subsystem. |
 | **Wayfinder Notification primitive (v2)** | new, **costed Wayfinder-side work** — not free, not bundled into "poller + persona" | Wayfinder repo — new entity + endpoints (§8.5), surfaced in Wayfinder's own UI. Track as its own line, decide in §9.6 whether/when to build it. |
 | Amplified Office dashboard | **not built** | Deferred per §7; revisit only on evidence. |
@@ -167,7 +182,10 @@ candidate  { candidate_id,                       // stable, correlates outcome +
              source_ref: { org_id, project_id, task_id },
              title, description,
              priority,                            // shared enum, owned/defined by Wayfinder (§6)
-             requested_role: "chief-of-staff" }
+             tag: "task-delegation"                // Wayfinder's own published classification
+                  | "research-request"             // vocabulary — informs triage, does NOT
+                  | "status-report"                 // address a specific recipient (§4)
+                  | "escalation" | ... }
 
 outcome    { candidate_id,                        // correlates back to the candidate
              outcome: "done" | "blocked" | "new_work",
@@ -175,7 +193,9 @@ outcome    { candidate_id,                        // correlates back to the cand
              detail }
 ```
 
-This also answers the "vice versa" half directly: anything else that wants to hand the chief-of-staff work — not just this Wayfinder poller — only needs to speak this schema, not know whiteboard exists.
+Note there is no `requested_role`/recipient field at all — addressing is implicit: every `candidate` lands on the single external-intake stream regardless of `tag`, and whoever is registered to drain that stream (chief-of-staff, by design — §4) is the recipient. This also answers the "vice versa" half directly: anything else that wants to hand the chief-of-staff work — not just this Wayfinder poller — only needs to speak this schema and know the intake stream's well-known name, not know whiteboard's internals or the persona's identity.
+
+`tag`'s vocabulary is **published and versioned by Wayfinder** (parity with `priority`, §6) — it's the classification Wayfinder itself assigns to what it's asking for, and it's what the chief-of-staff persona's own triage logic switches on. It is a **separate vocabulary from the project's local team-role tags** in `.ta/team.toml` (§4), which the chief-of-staff persona uses only for its own downstream `handoff.rs` routing decision and never appears on the wire to Wayfinder at all — the two vocabularies serve different audiences and must not be conflated into one enum.
 
 ## 9. Open decisions (yours, not mine to assume)
 
@@ -185,19 +205,24 @@ This also answers the "vice versa" half directly: anything else that wants to ha
 4. **Whether to formally name and scaffold the private repo now** — this doc assumes it exists; nothing here has created it.
 5. **Chief-of-staff concurrency model** — can persona invocations for different candidates run concurrently? If yes, the single-writer discipline in §5 needs to extend to that case explicitly (two concurrent invocations must never touch the same Wayfinder task or whiteboard thread) or the dual-writer problem this design otherwise avoids reappears.
 6. **Whether/when to build the Wayfinder Notification primitive (§6 v2, §8.5 Contract 1 additions)** — real upgrade, but the first genuinely costed Wayfinder-side piece of this whole design. Ship v1 (comment + flag) first; decide on v2 with evidence from real use, not speculatively — same standard §7 already applies to the dashboard question.
+7. **The exact `tag` vocabulary Wayfinder publishes, and where it's documented/versioned** — `task-delegation`/`research-request`/`status-report`/`escalation` are a plausible starting set (§4, §8.5), not a ratified list. Whoever owns Wayfinder's API contract should publish this the same way `priority` needs publishing — a small, explicit enum, not something the poller and the persona each guess at independently.
+8. **The project-local team-role tag vocabulary in `.ta/team.toml`** is per-project by design (§4) — confirm the `.ta/team.toml` convention itself (schema, field name, how it mirrors Wayfinder's `handles_verbs`) before the first private-repo team gets configured, so every project doesn't invent its own shape.
 
 ## 10. Suggested build order (once you confirm direction)
 
 1. Scaffold the private repo, thin Wayfinder REST client (reuse `ta-plan-wayfinder`'s auth/HTTP pattern by reference, not by cross-repo dependency — light duplication across the public/private boundary is the right call here, not a shared crate, matching this project's own "prove in-tree first" precedent). Authenticate as `member`-role service account (§2, §8).
-2. Poller: read-only first (log `TaskCandidate`s, no handoff yet) — cheap to verify against a real Wayfinder project before anything acts on it. Define the `candidate`/`outcome` schema (§8.5) at this step, even though nothing publishes it yet.
-3. Wire the whiteboard handoff leg (poller publishes `candidate` → chief-of-staff persona, highest-tier model, consumes independently → team member, role-tier model), still no Wayfinder writes. Nail down stable `external_id` derivation now (§4), before anything depends on upsert idempotency.
-4. Wire the report-back leg (`outcome` → status PATCH, new-task POST) behind an explicit dry-run flag until trusted. Add the poller's audit trail (§4) in this step, not after.
-5. Human-escalation glue, v1 (§6) — comment + flag, raise and clear together.
-6. Cross-links (§7) — cheap, easy to defer without blocking anything.
-7. Wayfinder Notification primitive, v2 (§6, §9.6) — only after evidence from steps 1-6 that v1's comment-flag approach is actually insufficient in practice.
+2. Build `topics.rs` + `registration.rs` on top of `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (§4, §8) — the external-intake stream and its (single-consumer-by-design) registration record. No `ta-agent-whiteboard` changes required.
+3. Poller: read-only first (log `TaskCandidate`s tagged with Wayfinder's classification vocabulary, no publish yet) — cheap to verify against a real Wayfinder project before anything acts on it. Define the `candidate`/`outcome` schema (§8.5) at this step.
+4. Wire intake: poller publishes `candidate` onto the external-intake stream → chief-of-staff persona (highest-tier model, registered as sole consumer) triages by Wayfinder's tag, then routes internally via existing `handoff.rs` using the project's own local tag vocabulary → team member (role-appropriate lower-cost tier). Still no Wayfinder writes. Nail down stable `external_id` derivation now (§4), before anything depends on upsert idempotency.
+5. Wire the report-back leg (`outcome` → status PATCH, new-task POST) behind an explicit dry-run flag until trusted. Add the poller's audit trail (§4) in this step, not after.
+6. Human-escalation glue, v1 (§6) — comment + flag, raise and clear together.
+7. Cross-links (§7) — cheap, easy to defer without blocking anything.
+8. Wayfinder Notification primitive, v2 (§6, §9.6) — only after evidence from steps 1-7 that v1's comment-flag approach is actually insufficient in practice.
 
 Each step is independently testable against a real (or sandboxed) Wayfinder project before the next one starts writing.
 
 ---
 
 **Changelog**: Rev 2 (2026-08-25) folds in a Wayfinder-side review of Rev 1, grounded in that session's actual work on Wayfinder's auth and rate-limiting. Changes: fixed a §3/§4/§5 flow inconsistency (poller never calls the persona directly — whiteboard-message-only, now stated explicitly and consistently); added the `TaskCandidate` internal type, stable `external_id` derivation, poller audit trail, and the chief-of-staff concurrency question (§4, §9.5); added two facts grounded in Wayfinder's current source — the structurally inert rate limiter on `/api/projects/*` dispatch/ready-queue routes, and `member` as the correct (not `owner`) service-account tier (§2, §8); expanded §6 into an explicit v1 (free) / v2 (costed Wayfinder Notification primitive) split with a shared-priority-enum rule and a raise/clear lifecycle requirement; added §8.5 defining two independent contracts — Wayfinder's REST DTOs and a versioned `candidate`/`outcome` handoff schema decoupled from whiteboard-as-transport; and resolved the model-tier open decision (chief-of-staff = highest reasoning tier the user selects; other personas = best lower-cost tier fitting each role).
+
+**Rev 3** (2026-08-25, same day) replaces explicit recipient-addressing with topic-based, registration-driven consumption (§3, §4, §5, §8, §8.5): the poller no longer names "chief-of-staff" anywhere — it tags each candidate with Wayfinder's own published classification vocabulary (`task-delegation`/`research-request`/`status-report`/`escalation`, ...) and appends it to a single external-intake stream; the chief-of-staff persona binds to that stream by registering itself, the poller never looks the registration up. Confirmed as a deliberate single-gate design, not one-topic-per-consumer: every Wayfinder-sourced missive, regardless of its Wayfinder tag, goes to the same sole registered consumer (chief-of-staff) — preserving "one orchestration role" from the original ask rather than fragmenting external intake across multiple independently-addressed roles. A second, separate tag vocabulary — defined per project in `.ta/team.toml`, mirroring Wayfinder's own `handles_verbs` convention — is what the chief-of-staff persona then uses for its own downstream routing to a specific team member, over the existing unmodified `handoff.rs` RoleRef mechanism; this vocabulary is local and never appears on the wire to Wayfinder. Both the topic stream and the registration record are built entirely on `ta-agent-whiteboard`'s already-public `WhiteboardTransport` trait — no changes to that crate are needed, though the pattern is a plausible future upstream candidate if a second use case wants it. New open decisions added (§9.7, §9.8): who publishes/versions Wayfinder's tag vocabulary, and confirming the `.ta/team.toml` local-tag schema before the first private-repo team is configured.
