@@ -829,9 +829,13 @@ pub async fn claim_phase(
     // `in_progress` — strictly safer than this handler's prior unconditional
     // write, not a behavior loss.
     if plan_content.is_some() {
+        // v0.17.11.3: `select_plan_store` returns `FilePlanStore` unless
+        // `.ta/workflow.toml`'s `[plan] backend = "wayfinder"` opts in —
+        // this is exactly the "never needs touching again" call site the
+        // comment above already promised.
         let store: Box<dyn ta_plan::PlanStore> =
-            match ta_plan::FilePlanStore::new(&state.project_root, &state.goals_dir) {
-                Ok(s) => Box::new(s),
+            match ta_plan_wayfinder::select_plan_store(&state.project_root, &state.goals_dir) {
+                Ok(s) => s,
                 Err(e) => {
                     state.phase_claims.release(&phase_id);
                     return (

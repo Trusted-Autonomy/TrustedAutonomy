@@ -1,27 +1,30 @@
 [package]
-name = "ta-plan"
+name = "ta-plan-wayfinder"
 version.workspace = true
 edition = "2021"
-description = "PLAN.md schema, parsing, and phase-tracking logic for Trusted Autonomy (extracted from ta-cli, v0.17.11.1)"
+description = "Wayfinder-backed PlanStore implementation for Trusted Autonomy (v0.17.11.3, Sub-project 3 of the TA<->Wayfinder plan integration design)"
 license = "Apache-2.0"
 repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
-keywords = ["ai", "agent", "autonomy", "plan"]
+keywords = ["ai", "agent", "autonomy", "plan", "wayfinder"]
 categories = ["development-tools"]
 
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-regex = { workspace = true }
 chrono = { workspace = true }
-sha2 = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 uuid = { workspace = true }
+reqwest = { workspace = true }
+url = "2"
+ta-plan = { path = "../ta-plan", version = "0.17.11-alpha.3" }
 ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.3" }
 ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.3" }
-ta-workflow = { path = "../ta-workflow", version = "0.17.11-alpha.3" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.3" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }
+wiremock = "0.6"

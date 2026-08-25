@@ -270,9 +270,15 @@ pub fn handle_plan_status(
         ]));
     }
 
-    let store = ta_plan::FilePlanStore::new(&state.config.workspace_root, &state.config.goals_dir)
-        .map_err(|e| McpError::internal_error(format!("failed to open PlanStore: {}", e), None))?;
-    let phases = ta_plan::PlanStore::list_phases(&store)
+    // v0.17.11.3: `select_plan_store` returns `FilePlanStore` unless
+    // `.ta/workflow.toml`'s `[plan] backend = "wayfinder"` opts in.
+    let store =
+        ta_plan_wayfinder::select_plan_store(&state.config.workspace_root, &state.config.goals_dir)
+            .map_err(|e| {
+                McpError::internal_error(format!("failed to open PlanStore: {}", e), None)
+            })?;
+    let phases = store
+        .list_phases()
         .map_err(|e| McpError::internal_error(format!("failed to read PLAN.md: {}", e), None))?;
 
     let done_window = params.done_window.unwrap_or(5) as usize;
