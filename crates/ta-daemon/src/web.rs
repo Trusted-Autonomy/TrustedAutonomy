@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -1190,7 +1191,19 @@ pub fn build_full_router(
         .collect();
     let cors = build_cors_layer(&extra_origins);
 
-    let web_routes = build_web_routes(web_state);
+    // v0.17.11.4, TA-07: `web_routes` (draft approve/deny/apply — writes to
+    // the real project — and memory CRUD) previously had no auth layer of
+    // its own and was merged straight into this router, which serves on
+    // `daemon_config.server.bind` — fully configurable, not the loopback-
+    // only address the standalone `--web-port` listener uses. That made
+    // these routes reachable unauthenticated on the same address/port as
+    // the rest of the authenticated API. Apply the exact same middleware
+    // `api_routes` already gets, from the same `app_state`, so both route
+    // groups are gated by one consistent auth decision.
+    let web_routes = build_web_routes(web_state).layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        crate::api::auth::auth_middleware,
+    ));
     let api_routes = crate::api::build_api_router(app_state.clone());
 
     // Merge: API routes take precedence, web routes fill in the rest.
@@ -1198,12 +1211,64 @@ pub fn build_full_router(
     (api_routes.merge(web_routes).layer(cors), app_state)
 }
 
+/// Lightweight state for `legacy_web_auth_middleware` — just enough to call
+/// `crate::api::auth::authenticate`, not the full `AppState` (v0.17.0.12.16
+/// or newer duplicated it once already for `build_full_router`'s `AppState`
+/// per port; this listener runs as a second, always-loopback process
+/// alongside that one, so building a second heavyweight `AppState` here
+/// would double up on `AppState::new`'s background initialization for no
+/// benefit — the auth decision only ever needs these two fields).
+struct LegacyAuthState {
+    auth: crate::config::AuthConfig,
+    token_store: crate::config::TokenStore,
+}
+
+async fn legacy_web_auth_middleware(
+    State(state): State<Arc<LegacyAuthState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match crate::api::auth::authenticate(
+        &state.auth,
+        &state.token_store,
+        Some(addr.ip()),
+        request.headers(),
+    ) {
+        Ok(_identity) => next.run(request).await,
+        Err(response) => *response,
+    }
+}
+
 /// Start the web review UI server (legacy — draft/memory only).
-pub async fn serve_web_ui(pr_packages_dir: PathBuf, port: u16) -> anyhow::Result<()> {
-    let app = build_router(pr_packages_dir);
+///
+/// Gated by the same `[auth]` config and token store as the main daemon API
+/// (v0.17.11.4, TA-07) — this listener is always loopback-bound, but that
+/// alone shouldn't be the only thing standing between the network and
+/// `/api/drafts/{id}/apply` (which writes to the real project) if an
+/// operator has deliberately set `local_bypass = false` to require tokens
+/// even for local callers.
+pub async fn serve_web_ui(
+    pr_packages_dir: PathBuf,
+    port: u16,
+    project_root: PathBuf,
+    auth: crate::config::AuthConfig,
+) -> anyhow::Result<()> {
+    let auth_state = Arc::new(LegacyAuthState {
+        token_store: crate::config::TokenStore::new(&project_root),
+        auth,
+    });
+    let app = build_router(pr_packages_dir).layer(middleware::from_fn_with_state(
+        auth_state,
+        legacy_web_auth_middleware,
+    ));
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     tracing::info!("Web review UI listening on http://127.0.0.1:{}", port);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1574,6 +1639,71 @@ mod tests {
             html.contains("d.status === 'Approved'"),
             "loadAttentionQueue() must include Approved-but-unapplied drafts in its own dataset"
         );
+    }
+
+    // v0.17.11.4, TA-07: the legacy web UI's draft/memory routes previously
+    // had no auth layer at all. These exercise `legacy_web_auth_middleware`
+    // the same way `serve_web_ui` wires it, via `oneshot` with a manually
+    // attached `ConnectInfo` (normally injected by
+    // `into_make_service_with_connect_info` on a real listener).
+    fn authed_test_router(dir: PathBuf, auth: crate::config::AuthConfig) -> Router {
+        let packages_dir = dir.join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let auth_state = Arc::new(LegacyAuthState {
+            token_store: crate::config::TokenStore::new(&dir),
+            auth,
+        });
+        build_router(packages_dir).layer(middleware::from_fn_with_state(
+            auth_state,
+            legacy_web_auth_middleware,
+        ))
+    }
+
+    fn request_from(addr: &str) -> Request<Body> {
+        let mut req = Request::get("/api/drafts").body(Body::empty()).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            addr.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        req
+    }
+
+    #[tokio::test]
+    async fn legacy_ui_default_auth_config_allows_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = authed_test_router(
+            dir.path().to_path_buf(),
+            crate::config::AuthConfig::default(),
+        );
+        let resp = app.oneshot(request_from("127.0.0.1:54321")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn legacy_ui_require_token_rejects_unauthenticated_non_local_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = crate::config::AuthConfig {
+            require_token: true,
+            local_bypass: false,
+            ..Default::default()
+        };
+        let app = authed_test_router(dir.path().to_path_buf(), auth);
+        let resp = app.oneshot(request_from("203.0.113.9:443")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn legacy_ui_require_token_and_no_bypass_rejects_even_loopback() {
+        // Proves `local_bypass = false` is actually honored here, not just
+        // by the main authenticated API.
+        let dir = tempfile::tempdir().unwrap();
+        let auth = crate::config::AuthConfig {
+            require_token: true,
+            local_bypass: false,
+            ..Default::default()
+        };
+        let app = authed_test_router(dir.path().to_path_buf(), auth);
+        let resp = app.oneshot(request_from("127.0.0.1:54321")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -17,10 +17,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.11-alpha.3" }
-ta-plugin = { path = "../ta-plugin", version = "0.17.11-alpha.3" }
+ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.11-alpha.4" }
+ta-plugin = { path = "../ta-plugin", version = "0.17.11-alpha.4" }
 ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
-ta-actions = { path = "../ta-actions", version = "0.17.11-alpha.3" }
+ta-actions = { path = "../ta-actions", version = "0.17.11-alpha.4" }
 toml = { workspace = true }
 
 [dev-dependencies]

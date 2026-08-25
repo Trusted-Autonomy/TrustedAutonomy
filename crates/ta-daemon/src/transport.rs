@@ -161,6 +161,24 @@ async fn serve_tcp(
 
     let local_addr = listener.local_addr()?;
 
+    // Refuse to serve a non-loopback TCP listener with neither TLS nor a
+    // bearer token configured (v0.17.11.4, TA-03) — this transport is
+    // documented for "remote agent execution and cluster deployments," so
+    // silently serving the full MCP tool surface (filesystem writes, goal
+    // control, ...) plaintext and unauthenticated to the network is a
+    // real exposure, not a hypothetical one. A loopback-only listener with
+    // no auth is unchanged: equivalent risk to the daemon's existing
+    // default HTTP posture, not a new hole.
+    if tls_config.is_none() && auth_token.is_none() && !local_addr.ip().is_loopback() {
+        bail!(
+            "Refusing to start TCP transport on {local_addr}: neither [transport].tls nor \
+             [transport].auth_token is configured, and this address is not loopback-only. This \
+             would serve the full MCP tool surface plaintext and unauthenticated to the network. \
+             Set [transport].auth_token (and ideally [transport].tls) in daemon.toml, or bind to \
+             127.0.0.1 for local-only use."
+        );
+    }
+
     if tls_config.is_some() {
         info!(addr = %local_addr, "MCP transport: TCP+TLS — waiting for connection");
     } else {
@@ -374,5 +392,73 @@ mod tests {
         let wr = tokio::io::BufWriter::new(std::io::Cursor::new(wr_buf));
         let result = authenticate_connection(rd, wr, Some("secret-token")).await;
         assert!(result.is_err(), "invalid token should fail authentication");
+    }
+
+    // A no-op MCP server good enough to reach `serve_tcp`'s post-bind
+    // refusal check — none of these tests get far enough for it to
+    // actually serve anything.
+    fn test_gateway_server() -> TaGatewayServer {
+        TaGatewayServer::new(ta_mcp_gateway::GatewayConfig::for_project(
+            std::env::temp_dir(),
+        ))
+        .expect("test gateway server should construct")
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_refuses_non_loopback_with_no_auth_and_no_tls() {
+        // v0.17.11.4, TA-03: previously this only logged a `warn!` and
+        // served anyway.
+        let result = serve_tcp(
+            test_gateway_server(),
+            "0.0.0.0:0",
+            None,
+            None,
+            Path::new("."),
+        )
+        .await;
+        let err = result.expect_err("non-loopback + no auth + no TLS must be refused");
+        assert!(err.to_string().contains("Refusing to start"));
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_still_serves_loopback_with_no_auth() {
+        // No regression: a loopback-only listener with no auth is
+        // unchanged (equivalent risk to the daemon's existing default HTTP
+        // posture) -- it should reach `.accept()` and block waiting for a
+        // connection, not be refused outright.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            serve_tcp(
+                test_gateway_server(),
+                "127.0.0.1:0",
+                None,
+                None,
+                Path::new("."),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected a timeout (still waiting for a connection), not an immediate refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_serves_non_loopback_when_auth_token_is_set() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            serve_tcp(
+                test_gateway_server(),
+                "0.0.0.0:0",
+                Some("secret-token"),
+                None,
+                Path::new("."),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an auth_token configured should let the non-loopback listener start (times out waiting for a connection, not refused)"
+        );
     }
 }

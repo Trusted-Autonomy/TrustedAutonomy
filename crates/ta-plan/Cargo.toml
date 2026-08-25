@@ -19,9 +19,9 @@ chrono = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.3" }
-ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.3" }
-ta-workflow = { path = "../ta-workflow", version = "0.17.11-alpha.3" }
+ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.4" }
+ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.4" }
+ta-workflow = { path = "../ta-workflow", version = "0.17.11-alpha.4" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
