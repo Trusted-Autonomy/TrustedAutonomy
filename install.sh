@@ -98,6 +98,64 @@ get_latest_version() {
     echo -e "${GREEN}Latest version:${NC} $VERSION"
 }
 
+# Downloads the release's SHA256SUMS.txt manifest (one file, covers every
+# platform archive in this release) plus its cosign signature bundle, and
+# verifies the bundle's signature over the manifest when `cosign` is
+# available (v0.17.11.5, closing red-team finding TA-05).
+#
+# Fixed a pre-existing bug here: this script used to fetch a per-binary
+# `<name>-<version>-<target>.tar.gz.sha256` sidecar that the release
+# workflow has never actually published (only one combined
+# `SHA256SUMS.txt` per release) — the checksum check always silently
+# no-op'd via the "Warning: No checksum" branch. Downloading the real
+# manifest fixes checksum verification itself, independent of whether
+# cosign is present to also verify its provenance.
+#
+# Populates the global CHECKSUMS_FILE and COSIGN_VERIFIED (0/1) on success;
+# leaves CHECKSUMS_FILE empty if the manifest can't be fetched at all
+# (checksum verification degrades to a warning per archive, matching this
+# script's existing fail-open-on-missing-manifest posture — a broken
+# download mirror shouldn't brick the installer).
+CHECKSUMS_FILE=""
+COSIGN_VERIFIED=0
+fetch_checksums_manifest() {
+    local manifest_url="https://github.com/$REPO/releases/download/$VERSION/SHA256SUMS.txt"
+    local bundle_url="${manifest_url}.bundle"
+    local dir
+    dir=$(mktemp -d)
+
+    if ! curl -fsSL "$manifest_url" -o "$dir/SHA256SUMS.txt" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: could not fetch SHA256SUMS.txt for this release — archive checksums will not be verified${NC}"
+        rm -rf "$dir"
+        return
+    fi
+    CHECKSUMS_FILE="$dir/SHA256SUMS.txt"
+
+    if ! command -v cosign > /dev/null; then
+        echo -e "${YELLOW}Note: cosign not found — skipping signature verification (checksums alone still verified below). Install cosign for cryptographic provenance: https://docs.sigstore.dev/system_config/installation/${NC}"
+        return
+    fi
+    if ! curl -fsSL "$bundle_url" -o "$dir/SHA256SUMS.txt.bundle" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: cosign is installed but this release has no signature bundle — skipping signature verification${NC}"
+        return
+    fi
+
+    echo -e "${GREEN}Verifying release manifest signature (cosign)...${NC}"
+    if cosign verify-blob \
+        --bundle "$dir/SHA256SUMS.txt.bundle" \
+        --certificate-identity-regexp "^https://github.com/${REPO}/" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        "$dir/SHA256SUMS.txt" > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ Signature verified — SHA256SUMS.txt was signed by a $REPO GitHub Actions release run${NC}"
+        COSIGN_VERIFIED=1
+    else
+        echo -e "${RED}Error: signature verification failed for SHA256SUMS.txt — refusing to install${NC}"
+        echo -e "${RED}This means the release manifest doesn't match what $REPO's release workflow actually published.${NC}"
+        rm -rf "$dir"
+        exit 1
+    fi
+}
+
 # Download, verify, and install a single binary.
 # Usage: download_and_install <name> <required>
 download_and_install() {
@@ -105,7 +163,7 @@ download_and_install() {
     local required="$2"
 
     local download_url="https://github.com/$REPO/releases/download/$VERSION/${name}-${VERSION}-${TARGET}.tar.gz"
-    local checksum_url="${download_url}.sha256"
+    local archive_name="${name}-${VERSION}-${TARGET}.tar.gz"
 
     echo -e "${GREEN}Downloading ${name} from:${NC} $download_url"
 
@@ -126,25 +184,32 @@ download_and_install() {
         fi
     fi
 
-    # Download and verify checksum
-    if curl -fsSL "$checksum_url" -o "$tmp_dir/${name}.tar.gz.sha256" 2>/dev/null; then
-        echo -e "${GREEN}Verifying checksum...${NC}"
-        cd "$tmp_dir"
-        if command -v sha256sum > /dev/null; then
-            sha256sum -c "${name}.tar.gz.sha256" 2>/dev/null || {
-                echo -e "${RED}Error: Checksum verification failed for ${name}${NC}"
-                cd - > /dev/null; rm -rf "$tmp_dir"; exit 1
-            }
-        elif command -v shasum > /dev/null; then
-            shasum -a 256 -c "${name}.tar.gz.sha256" 2>/dev/null || {
-                echo -e "${RED}Error: Checksum verification failed for ${name}${NC}"
-                cd - > /dev/null; rm -rf "$tmp_dir"; exit 1
-            }
+    # Verify against the (optionally cosign-verified) SHA256SUMS.txt manifest.
+    if [[ -n "$CHECKSUMS_FILE" ]]; then
+        local expected_line
+        expected_line=$(grep " ${archive_name}\$" "$CHECKSUMS_FILE" || true)
+        if [[ -z "$expected_line" ]]; then
+            echo -e "${YELLOW}Warning: ${archive_name} not listed in SHA256SUMS.txt, skipping checksum verification${NC}"
+        else
+            echo -e "${GREEN}Verifying checksum...${NC}"
+            local expected_hash actual_hash
+            expected_hash=$(echo "$expected_line" | awk '{print $1}')
+            if command -v sha256sum > /dev/null; then
+                actual_hash=$(sha256sum "$tmp_dir/${name}.tar.gz" | awk '{print $1}')
+            elif command -v shasum > /dev/null; then
+                actual_hash=$(shasum -a 256 "$tmp_dir/${name}.tar.gz" | awk '{print $1}')
+            else
+                echo -e "${YELLOW}Warning: no sha256sum/shasum available, skipping checksum verification${NC}"
+                actual_hash=""
+            fi
+            if [[ -n "$actual_hash" && "$actual_hash" != "$expected_hash" ]]; then
+                echo -e "${RED}Error: checksum mismatch for ${name} — expected ${expected_hash}, got ${actual_hash}${NC}"
+                rm -rf "$tmp_dir"
+                exit 1
+            elif [[ -n "$actual_hash" ]]; then
+                echo -e "${GREEN}✓ Checksum verified${NC}"
+            fi
         fi
-        cd - > /dev/null
-        echo -e "${GREEN}✓ Checksum verified${NC}"
-    else
-        echo -e "${YELLOW}Warning: No checksum for ${name}, skipping verification${NC}"
     fi
 
     # Extract and install
@@ -171,6 +236,8 @@ install_docs() {
 
 # Download and install binaries
 install_binary() {
+    fetch_checksums_manifest
+
     download_and_install "$BINARY_NAME" "true"
 
     if [[ "$INSTALL_DAEMON" == true ]]; then
