@@ -1,6 +1,6 @@
 # Virtual Team ↔ Wayfinder Dispatch — Design Options & Recommendation
 
-> Design spike, 2026-08-25. Rev 2 folds in a Wayfinder-side review grounded in that repo's just-completed auth/rate-limit hardening work; Rev 3 replaces explicit recipient-addressing with topic-based, registration-driven consumption — see the changelog notes at the end. Triggered by: "Wayfinder will definitely push tasks to the virtual team through the project manager or chief of staff... I expect there needs to be a push mechanism too... Red team come up with a plan, examining wayfinder and considering Studio. Do we need a central command and control Amplified Office dashboard?" Scope: how a private-repo virtual team receives Wayfinder-assigned work, executes it, reports back, and how humans stay in the loop. This is a planning document — no code in this repo implements it.
+> Design spike, 2026-08-25. Rev 2 folds in a Wayfinder-side review grounded in that repo's just-completed auth/rate-limit hardening work; Rev 3 replaces explicit recipient-addressing with topic-based, registration-driven consumption; Rev 4 turns §10 into a phased development plan and answers the split-sequencing question — see the changelog notes at the end. Triggered by: "Wayfinder will definitely push tasks to the virtual team through the project manager or chief of staff... I expect there needs to be a push mechanism too... Red team come up with a plan, examining wayfinder and considering Studio. Do we need a central command and control Amplified Office dashboard?" Scope: how a private-repo virtual team receives Wayfinder-assigned work, executes it, reports back, and how humans stay in the loop. This is a planning document — no code in this repo implements it.
 
 ---
 
@@ -202,27 +202,66 @@ Note there is no `requested_role`/recipient field at all — addressing is impli
 1. **Poll interval** — a few seconds feels "live enough" for a small team; every poll is a real API call against Wayfinder's (now-hardened, but not rate-limited on these routes — §2) auth path. Pick a default, make it configurable, and own the backoff discipline on the poller side since Wayfinder won't backstop it.
 2. ~~Chief-of-staff / persona model tier~~ **Resolved**: chief-of-staff runs at the highest reasoning-effort tier the user has selected; every other team-member persona runs at the best lower-cost tier that fits that role's specific task class, set per role in `.ta/team.toml` (§4).
 3. **Multi-Wayfinder-project scope** — one poller instance per Wayfinder org/project, or one poller fanning out across several? Affects the private repo's config shape from day one, cheap to decide now, expensive to retrofit. The inert-rate-limiter fact in §2 applies here too: fan-out design shouldn't assume Wayfinder will ever throttle it.
-4. **Whether to formally name and scaffold the private repo now** — this doc assumes it exists; nothing here has created it.
+4. **Repo name and org/visibility settings** — §10 now treats scaffolding as Phase 0 of the build (not an open "whether"), but the concrete name still needs picking before Phase 0 can start.
 5. **Chief-of-staff concurrency model** — can persona invocations for different candidates run concurrently? If yes, the single-writer discipline in §5 needs to extend to that case explicitly (two concurrent invocations must never touch the same Wayfinder task or whiteboard thread) or the dual-writer problem this design otherwise avoids reappears.
 6. **Whether/when to build the Wayfinder Notification primitive (§6 v2, §8.5 Contract 1 additions)** — real upgrade, but the first genuinely costed Wayfinder-side piece of this whole design. Ship v1 (comment + flag) first; decide on v2 with evidence from real use, not speculatively — same standard §7 already applies to the dashboard question.
 7. **The exact `tag` vocabulary Wayfinder publishes, and where it's documented/versioned** — `task-delegation`/`research-request`/`status-report`/`escalation` are a plausible starting set (§4, §8.5), not a ratified list. Whoever owns Wayfinder's API contract should publish this the same way `priority` needs publishing — a small, explicit enum, not something the poller and the persona each guess at independently.
 8. **The project-local team-role tag vocabulary in `.ta/team.toml`** is per-project by design (§4) — confirm the `.ta/team.toml` convention itself (schema, field name, how it mirrors Wayfinder's `handles_verbs`) before the first private-repo team gets configured, so every project doesn't invent its own shape.
 
-## 10. Suggested build order (once you confirm direction)
+## 10. Development plan
 
-1. Scaffold the private repo, thin Wayfinder REST client (reuse `ta-plan-wayfinder`'s auth/HTTP pattern by reference, not by cross-repo dependency — light duplication across the public/private boundary is the right call here, not a shared crate, matching this project's own "prove in-tree first" precedent). Authenticate as `member`-role service account (§2, §8).
-2. Build `topics.rs` + `registration.rs` on top of `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (§4, §8) — the external-intake stream and its (single-consumer-by-design) registration record. No `ta-agent-whiteboard` changes required.
-3. Poller: read-only first (log `TaskCandidate`s tagged with Wayfinder's classification vocabulary, no publish yet) — cheap to verify against a real Wayfinder project before anything acts on it. Define the `candidate`/`outcome` schema (§8.5) at this step.
-4. Wire intake: poller publishes `candidate` onto the external-intake stream → chief-of-staff persona (highest-tier model, registered as sole consumer) triages by Wayfinder's tag, then routes internally via existing `handoff.rs` using the project's own local tag vocabulary → team member (role-appropriate lower-cost tier). Still no Wayfinder writes. Nail down stable `external_id` derivation now (§4), before anything depends on upsert idempotency.
-5. Wire the report-back leg (`outcome` → status PATCH, new-task POST) behind an explicit dry-run flag until trusted. Add the poller's audit trail (§4) in this step, not after.
-6. Human-escalation glue, v1 (§6) — comment + flag, raise and clear together.
-7. Cross-links (§7) — cheap, easy to defer without blocking anything.
-8. Wayfinder Notification primitive, v2 (§6, §9.6) — only after evidence from steps 1-7 that v1's comment-flag approach is actually insufficient in practice.
+**Sequencing question, answered directly: the private-repo split happens *before* Wayfinder dispatch, but as a small Phase 0 inside this one plan — not as a separate initiative to fully finish first.** Every piece of new code this design specifies (poller, `topics.rs`/`registration.rs`, chief-of-staff persona config) is, by §8, explicitly private-repo work — none of it has anywhere to live, and there's no `RoleRef` to route a handoff to, until the repo and a minimal team exist. But that prerequisite is genuinely light, not a multi-week gate: TA core already ships the multi-role execution engine (`team_session.rs` fires one `ta run` goal per role in sequence) and the whole whiteboard coordination substrate (§4). "Splitting" mostly means creating a repo and its `.ta/` config and proving TA's existing machinery runs a goal there — it is not standing up a new orchestration engine from scratch. Treat Phase 0 below as a fast prerequisite, then move straight into dispatch phases in the same repo.
 
-Each step is independently testable against a real (or sandboxed) Wayfinder project before the next one starts writing.
+**Dependency mechanism** (settled, not open): the private repo depends on `ta-agent-whiteboard`, `ta-session`, `ta-goal`, etc. as **git dependencies** against `Trusted-Autonomy/TrustedAutonomy`, the same pattern TA's own `ta-mcp-gateway/Cargo.toml` already uses today for `ta-decision` (a *different* repo, `decision-gate`, consumed via `{ git = "...", tag = "v0.1.0" }`). This is a proven mechanism already in production in this exact codebase, not a new one to validate. **Pin to a released tag, not `main`** — TA core changes daily; tracking `main` would make the private repo's build break on unrelated TA-core work. Bump the pin deliberately, the same way any dependency upgrade would be reviewed.
+
+**Tooling parity**: carry over TA's own conventions into the new repo's `CLAUDE.md` — feature-branch + PR workflow, the four-gate verify (`build`/`test`/`clippy -D warnings`/`fmt --check`), Nix-provided toolchain. No reason to invent a second convention for a repo that's going to depend on TA core directly.
+
+---
+
+**Phase 0 — Repo scaffold + minimal team validation** (prerequisite; blocks every later phase)
+- Create the private repo (name/org/visibility — §9.4, pick before starting). Wire the git-dependency pin described above.
+- Add a minimal `.ta/team.toml`: the chief-of-staff role plus one placeholder worker role, following the existing TA convention.
+- Point a TA daemon at the new repo as its project root and run a toy two-role goal through TA core's *existing* `team_session.rs` sequential execution — no Wayfinder, no whiteboard topics, nothing new. This is a smoke test of the foundation, not new engineering; if it doesn't work, that's a TA-core gap to fix here before any dispatch work has somewhere to land.
+- **Exit criteria**: a toy multi-role goal runs end to end in the new repo using only already-shipped TA machinery.
+
+**Phase 1 — Topic + registration primitive**
+- Build `topics.rs` + `registration.rs` on top of `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (§4, §8) — the external-intake stream and its single-consumer-by-design registration record. No `ta-agent-whiteboard` changes required (confirmed by direct source read — its KV/stream primitives are already public).
+- Test against `InMemoryTransport` (already shipped, no NATS server needed for this phase) — publish a message, register a fake consumer, confirm it drains; confirm an unregistered topic still lands durably.
+- **Exit criteria**: a message published before any consumer registers is still delivered once one does; registration liveness (§4) is queryable.
+
+**Phase 2 — Wayfinder REST client + poller, read-only**
+- Thin client for `/api/dispatch`, ready-queue, task PATCH/POST (§8.5 Contract 1), authenticating as a `member`-role service account (§2).
+- Define the `candidate`/`outcome` schema (§8.5) now, even though nothing publishes yet.
+- Poller runs read-only: logs `TaskCandidate`s (the internal anti-corruption type, §4) tagged with Wayfinder's classification vocabulary, publishes nothing.
+- **Exit criteria**: verified against a real (or sandboxed) Wayfinder project — candidates are logged correctly, tagged correctly, with no writes anywhere yet.
+
+**Phase 3 — Wire intake end to end**
+- Poller publishes `candidate` onto the external-intake stream (Phase 1's primitive). Chief-of-staff persona (highest reasoning-effort tier, §4) is the registered consumer; it triages by Wayfinder's tag, then routes via the *existing, unmodified* `handoff.rs` to a team member, using the project's own local tag vocabulary (§9.8). Team member executes at its own role-appropriate lower-cost tier.
+- Still no Wayfinder writes. Nail down stable `external_id` derivation now (§4) — `ta-goal:<goal_id>`, never freshly generated — before anything downstream depends on upsert idempotency.
+- **Exit criteria**: a real Wayfinder task flows all the way to a team member executing a goal, purely through internal TA/whiteboard plumbing.
+
+**Phase 4 — Report-back leg**
+- `outcome` messages drive `PATCH` task status / `POST` new tasks, behind an explicit dry-run flag until trusted. Add the poller's audit trail (§4) here, not after — every write should already be correlatable to its originating `candidate_id`.
+- **Exit criteria**: dry-run output reviewed and judged correct on real Wayfinder tasks before the flag is removed.
+
+**Phase 5 — Human escalation, v1**
+- Comment + status flag glue (§6 v1) — raise and clear shipped together, not the raise half alone.
+- **Exit criteria**: a `ta_ask_human` interaction on Wayfinder-sourced work is visible and answerable from Wayfinder's own UI via the linked flag, and clears itself once answered.
+
+**Phase 6 — Cross-links** (§7)
+- Cheap, cosmetic relative to the rest; safe to defer past Phase 5 without blocking anything downstream.
+
+**Phase 7 — Wayfinder Notification primitive, v2** (§6, §9.6) — **evidence-gated, not scheduled**
+- Only after real use of Phases 0-6 shows v1's comment-flag approach is actually insufficient. This is the one phase with real Wayfinder-side cost (§8); don't pull it forward speculatively.
+
+---
+
+Each phase is independently testable against a real (or sandboxed) Wayfinder project before the next one starts writing. Once Phase 0 lands, **migrate this phase list into the new repo's own `PLAN.md`**, using TA's existing phase-tracking convention (`<!-- status: pending/in_progress/done -->`, `ta plan status`) — this document's job was to get the repo to a point where TA's own planning tooling can take over; it isn't meant to be the plan of record forever.
 
 ---
 
 **Changelog**: Rev 2 (2026-08-25) folds in a Wayfinder-side review of Rev 1, grounded in that session's actual work on Wayfinder's auth and rate-limiting. Changes: fixed a §3/§4/§5 flow inconsistency (poller never calls the persona directly — whiteboard-message-only, now stated explicitly and consistently); added the `TaskCandidate` internal type, stable `external_id` derivation, poller audit trail, and the chief-of-staff concurrency question (§4, §9.5); added two facts grounded in Wayfinder's current source — the structurally inert rate limiter on `/api/projects/*` dispatch/ready-queue routes, and `member` as the correct (not `owner`) service-account tier (§2, §8); expanded §6 into an explicit v1 (free) / v2 (costed Wayfinder Notification primitive) split with a shared-priority-enum rule and a raise/clear lifecycle requirement; added §8.5 defining two independent contracts — Wayfinder's REST DTOs and a versioned `candidate`/`outcome` handoff schema decoupled from whiteboard-as-transport; and resolved the model-tier open decision (chief-of-staff = highest reasoning tier the user selects; other personas = best lower-cost tier fitting each role).
 
 **Rev 3** (2026-08-25, same day) replaces explicit recipient-addressing with topic-based, registration-driven consumption (§3, §4, §5, §8, §8.5): the poller no longer names "chief-of-staff" anywhere — it tags each candidate with Wayfinder's own published classification vocabulary (`task-delegation`/`research-request`/`status-report`/`escalation`, ...) and appends it to a single external-intake stream; the chief-of-staff persona binds to that stream by registering itself, the poller never looks the registration up. Confirmed as a deliberate single-gate design, not one-topic-per-consumer: every Wayfinder-sourced missive, regardless of its Wayfinder tag, goes to the same sole registered consumer (chief-of-staff) — preserving "one orchestration role" from the original ask rather than fragmenting external intake across multiple independently-addressed roles. A second, separate tag vocabulary — defined per project in `.ta/team.toml`, mirroring Wayfinder's own `handles_verbs` convention — is what the chief-of-staff persona then uses for its own downstream routing to a specific team member, over the existing unmodified `handoff.rs` RoleRef mechanism; this vocabulary is local and never appears on the wire to Wayfinder. Both the topic stream and the registration record are built entirely on `ta-agent-whiteboard`'s already-public `WhiteboardTransport` trait — no changes to that crate are needed, though the pattern is a plausible future upstream candidate if a second use case wants it. New open decisions added (§9.7, §9.8): who publishes/versions Wayfinder's tag vocabulary, and confirming the `.ta/team.toml` local-tag schema before the first private-repo team is configured.
+
+**Rev 4** (2026-08-25, same day) turns §10 from a flat build-order list into a phased development plan and directly answers "before or after the virtual-team split": before, but as a fast Phase 0 inside this one plan rather than a separate initiative to finish first, since TA core already ships the multi-role execution engine (`team_session.rs`) and the whiteboard substrate the split mostly just needs to be pointed at. Adds a settled dependency mechanism (git dependency against `Trusted-Autonomy/TrustedAutonomy`, pinned to a released tag — the same pattern already proven by `ta-decision`/`decision-gate` in TA's own `ta-mcp-gateway/Cargo.toml`) and tooling-parity guidance (carry over CLAUDE.md conventions, four-gate verify). Restructures the prior 8-step list into 8 named phases (0-7) with explicit exit criteria each, and closes with instructions to migrate this plan into the new repo's own `PLAN.md` via TA's existing phase-tracking convention once Phase 0 lands, rather than treating this document as the permanent plan of record.
