@@ -5118,7 +5118,7 @@ dependencies = [
 
 [[package]]
 name = "ta-agent-whiteboard"
-version = "0.17.11-alpha.3"
+version = "0.17.11-alpha.4"
 dependencies = [
  "anyhow",
  "async-nats",
