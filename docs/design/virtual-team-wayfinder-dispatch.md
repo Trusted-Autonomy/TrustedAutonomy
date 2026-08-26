@@ -61,7 +61,7 @@ Split it into two layers, because they have different failure/judgment character
 
      **Correction (Rev 5): this field doesn't exist yet, and it's TA-core work, not private-repo config.** `TeamMember` (`ta-session/src/team.rs`/`agent_action.rs`) has exactly four fields today — `role`, `agent_id`, `security`, `persona` — no tag list. Consulting a "local tag vocabulary" requires adding one, e.g. `handles_tags: Vec<String>` with `#[serde(default)]` for backward compatibility with existing `team.toml` files, plus whatever small resolution logic reads it. That's a small, additive `ta-session` change on a feature branch through TA's own PR workflow — not a config-only addition the private repo can make unilaterally. See §8, §9.2, §9.8.
 
-   The intake side (Wayfinder tags → the single external-intake stream) is built entirely on `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (`stream_append`/`stream_read_next`/`stream_ack` for the stream itself, `kv_put`/`kv_list` with TTL for the registration record — the exact pattern `presence.rs` already establishes for liveness) — **no change to `ta-agent-whiteboard` is needed**; a small `topics.rs` + `registration.rs` pair lives in the private repo, built purely as a consumer of the crate's already-public surface. Because there's exactly one intended consumer, registration here isn't doing multi-consumer routing — it exists so (a) the persona formally binds to the stream without the poller ever hardcoding its identity, and (b) it *would become* observable — "the external-intake stream has messages piling up and nobody is currently registered to drain it" (chief-of-staff crashed, misconfigured, or never started) — **if something is actually built to check stream depth against registration presence.** Nothing in this design's current scope specifies that checker or where its output surfaces; it's the same raise-without-a-check shape §6 already flags for the human-escalation flag. Scoped explicitly as a Phase 1 exit-criterion in §10 rather than left as an implicit claim (Rev 5 correction).
+   The intake side (Wayfinder tags → the single external-intake stream) is built entirely on `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (`stream_append`/`stream_read_next`/`stream_ack` for the stream itself, `kv_put`/`kv_list` with TTL for the registration record — the exact pattern `presence.rs` already establishes for liveness) — **no change to `ta-agent-whiteboard` is needed**; a small `topics.rs` + `registration.rs` pair lives in the private repo, built purely as a consumer of the crate's already-public surface. Because there's exactly one intended consumer, registration here isn't doing multi-consumer routing — it exists so (a) the persona formally binds to the stream without the poller ever hardcoding its identity, and (b) it *would become* observable — "the external-intake stream has messages piling up and nobody is currently registered to drain it" (chief-of-staff crashed, misconfigured, or never started) — **if something is actually built to check stream depth against registration presence.** Nothing in this design's current scope specifies that checker or where its output surfaces; it's the same raise-without-a-check shape §6 already flags for the human-escalation flag. Scoped explicitly as a Phase 3 exit-criterion in §10 rather than left as an implicit claim (Rev 5 correction; renumbered to Phase 3 in Rev 6's four-stage restructure).
 
    **Future flexibility, not default architecture**: nothing about the wire format forces every Wayfinder tag through chief-of-staff forever. If a project later wants, say, `status-report` missives drained by a different, dedicated role without passing through chief-of-staff, that's a deliberate re-registration (a different `RoleRef` registers for that one Wayfinder tag specifically) — the tag is already on the wire, so splitting the intake later doesn't require touching the schema, only the registration config. Don't build that split up front; the single-gate design is the right default for a small team.
 
@@ -218,55 +218,78 @@ Note there is no `requested_role`/recipient field at all — addressing is impli
 
 ## 10. Development plan
 
-**Sequencing question, answered directly: the private-repo split happens *before* Wayfinder dispatch, but as a small Phase 0 inside this one plan — not as a separate initiative to fully finish first.** Every piece of new code this design specifies (poller, `topics.rs`/`registration.rs`, chief-of-staff persona config) is, by §8, explicitly private-repo work — none of it has anywhere to live, and there's no `RoleRef` to route a handoff to, until the repo and a minimal team exist. But that prerequisite is genuinely light, not a multi-week gate: TA core already ships the multi-role execution engine (`team_session.rs` fires one `ta run` goal per role in sequence) and the whole whiteboard coordination substrate (§4). "Splitting" mostly means creating a repo and its `.ta/` config and proving TA's existing machinery runs a goal there — it is not standing up a new orchestration engine from scratch. Treat Phase 0 below as a fast prerequisite, then move straight into dispatch phases in the same repo.
+**Four stages, in this order: split, test, finalize, then the Wayfinder module — and the Wayfinder module is optional, off by default, the whole way through.** Splitting the virtual team out and pairing it with Wayfinder are two different deliverables, not one continuous build. The virtual team has to work, and be worth using, entirely on its own — a human should be able to run one with zero Wayfinder configuration. Wayfinder-pairing is an add-on bolted on top once that base is proven, gated behind an explicit opt-in the same way `ta-agent-whiteboard` already gates coordination behind `[whiteboard] enabled = true` (default `false`, confirmed in `ta-agent-whiteboard/src/config.rs`) — this design should add a matching `[wayfinder] enabled = true` gate, default `false`, rather than assuming every virtual team wants Wayfinder wired in.
 
 **Dependency mechanism** (settled, not open): the private repo depends on `ta-agent-whiteboard`, `ta-session`, `ta-goal`, etc. as **git dependencies** against `Trusted-Autonomy/TrustedAutonomy`, the same pattern TA's own `ta-mcp-gateway/Cargo.toml` already uses today for `ta-decision` (a *different* repo, `decision-gate`, consumed via `{ git = "...", tag = "v0.1.0" }`). This is a proven mechanism already in production in this exact codebase, not a new one to validate. **Pin to a released tag, not `main`** — TA core changes daily; tracking `main` would make the private repo's build break on unrelated TA-core work. Bump the pin deliberately, the same way any dependency upgrade would be reviewed.
 
 **Tooling parity**: carry over TA's own conventions into the new repo's `CLAUDE.md` — feature-branch + PR workflow, the four-gate verify (`build`/`test`/`clippy -D warnings`/`fmt --check`), Nix-provided toolchain. No reason to invent a second convention for a repo that's going to depend on TA core directly.
 
+**Existing engine, not a blank slate**: TA core's multi-role executor (`ta-daemon/src/team_session.rs` — fires one `ta run` goal per role, sequentially) already carries ~20 unit tests today (signal handling, session-context building, `run_one_cycle`). Stage 2 below is exercising that engine as a real product end to end for the first time, not proving it from zero.
+
 ---
 
-**Phase 0 — Repo scaffold + minimal team validation** (prerequisite; blocks every later phase)
-- **TA-core sub-step, on its own feature branch + PR against `Trusted-Autonomy/TrustedAutonomy`, done first**: extend `TeamMember` (`ta-session/src/team.rs`/`agent_action.rs`) with two small, additive, `#[serde(default)]` fields — `model_tier` and `handles_tags` — plus whatever minimal resolution logic reads them (§4, §8, §9.2, §9.8). This is the one piece of this whole plan that isn't private-repo-only; land and tag-release it before the private repo's `.ta/team.toml` can express either policy.
-- Create the private repo (name/org/visibility — §9.4, pick before starting). Wire the git-dependency pin described above, against the tag that includes the `TeamMember` change.
-- Add a minimal `.ta/team.toml`: the chief-of-staff role (with `model_tier` set to the top tier) plus one placeholder worker role, following the existing TA convention.
-- Point a TA daemon at the new repo as its project root and run a toy two-role goal through TA core's *existing* `team_session.rs` sequential execution — no Wayfinder, no whiteboard topics, nothing new beyond the schema fields just added. This is a smoke test of the foundation, not new engineering; if it doesn't work, that's a TA-core gap to fix here before any dispatch work has somewhere to land.
-- **Exit criteria**: a toy multi-role goal runs end to end in the new repo using TA machinery plus the new schema fields, with `model_tier` actually observed to affect which model executes.
+### Stage 1 — Split
 
-**Phase 1 — Topic + registration primitive**
+**Phase 0 — Repo scaffold + `TeamMember` schema PR**
+- **TA-core sub-step, on its own feature branch + PR against `Trusted-Autonomy/TrustedAutonomy`, done first**: extend `TeamMember` (`ta-session/src/team.rs`/`agent_action.rs`) with two small, additive, `#[serde(default)]` fields — `model_tier` and `handles_tags` — plus whatever minimal resolution logic reads them (§4, §8, §9.2, §9.8). This benefits the virtual team on its own merits (§4's model-tier policy is not Wayfinder-specific), so it belongs here, not deferred to Stage 4. Land and tag-release it before the private repo's `.ta/team.toml` can express either field.
+- Create the private repo (name/org/visibility — §9.4, pick before starting). Wire the git-dependency pin described above, against the tag that includes the `TeamMember` change.
+- **Exit criteria**: the repo exists, builds against the pinned TA-core tag, and `.ta/team.toml` accepts `model_tier`/`handles_tags` without error.
+
+### Stage 2 — Test virtual teams, standalone (no Wayfinder anywhere)
+
+**Phase 1 — Real roster, real work**
+- Replace any placeholder roster with a real one: chief-of-staff plus however many worker roles the first real use case needs, each with an appropriate `model_tier` and `security` level.
+- Run real goals (not toys) through `team_session.rs`'s existing sequential execution. Confirm `model_tier` actually changes which model runs a given role — this is the first real exercise of the field added in Phase 0.
+- Exercise the whiteboard substrate for real: presence while two roles are concurrently active, a `handoff.rs` message between two team members outside of any Wayfinder context, `ta_ask_human`/`ta_human_verify` firing from inside a team-run goal and getting answered.
+- Run the full draft review → apply cycle on team-produced output, end to end.
+- **Exit criteria**: a human can point TA at this repo, run a real multi-role goal, review its draft, and apply it — with no Wayfinder involvement anywhere. This is the actual bar for "the split succeeded," not the toy smoke test alone.
+
+### Stage 3 — Finalize base integration
+
+**Phase 2 — Productionize**
+- CI on the new repo mirroring TA's own four-gate verify.
+- Prove the git-dependency pin/bump workflow at least once for real (bump the pin to a newer TA-core tag, confirm nothing silently breaks).
+- Docs: a README/USAGE-equivalent, example `team.toml` configs, the repo's own versioning scheme.
+- **Exit criteria**: the repo is in a state you'd hand to another person to use, still with zero Wayfinder configuration anywhere.
+
+### Stage 4 — Optional Wayfinder-pairing module (gated behind `[wayfinder] enabled = true`)
+
+Everything below is additive and off by default — a team that never sets `[wayfinder] enabled = true` never runs any of it.
+
+**Phase 3 — Topic + registration primitive**
 - Build `topics.rs` + `registration.rs` on top of `ta-agent-whiteboard`'s existing public `WhiteboardTransport` trait (§4, §8) — the external-intake stream and its single-consumer-by-design registration record. No `ta-agent-whiteboard` changes required (confirmed by direct source read — its KV/stream primitives are already public).
 - Test against `InMemoryTransport` (already shipped, no NATS server needed for this phase) — publish a message, register a fake consumer, confirm it drains; confirm an unregistered topic still lands durably.
 - **Scope the stream-depth-vs-registration check here, explicitly** (§4 Rev 5 correction): a small function comparing pending-message count on the intake stream against whether a live (non-expired) registration exists, logged as a warning when they diverge. Doesn't need a UI yet — a `tracing::warn!` is enough to make the earlier "detectable condition" claim actually true rather than aspirational.
 - **Exit criteria**: a message published before any consumer registers is still delivered once one does; registration liveness (§4) is queryable; the depth-vs-registration check fires in a test that stops registering and keeps publishing.
 
-**Phase 2 — Wayfinder REST client + poller, read-only**
+**Phase 4 — Wayfinder REST client + poller, read-only**
 - Thin client for `POST /api/dispatch`, `GET` ready-queue, `PATCH .../tasks/:id/status`, `POST /api/tasks` (§8.5 Contract 1 — verbs corrected Rev 5), authenticating as a `member`-role service account (§2).
 - Define the `candidate`/`outcome` schema (§8.5) now, even though nothing publishes yet.
-- Poller runs read-only: logs `TaskCandidate`s (the internal anti-corruption type, §4) tagged with Wayfinder's classification vocabulary, publishes nothing.
+- Poller runs read-only: logs `TaskCandidate`s (the internal anti-corruption type, §4) tagged with Wayfinder's classification vocabulary, publishes nothing. Only runs at all when `[wayfinder] enabled = true`.
 - **Exit criteria**: verified against a real (or sandboxed) Wayfinder project — candidates are logged correctly, tagged correctly, with no writes anywhere yet.
 
-**Phase 3 — Wire intake end to end**
-- Poller publishes `candidate` onto the external-intake stream (Phase 1's primitive). Chief-of-staff persona (highest reasoning-effort tier, §4) is the registered consumer; it triages by Wayfinder's tag, then routes via the *existing, unmodified* `handoff.rs` to a team member, using the project's own local tag vocabulary (§9.8). Team member executes at its own role-appropriate lower-cost tier.
+**Phase 5 — Wire intake end to end**
+- Poller publishes `candidate` onto the external-intake stream (Phase 3's primitive). Chief-of-staff persona (highest reasoning-effort tier, §4) is the registered consumer; it triages by Wayfinder's tag, then routes via the *existing, unmodified* `handoff.rs` to a team member, using the project's own local tag vocabulary (§9.8). Team member executes at its own role-appropriate lower-cost tier.
 - Still no Wayfinder writes. Nail down stable `external_id` derivation now (§4) — `ta-goal:<goal_id>`, never freshly generated — before anything downstream depends on upsert idempotency.
 - **Exit criteria**: a real Wayfinder task flows all the way to a team member executing a goal, purely through internal TA/whiteboard plumbing.
 
-**Phase 4 — Report-back leg**
+**Phase 6 — Report-back leg**
 - `outcome` messages drive `PATCH` task status / `POST` new tasks, behind an explicit dry-run flag until trusted. Add the poller's audit trail (§4) here, not after — every write should already be correlatable to its originating `candidate_id`.
 - **Exit criteria**: dry-run output reviewed and judged correct on real Wayfinder tasks before the flag is removed.
 
-**Phase 5 — Human escalation, v1**
+**Phase 7 — Human escalation, v1**
 - Comment + status flag glue (§6 v1) — raise and clear shipped together, not the raise half alone.
 - **Exit criteria**: a `ta_ask_human` interaction on Wayfinder-sourced work is visible and answerable from Wayfinder's own UI via the linked flag, and clears itself once answered.
 
-**Phase 6 — Cross-links** (§7)
-- Cheap, cosmetic relative to the rest; safe to defer past Phase 5 without blocking anything downstream.
+**Phase 8 — Cross-links** (§7)
+- Cheap, cosmetic relative to the rest; safe to defer past Phase 7 without blocking anything downstream.
 
-**Phase 7 — Wayfinder Notification primitive, v2** (§6, §9.6) — **evidence-gated, not scheduled**
-- Only after real use of Phases 0-6 shows v1's comment-flag approach is actually insufficient. This is the one phase with real Wayfinder-side cost (§8); don't pull it forward speculatively.
+**Phase 9 — Wayfinder Notification primitive, v2** (§6, §9.6) — **evidence-gated, not scheduled**
+- Only after real use of Phases 3-8 shows v1's comment-flag approach is actually insufficient. This is the one phase with real Wayfinder-side cost (§8); don't pull it forward speculatively.
 
 ---
 
-Each phase is independently testable against a real (or sandboxed) Wayfinder project before the next one starts writing. Once Phase 0 lands, **migrate this phase list into the new repo's own `PLAN.md`**, using TA's existing phase-tracking convention (`<!-- status: pending/in_progress/done -->`, `ta plan status`) — this document's job was to get the repo to a point where TA's own planning tooling can take over; it isn't meant to be the plan of record forever.
+Each phase is independently testable before the next one starts writing (Stage 4's phases against a real or sandboxed Wayfinder project; Stage 1-3's against the private repo alone). Once Phase 0 lands, **migrate this phase list into the new repo's own `PLAN.md`**, using TA's existing phase-tracking convention (`<!-- status: pending/in_progress/done -->`, `ta plan status`) — this document's job was to get the repo to a point where TA's own planning tooling can take over; it isn't meant to be the plan of record forever.
 
 ---
 
@@ -277,3 +300,5 @@ Each phase is independently testable against a real (or sandboxed) Wayfinder pro
 **Rev 4** (2026-08-25, same day) turns §10 from a flat build-order list into a phased development plan and directly answers "before or after the virtual-team split": before, but as a fast Phase 0 inside this one plan rather than a separate initiative to finish first, since TA core already ships the multi-role execution engine (`team_session.rs`) and the whiteboard substrate the split mostly just needs to be pointed at. Adds a settled dependency mechanism (git dependency against `Trusted-Autonomy/TrustedAutonomy`, pinned to a released tag — the same pattern already proven by `ta-decision`/`decision-gate` in TA's own `ta-mcp-gateway/Cargo.toml`) and tooling-parity guidance (carry over CLAUDE.md conventions, four-gate verify). Restructures the prior 8-step list into 8 named phases (0-7) with explicit exit criteria each, and closes with instructions to migrate this plan into the new repo's own `PLAN.md` via TA's existing phase-tracking convention once Phase 0 lands, rather than treating this document as the permanent plan of record.
 
 **Rev 5** (2026-08-25, same day) corrects three issues surfaced by an independent Wayfinder-side agent review, verified directly against both codebases (`wayfinder-api/src/routes/{dispatch,tasks,ready_queue}.rs`, `project_router.rs`, `ta-session/src/team.rs`) rather than taken on trust — the review's own methodology (checking concrete claims against source, not the doc's prose) is repeated here, and its whiteboard-primitive and `EscalatePrimitive` findings were confirmed accurate and left unchanged. **Two real route errors in §8.5 Contract 1**: `dispatch` is `post(dispatch)`, not GET — it mutates and would 405 as GET; there is no bare `.../tasks/:id` PATCH, only `.../tasks/:id/status` (task status) and the separate `.../tasks/:id/assignee` — both fixed in the table, with the external `/api/projects/:project_id/...` prefix itself confirmed correct via `project_router.rs`'s `dispatch_to_project` rewrite (§2). **One systematic mis-costing**: `model_tier` and the project-local tag vocabulary were written as if `.ta/team.toml` already had fields for them; `TeamMember` is actually exactly `{ role, agent_id, security, persona }` (confirmed by direct source read of `ta-session/src/team.rs`) — realizing either requires a small, additive, backward-compatible `ta-session` schema change (new §8 row, new Phase 0 sub-step in §10), not free config, correcting §8's prior "no new agent-execution code needed" framing for the chief-of-staff persona specifically (the persona's *execution* path is still unchanged; its *config schema* needs a small TA-core PR first). **One softened claim**: §4's assertion that an unregistered intake stream is "a real, detectable condition" is corrected to note nothing in scope actually builds that check yet — scoped explicitly as a Phase 1 exit criterion in §10 instead of stated as already true.
+
+**Rev 6** (2026-08-25, same day) restructures §10 into four explicit stages — Split, Test (standalone, no Wayfinder), Finalize base integration, then the Wayfinder-pairing module — answering a direct sequencing question and correcting an implicit assumption the prior revs never stated outright: that the Wayfinder module is **optional and off by default**, not something baked into the core virtual-team repo. Adds a `[wayfinder] enabled = true` config gate, mirroring `ta-agent-whiteboard`'s own `[whiteboard] enabled = true` (default `false`, confirmed in `ta-agent-whiteboard/src/config.rs`) — a team should work fully with zero Wayfinder configuration. Phases renumbered 0-9 across the four stages (0: repo + `TeamMember` schema PR; 1: real roster + real goals through `team_session.rs`, no Wayfinder anywhere, exit criterion is draft-review-and-apply working end to end standalone; 2: CI/docs/dependency-bump-workflow productionization; 3-9: the prior Wayfinder-module phases, unchanged in content, gated behind the new config flag). Notes that TA core's multi-role executor (`ta-daemon/src/team_session.rs`) already carries ~20 unit tests today — Stage 2 is the engine's first real end-to-end product exercise, not proving it from zero.
