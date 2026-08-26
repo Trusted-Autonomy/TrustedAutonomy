@@ -1,16 +1,25 @@
-// team.rs — Virtual team configuration: team.toml schema, parser, and personas path (v0.17.0.3).
+// team.rs — Virtual team configuration: team.toml schema, parser, and personas path (v0.17.0.3, model_tier/handles_tags added v0.17.11.6).
 //
 // `.ta/team.toml` declares which agent ID fills each team role and at what security level.
+// `model_tier` (optional) overrides `agent_id` via a lookup in the top-level `[model_tiers]`
+// table; `handles_tags` (optional) is a local routing hint consulted only by a virtual
+// team's own orchestrator persona, never by TA core.
 //
 // Example:
 // ```toml
+// [model_tiers]
+// highest = "claude-opus-5"
+//
 // [[members]]
 // role = "reviewer"
 // agent_id = "claude-sonnet-4-6"
 // security = "auto"
 // persona = "strict-reviewer"
+// model_tier = "highest"
+// handles_tags = ["task-delegation"]
 // ```
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
@@ -36,6 +45,12 @@ pub enum TeamConfigError {
 pub struct TeamConfig {
     #[serde(default)]
     pub members: Vec<TeamMember>,
+    /// Named tier -> concrete `agent_id` (e.g. `highest = "claude-opus-5"`).
+    /// Looked up by `TeamMember.model_tier`; a member's `agent_id` remains
+    /// the fallback when its tier is unset or not present here
+    /// (v0.17.11.6).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_tiers: HashMap<String, String>,
 }
 
 impl TeamConfig {
@@ -68,10 +83,33 @@ impl TeamConfig {
         self.members.iter().find(|m| &m.role == role)
     }
 
+    /// All team members whose `handles_tags` includes `tag` — a local
+    /// routing lookup for a virtual team's own orchestrator persona
+    /// (v0.17.11.6); never consulted by TA core itself.
+    pub fn find_by_tag(&self, tag: &str) -> Vec<&TeamMember> {
+        self.members
+            .iter()
+            .filter(|m| m.handles_tags.iter().any(|t| t == tag))
+            .collect()
+    }
+
+    /// Resolve `member`'s `agent_id` against this config's `model_tiers` —
+    /// `member.model_tier` wins when set and present in `model_tiers`;
+    /// `member.agent_id` is the fallback otherwise (v0.17.11.6).
+    pub fn resolve_agent_id<'a>(&'a self, member: &'a TeamMember) -> &'a str {
+        member
+            .model_tier
+            .as_deref()
+            .and_then(|tier| self.model_tiers.get(tier))
+            .map(String::as_str)
+            .unwrap_or(&member.agent_id)
+    }
+
     /// Upsert a team member for the given role.
     ///
     /// If a member with `role` already exists, updates their fields.
-    /// Otherwise appends a new member. Returns `&mut Self` for chaining.
+    /// Otherwise appends a new member (with no tier/tags — set those via
+    /// direct field access). Returns `&mut Self` for chaining.
     pub fn assign(
         &mut self,
         role: TeamRole,
@@ -89,6 +127,8 @@ impl TeamConfig {
                 agent_id,
                 security,
                 persona,
+                model_tier: None,
+                handles_tags: Vec::new(),
             });
         }
         self
@@ -125,6 +165,8 @@ mod tests {
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::ReadOnly,
             persona: None,
+            model_tier: None,
+            handles_tags: Vec::new(),
         }
     }
 
@@ -144,6 +186,8 @@ mod tests {
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::Auto,
             persona: Some("strict-reviewer".to_string()),
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         config.save(tmp.path()).unwrap();
 
@@ -167,12 +211,16 @@ mod tests {
             agent_id: "claude-opus-4-8".to_string(),
             security: AdvisorSecurity::ReadOnly,
             persona: None,
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         config.members.push(TeamMember {
             role: TeamRole::reviewer(),
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::Auto,
             persona: Some("strict".to_string()),
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         config.save(tmp.path()).unwrap();
 
@@ -192,6 +240,8 @@ mod tests {
             agent_id: "claude-opus-4-8".to_string(),
             security: AdvisorSecurity::ReadOnly,
             persona: None,
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         config.save(tmp.path()).unwrap();
 
@@ -270,6 +320,128 @@ persona = "strict-reviewer"
         assert!(config.find_by_role(&TeamRole::reviewer()).is_some());
         assert!(config.find_by_role(&TeamRole::qa()).is_some());
         assert!(config.find_by_role(&TeamRole::architect()).is_none());
+    }
+
+    #[test]
+    fn team_toml_model_tier_and_handles_tags_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = TeamConfig::default();
+        config
+            .model_tiers
+            .insert("highest".to_string(), "claude-opus-5".to_string());
+        config.members.push(TeamMember {
+            role: TeamRole::new("chief-of-staff"),
+            agent_id: "claude-sonnet-5".to_string(),
+            security: AdvisorSecurity::Auto,
+            persona: None,
+            model_tier: Some("highest".to_string()),
+            handles_tags: vec![
+                "task-delegation".to_string(),
+                "research-request".to_string(),
+            ],
+        });
+        config.save(tmp.path()).unwrap();
+
+        let loaded = TeamConfig::load(tmp.path()).unwrap();
+        assert_eq!(loaded.members.len(), 1);
+        assert_eq!(loaded.members[0].model_tier, Some("highest".to_string()));
+        assert_eq!(
+            loaded.members[0].handles_tags,
+            vec![
+                "task-delegation".to_string(),
+                "research-request".to_string()
+            ]
+        );
+        assert_eq!(
+            loaded.model_tiers.get("highest"),
+            Some(&"claude-opus-5".to_string())
+        );
+    }
+
+    #[test]
+    fn team_toml_missing_model_tier_and_handles_tags_default_empty() {
+        // Backward compatibility: existing team.toml files with neither
+        // field must keep parsing identically (matches the well-known-roles
+        // regression guard above).
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ta")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ta").join("team.toml"),
+            r#"
+[[members]]
+role = "reviewer"
+agent_id = "claude-sonnet-4-6"
+security = "auto"
+"#,
+        )
+        .unwrap();
+
+        let loaded = TeamConfig::load(tmp.path()).unwrap();
+        assert_eq!(loaded.members.len(), 1);
+        assert_eq!(loaded.members[0].model_tier, None);
+        assert!(loaded.members[0].handles_tags.is_empty());
+        assert!(loaded.model_tiers.is_empty());
+    }
+
+    #[test]
+    fn resolve_agent_id_uses_tier_when_set_and_present() {
+        let mut config = TeamConfig::default();
+        config
+            .model_tiers
+            .insert("highest".to_string(), "claude-opus-5".to_string());
+        let mut member = make_member(TeamRole::reviewer());
+        member.model_tier = Some("highest".to_string());
+
+        assert_eq!(config.resolve_agent_id(&member), "claude-opus-5");
+    }
+
+    #[test]
+    fn resolve_agent_id_falls_back_to_agent_id_when_tier_unset() {
+        let config = TeamConfig::default();
+        let member = make_member(TeamRole::reviewer());
+
+        assert_eq!(config.resolve_agent_id(&member), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn resolve_agent_id_falls_back_to_agent_id_when_tier_not_found() {
+        let config = TeamConfig::default();
+        let mut member = make_member(TeamRole::reviewer());
+        member.model_tier = Some("nonexistent-tier".to_string());
+
+        // The tier is set but not declared in `model_tiers` — fall back
+        // rather than error, since a stale/typo'd tier shouldn't break
+        // launching the role entirely.
+        assert_eq!(config.resolve_agent_id(&member), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn find_by_tag_returns_matching_members_only() {
+        let mut config = TeamConfig::default();
+        let mut chief = make_member(TeamRole::new("chief-of-staff"));
+        chief.handles_tags = vec!["task-delegation".to_string()];
+        let mut worker = make_member(TeamRole::implementer());
+        worker.handles_tags = vec!["docs".to_string()];
+        config.members.push(chief);
+        config.members.push(worker);
+
+        let matches = config.find_by_tag("task-delegation");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].role, TeamRole::new("chief-of-staff"));
+        assert!(config.find_by_tag("nonexistent-tag").is_empty());
+    }
+
+    #[test]
+    fn assign_new_member_defaults_tier_and_tags_empty() {
+        let mut config = TeamConfig::default();
+        config.assign(
+            TeamRole::implementer(),
+            "claude-opus".to_string(),
+            AdvisorSecurity::ReadOnly,
+            None,
+        );
+        assert_eq!(config.members[0].model_tier, None);
+        assert!(config.members[0].handles_tags.is_empty());
     }
 
     #[test]

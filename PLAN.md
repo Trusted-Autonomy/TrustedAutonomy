@@ -10586,6 +10586,20 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.5`
 
+### v0.17.11.6 — Virtual-Team `TeamMember` Model-Tier & Local-Tag Schema
+<!-- status: done -->
+**Depends on**: none
+
+**Goal**: Unblock the private `Trusted-Autonomy/ta-virtual-team` repo's Phase 0 (see its own `PLAN.md` and `docs/design/virtual-team-wayfinder-dispatch.md`), which needs two fields on `.ta/team.toml`'s `TeamMember` that don't exist yet: a portable model-tier policy (chief-of-staff role runs the user's highest-configured reasoning tier; other roles run whatever lower-cost tier fits their task) and a local tag vocabulary an orchestrator persona can consult when routing incoming work to a specific team member. Neither is Wayfinder-specific — both benefit any virtual team on their own merits.
+
+1. [x] **`TeamMember` schema** (`ta-session/src/agent_action.rs`): added `model_tier: Option<String>` and `handles_tags: Vec<String>`, both `#[serde(default)]` — backward compatible, existing `.ta/team.toml` files round-trip identically (regression-tested). Data-defined (plain string), not a closed Rust enum, matching `TeamRole`'s own newtype convention (TA-CONSTITUTION.md §1.6) so new tiers/tags never require a schema change.
+2. [x] **`TeamConfig.model_tiers: HashMap<String, String>`** (`ta-session/src/team.rs`): named tier -> concrete `agent_id`, e.g. `highest = "claude-opus-5"`. `TeamConfig::resolve_agent_id(&member)` resolves `member.model_tier` against it, falling back to `member.agent_id` when the tier is unset or not declared (a stale/typo'd tier doesn't block launching the role, just falls back — no hard error).
+3. [x] **Wired into actual execution, not just schema**: `ta-daemon/src/team_session.rs`'s `build_ta_run_args` now calls `team_config.resolve_agent_id(member)` instead of reading `member.agent_id` directly — `model_tier` demonstrably changes which model launches a role (unit-tested both the override and the fall-back-when-unresolvable cases), not a field that round-trips but is never consumed.
+4. [x] **`TeamConfig::find_by_tag(tag) -> Vec<&TeamMember>`**: local routing lookup mirroring `find_by_role`, for a virtual team's own orchestrator persona to consult — never called from TA core itself; `handles_tags` is purely a per-project routing hint carried in the schema.
+5. [x] **Tests**: round-trip (both fields present, and backward-compat with neither present), `resolve_agent_id` (tier hit / unset / declared-but-missing), `find_by_tag`, `assign()` defaults the new fields empty on a fresh member. All four verification gates (`build`/`test --workspace`/`clippy --workspace -- -D warnings`/`fmt --check`) clean at the full-workspace level, not just the touched crates.
+
+#### Version: `0.17.11-alpha.6`
+
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin

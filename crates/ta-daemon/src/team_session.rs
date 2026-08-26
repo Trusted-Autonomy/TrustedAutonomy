@@ -395,7 +395,11 @@ pub fn build_ta_run_args(
             args.push(persona.clone());
         }
         args.push("--agent".to_string());
-        args.push(member.agent_id.clone());
+        // Resolves `member.model_tier` against `team_config.model_tiers`
+        // when set, falling back to `member.agent_id` otherwise
+        // (v0.17.11.6) — this is the one place model_tier actually
+        // affects which model launches a role.
+        args.push(team_config.resolve_agent_id(member).to_string());
     }
     // A role with no `.ta/team.toml` assignment yet falls through to
     // `ta run`'s own default resolution chain (workflow.toml, daemon.toml,
@@ -1004,6 +1008,58 @@ mod tests {
         assert!(args.contains(&"auto".to_string()));
         assert!(args.contains(&"--persona".to_string()));
         assert!(args.contains(&"careful-analyst".to_string()));
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn build_args_model_tier_overrides_agent_id_when_resolvable() {
+        // Proves model_tier actually affects which model launches a role
+        // (v0.17.11.6), not just that the field round-trips through TOML.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path = write_session_context(dir.path(), &state, &stage.name).unwrap();
+
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "claude-sonnet-4-6".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+        team_config
+            .model_tiers
+            .insert("highest".to_string(), "claude-opus-5".to_string());
+        team_config.members[0].model_tier = Some("highest".to_string());
+
+        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"claude-opus-5".to_string()));
+        assert!(!args.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn build_args_model_tier_falls_back_to_agent_id_when_tier_unresolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path = write_session_context(dir.path(), &state, &stage.name).unwrap();
+
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "claude-sonnet-4-6".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+        // model_tier set, but not declared in [model_tiers] — should not
+        // block launching the role, just fall back to agent_id.
+        team_config.members[0].model_tier = Some("nonexistent-tier".to_string());
+
+        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
