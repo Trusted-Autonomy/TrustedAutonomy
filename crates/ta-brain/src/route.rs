@@ -743,6 +743,8 @@ mod tests {
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::ReadOnly,
             persona: Some("careful-implementer".to_string()),
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         team_config.save(tmp.path()).unwrap();
         let decision = route(&explicit("Add a new dashboard widget"), tmp.path());
@@ -758,6 +760,8 @@ mod tests {
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::ReadOnly,
             persona: Some("careful-implementer".to_string()),
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         team_config.save(tmp.path()).unwrap();
         let mut req = ExplicitGoalRequest::new("Add a new dashboard widget");
@@ -839,6 +843,8 @@ mod tests {
             agent_id: "claude-sonnet-4-6".to_string(),
             security: AdvisorSecurity::Suggest,
             persona: None,
+            model_tier: None,
+            handles_tags: Vec::new(),
         });
         team_config.save(tmp.path()).unwrap();
         let decision = route(&explicit("Add a new dashboard widget"), tmp.path());

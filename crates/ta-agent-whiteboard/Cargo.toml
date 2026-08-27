@@ -24,7 +24,7 @@ async-trait = "0.1"
 async-nats = "0.50"
 bytes = "1"
 futures-util = "0.3"
-ta-session = { path = "../ta-session", version = "0.17.11-alpha.5" }
+ta-session = { path = "../ta-session", version = "0.17.11-alpha.6" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

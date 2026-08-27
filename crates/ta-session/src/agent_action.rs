@@ -89,6 +89,20 @@ pub struct TeamMember {
     pub security: crate::workflow_session::AdvisorSecurity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
+    /// Named tier (e.g. `"highest"`, `"standard"`, `"economy"`) resolved
+    /// against `TeamConfig::model_tiers` to pick the concrete `agent_id` to
+    /// launch this role with (v0.17.11.6 — virtual-team model-tier policy).
+    /// Data-defined like `TeamRole` rather than a closed enum, so new tiers
+    /// don't require a schema change. `agent_id` remains the fallback when
+    /// unset or when the tier isn't found in `model_tiers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tier: Option<String>,
+    /// Local tags this role handles, consulted by a virtual team's own
+    /// orchestrator persona when routing incoming work — mirrors Wayfinder's
+    /// `TeamRole.handles_verbs` convention. Never sent externally; purely a
+    /// per-project routing hint (v0.17.11.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles_tags: Vec<String>,
 }
 
 // ── RoleRef ───────────────────────────────────────────────────────────────────
