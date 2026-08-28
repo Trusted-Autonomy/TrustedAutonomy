@@ -10600,6 +10600,21 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.6`
 
+### v0.17.11.7 — Staged-Resource Conflict Detection (`ta-agent-whiteboard` ↔ `ta-changeset`)
+<!-- status: in_progress -->
+**Depends on**: v0.17.11.2 (`ta-agent-whiteboard`)
+
+**Goal**: Resurfaces item 7 from the original `agent-coordination-whiteboard.md` design doc, explicitly deferred out of v1 scope at the time. `is_anyone_touching()` today answers "is anyone touching this resource" from self-declared, ephemeral presence records — advisory, and can be wrong, stale, or incomplete. This phase adds a strictly higher-signal question, answered from `ta-changeset`'s actual staged (drafted, not-yet-applied) artifacts instead: "has anyone already staged a real change touching this resource." Full design and scope rationale (including what was deliberately cut — DB resources, VCS as a distinct domain, task-graph wave-scheduler enforcement) in `docs/design/staged-resource-conflict-detection.md`.
+
+**Items**:
+1. [ ] **`DraftLookup` trait** in `ta-agent-whiteboard`: a small trait over "pending drafts and their artifact `resource_uri`s," so this crate does not take a direct dependency on the larger, more actively-changing `ta-changeset` crate (trait-based inversion, same reasoning that already justifies `WhiteboardTransport` being a trait rather than a hardcoded NATS client).
+2. [ ] **`staged_conflicts_for(drafts: &dyn DraftLookup, resource_uris: &[String]) -> Result<Vec<StagedConflict>>`**: reuses `discovery.rs`'s existing glob-matching logic (both-directions matching, already tested there) against `resource_uri` instead of presence-declared globs. `fs://` scope only.
+3. [ ] `ta-changeset`-backed `DraftLookup` implementation, wired in wherever the caller (daemon/CLI) already has access to both crates.
+4. [ ] Tests: overlapping `fs://` URI detected, non-overlapping not, empty draft store returns empty, glob-vs-exact-path matching both directions.
+5. [ ] Stays advisory-only in this phase — no `task-graph` wave-scheduler integration, no blocking of goal launch or draft creation. Explicitly deferred, not silently dropped: task-graph enforcement → future phase (cross-repo, `Trusted-Autonomy/task-graph`); DB resources (`db://`) → future phase (tied to `ta-db-proxy`'s own resource model).
+
+#### Version: `0.17.11-alpha.7`
+
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
