@@ -8,10 +8,9 @@
 //! Point-in-time snapshots (`kv_list` + filter), not a live subscription —
 //! see `transport.rs`'s module doc for why there's no push-based watch here.
 
-use glob::Pattern;
-
 use crate::error::Result;
 use crate::presence::{PresenceRecord, PRESENCE_BUCKET};
+use crate::resource_match::glob_overlap;
 use crate::transport::WhiteboardTransport;
 
 /// All currently-live presence records — "what is everyone doing right now."
@@ -59,34 +58,19 @@ pub async fn is_anyone_touching(
     source_dir: &str,
     resource_patterns: &[String],
 ) -> Result<Vec<PresenceRecord>> {
-    let candidates = active_agents_for_source(transport, source_dir).await?;
-    let queries: Vec<Pattern> = resource_patterns
-        .iter()
-        .filter_map(|p| Pattern::new(p).ok())
-        .collect();
-    if queries.is_empty() {
+    if resource_patterns.is_empty() {
         return Ok(Vec::new());
     }
+    let candidates = active_agents_for_source(transport, source_dir).await?;
     Ok(candidates
         .into_iter()
         .filter(|record| {
-            record.resources.iter().any(|declared| {
-                queries.iter().any(|q| q.matches(declared))
-                    || glob_matches_either_way(declared, resource_patterns)
-            })
+            record
+                .resources
+                .iter()
+                .any(|declared| glob_overlap(declared, resource_patterns))
         })
         .collect())
-}
-
-/// A declared resource and a query pattern can each be the more specific
-/// side (`"src/**"` querying a record that declared `"src/auth.rs"`, or a
-/// record that declared `"src/**"` being queried with a specific file) —
-/// match in both directions so either style of declaration is caught.
-fn glob_matches_either_way(declared: &str, queries: &[String]) -> bool {
-    let Ok(declared_pattern) = Pattern::new(declared) else {
-        return false;
-    };
-    queries.iter().any(|q| declared_pattern.matches(q))
 }
 
 #[cfg(test)]

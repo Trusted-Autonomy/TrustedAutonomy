@@ -32,6 +32,7 @@ pub mod config;
 pub mod error;
 pub mod interceptor;
 pub mod server;
+pub mod staged_conflict_check;
 pub mod tools;
 pub mod validation;
 pub mod verify_audit;

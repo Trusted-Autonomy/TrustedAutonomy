@@ -10,6 +10,11 @@
 //! - [`discovery`] — query presence: who's active, who's touching what.
 //! - [`tasks`] — a shared, dependency-aware, race-free-claim task list.
 //! - [`handoff`] — durable, peer-to-peer messages.
+//! - [`staged_conflicts`] — query actual staged (not-yet-applied) drafts
+//!   for resource overlap, via the [`staged_conflicts::DraftLookup`] trait
+//!   (v0.17.11.7) — strictly higher-signal than presence-declared intent,
+//!   but not transport-based like the layers above (no NATS/whiteboard
+//!   involvement — it reads staging state, supplied by the caller).
 //!
 //! TA-core infrastructure, not a downstream-product concern — see the
 //! design doc §1 and PLAN.md's v0.17.11.2 entry.
@@ -21,6 +26,8 @@ pub mod handoff;
 pub mod memory_transport;
 pub mod nats_transport;
 pub mod presence;
+mod resource_match;
+pub mod staged_conflicts;
 pub mod tasks;
 pub mod transport;
 
