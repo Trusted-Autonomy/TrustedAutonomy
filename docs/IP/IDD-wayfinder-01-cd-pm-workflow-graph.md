@@ -6,15 +6,15 @@
 
 **Invention Disclosure Document - prepared for patent counsel (preliminary filing and prior-art search).**
 
-**Status:** Draft rev. 3 - internal disclosure, not yet filed or publicly disclosed
-**Date prepared:** 2026-09-01 (rev. 1); revised 2026-09-01 (rev. 2 - adds governance/constitution layer, schema validation, auditor, optimizer, and marketplace trust model); revised 2026-09-02 (rev. 3 - split from a sibling, CinePipeAi-specific disclosure; this document covers the general-purpose Wayfinder platform technology, assigned to Trusted-Autonomy, Inc.; the CinePipeAi-specific application of this technology is separately disclosed and assigned to CinePipeAi, Inc. in that company's own IP filings - see the note below)
-**Discloser:** Michael Hunley (michael@hunleys.us)
+**Status:** Draft rev. 4 - internal disclosure, not yet filed or publicly disclosed
+**Date prepared:** 2026-09-01 (rev. 1); revised 2026-09-01 (rev. 2 - adds governance/constitution layer, schema validation, auditor, optimizer, and marketplace trust model); revised 2026-09-02 (rev. 3 - split from a sibling, CinePipeAi-specific disclosure; this document covers the general-purpose Wayfinder platform technology, assigned to Trusted-Autonomy, Inc.; the CinePipeAi-specific application of this technology is separately disclosed and assigned to CinePipeAi, Inc. in that company's own IP filings - see the note below); revised 2026-09-02 (rev. 4 - **Scott Stewart and Joseph Rubino added as co-inventors alongside Michael Hunley**, at Michael Hunley's direct instruction, matching the identical correction made to the sibling `IDD-sage-01` disclosure - see the "Inventors" line below)
+**Inventors (co-inventors):** Michael Hunley (michael@hunleys.us), Scott Stewart, Joseph Rubino - Scott Stewart and Joseph Rubino added 2026-09-02 (rev. 4), at Michael Hunley's direct instruction. Applied here for consistency with the sibling `IDD-sage-01` disclosure, since both documents describe the identical underlying technical mechanism at two levels of generality - leaving the two documents with different named inventors for the same mechanism would itself be a red flag for counsel. This is a factual attribution conveyed by Michael Hunley on behalf of all three inventors, not this drafting session's own determination; counsel should still confirm each named individual's contribution to conception of at least one claim before filing, per standard inventorship doctrine.
 **Assignee:** **Trusted-Autonomy, Inc.**
-**Prepared by:** Drafted with AI assistance (Claude) at the discloser's direction, based on discloser's original conception; **this document is not legal advice and has not been reviewed by patent counsel.**
+**Prepared by:** Drafted with AI assistance (Claude) at Michael Hunley's direction, based on the named inventors' conception as conveyed by Michael Hunley; **this document is not legal advice and has not been reviewed by patent counsel.**
 
 **Note on the sibling CinePipeAi disclosure**: Trusted-Autonomy, Inc. has conveyed a universal license to CinePipeAi, Inc. covering all Trusted-Autonomy technology, including the Wayfinder platform this document discloses. CinePipeAi's own application of this platform - its "S.A.G.E. x CD" / "S.A.G.E. x PM" system for animated/media production - is separately disclosed, in CinePipeAi-specific terms and assigned to CinePipeAi, Inc., as `IDD-sage-01-cd-pm-workflow-graph.md` in `cinepipe-warden/docs/IP/` (a private repository under the CinePipeAi organization). This document is the general-platform-level disclosure; that one is the CinePipeAi-specific application built on it under license. The two should be read together by counsel and filed, if at all, with a coordinated priority strategy so neither creates a self-prior-art problem for the other - they describe the same underlying mechanism at two different levels of generality, for two different assignees, under one governing license.
 
-**Revision note:** Rev. 2 incorporated four structural decisions made after rev. 1: (1) the constitution is a non-overridable platform baseline with tenant-specific overlays; (2) the auditor blocks on correctness/governance violations but is advisory-only on cost; (3) the optimizer is propose-only - it never auto-applies changes; (4) the system is closed to community-authored *Agents*, but a marketplace allows community-authored *Pipes* (graph compositions of first-party Agents plus a user-supplied purpose/summary label). Cross-tenant use of aggregated audit/cost data for platform-wide optimizer improvement is explicitly deferred and will be handled manually, not as an automated system capability, until a separate decision is made. **Rev. 3 (this revision) splits this document from its formerly-shared CinePipeAi framing** - see the note above - and is otherwise unchanged in technical substance from rev. 2.
+**Revision note:** Rev. 2 incorporated four structural decisions made after rev. 1: (1) the constitution is a non-overridable platform baseline with tenant-specific overlays; (2) the auditor blocks on correctness/governance violations but is advisory-only on cost; (3) the optimizer is propose-only - it never auto-applies changes; (4) the system is closed to community-authored *Agents*, but a marketplace allows community-authored *Pipes* (graph compositions of first-party Agents plus a user-supplied purpose/summary label). Cross-tenant use of aggregated audit/cost data for platform-wide optimizer improvement is explicitly deferred and will be handled manually, not as an automated system capability, until a separate decision is made. Rev. 3 split this document from its formerly-shared CinePipeAi framing - see the note above - and was otherwise unchanged in technical substance from rev. 2. **Rev. 4 (this revision) adds Scott Stewart and Joseph Rubino as co-inventors alongside Michael Hunley** - again a header/attribution correction, not a change to Sections 3/4's technical description.
 
 ---
 
@@ -24,7 +24,7 @@ Multi-agent AI orchestration; specifically, systems for automatically selecting,
 
 ## 2. Background / Problem Statement
 
-Existing multi-agent orchestration frameworks (e.g., LangGraph, CrewAI, AutoGen, Microsoft Semantic Kernel planners) let a developer hand-wire agents into a graph, or let an LLM pick from a small, hardcoded toolset at runtime. None of the frameworks known to the discloser combine all of the following:
+Existing multi-agent orchestration frameworks (e.g., LangGraph, CrewAI, AutoGen, Microsoft Semantic Kernel planners) let a developer hand-wire agents into a graph, or let an LLM pick from a small, hardcoded toolset at runtime. None of the frameworks known to the inventors combine all of the following:
 
 1. A **standards-conformant, human- and machine-readable knowledge graph** (built on Google's Open Knowledge Format, OKF) that independently documents each agent's inputs, outputs, purpose(s), and - distinctively - its **pros and cons** (what it is good at, what it is not), at both the individual-agent level and the composed-pipeline level;
 2. A **dedicated planning/advisory agent** ("Sage CD," a creative-director role) responsible for selecting an existing pipeline or constructing a new one by reasoning over that knowledge graph, rather than by fixed developer-authored routing logic;
@@ -101,7 +101,7 @@ The system distinguishes two categories of user-contributed content. First-party
 
 ## 6. Prior Art Landscape (non-exhaustive, informal)
 
-The discloser is aware of, and a formal search should specifically address:
+The inventors are aware of, and a formal search should specifically address:
 
 - **Multi-agent orchestration frameworks**: LangGraph, CrewAI, AutoGen, Microsoft Semantic Kernel (planner patterns), and various 2023-2025 patent filings in the LLM-agent-orchestration space by major cloud/AI vendors.
 - **Node-graph creative tools**: ComfyUI and similar node-graph-based generative pipelines (prior art for the *visual pipeline* concept, though these are user-authored, not automatically constructed from a knowledge graph).
@@ -140,7 +140,7 @@ Primary application: the general-purpose Wayfinder platform, licensable to any t
 
 ## 10. Public Disclosure Status
 
-No public disclosure, publication, demonstration, or sale of this system has occurred as of the date of this document, to the discloser's knowledge. This status is time-sensitive and should be reconfirmed at the time of any filing decision, since public disclosure can start statutory bars to patentability in some jurisdictions.
+No public disclosure, publication, demonstration, or sale of this system has occurred as of the date of this document, to the inventors' knowledge. This status is time-sensitive and should be reconfirmed at the time of any filing decision, since public disclosure can start statutory bars to patentability in some jurisdictions.
 
 ## 11. Patentability and Protection-Strategy Evaluation
 
@@ -165,4 +165,4 @@ No public disclosure, publication, demonstration, or sale of this system has occ
 
 ## 12. Legal Disclaimer
 
-This document was prepared with AI assistance at the discloser's direction and reflects a technical description and informal analysis only. It does not constitute legal advice, does not constitute a formal patentability opinion, and has not been reviewed by a licensed patent attorney. Before making any filing decision, disclosing this invention publicly, or relying on any statement in Section 11, consult qualified patent counsel and, if pursuing a filing, commission a professional prior-art search.
+This document was prepared with AI assistance at Michael Hunley's direction, on behalf of all three named inventors, and reflects a technical description and informal analysis only. It does not constitute legal advice, does not constitute a formal patentability opinion, and has not been reviewed by a licensed patent attorney. Before making any filing decision, disclosing this invention publicly, or relying on any statement in Section 11, consult qualified patent counsel and, if pursuing a filing, commission a professional prior-art search.
