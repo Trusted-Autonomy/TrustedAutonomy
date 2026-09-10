@@ -9,7 +9,7 @@
 #               CI version-consistency check
 
 # Is the current build a pre-release? Controls --prerelease flag on gh release create.
-prerelease = true
+prerelease = false
 
 # Human-readable description appended after "TA v<version> — " in the release title.
 # Update when the release cycle's theme changes (not on every rc bump).
