@@ -76,6 +76,16 @@ jobs:
         if: matrix.cross == true
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Ensure target toolchain is installed
+        if: matrix.cross == false
+        run: rustup target add ${{ matrix.target }}
+        # dtolnay/rust-toolchain's `targets:` input has been observed not
+        # installing a target's rust-std when it differs from the runner's
+        # host arch (e.g. x86_64-apple-darwin on GitHub's arm64 macos-latest
+        # runner), failing the build with "error[E0463]: can't find crate
+        # for `core`". This is a cheap no-op when the target already matches
+        # the host. See v0.17.11-alpha.7 release run 34442820644.
+
       - name: Build binary (native)
         if: matrix.cross == false
         run: |
