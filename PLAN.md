@@ -10622,7 +10622,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: Replace `FileVault` with an enterprise credential store backend for SA deployments. Agent session tokens are issued against credentials stored in HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, or equivalent. User validation is required before token issuance — agent identity is asserted via session ID, signed token, or SPIFFE SVID.
 
-**Depends on**: v0.17.4 (release management stable — SA is a separate product build on top of stable TA)
+**Depends on**: v0.17.11.7 (release management stable through the full 0.17.x line, incl. staged-resource conflict detection — SA is a separate product build on top of stable TA; this note was last updated 2026-09-09 and previously understated the dependency as v0.17.4, which `ta plan status` was reading as if it were a full-plan completion audit rather than this phase's own scoping note)
 
 **Items**:
 
