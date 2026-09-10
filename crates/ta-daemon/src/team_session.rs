@@ -64,7 +64,7 @@ pub struct TeamSessionConfig {
     pub budget: Option<BudgetGuardrails>,
     /// Each role's `prompt:` text from the workflow YAML, keyed by role
     /// name and resolved once by the CLI from `WorkflowDefinition.roles` at
-    /// `start` time — same "CLI parses the YAML, daemon never does" split
+    /// `start` time, same "CLI parses the YAML, daemon never does" split
     /// as `stages`/`budget` above. Without this, a role's own instructions
     /// (e.g. trading-desk.yaml's "You are a trader...") never reached the
     /// agent at all; only the session-level `objective` and prior findings
@@ -985,7 +985,7 @@ mod tests {
     fn render_context_includes_the_firing_roles_own_prompt() {
         // Regression test (Phase 1 live testing of ta-virtual-team, 2026-09):
         // a role's `prompt:` text from the workflow YAML was parsed by
-        // `ta-workflow`'s `RoleDefinition` but never reached the agent —
+        // `ta-workflow`'s `RoleDefinition` but never reached the agent:
         // only the session-level `objective` and prior findings did. A live
         // team-session run silently ignored a role's own instructions.
         let mut config = sample_config();
