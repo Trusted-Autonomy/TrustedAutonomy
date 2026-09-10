@@ -62,6 +62,17 @@ pub struct TeamSessionConfig {
     /// `stages` is already pre-resolved rather than re-derived here.
     #[serde(default)]
     pub budget: Option<BudgetGuardrails>,
+    /// Each role's `prompt:` text from the workflow YAML, keyed by role
+    /// name and resolved once by the CLI from `WorkflowDefinition.roles` at
+    /// `start` time — same "CLI parses the YAML, daemon never does" split
+    /// as `stages`/`budget` above. Without this, a role's own instructions
+    /// (e.g. trading-desk.yaml's "You are a trader...") never reached the
+    /// agent at all; only the session-level `objective` and prior findings
+    /// did (found during Phase 1 live testing of ta-virtual-team, 2026-09).
+    /// `#[serde(default)]` so state.json files written before this field
+    /// existed still load.
+    #[serde(default)]
+    pub role_prompts: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,10 +302,16 @@ impl FailureTracker {
 /// context" shape as `ta_session::advisor_agent::build_advisor_context`,
 /// applied to a team session's own findings instead of a draft/phase
 /// summary.
-pub fn render_session_context(project_root: &Path, state: &TeamSessionState) -> String {
+pub fn render_session_context(project_root: &Path, state: &TeamSessionState, role: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Team session: {}\n\n", state.config.name));
     out.push_str(&format!("**Objective:** {}\n\n", state.config.objective));
+
+    if let Some(prompt) = state.config.role_prompts.get(role) {
+        if !prompt.trim().is_empty() {
+            out.push_str(&format!("## Your role: {role}\n\n{prompt}\n\n"));
+        }
+    }
 
     if let Some(budget) = &state.config.budget {
         let ledger_path = TeamSessionState::budget_ledger_path(project_root, &state.id);
@@ -357,11 +374,12 @@ pub fn write_session_context(
     project_root: &Path,
     state: &TeamSessionState,
     stage_name: &str,
+    role: &str,
 ) -> io::Result<PathBuf> {
     let dir = TeamSessionState::state_dir(project_root, &state.id);
     std::fs::create_dir_all(&dir)?;
     let path = session_context_path(project_root, &state.id, stage_name);
-    std::fs::write(&path, render_session_context(project_root, state))?;
+    std::fs::write(&path, render_session_context(project_root, state, role))?;
     Ok(path)
 }
 
@@ -513,7 +531,7 @@ pub fn run_one_cycle(
         .unwrap_or_else(|| "implementer".to_string());
 
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
-    let context_path = write_session_context(project_root, &state, &stage.name)?;
+    let context_path = write_session_context(project_root, &state, &stage.name, &role)?;
     let args = build_ta_run_args(&state, &stage, &role, &team_config, &context_path);
 
     let output = std::process::Command::new(ta_bin)
@@ -695,6 +713,7 @@ mod tests {
             team_toml_path: ".ta/team.toml".to_string(),
             objective: "Generate income > 2x within 6 months after fees".to_string(),
             budget: None,
+            role_prompts: std::collections::HashMap::new(),
         }
     }
 
@@ -906,7 +925,7 @@ mod tests {
     fn render_context_with_no_findings_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
-        let rendered = render_session_context(dir.path(), &state);
+        let rendered = render_session_context(dir.path(), &state, "analyst");
         assert!(rendered.contains("No prior role findings yet"));
         assert!(rendered.contains("trading-desk"));
     }
@@ -927,7 +946,7 @@ mod tests {
         let ledger_path = TeamSessionState::budget_ledger_path(dir.path(), "sess-1");
         ta_policy::business_budget::record_ledger_spend(&ledger_path, "buy AAPL", 250.0).unwrap();
 
-        let rendered = render_session_context(dir.path(), &state);
+        let rendered = render_session_context(dir.path(), &state, "analyst");
         assert!(rendered.contains("Budget (usd)"), "got: {rendered}");
         assert!(rendered.contains("250.00 / 1000.00"), "got: {rendered}");
         assert!(rendered.contains("25.0%"), "got: {rendered}");
@@ -951,7 +970,7 @@ mod tests {
             summary: "Open a long position.".to_string(),
         });
         let dir = tempfile::tempdir().unwrap();
-        let rendered = render_session_context(dir.path(), &state);
+        let rendered = render_session_context(dir.path(), &state, "trader");
         let analyst_pos = rendered.find("analyst").unwrap();
         let strategist_pos = rendered.find("strategist").unwrap();
         assert!(
@@ -963,10 +982,61 @@ mod tests {
     }
 
     #[test]
+    fn render_context_includes_the_firing_roles_own_prompt() {
+        // Regression test (Phase 1 live testing of ta-virtual-team, 2026-09):
+        // a role's `prompt:` text from the workflow YAML was parsed by
+        // `ta-workflow`'s `RoleDefinition` but never reached the agent —
+        // only the session-level `objective` and prior findings did. A live
+        // team-session run silently ignored a role's own instructions.
+        let mut config = sample_config();
+        config.role_prompts.insert(
+            "analyst".to_string(),
+            "You are a market analyst. Review market data and report findings.".to_string(),
+        );
+        config.role_prompts.insert(
+            "trader".to_string(),
+            "You are a trader. Execute the strategist's decisions.".to_string(),
+        );
+        let state = TeamSessionState::new("sess-1".to_string(), config, sample_stages());
+        let dir = tempfile::tempdir().unwrap();
+
+        let analyst_context = render_session_context(dir.path(), &state, "analyst");
+        assert!(
+            analyst_context.contains("You are a market analyst."),
+            "got: {analyst_context}"
+        );
+        assert!(
+            !analyst_context.contains("Execute the strategist's decisions."),
+            "analyst's context must not contain the trader's prompt"
+        );
+
+        let trader_context = render_session_context(dir.path(), &state, "trader");
+        assert!(
+            trader_context.contains("You are a trader."),
+            "got: {trader_context}"
+        );
+        assert!(
+            !trader_context.contains("market analyst"),
+            "trader's context must not contain the analyst's prompt"
+        );
+    }
+
+    #[test]
+    fn render_context_omits_role_section_when_no_prompt_configured() {
+        // A role with no `prompt:` in the workflow YAML (or an older
+        // state.json predating this field) must not render an empty
+        // "## Your role" heading.
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let dir = tempfile::tempdir().unwrap();
+        let rendered = render_session_context(dir.path(), &state, "analyst");
+        assert!(!rendered.contains("## Your role"), "got: {rendered}");
+    }
+
+    #[test]
     fn write_session_context_creates_the_expected_file() {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
-        let path = write_session_context(dir.path(), &state, "analyze").unwrap();
+        let path = write_session_context(dir.path(), &state, "analyze", "analyst").unwrap();
         assert_eq!(
             path,
             dir.path()
@@ -986,7 +1056,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
-        let context_path = write_session_context(dir.path(), &state, &stage.name).unwrap();
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
 
         let mut team_config = TeamConfig::default();
         team_config.assign(
@@ -1019,7 +1090,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
-        let context_path = write_session_context(dir.path(), &state, &stage.name).unwrap();
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
 
         let mut team_config = TeamConfig::default();
         team_config.assign(
@@ -1045,7 +1117,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
-        let context_path = write_session_context(dir.path(), &state, &stage.name).unwrap();
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
 
         let mut team_config = TeamConfig::default();
         team_config.assign(
@@ -1069,7 +1142,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
-        let context_path = write_session_context(dir.path(), &state, &stage.name).unwrap();
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
 
         let team_config = TeamConfig::default(); // no members assigned
 

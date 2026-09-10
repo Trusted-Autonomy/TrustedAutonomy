@@ -40,6 +40,13 @@ struct TeamSessionConfig {
     /// daemon's supervisor loop never re-parses the workflow YAML.
     #[serde(default)]
     budget: Option<BudgetGuardrails>,
+    /// Each role's `prompt:` text from `definition.roles`, resolved once
+    /// here at `start` time — same split as `budget` above. Without this,
+    /// a role's own instructions never reached the agent at all (found
+    /// during Phase 1 live testing of ta-virtual-team, 2026-09); only the
+    /// session-level `objective` and prior findings did.
+    #[serde(default)]
+    role_prompts: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +224,16 @@ fn start(
         }
     });
 
+    // Resolved once here, mirroring `budget` above — the daemon never
+    // parses the workflow YAML itself, so each role's own `prompt:` text
+    // has to be carried into `TeamSessionConfig` at start time or it never
+    // reaches the agent at all (see `role_prompts`' doc comment).
+    let role_prompts: std::collections::HashMap<String, String> = definition
+        .roles
+        .iter()
+        .map(|(role_name, role_def)| (role_name.clone(), role_def.prompt.clone()))
+        .collect();
+
     let now = chrono::Utc::now();
     let state = TeamSessionState {
         id: name.to_string(),
@@ -226,6 +243,7 @@ fn start(
             team_toml_path: team_toml.unwrap_or(".ta/team.toml").to_string(),
             objective: objective.to_string(),
             budget,
+            role_prompts,
         },
         stages,
         status: TeamSessionStatus::Active,
@@ -438,6 +456,31 @@ budget:
         assert_eq!(state.stages[1].name, "decide");
         assert_eq!(state.status, TeamSessionStatus::Active);
         assert!(state.config.budget.is_none());
+    }
+
+    #[test]
+    fn start_resolves_each_roles_prompt_into_session_config() {
+        // Regression test (Phase 1 live testing of ta-virtual-team, 2026-09):
+        // a role's `prompt:` was parsed from the workflow YAML but never
+        // carried into `TeamSessionConfig`, so it never reached the agent.
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert_eq!(
+            state.config.role_prompts.get("analyst").map(String::as_str),
+            Some("Analyze the market.")
+        );
+        assert_eq!(
+            state
+                .config
+                .role_prompts
+                .get("strategist")
+                .map(String::as_str),
+            Some("Decide a strategy.")
+        );
     }
 
     #[test]
