@@ -5450,6 +5450,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "ta-advisor",
+ "ta-agent-whiteboard",
  "ta-audit",
  "ta-changeset",
  "ta-connector-email",
