@@ -40,6 +40,13 @@ struct TeamSessionConfig {
     /// daemon's supervisor loop never re-parses the workflow YAML.
     #[serde(default)]
     budget: Option<BudgetGuardrails>,
+    /// Each role's `prompt:` text from `definition.roles`, resolved once
+    /// here at `start` time, same split as `budget` above. Without this,
+    /// a role's own instructions never reached the agent at all (found
+    /// during Phase 1 live testing of ta-virtual-team, 2026-09); only the
+    /// session-level `objective` and prior findings did.
+    #[serde(default)]
+    role_prompts: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +189,30 @@ fn start(
             workflow_full_path.display()
         )
     })?;
+
+    // Catch stage/role name mismatches (and other structural problems) up
+    // front. Without this, a stage referencing a role name that doesn't
+    // match `roles:` (e.g. a typo or case drift) would silently start the
+    // session anyway: `role_prompts.get(role_name)` below would just never
+    // find that role's entry, and it would run every cycle on undifferentiated
+    // context with no error and no log line to explain why.
+    let validation = ta_workflow::validate::validate_workflow(&definition, Some(project_root));
+    if validation.has_errors() {
+        let details = validation
+            .findings
+            .iter()
+            .filter(|f| f.severity == ta_workflow::validate::ValidationSeverity::Error)
+            .map(|f| match &f.suggestion {
+                Some(s) => format!("  - {}: {} ({})", f.location, f.message, s),
+                None => format!("  - {}: {}", f.location, f.message),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "Workflow '{workflow_path}' failed validation: team session '{name}' was not started.\n{details}\n\nRun `ta workflow validate {workflow_path}` for full details."
+        );
+    }
+
     let stage_order = definition
         .stage_order()
         .with_context(|| format!("Workflow '{workflow_path}' has a cyclic stage dependency graph — cannot resolve a stage order for team session '{name}'."))?;
@@ -217,6 +248,16 @@ fn start(
         }
     });
 
+    // Resolved once here, mirroring `budget` above: the daemon never
+    // parses the workflow YAML itself, so each role's own `prompt:` text
+    // has to be carried into `TeamSessionConfig` at start time or it never
+    // reaches the agent at all (see `role_prompts`' doc comment).
+    let role_prompts: std::collections::HashMap<String, String> = definition
+        .roles
+        .iter()
+        .map(|(role_name, role_def)| (role_name.clone(), role_def.prompt.clone()))
+        .collect();
+
     let now = chrono::Utc::now();
     let state = TeamSessionState {
         id: name.to_string(),
@@ -226,6 +267,7 @@ fn start(
             team_toml_path: team_toml.unwrap_or(".ta/team.toml").to_string(),
             objective: objective.to_string(),
             budget,
+            role_prompts,
         },
         stages,
         status: TeamSessionStatus::Active,
@@ -441,6 +483,31 @@ budget:
     }
 
     #[test]
+    fn start_resolves_each_roles_prompt_into_session_config() {
+        // Regression test (Phase 1 live testing of ta-virtual-team, 2026-09):
+        // a role's `prompt:` was parsed from the workflow YAML but never
+        // carried into `TeamSessionConfig`, so it never reached the agent.
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert_eq!(
+            state.config.role_prompts.get("analyst").map(String::as_str),
+            Some("Analyze the market.")
+        );
+        assert_eq!(
+            state
+                .config
+                .role_prompts
+                .get("strategist")
+                .map(String::as_str),
+            Some("Decide a strategy.")
+        );
+    }
+
+    #[test]
     fn start_resolves_workflow_budget_into_session_config() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow_with_budget(dir.path());
@@ -532,6 +599,39 @@ budget:
         let dir = tempfile::tempdir().unwrap();
         let result = start(dir.path(), "sess-1", "does-not-exist.yaml", None, "");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn start_rejects_a_stage_referencing_an_undefined_role() {
+        // A stage/role name mismatch (typo, case drift) used to start the
+        // session anyway: role_prompts.get(role_name) would just never find
+        // that role's entry, and it would silently run every cycle on
+        // undifferentiated context with no error and no log line.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-workflow.yaml");
+        std::fs::write(
+            &path,
+            r#"
+name: trading-desk
+roles:
+  analyst:
+    agent: claude-code
+    prompt: "Analyze the market."
+stages:
+  - name: analyze
+    roles: ["Analyst"]
+"#,
+        )
+        .unwrap();
+
+        let result = start(dir.path(), "sess-1", "bad-workflow.yaml", None, "");
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("undefined role 'Analyst'"),
+            "expected an undefined-role validation error, got: {err}"
+        );
+        assert!(!state_path(dir.path(), "sess-1").exists());
     }
 
     #[test]
