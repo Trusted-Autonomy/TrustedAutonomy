@@ -545,6 +545,20 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/whiteboard/presence",
             get(whiteboard::list_presence).post(whiteboard::register_presence),
         )
+        // Daemon-hosted whiteboard handoff + task claim/complete (v0.17.11.8 Task 5).
+        .route(
+            "/api/whiteboard/handoff/send",
+            post(whiteboard::send_handoff),
+        )
+        .route(
+            "/api/whiteboard/handoff/receive",
+            post(whiteboard::receive_handoff),
+        )
+        .route("/api/whiteboard/tasks/claim", post(whiteboard::claim_task))
+        .route(
+            "/api/whiteboard/tasks/complete",
+            post(whiteboard::complete_task),
+        )
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),
