@@ -73,6 +73,13 @@ pub struct TeamSessionConfig {
     /// existed still load.
     #[serde(default)]
     pub role_prompts: std::collections::HashMap<String, String>,
+    /// Biscuit-backed grant scoped to `whiteboard:team_session:<name>`,
+    /// minted at `start()` time when `[whiteboard] enabled = true`. `None`
+    /// when whiteboard coordination is off for this project. Threaded into
+    /// each role's launch so agent processes can call the new
+    /// `ta_whiteboard_*` MCP tools.
+    #[serde(default)]
+    pub whiteboard_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -714,6 +721,7 @@ mod tests {
             objective: "Generate income > 2x within 6 months after fees".to_string(),
             budget: None,
             role_prompts: std::collections::HashMap::new(),
+            whiteboard_token: None,
         }
     }
 

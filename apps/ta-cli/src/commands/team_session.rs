@@ -47,6 +47,13 @@ struct TeamSessionConfig {
     /// session-level `objective` and prior findings did.
     #[serde(default)]
     role_prompts: std::collections::HashMap<String, String>,
+    /// Biscuit-backed grant scoped to `whiteboard:team_session:<name>`,
+    /// minted at `start()` time when `[whiteboard] enabled = true`. `None`
+    /// when whiteboard coordination is off for this project. Threaded into
+    /// each role's launch so agent processes can call the new
+    /// `ta_whiteboard_*` MCP tools.
+    #[serde(default)]
+    whiteboard_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +265,29 @@ fn start(
         .map(|(role_name, role_def)| (role_name.clone(), role_def.prompt.clone()))
         .collect();
 
+    let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
+    let whiteboard_token = if whiteboard_config.enabled {
+        let broker_dir = project_root.join(".ta");
+        match ta_credential_broker::CredentialBroker::open(&broker_dir) {
+            Ok(broker) => {
+                let scope = format!("whiteboard:team_session:{name}");
+                match broker.grant(uuid::Uuid::new_v4(), name, vec![scope], 86400) {
+                    Ok(granted) => Some(granted.token),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "team-session: failed to mint whiteboard scope token, whiteboard coordination will be unavailable for this session");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "team-session: failed to open credential broker, whiteboard coordination will be unavailable for this session");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let now = chrono::Utc::now();
     let state = TeamSessionState {
         id: name.to_string(),
@@ -268,6 +298,7 @@ fn start(
             objective: objective.to_string(),
             budget,
             role_prompts,
+            whiteboard_token,
         },
         stages,
         status: TeamSessionStatus::Active,
@@ -520,6 +551,34 @@ budget:
         assert_eq!(budget.total, 1000.0);
         assert_eq!(budget.per_action_max_pct, Some(10.0));
         assert_eq!(budget.soft_threshold_pct, Some(80.0));
+    }
+
+    #[test]
+    fn start_mints_a_whiteboard_scope_token_when_whiteboard_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = true\ntransport = \"memory\"\n",
+        )
+        .unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert!(state.config.whiteboard_token.is_some());
+    }
+
+    #[test]
+    fn start_does_not_mint_a_whiteboard_token_when_whiteboard_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert!(state.config.whiteboard_token.is_none());
     }
 
     #[test]
