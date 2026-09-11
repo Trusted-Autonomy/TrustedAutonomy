@@ -5456,6 +5456,7 @@ dependencies = [
  "ta-changeset",
  "ta-connector-email",
  "ta-connector-slack",
+ "ta-credential-broker",
  "ta-data-spec",
  "ta-events",
  "ta-extension",

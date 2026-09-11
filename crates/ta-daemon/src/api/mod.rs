@@ -37,6 +37,7 @@ pub mod stats;
 pub mod status;
 pub mod team;
 pub mod webhooks;
+pub mod whiteboard;
 pub mod workflow;
 
 use std::path::PathBuf;
@@ -539,6 +540,11 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Daemon lifecycle routes (v0.10.10 / v0.17.0.12.2).
         .route("/api/shutdown", post(shutdown_daemon))
         .route("/api/drain/status", get(drain::drain_status))
+        // Daemon-hosted whiteboard coordination (v0.17.11.8 Task 4).
+        .route(
+            "/api/whiteboard/presence",
+            get(whiteboard::list_presence).post(whiteboard::register_presence),
+        )
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

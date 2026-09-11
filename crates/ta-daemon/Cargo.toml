@@ -52,6 +52,7 @@ ta-advisor = { path = "../ta-advisor", version = "0.17.11-alpha.7" }
 ta-data-spec = { path = "../ta-data-spec", version = "0.17.11-alpha.7" }
 ta-init = { path = "../ta-init", version = "0.17.11-alpha.7" }
 ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.7" }
+ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.7" }
 which = "7"
 libc = { workspace = true }
 async-trait = "0.1"
