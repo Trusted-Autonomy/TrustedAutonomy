@@ -10645,6 +10645,19 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 6. [ ] **`ta governed status`**: Shows all active FUSE mounts, session-level governed paths, SHA store sizes, live checkpoints, and the last 10 writes per governed path.
 7. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
+
+### v0.18.0.4 — SA Horizontal Scaling: Daemon Sharding for Concurrent Load
+<!-- status: pending -->
+
+**Goal**: A single TA daemon currently hosts all coordination state for one project (see `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md`, which centralizes whiteboard presence/handoff/task-claim into the daemon). At enterprise scale, one daemon process may not sustain the concurrent agent/user load a large org's virtual-team deployment generates. This is an SA-tier capability, not a TA-core or virtual-team-add-on concern — ordinary self-hosted deployments (single operator, VCS-shared team, private-label customer cloud) are all single-daemon by design and don't need this.
+
+**Depends on**: the daemon-hosted whiteboard design landing first (need a real daemon RPC surface to actually load-test), v0.18.0 (SA product line baseline)
+
+**Items**:
+1. [ ] **Capacity benchmark** (prerequisite, blocks everything else in this phase): measure how many concurrent agent connections / whiteboard RPC calls a single daemon sustains before degrading, under realistic team-session load patterns. No design work below should proceed without this data — don't spec shard counts or thresholds speculatively.
+2. [ ] **Sharding design**: once capacity data exists, design horizontal scaling as sharding per logical execution unit (e.g. per team-session or per org), not per-request load balancing — informed by whatever the benchmark shows actually bottlenecks first (connection count, RPC throughput, transport backend, etc).
+3. [ ] **Cross-shard concerns**: if a real Wayfinder-hosted multi-tenant option is ever built on top of this (see the whiteboard design's deferred section), shard boundaries and tenant boundaries should likely be the same boundary — revisit together, not separately.
+
 ### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
 <!-- status: pending -->
 
