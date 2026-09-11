@@ -191,4 +191,35 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].agent_id, "agent-1");
     }
+
+    #[tokio::test]
+    async fn register_presence_with_valid_scope_returns_200_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_whiteboard_enabled(dir.path());
+        let token = mint_test_token(dir.path(), "sess-1");
+        let router = crate::api::build_api_router(state).into_service();
+
+        let body = serde_json::json!({
+            "token": token,
+            "team_session": "sess-1",
+            "record": PresenceRecord::new("agent-1", "goal-1", "/tmp"),
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/whiteboard/presence")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp_body.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
 }
