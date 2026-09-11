@@ -5629,9 +5629,11 @@ dependencies = [
 name = "ta-mcp-gateway"
 version = "0.17.11-alpha.7"
 dependencies = [
+ "anyhow",
  "chrono",
  "decision-gate",
  "regex",
+ "reqwest",
  "rmcp",
  "schemars",
  "serde",
