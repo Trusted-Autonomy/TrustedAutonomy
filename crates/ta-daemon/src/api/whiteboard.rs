@@ -245,6 +245,32 @@ pub async fn complete_task(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PresenceForSourceQuery {
+    pub source_dir: String,
+}
+
+/// Advisory-only pre-launch query — no whiteboard scope required (this
+/// runs before any team-session/goal exists to mint one against), gated
+/// only by the daemon's existing local-bypass auth like every other
+/// same-machine caller. Mirrors `discovery::active_agents_for_source`.
+pub async fn presence_for_source(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PresenceForSourceQuery>,
+) -> impl IntoResponse {
+    let Some(transport) = &state.whiteboard_transport else {
+        return (StatusCode::OK, Json(Vec::<PresenceRecord>::new())).into_response();
+    };
+    match discovery::active_agents_for_source(transport.as_ref(), &q.source_dir).await {
+        Ok(records) => (StatusCode::OK, Json(records)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +547,33 @@ mod tests {
             .unwrap();
         let task = tasks.iter().find(|t| t.id == "t1").unwrap();
         assert_eq!(task.status, ta_agent_whiteboard::tasks::TaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn presence_for_source_needs_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_whiteboard_enabled(dir.path());
+        let transport = state.whiteboard_transport.clone().unwrap();
+        presence::publish_presence(
+            transport.as_ref(),
+            &PresenceRecord::new("agent-1", "goal-1", "/tmp/proj"),
+            DEFAULT_PRESENCE_TTL,
+        )
+        .await
+        .unwrap();
+
+        let router = crate::api::build_api_router(state).into_service();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/whiteboard/presence_for_source?source_dir=/tmp/proj")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

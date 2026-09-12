@@ -559,6 +559,12 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/whiteboard/tasks/complete",
             post(whiteboard::complete_task),
         )
+        // Unauthenticated advisory pre-launch conflict check (v0.17.11.8 Task 8):
+        // runs before any team-session/goal exists to mint a scope against.
+        .route(
+            "/api/whiteboard/presence_for_source",
+            get(whiteboard::presence_for_source),
+        )
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

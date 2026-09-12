@@ -90,6 +90,32 @@ impl WhiteboardDaemonClient {
             .context("whiteboard presence list: bad response body")
     }
 
+    /// Advisory-only pre-launch conflict query — no token/team-session
+    /// required, since this runs at `ta_goal_start` time, potentially
+    /// before any team-session exists to mint a scope against. Hits the
+    /// daemon's local-bypass-gated `presence_for_source` endpoint.
+    pub async fn list_presence_for_source(&self, source_dir: &str) -> Result<Vec<PresenceRecord>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/whiteboard/presence_for_source",
+                self.base_url
+            ))
+            .query(&[("source_dir", source_dir)])
+            .send()
+            .await
+            .context("whiteboard presence_for_source: request failed")?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "whiteboard presence_for_source failed: HTTP {}",
+                resp.status()
+            );
+        }
+        resp.json()
+            .await
+            .context("whiteboard presence_for_source: bad response body")
+    }
+
     pub async fn send_handoff(
         &self,
         token: &str,
