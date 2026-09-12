@@ -615,4 +615,74 @@ mod tests {
             Some("[whiteboard] enabled = false for this project")
         );
     }
+
+    /// The single most important test in this crate's whiteboard work:
+    /// binds a REAL TCP listener and drives the real router through two
+    /// independent `WhiteboardDaemonClient` instances (real HTTP calls,
+    /// not `oneshot`) — simulating two separate `ta serve` subprocesses,
+    /// which is exactly the scenario the original red-teamed bug missed
+    /// (each per-agent process held its own `InMemoryTransport`, so two
+    /// concurrent agents silently never saw each other). Proves presence
+    /// is shared via the daemon's single owned `AppState.whiteboard_transport`
+    /// rather than any in-process shortcut `oneshot` would paper over.
+    #[tokio::test]
+    async fn two_concurrent_agent_processes_both_see_each_other_via_presence() {
+        use std::net::SocketAddr;
+        use ta_mcp_gateway::daemon_client::WhiteboardDaemonClient;
+        use tokio::net::TcpListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_whiteboard_enabled(dir.path());
+        let token_a = mint_test_token(dir.path(), "sess-1");
+        let token_b = mint_test_token(dir.path(), "sess-1");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // WhiteboardDaemonClient::new resolves its base_url from
+        // `.ta/daemon.pid`'s `port=` line (see daemon_client.rs), so
+        // pointing both independent clients at the real bound port means
+        // writing it here exactly as the real daemon startup path does.
+        std::fs::write(dir.path().join(".ta/daemon.pid"), format!("port={port}\n")).unwrap();
+
+        let router = crate::api::build_api_router(state);
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        // Two independent clients (own reqwest::Client, own connections) —
+        // not the same client called twice — simulating two separate agent
+        // processes talking to the one real daemon over the network.
+        let client_a = WhiteboardDaemonClient::new(dir.path());
+        let client_b = WhiteboardDaemonClient::new(dir.path());
+
+        client_a
+            .register_presence(
+                &token_a,
+                "sess-1",
+                &PresenceRecord::new("agent-a", "goal-a", "/tmp/proj"),
+            )
+            .await
+            .unwrap();
+        client_b
+            .register_presence(
+                &token_b,
+                "sess-1",
+                &PresenceRecord::new("agent-b", "goal-b", "/tmp/proj"),
+            )
+            .await
+            .unwrap();
+
+        let seen_by_a = client_a.list_presence(&token_a, "sess-1").await.unwrap();
+        let seen_by_b = client_b.list_presence(&token_b, "sess-1").await.unwrap();
+
+        assert_eq!(seen_by_a.len(), 2, "agent-a should see both agents");
+        assert_eq!(seen_by_b.len(), 2, "agent-b should see both agents");
+        assert!(seen_by_a.iter().any(|r| r.agent_id == "agent-b"));
+        assert!(seen_by_b.iter().any(|r| r.agent_id == "agent-a"));
+    }
 }
