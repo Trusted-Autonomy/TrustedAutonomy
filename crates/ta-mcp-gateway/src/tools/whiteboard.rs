@@ -50,12 +50,19 @@ use crate::server::GatewayState;
 struct WhiteboardSession {
     team_session: String,
     token: String,
+    /// The real project root (not this goal's staging path) — see
+    /// `apps/ta-cli/src/commands/run.rs`'s `write_whiteboard_session_file`,
+    /// which populates this from `config.workspace_root` so presence
+    /// records group agents on the same real project together, matching
+    /// `whiteboard_check.rs`'s pre-launch conflict check.
+    source_dir: String,
 }
 
 #[derive(Deserialize)]
 struct RawWhiteboardSession {
     team_session: String,
     token: String,
+    source_dir: String,
 }
 
 /// Reads `workspace_root/.ta/whiteboard-session.json` — see this module's
@@ -88,6 +95,7 @@ fn load_whiteboard_session(workspace_root: &Path) -> Result<WhiteboardSession, M
     Ok(WhiteboardSession {
         team_session: parsed.team_session,
         token: parsed.token,
+        source_dir: parsed.source_dir,
     })
 }
 
@@ -155,7 +163,7 @@ pub fn handle_presence_register(
     let mut record = PresenceRecord::new(
         params.agent_id.clone(),
         params.goal_run_id.clone(),
-        workspace_root.display().to_string(),
+        session.source_dir.clone(),
     );
     if let Some(phase) = params.phase.clone() {
         record = record.with_phase(phase);
@@ -341,11 +349,21 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
         std::fs::write(
             dir.path().join(".ta/whiteboard-session.json"),
-            serde_json::json!({ "team_session": "sess-1", "token": "tok-abc" }).to_string(),
+            serde_json::json!({
+                "team_session": "sess-1",
+                "token": "tok-abc",
+                "source_dir": "/real/project/root",
+            })
+            .to_string(),
         )
         .unwrap();
         let session = load_whiteboard_session(dir.path()).unwrap();
         assert_eq!(session.team_session, "sess-1");
         assert_eq!(session.token, "tok-abc");
+        assert_eq!(
+            session.source_dir, "/real/project/root",
+            "source_dir must come from the session file (the real project root), \
+             not be derived from the staging workspace_root"
+        );
     }
 }

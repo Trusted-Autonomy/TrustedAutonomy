@@ -6432,7 +6432,13 @@ pub(crate) fn write_stable_agent_mcp_config(
 /// is launched against `staging_path`, and always against the true root —
 /// see the call site) and write it to `staging_path/.ta/whiteboard-session.json`
 /// so the agent's `ta_whiteboard_*` MCP tools
-/// (`crates/ta-mcp-gateway/src/tools/whiteboard.rs`) can authenticate.
+/// (`crates/ta-mcp-gateway/src/tools/whiteboard.rs`) can authenticate. The
+/// written file also carries `source_dir: project_root` (the real project
+/// root, not the staging path) so `ta_whiteboard_presence_register` can
+/// group agents by the same key `whiteboard_check.rs`'s pre-launch conflict
+/// check uses — otherwise two roles staging the same real project would
+/// register presence under two different staging paths and never see each
+/// other.
 ///
 /// Deliberately reads `state.json` directly as loosely-typed JSON rather
 /// than depending on `ta-daemon`'s `TeamSessionState` type: `ta-daemon` has
@@ -6519,6 +6525,7 @@ fn write_whiteboard_session_file(
     let payload = serde_json::json!({
         "team_session": session_id,
         "token": token,
+        "source_dir": project_root.display().to_string(),
     });
     let dest_path = dest_dir.join("whiteboard-session.json");
     if let Err(e) = std::fs::write(&dest_path, payload.to_string()) {
@@ -8812,6 +8819,14 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(value["team_session"], "sess-1");
         assert_eq!(value["token"], "secret-token-abc");
+        assert_eq!(
+            value["source_dir"],
+            project_root.path().display().to_string(),
+            "source_dir must be the real project root, not the staging path, so \
+             ta_whiteboard_presence_register groups agents on the same real project \
+             together (see whiteboard_check.rs's pre-launch conflict check)"
+        );
+        assert_ne!(value["source_dir"], staging.path().display().to_string());
     }
 
     #[test]
