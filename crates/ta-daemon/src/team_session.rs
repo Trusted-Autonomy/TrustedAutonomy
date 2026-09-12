@@ -410,6 +410,12 @@ pub fn build_ta_run_args(
         context_path.to_string_lossy().to_string(),
         "--team".to_string(),
         role.to_string(),
+        // v0.17.11.8: lets `ta run` deliver `state.config.whiteboard_token`
+        // into this role's staging workspace (see apps/ta-cli/src/commands/
+        // run.rs's `write_whiteboard_session_file`) so the agent's
+        // `ta_whiteboard_*` MCP tools can authenticate.
+        "--team-session-id".to_string(),
+        state.id.clone(),
     ];
 
     if let Some(member) = team_config.find_by_role(&TeamRole::new(role)) {
@@ -1162,6 +1168,27 @@ mod tests {
         assert!(!args.contains(&"--agent".to_string()));
         // Still fires the goal — just without an assignment-derived override.
         assert!(args.contains(&"--team".to_string()));
+    }
+
+    #[test]
+    fn build_args_always_includes_team_session_id() {
+        // v0.17.11.8: every team-session role launch passes its own
+        // session id so `ta run` can look up `whiteboard_token` from the
+        // real project root and deliver it into the role's staging copy.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-42".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+        let team_config = TeamConfig::default();
+
+        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+
+        let flag_idx = args
+            .iter()
+            .position(|a| a == "--team-session-id")
+            .expect("--team-session-id flag missing");
+        assert_eq!(args[flag_idx + 1], "sess-42");
     }
 
     #[cfg(unix)]

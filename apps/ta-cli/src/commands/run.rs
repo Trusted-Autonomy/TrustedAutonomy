@@ -2056,6 +2056,7 @@ pub fn execute(
     persona_name: Option<&str>,
     context_path: Option<&Path>,
     credential_scopes: Option<&[String]>,
+    team_session_id: Option<&str>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -3043,6 +3044,12 @@ pub fn execute(
     {
         tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
+
+    // v0.17.11.8: for a team-session role launch (--team-session-id), deliver
+    // the session's whiteboard token into this goal's staging workspace so
+    // the agent's `ta_whiteboard_*` MCP tools can authenticate. No-op for the
+    // overwhelmingly common non-team-session goal.
+    write_whiteboard_session_file(&config.workspace_root, &staging_path, team_session_id);
 
     // v0.13.8 item 12: Memory bridge — context mode.
     // For frameworks with memory.inject = "context", serialize relevant memory
@@ -6418,6 +6425,111 @@ pub(crate) fn write_stable_agent_mcp_config(
     Ok(())
 }
 
+/// v0.17.11.8: when `team_session_id` is set (a team-session role launch —
+/// see `crates/ta-daemon/src/team_session.rs`'s `build_ta_run_args`), read
+/// that team session's `whiteboard_token` from the *real* project root's
+/// `.ta/team-sessions/<id>/state.json` (this function runs before the agent
+/// is launched against `staging_path`, and always against the true root —
+/// see the call site) and write it to `staging_path/.ta/whiteboard-session.json`
+/// so the agent's `ta_whiteboard_*` MCP tools
+/// (`crates/ta-mcp-gateway/src/tools/whiteboard.rs`) can authenticate.
+///
+/// Deliberately reads `state.json` directly as loosely-typed JSON rather
+/// than depending on `ta-daemon`'s `TeamSessionState` type: `ta-daemon` has
+/// no library target (only a `main.rs` binary with private-to-the-binary
+/// `pub mod` declarations), so `ta-cli` cannot import it without first
+/// restructuring `ta-daemon` into a lib+bin crate — out of scope here.
+///
+/// `team_session_id: None` (every non-team-session goal, the overwhelming
+/// majority) is a hard no-op: no file is read or written, no other behavior
+/// changes. Any failure (missing/malformed state.json, no token configured)
+/// is logged and treated as "whiteboard coordination unavailable for this
+/// goal" — it never fails the goal run itself.
+fn write_whiteboard_session_file(
+    project_root: &Path,
+    staging_path: &Path,
+    team_session_id: Option<&str>,
+) {
+    let Some(session_id) = team_session_id else {
+        return;
+    };
+
+    #[derive(serde::Deserialize)]
+    struct PartialTeamSessionConfig {
+        #[serde(default)]
+        whiteboard_token: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct PartialTeamSessionState {
+        config: PartialTeamSessionConfig,
+    }
+
+    let state_path = project_root
+        .join(".ta")
+        .join("team-sessions")
+        .join(session_id)
+        .join("state.json");
+
+    let raw = match std::fs::read_to_string(&state_path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!(
+                team_session = %session_id,
+                path = %state_path.display(),
+                error = %e,
+                "ta run --team-session-id: could not read team-session state; \
+                 ta_whiteboard_* MCP tools will be unavailable for this goal"
+            );
+            return;
+        }
+    };
+
+    let state: PartialTeamSessionState = match serde_json::from_str(&raw) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                team_session = %session_id,
+                path = %state_path.display(),
+                error = %e,
+                "ta run --team-session-id: malformed team-session state.json; \
+                 ta_whiteboard_* MCP tools will be unavailable for this goal"
+            );
+            return;
+        }
+    };
+
+    let Some(token) = state.config.whiteboard_token else {
+        tracing::debug!(
+            team_session = %session_id,
+            "ta run --team-session-id: team session has no whiteboard_token \
+             (whiteboard coordination not enabled) — skipping whiteboard-session.json"
+        );
+        return;
+    };
+
+    let dest_dir = staging_path.join(".ta");
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        tracing::warn!(
+            path = %dest_dir.display(),
+            error = %e,
+            "ta run --team-session-id: failed to create .ta dir in staging for whiteboard-session.json"
+        );
+        return;
+    }
+    let payload = serde_json::json!({
+        "team_session": session_id,
+        "token": token,
+    });
+    let dest_path = dest_dir.join("whiteboard-session.json");
+    if let Err(e) = std::fs::write(&dest_path, payload.to_string()) {
+        tracing::warn!(
+            path = %dest_path.display(),
+            error = %e,
+            "ta run --team-session-id: failed to write whiteboard-session.json"
+        );
+    }
+}
+
 /// Restore the original `.mcp.json` after agent exits.
 ///
 /// Used by both `ta run --macro` (before diff) and `ta dev` (cleanup).
@@ -8638,6 +8750,123 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // ── write_whiteboard_session_file tests (v0.17.11.8) ────────────────────
+    //
+    // The most important property here: absent `--team-session-id` (the
+    // overwhelming majority of goal runs), this must be a hard no-op — no
+    // file read, no file written, no behavior change from before this flag
+    // existed.
+
+    #[test]
+    fn write_whiteboard_session_file_noop_when_team_session_id_absent() {
+        let project_root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+
+        write_whiteboard_session_file(project_root.path(), staging.path(), None);
+
+        assert!(
+            !staging.path().join(".ta").exists(),
+            "no .ta dir should be created in staging when --team-session-id is absent"
+        );
+    }
+
+    #[test]
+    fn write_whiteboard_session_file_writes_token_when_present() {
+        let project_root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+
+        let state_dir = project_root
+            .path()
+            .join(".ta")
+            .join("team-sessions")
+            .join("sess-1");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::json!({
+                "id": "sess-1",
+                "config": {
+                    "name": "test-session",
+                    "workflow_path": "wf.yaml",
+                    "team_toml_path": "team.toml",
+                    "objective": "test",
+                    "whiteboard_token": "secret-token-abc",
+                },
+                "stages": [],
+                "status": "active",
+                "current_stage_index": 0,
+                "findings": [],
+                "restart_count": 0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-1"));
+
+        let written = std::fs::read_to_string(
+            staging.path().join(".ta").join("whiteboard-session.json"),
+        )
+        .expect("whiteboard-session.json should have been written");
+        let value: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(value["team_session"], "sess-1");
+        assert_eq!(value["token"], "secret-token-abc");
+    }
+
+    #[test]
+    fn write_whiteboard_session_file_noop_when_no_token_configured() {
+        let project_root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+
+        let state_dir = project_root
+            .path()
+            .join(".ta")
+            .join("team-sessions")
+            .join("sess-2");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::json!({
+                "id": "sess-2",
+                "config": {
+                    "name": "test-session",
+                    "workflow_path": "wf.yaml",
+                    "team_toml_path": "team.toml",
+                    "objective": "test",
+                },
+                "stages": [],
+                "status": "active",
+                "current_stage_index": 0,
+                "findings": [],
+                "restart_count": 0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-2"));
+
+        assert!(!staging
+            .path()
+            .join(".ta")
+            .join("whiteboard-session.json")
+            .exists());
+    }
+
+    #[test]
+    fn write_whiteboard_session_file_noop_when_session_missing() {
+        let project_root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+
+        write_whiteboard_session_file(project_root.path(), staging.path(), Some("nonexistent"));
+
+        assert!(!staging.path().join(".ta").join("whiteboard-session.json").exists());
+    }
+
     // ── framework_to_launch_config / build_goal_context_text tests ─────────
     //
     // Regression coverage for a real bug found live: framework_to_launch_config
@@ -9098,6 +9327,7 @@ context_inject = "{mode_toml}"
             None,  // persona_name = None
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
+            None, // team_session_id = None (v0.17.11.8)
         )
         .unwrap();
 
@@ -11110,6 +11340,7 @@ plan_pending_window = 7
             None,
             None,
             None, // credential_scopes = None (v0.17.6.1)
+            None, // team_session_id = None (v0.17.11.8)
         )
         .unwrap();
 
@@ -11145,6 +11376,7 @@ plan_pending_window = 7
             None,
             None,
             None, // credential_scopes = None (v0.17.6.1)
+            None, // team_session_id = None (v0.17.11.8)
         )
         .unwrap();
 
