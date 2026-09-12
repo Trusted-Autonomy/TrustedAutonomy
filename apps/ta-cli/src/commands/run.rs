@@ -8806,10 +8806,9 @@ mod tests {
 
         write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-1"));
 
-        let written = std::fs::read_to_string(
-            staging.path().join(".ta").join("whiteboard-session.json"),
-        )
-        .expect("whiteboard-session.json should have been written");
+        let written =
+            std::fs::read_to_string(staging.path().join(".ta").join("whiteboard-session.json"))
+                .expect("whiteboard-session.json should have been written");
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(value["team_session"], "sess-1");
         assert_eq!(value["token"], "secret-token-abc");
@@ -8864,7 +8863,11 @@ mod tests {
 
         write_whiteboard_session_file(project_root.path(), staging.path(), Some("nonexistent"));
 
-        assert!(!staging.path().join(".ta").join("whiteboard-session.json").exists());
+        assert!(!staging
+            .path()
+            .join(".ta")
+            .join("whiteboard-session.json")
+            .exists());
     }
 
     // ── framework_to_launch_config / build_goal_context_text tests ─────────
@@ -9327,7 +9330,7 @@ context_inject = "{mode_toml}"
             None,  // persona_name = None
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
-            None, // team_session_id = None (v0.17.11.8)
+            None,  // team_session_id = None (v0.17.11.8)
         )
         .unwrap();
 

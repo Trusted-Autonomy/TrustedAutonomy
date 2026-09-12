@@ -1157,6 +1157,81 @@ impl TaGatewayServer {
         tools::human_verify::handle_human_verify(&self.state, params)
     }
 
+    // ── Daemon-hosted whiteboard tools (v0.17.11.8) ───────────────────────
+    //
+    // Live team-session coordination tools, backed by the daemon's HTTP
+    // whiteboard API (`crate::daemon_client::WhiteboardDaemonClient`).
+    // Authenticate via `.ta/whiteboard-session.json` in this goal's staging
+    // workspace (written by `ta run --team-session-id`), never via an
+    // LLM-supplied token/team_session argument — see
+    // `tools::whiteboard`'s module doc for the full rationale.
+
+    #[tool(
+        description = "Publish (or refresh) this agent's presence on the team-session whiteboard: what it's doing right now, for other roles/agents to see. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_presence_register(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::PresenceRegisterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_presence_register", None, None);
+        tools::whiteboard::handle_presence_register(&self.state, params)
+    }
+
+    #[tool(
+        description = "List the current presence records for this team session — which agents/roles are active and what they're working on. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_presence_list(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::PresenceListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_presence_list", None, None);
+        tools::whiteboard::handle_presence_list(&self.state, params)
+    }
+
+    #[tool(
+        description = "Send a handoff payload to another role or agent in this team session. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_handoff_send(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::HandoffSendParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_handoff_send", None, None);
+        tools::whiteboard::handle_handoff_send(&self.state, params)
+    }
+
+    #[tool(
+        description = "Check for a pending handoff addressed to this role or agent in this team session. Returns null if none is pending. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_handoff_receive(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::HandoffReceiveParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_handoff_receive", None, None);
+        tools::whiteboard::handle_handoff_receive(&self.state, params)
+    }
+
+    #[tool(
+        description = "Attempt to claim a task on the team-session whiteboard — returns whether the claim succeeded (false if another agent already claimed it). Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_task_claim(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::TaskClaimParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_task_claim", None, None);
+        tools::whiteboard::handle_task_claim(&self.state, params)
+    }
+
+    #[tool(
+        description = "Mark a previously claimed task complete on the team-session whiteboard. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_task_complete(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::TaskCompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_task_complete", None, None);
+        tools::whiteboard::handle_task_complete(&self.state, params)
+    }
+
     // ── Unreal Engine 5 tools (v0.14.14) ─────────────────────────────
 
     #[tool(
@@ -1586,8 +1661,11 @@ mod tests {
         //           community_search, community_get, community_annotate,
         //           community_feedback, community_suggest (v0.17.0.12.4)
         //           ta_human_verify (v0.17.0.12.26)
+        //           ta_whiteboard_presence_register, ta_whiteboard_presence_list,
+        //           ta_whiteboard_handoff_send, ta_whiteboard_handoff_receive,
+        //           ta_whiteboard_task_claim, ta_whiteboard_task_complete (v0.17.11.8)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 41, "expected 41 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 47, "expected 47 tools, got: {:?}", names);
     }
 
     #[test]
