@@ -585,7 +585,10 @@ mod tests {
             "[whiteboard]\nenabled = false\n",
         )
         .unwrap();
-        let state = Arc::new(AppState::new(dir.path().to_path_buf(), DaemonConfig::default()));
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            DaemonConfig::default(),
+        ));
         let token = mint_test_token(dir.path(), "sess-1");
         let router = crate::api::build_api_router(state).into_service();
 
