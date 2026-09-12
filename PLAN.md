@@ -10615,6 +10615,25 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.7`
 
+### v0.17.11.8 — Daemon-Hosted Whiteboard Coordination
+<!-- status: done -->
+**Depends on**: v0.17.11.7 (staged-resource conflict detection), v0.17.11.2 (`ta-agent-whiteboard`)
+
+**Goal**: Closes a real silent-failure gap found during Phase 1 dogfood testing of the `ta-virtual-team` split: `ta-agent-whiteboard`'s presence/discovery/handoff/task-claim modules had zero live callers anywhere, and the one caller that did exist (`whiteboard_check.rs`'s advisory pre-launch conflict check) instantiated its own private `WhiteboardTransport` per-process — with `transport = "memory"`, two concurrent `ta serve` processes each saw an empty view and both silently reported "no conflict" even when one existed. Full design in `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md`; implementation plan in `docs/superpowers/plans/2026-09-11-daemon-hosted-whiteboard-implementation.md`.
+
+**Items**:
+1. [x] `PresenceRecord.host_id` field added for future LAN/VPN multi-daemon support (unused today, single-daemon scope).
+2. [x] Daemon owns one shared `WhiteboardTransport` instance (`AppState.whiteboard_transport`), initialized once at startup — the structural fix, since the daemon is the one genuinely long-lived process per project, unlike each agent's own throwaway `ta serve`.
+3. [x] New Biscuit scope `whiteboard:team_session:<id>`, minted via the existing `CredentialBroker` at `ta team-session start` time, verified by every new daemon handler before touching the transport.
+4. [x] 6 new daemon HTTP endpoints under `/api/whiteboard/*`: presence register/list, handoff send/receive, task claim/complete — every failure path returns a structured error, never a silent empty success (closes a second false-success bug found in review: `complete_task` originally returned `{"ok": true}` when whiteboard was disabled).
+5. [x] `ta-mcp-gateway`'s first-ever daemon HTTP client (`daemon_client.rs`) and 6 new `ta_whiteboard_*` MCP tools, reading their auth token exclusively from a new `whiteboard-session.json` file written into the agent's own staging directory at launch time (via a new `ta run --team-session-id` flag) — never from an environment variable or an LLM-supplied tool-call parameter, since either would let a prompt-injected agent forge a different session's token.
+6. [x] `whiteboard_check.rs`'s pre-launch conflict check rewritten to call the daemon instead of instantiating its own transport — the actual fix for the original bug, plus a new unauthenticated `presence_for_source` daemon endpoint for this specific pre-team-session-existence case.
+7. [x] Regression test proving two independent, real HTTP clients against a real bound TCP listener both see each other's presence via the one daemon-owned transport — the concrete, live proof the bug is fixed, not just unit-tested in isolation (`crates/ta-daemon/src/api/whiteboard.rs`'s `two_concurrent_agent_processes_both_see_each_other_via_presence`).
+8. [x] Manual smoke check against a real running daemon (not just the test harness): `POST`/`GET /api/whiteboard/presence`, `GET /api/whiteboard/presence_for_source`, and the 403-on-invalid-token path all confirmed working end-to-end.
+
+**Explicitly deferred, not silently dropped**: LAN/VPN multi-daemon transport (interface pre-planned via `host_id`, not implemented); SA horizontal scaling / daemon sharding and the capacity-benchmarking prerequisite it depends on (tracked separately, `v0.18.0.4`); a hosted multi-tenant Wayfinder option (would need tenant isolation beyond this phase's per-session Biscuit scope — not needed for the private-label self-host model this phase targets). Two known pre-existing, non-regression test-coverage gaps noted for a future pass: no dedicated `ta-mcp-gateway` test exercises the rewritten `whiteboard_check.rs` HTTP path end-to-end, and `PresenceRecord::source_dir`/`ta-daemon`'s lack of a `[lib]` target are both minor structural notes, not defects.
+
+#### Version: `0.17.11-alpha.8`
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
