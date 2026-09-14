@@ -266,6 +266,16 @@ fn start(
         .collect();
 
     let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
+    // Known limitation, not yet fixed: this token is minted once here, with
+    // a fixed 24h TTL, and there is no refresh path anywhere in this
+    // session's lifecycle. A team session still active past 24h starts
+    // getting a clear 403 from every ta_whiteboard_* call (require_whiteboard_scope
+    // in ta-daemon's whiteboard API) -- an observable, actionable failure per
+    // the Observability Mandate, but not a graceful one: whiteboard
+    // coordination simply stops working for the rest of that session's run.
+    // Fixing this properly needs a re-mint-on-heartbeat (or similar) path
+    // wired into team_session.rs's own resume/cycle lifecycle -- deliberately
+    // not built here; tracked as a follow-up, not silently dropped.
     let whiteboard_token = if whiteboard_config.enabled {
         let broker_dir = project_root.join(".ta");
         match ta_credential_broker::CredentialBroker::open(&broker_dir) {

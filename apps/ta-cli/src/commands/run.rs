@@ -6534,6 +6534,24 @@ fn write_whiteboard_session_file(
             error = %e,
             "ta run --team-session-id: failed to write whiteboard-session.json"
         );
+        return;
+    }
+    // This file carries a live bearer token (whiteboard:team_session:<name>
+    // scope, 24h TTL) -- restrict it like every other secret-bearing file in
+    // this codebase (see ta-credentials's key/vault files).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&dest_path, std::fs::Permissions::from_mode(0o600))
+        {
+            tracing::warn!(
+                path = %dest_path.display(),
+                error = %e,
+                "ta run --team-session-id: failed to restrict whiteboard-session.json \
+                 permissions to 0600 -- the whiteboard token in this file may be readable \
+                 by other local users"
+            );
+        }
     }
 }
 
@@ -8827,6 +8845,55 @@ mod tests {
              together (see whiteboard_check.rs's pre-launch conflict check)"
         );
         assert_ne!(value["source_dir"], staging.path().display().to_string());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_whiteboard_session_file_is_chmod_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project_root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+
+        let state_dir = project_root
+            .path()
+            .join(".ta")
+            .join("team-sessions")
+            .join("sess-1");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::json!({
+                "id": "sess-1",
+                "config": {
+                    "name": "test-session",
+                    "workflow_path": "wf.yaml",
+                    "team_toml_path": "team.toml",
+                    "objective": "test",
+                    "whiteboard_token": "secret-token-abc",
+                },
+                "stages": [],
+                "status": "active",
+                "current_stage_index": 0,
+                "findings": [],
+                "restart_count": 0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-1"));
+
+        let dest_path = staging.path().join(".ta").join("whiteboard-session.json");
+        let mode = std::fs::metadata(&dest_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "whiteboard-session.json carries a live bearer token and must be \
+             chmod 0600 like every other secret-bearing file in this codebase, \
+             got mode {mode:o}"
+        );
     }
 
     #[test]

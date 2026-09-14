@@ -173,7 +173,11 @@ pub fn handle_presence_register(
     }
 
     run_on_dedicated_thread(move || async move {
-        let client = WhiteboardDaemonClient::new(&workspace_root);
+        // The real project's daemon, not staging's -- staging's `.ta/` is
+        // always freshly created (never contains daemon.pid), so resolving
+        // against `workspace_root` here would silently fall back to the
+        // default port 7700 for any project running its daemon elsewhere.
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
         client
             .register_presence(&session.token, &session.team_session, &record)
             .await
@@ -195,7 +199,7 @@ pub fn handle_presence_list(
     let session = load_whiteboard_session(&workspace_root)?;
 
     let records = run_on_dedicated_thread(move || async move {
-        let client = WhiteboardDaemonClient::new(&workspace_root);
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
         client
             .list_presence(&session.token, &session.team_session)
             .await
@@ -224,7 +228,7 @@ pub fn handle_handoff_send(
     let session = load_whiteboard_session(&workspace_root)?;
 
     run_on_dedicated_thread(move || async move {
-        let client = WhiteboardDaemonClient::new(&workspace_root);
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
         client
             .send_handoff(
                 &session.token,
@@ -255,7 +259,7 @@ pub fn handle_handoff_receive(
     let session = load_whiteboard_session(&workspace_root)?;
 
     let handoff = run_on_dedicated_thread(move || async move {
-        let client = WhiteboardDaemonClient::new(&workspace_root);
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
         client
             .receive_handoff(&session.token, &session.team_session, &params.recipient)
             .await
@@ -282,7 +286,7 @@ pub fn handle_task_claim(
     let session = load_whiteboard_session(&workspace_root)?;
 
     let claimed = run_on_dedicated_thread(move || async move {
-        let client = WhiteboardDaemonClient::new(&workspace_root);
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
         client
             .claim_task(
                 &session.token,
@@ -312,7 +316,7 @@ pub fn handle_task_complete(
     let session = load_whiteboard_session(&workspace_root)?;
 
     run_on_dedicated_thread(move || async move {
-        let client = WhiteboardDaemonClient::new(&workspace_root);
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
         client
             .complete_task(&session.token, &session.team_session, &params.task_id)
             .await
@@ -364,6 +368,64 @@ mod tests {
             session.source_dir, "/real/project/root",
             "source_dir must come from the session file (the real project root), \
              not be derived from the staging workspace_root"
+        );
+    }
+
+    /// Regression test for a bug where every handler built
+    /// `WhiteboardDaemonClient::new(&workspace_root)` (staging) instead of
+    /// `session.source_dir` (the real project root). Staging's `.ta/` is
+    /// always freshly created and never contains a copy of the real
+    /// project's `daemon.pid` (see `ta-workspace`'s hardcoded `.ta/`
+    /// exclusion), so the bug silently resolved to the default port 7700
+    /// for any project running its daemon elsewhere — this proves the fix
+    /// resolves against `source_dir` and gets a different, correct port.
+    #[test]
+    fn daemon_client_must_resolve_against_source_dir_not_workspace_root() {
+        let workspace_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace_root.path().join(".ta")).unwrap();
+        std::fs::write(
+            workspace_root.path().join(".ta/whiteboard-session.json"),
+            serde_json::json!({
+                "team_session": "sess-1",
+                "token": "tok-abc",
+                "source_dir": "placeholder",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // workspace_root (staging) never has daemon.pid in real usage --
+        // deliberately left without one here to match that.
+
+        let source_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source_dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            source_dir.path().join(".ta/daemon.pid"),
+            "pid=999\nport=8899\n",
+        )
+        .unwrap();
+
+        let session = load_whiteboard_session(workspace_root.path()).unwrap();
+        // The fixed handler path: resolve against session.source_dir, not
+        // the workspace_root passed to load_whiteboard_session.
+        let resolved_against_workspace_root =
+            crate::daemon_client::resolve_daemon_url(workspace_root.path());
+        let resolved_against_source_dir =
+            crate::daemon_client::resolve_daemon_url(std::path::Path::new(source_dir.path()));
+        assert_eq!(
+            resolved_against_workspace_root, "http://127.0.0.1:7700",
+            "staging has no daemon.pid, so resolving against it silently falls back to 7700 \
+             -- this is exactly the bug, kept here to document what NOT to resolve against"
+        );
+        assert_eq!(
+            resolved_against_source_dir, "http://127.0.0.1:8899",
+            "resolving against the real project root (source_dir) must find its daemon.pid \
+             and use the real port, not the default"
+        );
+        // Sanity: the session really does carry a source_dir distinct from
+        // workspace_root, which is what handlers must use.
+        assert_ne!(
+            session.source_dir,
+            workspace_root.path().display().to_string()
         );
     }
 }
