@@ -47,6 +47,7 @@ pub mod prompt_optimizer_supervisor;
 pub mod question_registry;
 pub mod router;
 pub mod team_session;
+pub mod token_refresh;
 pub mod transport;
 pub mod wake_listener;
 pub mod watchdog;
@@ -415,6 +416,15 @@ async fn main() -> Result<()> {
                 team_session::start(ts_root, ts_shutdown);
             }
 
+            // Periodic whiteboard-token refresh (v0.17.11.12) — independent
+            // of the rotation supervisor above, see token_refresh.rs's
+            // module doc for why.
+            {
+                let tr_root = project_root.clone();
+                let tr_shutdown = shutdown.clone();
+                token_refresh::start(tr_root, tr_shutdown);
+            }
+
             // Periodic GC task: run every `gc_interval_hours` (default 6h).
             if gc_interval_hours > 0 {
                 let gc_project_root = project_root.clone();
@@ -517,6 +527,13 @@ async fn main() -> Result<()> {
             let ts_root = project_root.clone();
             let ts_shutdown = shutdown.clone();
             team_session::start(ts_root, ts_shutdown);
+        }
+
+        // Periodic whiteboard-token refresh in MCP mode too (v0.17.11.12).
+        {
+            let tr_root = project_root.clone();
+            let tr_shutdown = shutdown.clone();
+            token_refresh::start(tr_root, tr_shutdown);
         }
 
         // Serve MCP using the configured transport.

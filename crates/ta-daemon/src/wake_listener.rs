@@ -299,6 +299,7 @@ mod tests {
             budget: None,
             role_prompts: std::collections::HashMap::new(),
             whiteboard_token: None,
+            whiteboard_token_expires_at: None,
         }
     }
 

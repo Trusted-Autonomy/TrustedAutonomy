@@ -80,6 +80,17 @@ pub struct TeamSessionConfig {
     /// `ta_whiteboard_*` MCP tools.
     #[serde(default)]
     pub whiteboard_token: Option<String>,
+    /// When `whiteboard_token` expires (v0.17.11.12) — `token_refresh.rs`'s
+    /// periodic task re-mints the token and updates both fields together
+    /// well before this passes, so a long-running session never actually
+    /// hits it. `None` for a session with no whiteboard token, or one
+    /// started before this field existed (`#[serde(default)]`) — the
+    /// refresh task treats a missing expiry on a *present* token as
+    /// "refresh it now" rather than "never expires", so an old session
+    /// self-heals into having a real expiry on its next refresh check
+    /// instead of silently never being refreshed.
+    #[serde(default)]
+    pub whiteboard_token_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -752,6 +763,7 @@ mod tests {
             budget: None,
             role_prompts: std::collections::HashMap::new(),
             whiteboard_token: None,
+            whiteboard_token_expires_at: None,
         }
     }
 

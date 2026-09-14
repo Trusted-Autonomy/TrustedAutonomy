@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 use ta_policy::business_budget::BudgetGuardrails;
 use ta_workflow::WorkflowDefinition;
 
+/// Whiteboard scope token TTL, in seconds (24h) — shared with `ta-daemon`'s
+/// `token_refresh.rs` so both the initial mint (here) and every re-mint
+/// agree on the token's lifetime.
+pub(crate) const WHITEBOARD_TOKEN_TTL_SECS: i64 = 86400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TeamSessionStatus {
@@ -64,6 +69,12 @@ struct TeamSessionConfig {
     /// `ta_whiteboard_*` MCP tools.
     #[serde(default)]
     whiteboard_token: Option<String>,
+    /// When `whiteboard_token` expires (v0.17.11.12) — the daemon's
+    /// `token_refresh.rs` re-mints it well before this passes. Mirrors
+    /// `ta-daemon`'s `TeamSessionConfig.whiteboard_token_expires_at`
+    /// field-for-field.
+    #[serde(default)]
+    whiteboard_token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,36 +326,43 @@ fn start(
         .collect();
 
     let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
-    // Known limitation, not yet fixed: this token is minted once here, with
-    // a fixed 24h TTL, and there is no refresh path anywhere in this
-    // session's lifecycle. A team session still active past 24h starts
-    // getting a clear 403 from every ta_whiteboard_* call (require_whiteboard_scope
-    // in ta-daemon's whiteboard API) -- an observable, actionable failure per
-    // the Observability Mandate, but not a graceful one: whiteboard
-    // coordination simply stops working for the rest of that session's run.
-    // Fixing this properly needs a re-mint-on-heartbeat (or similar) path
-    // wired into team_session.rs's own resume/cycle lifecycle -- deliberately
-    // not built here; tracked as a follow-up, not silently dropped.
-    let whiteboard_token = if whiteboard_config.enabled {
+    // Minted here with a fixed TTL (WHITEBOARD_TOKEN_TTL_SECS, shared with
+    // ta-daemon's token_refresh.rs so both sides agree on the lifetime) --
+    // the daemon's periodic refresh task re-mints it well before it expires
+    // and updates whiteboard_token/whiteboard_token_expires_at together in
+    // state.json, so a long-running session never actually hits the old
+    // "403 after 24h" failure mode (v0.17.11.12).
+    let (whiteboard_token, whiteboard_token_expires_at) = if whiteboard_config.enabled {
         let broker_dir = project_root.join(".ta");
         match ta_credential_broker::CredentialBroker::open(&broker_dir) {
             Ok(broker) => {
                 let scope = format!("whiteboard:team_session:{name}");
-                match broker.grant(uuid::Uuid::new_v4(), name, vec![scope], 86400) {
-                    Ok(granted) => Some(granted.token),
+                match broker.grant(
+                    uuid::Uuid::new_v4(),
+                    name,
+                    vec![scope],
+                    WHITEBOARD_TOKEN_TTL_SECS as u64,
+                ) {
+                    Ok(granted) => (
+                        Some(granted.token),
+                        Some(
+                            chrono::Utc::now()
+                                + chrono::Duration::seconds(WHITEBOARD_TOKEN_TTL_SECS),
+                        ),
+                    ),
                     Err(e) => {
                         tracing::warn!(error = %e, "team-session: failed to mint whiteboard scope token, whiteboard coordination will be unavailable for this session");
-                        None
+                        (None, None)
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "team-session: failed to open credential broker, whiteboard coordination will be unavailable for this session");
-                None
+                (None, None)
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     let now = chrono::Utc::now();
@@ -358,6 +376,7 @@ fn start(
             budget,
             role_prompts,
             whiteboard_token,
+            whiteboard_token_expires_at,
         },
         stages,
         wake_on_demand_listeners,
@@ -751,6 +770,14 @@ budget:
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         assert!(state.config.whiteboard_token.is_some());
+        let expires_at = state
+            .config
+            .whiteboard_token_expires_at
+            .expect("a minted token must carry an expiry");
+        let expected = chrono::Utc::now() + chrono::Duration::seconds(WHITEBOARD_TOKEN_TTL_SECS);
+        // Allow a few seconds of test-execution slack rather than asserting
+        // exact equality against a clock read at a slightly different instant.
+        assert!((expected - expires_at).num_seconds().abs() < 5);
     }
 
     #[test]
@@ -770,6 +797,7 @@ budget:
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         assert!(state.config.whiteboard_token.is_none());
+        assert!(state.config.whiteboard_token_expires_at.is_none());
     }
 
     #[test]
