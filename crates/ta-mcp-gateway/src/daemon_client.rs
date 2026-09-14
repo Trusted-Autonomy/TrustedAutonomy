@@ -40,7 +40,14 @@ impl WhiteboardDaemonClient {
     pub fn new(project_root: &Path) -> Self {
         Self {
             base_url: resolve_daemon_url(project_root),
-            client: reqwest::Client::new(),
+            // 2s matches this repo's convention for routine daemon HTTP
+            // calls (see `apps/ta-cli/src/commands/daemon.rs`'s health/
+            // status checks) rather than the longer timeouts reserved for
+            // startup/drain waits.
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 

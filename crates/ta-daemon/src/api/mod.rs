@@ -540,12 +540,12 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Daemon lifecycle routes (v0.10.10 / v0.17.0.12.2).
         .route("/api/shutdown", post(shutdown_daemon))
         .route("/api/drain/status", get(drain::drain_status))
-        // Daemon-hosted whiteboard coordination (v0.17.11.8 Task 4).
+        // Daemon-hosted whiteboard coordination.
         .route(
             "/api/whiteboard/presence",
             get(whiteboard::list_presence).post(whiteboard::register_presence),
         )
-        // Daemon-hosted whiteboard handoff + task claim/complete (v0.17.11.8 Task 5).
+        // Daemon-hosted whiteboard handoff + task claim/complete.
         .route(
             "/api/whiteboard/handoff/send",
             post(whiteboard::send_handoff),
@@ -559,7 +559,7 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/whiteboard/tasks/complete",
             post(whiteboard::complete_task),
         )
-        // Unauthenticated advisory pre-launch conflict check (v0.17.11.8 Task 8):
+        // Unauthenticated advisory pre-launch conflict check:
         // runs before any team-session/goal exists to mint a scope against.
         .route(
             "/api/whiteboard/presence_for_source",

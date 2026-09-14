@@ -16247,6 +16247,51 @@ ta team-session status trading-desk
 #   token budget: max_tokens_per_goal=50000 (from .ta/policy.yaml)
 ```
 
+### Agent Coordination Whiteboard
+
+When a persistent team session runs multiple roles concurrently, each role's agent
+is a separate process with no shared memory. The daemon-hosted whiteboard gives
+those processes a place to see each other, hand off work, and claim tasks without
+double-doing them — coordination state lives in the daemon, not in any one agent's
+process.
+
+**Enabling it** — add a `[whiteboard]` section to `.ta/workflow.toml`:
+
+```toml
+# .ta/workflow.toml
+[whiteboard]
+enabled = true
+transport = "nats"          # "nats" (default, real cross-process coordination)
+                             # or "memory" (single daemon process only)
+# nats_url = "localhost:4222"  # only used when transport = "nats"
+```
+
+Whiteboard participation is disabled by default. Enabling it requires a **daemon
+restart** to take effect — the transport is initialized once at daemon startup, so
+`ta daemon restart` after editing `.ta/workflow.toml` is required before any
+`ta_whiteboard_*` tool call will succeed.
+
+**Available tools** — once enabled, an agent running inside a team-session goal
+(launched via `ta run --team-session-id <id>`, see below) gets six MCP tools:
+
+| Tool | Purpose |
+|---|---|
+| `ta_whiteboard_presence_register` | Advertise this agent's id, goal run, phase, and resources being touched |
+| `ta_whiteboard_presence_list` | List other agents currently registered on the whiteboard |
+| `ta_whiteboard_handoff_send` | Send a payload to another role or specific agent |
+| `ta_whiteboard_handoff_receive` | Check for and consume a handoff addressed to this agent |
+| `ta_whiteboard_task_claim` | Atomically claim a task by id so only one agent works on it |
+| `ta_whiteboard_task_complete` | Mark a claimed task done |
+
+These tools are only available inside a goal launched as part of a team session
+with whiteboard coordination enabled — any other goal gets a clear error rather
+than a silent no-op if it tries to call them.
+
+**`ta run --team-session-id <id>`** — an internal plumbing flag the team-session
+supervisor passes when launching each role's goal, so that goal's agent receives
+the whiteboard credentials for that session. This is not a flag you normally pass
+by hand.
+
 ---
 
 ## Context Compression

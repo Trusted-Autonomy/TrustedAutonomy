@@ -87,7 +87,11 @@ pub async fn list_presence(
         return resp.into_response();
     }
     let Some(transport) = &state.whiteboard_transport else {
-        return (StatusCode::OK, Json(Vec::<PresenceRecord>::new())).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "[whiteboard] enabled = false for this project"})),
+        )
+            .into_response();
     };
     match discovery::list_active_agents(transport.as_ref()).await {
         Ok(records) => (StatusCode::OK, Json(records)).into_response(),
@@ -151,7 +155,11 @@ pub async fn receive_handoff(
         return resp.into_response();
     }
     let Some(transport) = &state.whiteboard_transport else {
-        return (StatusCode::OK, Json(serde_json::Value::Null)).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "[whiteboard] enabled = false for this project"})),
+        )
+            .into_response();
     };
     match ta_agent_whiteboard::handoff::receive_handoff(transport.as_ref(), &req.recipient).await {
         Ok(Some(delivered)) => {
@@ -195,7 +203,11 @@ pub async fn claim_task(
         return resp.into_response();
     }
     let Some(transport) = &state.whiteboard_transport else {
-        return (StatusCode::OK, Json(serde_json::json!({"claimed": false}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "[whiteboard] enabled = false for this project"})),
+        )
+            .into_response();
     };
     match ta_agent_whiteboard::tasks::claim_task(transport.as_ref(), &req.task_id, &req.agent_id)
         .await
@@ -602,6 +614,132 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/whiteboard/tasks/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            resp_body.get("error").and_then(|v| v.as_str()),
+            Some("[whiteboard] enabled = false for this project")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_presence_with_whiteboard_disabled_returns_503() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = false\n",
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            DaemonConfig::default(),
+        ));
+        let token = mint_test_token(dir.path(), "sess-1");
+        let router = crate::api::build_api_router(state).into_service();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/whiteboard/presence?team_session=sess-1&token={token}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            resp_body.get("error").and_then(|v| v.as_str()),
+            Some("[whiteboard] enabled = false for this project")
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_handoff_with_whiteboard_disabled_returns_503() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = false\n",
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            DaemonConfig::default(),
+        ));
+        let token = mint_test_token(dir.path(), "sess-1");
+        let router = crate::api::build_api_router(state).into_service();
+
+        let body = serde_json::json!({
+            "token": token,
+            "team_session": "sess-1",
+            "recipient": {"agent": "implementer"},
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/whiteboard/handoff/receive")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            resp_body.get("error").and_then(|v| v.as_str()),
+            Some("[whiteboard] enabled = false for this project")
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_task_with_whiteboard_disabled_returns_503() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = false\n",
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            DaemonConfig::default(),
+        ));
+        let token = mint_test_token(dir.path(), "sess-1");
+        let router = crate::api::build_api_router(state).into_service();
+
+        let body = serde_json::json!({
+            "token": token,
+            "team_session": "sess-1",
+            "task_id": "t1",
+            "agent_id": "agent-a",
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/whiteboard/tasks/claim")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
