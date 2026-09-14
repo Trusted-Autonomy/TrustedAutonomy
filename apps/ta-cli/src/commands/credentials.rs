@@ -26,6 +26,19 @@ pub enum CredentialsCommands {
     },
     /// List all stored credentials (secrets are hidden).
     List,
+    /// Rotate a credential's secret in place, keeping its name, service,
+    /// scopes, and id unchanged. Use this instead of `revoke` + `add` when
+    /// swapping in a new key for the same credential (e.g. after rotating a
+    /// model-provider API key) — anything that already refers to this
+    /// credential by id (an issued grant, a `.ta/team.toml` role binding)
+    /// keeps working, it just resolves to the new secret on next use.
+    Update {
+        /// Credential ID (UUID) or prefix.
+        id: String,
+        /// The new secret value.
+        #[arg(long)]
+        secret: String,
+    },
     /// Revoke (delete) a credential by ID.
     Revoke {
         /// Credential ID (UUID) or prefix.
@@ -67,6 +80,7 @@ pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Res
             scope,
         } => add_credential(config, name, service, secret, scope),
         CredentialsCommands::List => list_credentials(config),
+        CredentialsCommands::Update { id, secret } => update_credential(config, id, secret),
         CredentialsCommands::Revoke { id } => revoke_credential(config, id),
         CredentialsCommands::Grant {
             id,
@@ -127,6 +141,48 @@ fn list_credentials(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve `id_str` (a full credential UUID or an unambiguous prefix of one)
+/// to a single credential summary. Shared by `revoke`, `grant`, and `update`
+/// — all three accept a prefix rather than requiring the full UUID.
+fn resolve_credential_prefix<'a>(
+    creds: &'a [ta_credentials::CredentialSummary],
+    id_str: &str,
+) -> anyhow::Result<&'a ta_credentials::CredentialSummary> {
+    let matches: Vec<_> = creds
+        .iter()
+        .filter(|c| c.id.to_string().starts_with(id_str))
+        .collect();
+    match matches.len() {
+        0 => anyhow::bail!("No credential found matching '{}'", id_str),
+        1 => Ok(matches[0]),
+        n => anyhow::bail!(
+            "Ambiguous prefix '{}' matches {} credentials. Use a longer prefix.",
+            id_str,
+            n
+        ),
+    }
+}
+
+fn update_credential(config: &GatewayConfig, id_str: &str, secret: &str) -> anyhow::Result<()> {
+    let mut vault = FileVault::open(&cred_config(config))?;
+    let creds = vault.list()?;
+    let id = resolve_credential_prefix(&creds, id_str)?.id;
+
+    let updated = vault.update(id, secret)?;
+    println!("Credential rotated:");
+    println!("  ID:      {}", updated.id);
+    println!("  Name:    {}", updated.name);
+    println!("  Service: {}", updated.service);
+    if !updated.scopes.is_empty() {
+        println!("  Scopes:  {}", updated.scopes.join(", "));
+    }
+    println!(
+        "Existing grants for this credential remain valid; the next agent launch \
+         picks up the new secret."
+    );
+    Ok(())
+}
+
 /// Where the broker's root key and revocation denylist live — alongside
 /// `credentials.json`, inside the project's `.ta` dir.
 fn broker_dir(config: &GatewayConfig) -> std::path::PathBuf {
@@ -152,23 +208,8 @@ fn mint_grant(
     ta_credential_broker::GrantedToken,
 )> {
     let vault = FileVault::open(&cred_config(config))?;
-
-    // Support prefix matching, same as `revoke`.
     let creds = vault.list()?;
-    let matches: Vec<_> = creds
-        .iter()
-        .filter(|c| c.id.to_string().starts_with(id_str))
-        .collect();
-
-    let cred = match matches.len() {
-        0 => anyhow::bail!("No credential found matching '{}'", id_str),
-        1 => matches[0].clone(),
-        n => anyhow::bail!(
-            "Ambiguous prefix '{}' matches {} credentials. Use a longer prefix.",
-            id_str,
-            n
-        ),
-    };
+    let cred = resolve_credential_prefix(&creds, id_str)?.clone();
 
     let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(config))?;
     let granted = broker.grant(cred.id, agent, scopes.to_vec(), ttl_secs)?;
@@ -200,29 +241,14 @@ fn grant_token(
 
 fn revoke_credential(config: &GatewayConfig, id_str: &str) -> anyhow::Result<()> {
     let mut vault = FileVault::open(&cred_config(config))?;
-
-    // Support prefix matching.
     let creds = vault.list()?;
-    let matches: Vec<_> = creds
-        .iter()
-        .filter(|c| c.id.to_string().starts_with(id_str))
-        .collect();
+    let resolved = resolve_credential_prefix(&creds, id_str)?;
+    let id = resolved.id;
+    let name = resolved.name.clone();
 
-    match matches.len() {
-        0 => anyhow::bail!("No credential found matching '{}'", id_str),
-        1 => {
-            let id = matches[0].id;
-            let name = &matches[0].name;
-            vault.revoke(id)?;
-            println!("Revoked credential '{}' ({})", name, id);
-            Ok(())
-        }
-        n => anyhow::bail!(
-            "Ambiguous prefix '{}' matches {} credentials. Use a longer prefix.",
-            id_str,
-            n
-        ),
-    }
+    vault.revoke(id)?;
+    println!("Revoked credential '{}' ({})", name, id);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -276,5 +302,99 @@ mod tests {
 
         let result = mint_grant(&config, "deadbeef", "agent-1", &[], 3600);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_rotates_secret_and_is_resolvable_by_prefix() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        add_credential(&config, "api-key", "anthropic", "old-secret", &[]).unwrap();
+        let cred_id = FileVault::open(&cred_config(&config))
+            .unwrap()
+            .list()
+            .unwrap()[0]
+            .id;
+        let prefix = &cred_id.to_string()[..8];
+
+        update_credential(&config, prefix, "new-secret").unwrap();
+
+        let vault = FileVault::open(&cred_config(&config)).unwrap();
+        assert_eq!(vault.get(cred_id).unwrap().secret, "new-secret");
+        // Name/service/scopes unchanged by rotation.
+        let summary = &vault.list().unwrap()[0];
+        assert_eq!(summary.name, "api-key");
+        assert_eq!(summary.service, "anthropic");
+    }
+
+    #[test]
+    fn update_unknown_prefix_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+
+        let result = update_credential(&config, "deadbeef", "new-secret");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_ambiguous_prefix_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        add_credential(&config, "a", "svc", "secret1", &[]).unwrap();
+        add_credential(&config, "b", "svc", "secret2", &[]).unwrap();
+
+        // The empty string is a prefix of every id.
+        let result = update_credential(&config, "", "new-secret");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn existing_grant_survives_a_rotation() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        add_credential(&config, "svc", "svc", "old-secret", &["read".into()]).unwrap();
+        let cred_id = FileVault::open(&cred_config(&config))
+            .unwrap()
+            .list()
+            .unwrap()[0]
+            .id;
+
+        let (_, granted) = mint_grant(
+            &config,
+            &cred_id.to_string(),
+            "agent-1",
+            &["read".into()],
+            3600,
+        )
+        .unwrap();
+
+        update_credential(&config, &cred_id.to_string(), "new-secret").unwrap();
+
+        // The grant minted before rotation still verifies — rotation only
+        // changes the secret a subsequent `vault.get` returns, not the
+        // credential's identity or any already-issued grant.
+        let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(&config)).unwrap();
+        let verified = broker.verify(&granted.token).unwrap();
+        assert_eq!(verified.credential_id, cred_id);
+
+        let vault = FileVault::open(&cred_config(&config)).unwrap();
+        assert_eq!(vault.get(cred_id).unwrap().secret, "new-secret");
+    }
+
+    #[test]
+    fn revoke_by_prefix_still_works_after_extracting_shared_helper() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        add_credential(&config, "svc", "svc", "secret", &[]).unwrap();
+        let cred_id = FileVault::open(&cred_config(&config))
+            .unwrap()
+            .list()
+            .unwrap()[0]
+            .id;
+        let prefix = &cred_id.to_string()[..8];
+
+        revoke_credential(&config, prefix).unwrap();
+
+        let vault = FileVault::open(&cred_config(&config)).unwrap();
+        assert!(vault.list().unwrap().is_empty());
     }
 }
