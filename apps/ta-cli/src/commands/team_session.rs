@@ -29,6 +29,16 @@ struct TeamSessionStageConfig {
     roles: Vec<String>,
 }
 
+/// Mirrors `ta-daemon`'s `wake_listener::WakeListenerConfig` field-for-field
+/// (`ta-daemon` has no `[lib]` target, so this CLI can't import the real
+/// type — same reason every other struct in this file is its own mirror,
+/// not a shared import). Keep in sync by hand if the daemon's shape changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WakeOnDemandListenerConfig {
+    role: String,
+    keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TeamSessionConfig {
     name: String,
@@ -61,6 +71,8 @@ struct TeamSessionState {
     id: String,
     config: TeamSessionConfig,
     stages: Vec<TeamSessionStageConfig>,
+    #[serde(default)]
+    wake_on_demand_listeners: Vec<WakeOnDemandListenerConfig>,
     status: TeamSessionStatus,
     current_stage_index: usize,
     findings: Vec<serde_json::Value>,
@@ -127,6 +139,15 @@ pub enum TeamSessionCommands {
         /// The session's overall objective, carried into every role's context.
         #[arg(long, default_value = "")]
         objective: String,
+        /// Register a role as a wake-on-demand listener instead of giving
+        /// it a round-robin turn: `--wake-on-demand <role>:<key1>,<key2>`.
+        /// Repeatable. The role is launched via `ta run` the moment a
+        /// message arrives on any of its keys (v0.17.11.10) — requires
+        /// `[whiteboard] enabled = true` in `.ta/workflow.toml`, since it's
+        /// delivered over the same coordination transport as everything
+        /// else in `ta_whiteboard_*`.
+        #[arg(long = "wake-on-demand")]
+        wake_on_demand: Vec<String>,
     },
     /// Pause a running session — the supervisor stops firing new goal-runs
     /// until `ta team-session resume <name>`.
@@ -149,12 +170,14 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
             workflow,
             team_toml,
             objective,
+            wake_on_demand,
         } => start(
             project_root,
             name,
             workflow,
             team_toml.as_deref(),
             objective,
+            wake_on_demand,
         ),
         TeamSessionCommands::Pause { name } => {
             write_signal(project_root, name, "pause-signal").context("writing pause-signal")?;
@@ -181,6 +204,7 @@ fn start(
     workflow_path: &str,
     team_toml: Option<&str>,
     objective: &str,
+    wake_on_demand: &[String],
 ) -> Result<()> {
     if state_path(project_root, name).exists() {
         bail!(
@@ -188,6 +212,31 @@ fn start(
             state_path(project_root, name).display()
         );
     }
+
+    // Each entry is "<role>:<key1>,<key2>,...". Parsed up front so a
+    // malformed flag fails fast, before any workflow/state.json work.
+    let wake_on_demand_listeners: Vec<WakeOnDemandListenerConfig> = wake_on_demand
+        .iter()
+        .map(|entry| {
+            let (role, keys) = entry.split_once(':').with_context(|| {
+                format!(
+                    "--wake-on-demand '{entry}' is not in the form <role>:<key1>,<key2> \
+                     (missing ':')"
+                )
+            })?;
+            let keys: Vec<String> = keys.split(',').map(|k| k.trim().to_string()).collect();
+            if role.trim().is_empty() || keys.iter().any(|k| k.is_empty()) {
+                bail!(
+                    "--wake-on-demand '{entry}' is not in the form <role>:<key1>,<key2> \
+                     (empty role or key)"
+                );
+            }
+            Ok(WakeOnDemandListenerConfig {
+                role: role.trim().to_string(),
+                keys,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let workflow_full_path = project_root.join(workflow_path);
     let definition = WorkflowDefinition::from_file(&workflow_full_path).with_context(|| {
@@ -311,6 +360,7 @@ fn start(
             whiteboard_token,
         },
         stages,
+        wake_on_demand_listeners,
         status: TeamSessionStatus::Active,
         current_stage_index: 0,
         findings: Vec::new(),
@@ -326,8 +376,21 @@ fn start(
     std::fs::write(state_path(project_root, name), raw)
         .with_context(|| format!("Failed to write state.json for team session '{name}'"))?;
 
+    let wake_on_demand_note = if state.wake_on_demand_listeners.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Wake-on-demand: {}.",
+            state
+                .wake_on_demand_listeners
+                .iter()
+                .map(|l| format!("{} ({})", l.role, l.keys.join(", ")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     println!(
-        "[team-session] started '{name}' with {} stage(s) from '{workflow_path}'. The daemon supervisor picks it up on its next startup or poll cycle. Check progress with `ta team-session status {name}`.",
+        "[team-session] started '{name}' with {} stage(s) from '{workflow_path}'.{wake_on_demand_note} The daemon supervisor picks it up on its next startup or poll cycle. Check progress with `ta team-session status {name}`.",
         state.stages.len()
     );
     Ok(())
@@ -513,7 +576,15 @@ budget:
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
 
-        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[],
+        )
+        .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         assert_eq!(state.stages.len(), 2);
@@ -521,6 +592,84 @@ budget:
         assert_eq!(state.stages[1].name, "decide");
         assert_eq!(state.status, TeamSessionStatus::Active);
         assert!(state.config.budget.is_none());
+        assert!(state.wake_on_demand_listeners.is_empty());
+    }
+
+    #[test]
+    fn start_parses_wake_on_demand_flag_into_state_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[
+                "chief-of-staff:external-intake".to_string(),
+                "chief-of-staff:another-key".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert_eq!(state.wake_on_demand_listeners.len(), 2);
+        assert_eq!(state.wake_on_demand_listeners[0].role, "chief-of-staff");
+        assert_eq!(
+            state.wake_on_demand_listeners[0].keys,
+            vec!["external-intake".to_string()]
+        );
+        assert_eq!(state.wake_on_demand_listeners[1].role, "chief-of-staff");
+        assert_eq!(
+            state.wake_on_demand_listeners[1].keys,
+            vec!["another-key".to_string()]
+        );
+    }
+
+    #[test]
+    fn start_parses_multiple_comma_separated_keys_for_one_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &["chief-of-staff:external-intake,urgent-review".to_string()],
+        )
+        .unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert_eq!(state.wake_on_demand_listeners.len(), 1);
+        assert_eq!(
+            state.wake_on_demand_listeners[0].keys,
+            vec!["external-intake".to_string(), "urgent-review".to_string()]
+        );
+    }
+
+    #[test]
+    fn start_rejects_malformed_wake_on_demand_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        let result = start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &["chief-of-staff-no-colon".to_string()],
+        );
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("chief-of-staff-no-colon"));
+        assert!(
+            !state_path(dir.path(), "sess-1").exists(),
+            "a malformed --wake-on-demand flag must fail before any state.json is written"
+        );
     }
 
     #[test]
@@ -531,7 +680,15 @@ budget:
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
 
-        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[],
+        )
+        .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         assert_eq!(
@@ -553,7 +710,15 @@ budget:
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow_with_budget(dir.path());
 
-        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[],
+        )
+        .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         let budget = state.config.budget.expect("budget should be resolved");
@@ -574,7 +739,15 @@ budget:
         .unwrap();
         let workflow_path = write_role_workflow(dir.path());
 
-        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[],
+        )
+        .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         assert!(state.config.whiteboard_token.is_some());
@@ -585,7 +758,15 @@ budget:
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
 
-        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[],
+        )
+        .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
         assert!(state.config.whiteboard_token.is_none());
@@ -595,7 +776,15 @@ budget:
     fn status_shows_business_and_token_budget_side_by_side() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow_with_budget(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "Make money").unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[],
+        )
+        .unwrap();
 
         let ledger_path = budget_ledger_path(dir.path(), "sess-1");
         ta_policy::business_budget::record_ledger_spend(&ledger_path, "buy AAPL", 250.0).unwrap();
@@ -656,9 +845,9 @@ budget:
     fn start_rejects_a_duplicate_name() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "").unwrap();
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[]).unwrap();
 
-        let result = start(dir.path(), "sess-1", &workflow_path, None, "");
+        let result = start(dir.path(), "sess-1", &workflow_path, None, "", &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -666,7 +855,7 @@ budget:
     #[test]
     fn start_rejects_missing_workflow_file() {
         let dir = tempfile::tempdir().unwrap();
-        let result = start(dir.path(), "sess-1", "does-not-exist.yaml", None, "");
+        let result = start(dir.path(), "sess-1", "does-not-exist.yaml", None, "", &[]);
         assert!(result.is_err());
     }
 
@@ -693,7 +882,7 @@ stages:
         )
         .unwrap();
 
-        let result = start(dir.path(), "sess-1", "bad-workflow.yaml", None, "");
+        let result = start(dir.path(), "sess-1", "bad-workflow.yaml", None, "", &[]);
 
         let err = result.unwrap_err().to_string();
         assert!(
@@ -707,7 +896,7 @@ stages:
     fn pause_resume_stop_write_expected_signal_files() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "").unwrap();
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[]).unwrap();
 
         execute(
             &TeamSessionCommands::Pause {
@@ -747,7 +936,7 @@ stages:
     fn status_reports_persisted_state_before_any_supervisor_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "").unwrap();
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[]).unwrap();
 
         // No supervisor-status.json written yet (daemon hasn't run a cycle) —
         // must not error, must fall back to persisted state.json.
@@ -800,6 +989,7 @@ stages:
             "trading-desk.yaml",
             None,
             "Generate income > 2x within 6 months after fees",
+            &[],
         )
         .unwrap();
 

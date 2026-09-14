@@ -48,6 +48,7 @@ pub mod question_registry;
 pub mod router;
 pub mod team_session;
 pub mod transport;
+pub mod wake_listener;
 pub mod watchdog;
 mod web;
 
