@@ -325,6 +325,50 @@ pub fn handle_task_complete(
     success_json(serde_json::json!({ "completed": true }))
 }
 
+// ── ta_whiteboard_outcome_send ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct OutcomeSendParams {
+    /// Correlates back to the candidate this outcome is for (the
+    /// `candidate_id` from the "## New intake" context this role was woken
+    /// with, if any) — required so the Wayfinder poller can act on the
+    /// right task, never freshly generated.
+    pub candidate_id: String,
+    /// `"done"`, `"blocked"`, or `"new_work"`.
+    pub outcome: String,
+    /// Free-text detail — what happened, why, or what's blocking it.
+    pub detail: String,
+    /// Only meaningful when `outcome == "new_work"`: a title for the new
+    /// Wayfinder task the poller should create.
+    #[serde(default)]
+    pub new_task_title: Option<String>,
+}
+
+pub fn handle_outcome_send(
+    state: &Arc<Mutex<GatewayState>>,
+    params: OutcomeSendParams,
+) -> Result<CallToolResult, McpError> {
+    let workspace_root = workspace_root(state)?;
+    let session = load_whiteboard_session(&workspace_root)?;
+
+    let payload = serde_json::json!({
+        "candidate_id": params.candidate_id,
+        "outcome": params.outcome,
+        "detail": params.detail,
+        "new_task_title": params.new_task_title,
+    })
+    .to_string();
+
+    run_on_dedicated_thread(move || async move {
+        let client = WhiteboardDaemonClient::new(Path::new(&session.source_dir));
+        client
+            .send_outcome(&session.token, &session.team_session, &payload)
+            .await
+    })?;
+
+    success_json(serde_json::json!({ "sent": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

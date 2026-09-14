@@ -1232,6 +1232,17 @@ impl TaGatewayServer {
         tools::whiteboard::handle_task_complete(&self.state, params)
     }
 
+    #[tool(
+        description = "Report an outcome (done/blocked/new_work) for Wayfinder-sourced work back onto the report-back stream, so the Wayfinder poller can PATCH/POST it back to Wayfinder's task API. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+    )]
+    fn ta_whiteboard_outcome_send(
+        &self,
+        Parameters(params): Parameters<tools::whiteboard::OutcomeSendParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_whiteboard_outcome_send", None, None);
+        tools::whiteboard::handle_outcome_send(&self.state, params)
+    }
+
     // ── Unreal Engine 5 tools (v0.14.14) ─────────────────────────────
 
     #[tool(
@@ -1664,8 +1675,9 @@ mod tests {
         //           ta_whiteboard_presence_register, ta_whiteboard_presence_list,
         //           ta_whiteboard_handoff_send, ta_whiteboard_handoff_receive,
         //           ta_whiteboard_task_claim, ta_whiteboard_task_complete (v0.17.11.8)
+        //           ta_whiteboard_outcome_send (v0.17.11.11)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 47, "expected 47 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 48, "expected 48 tools, got: {:?}", names);
     }
 
     #[test]

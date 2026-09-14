@@ -559,6 +559,14 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/whiteboard/tasks/complete",
             post(whiteboard::complete_task),
         )
+        // Report-back leg (v0.17.11.11): chief-of-staff publishes an
+        // outcome for Wayfinder-sourced work here; the Wayfinder poller
+        // drains it and turns each message into a PATCH/POST back to
+        // Wayfinder's task API.
+        .route(
+            "/api/whiteboard/outcome/send",
+            post(whiteboard::send_outcome),
+        )
         // Unauthenticated advisory pre-launch conflict check:
         // runs before any team-session/goal exists to mint a scope against.
         .route(

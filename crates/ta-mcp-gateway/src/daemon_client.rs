@@ -235,6 +235,29 @@ impl WhiteboardDaemonClient {
         }
         Ok(())
     }
+
+    /// Publishes `payload` (an opaque, already-JSON-encoded outcome message)
+    /// onto the report-back stream (v0.17.11.11) — the Wayfinder poller
+    /// drains it and turns it into a `PATCH`/`POST` back to Wayfinder's
+    /// task API. No RoleRef addressing, unlike `send_handoff`: there is
+    /// exactly one intended reader.
+    pub async fn send_outcome(&self, token: &str, team_session: &str, payload: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/api/whiteboard/outcome/send", self.base_url))
+            .json(&serde_json::json!({
+                "token": token,
+                "team_session": team_session,
+                "payload": payload,
+            }))
+            .send()
+            .await
+            .context("whiteboard outcome send: request failed")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("whiteboard outcome send failed: HTTP {}", resp.status());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

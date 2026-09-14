@@ -257,6 +257,59 @@ pub async fn complete_task(
     }
 }
 
+/// The report-back stream's well-known name (v0.17.11.11) — must match the
+/// constant `ta-virtual-team`'s poller reads from (`EXTERNAL_OUTCOME_STREAM`
+/// in that repo's `src/wayfinder/poller.rs`), the mirror image of
+/// `wake_listener.rs`'s `external-intake` stream: chief-of-staff publishes
+/// here after triaging Wayfinder-sourced work, the poller drains it and
+/// turns each message into a `PATCH`/`POST` back to Wayfinder.
+pub const EXTERNAL_OUTCOME_STREAM: &str = "external-outcome";
+
+#[derive(Debug, Deserialize)]
+pub struct OutcomeSendRequest {
+    pub token: String,
+    pub team_session: String,
+    /// Opaque to the daemon — a JSON-encoded `outcome` message (design doc
+    /// §8.5: `candidate_id`, `outcome`, `detail`, ...). The daemon only
+    /// carries bytes; interpreting them is the poller's job on the other
+    /// end, same "poller never judges" principle §4 already establishes for
+    /// the intake direction.
+    pub payload: String,
+}
+
+/// `POST /api/whiteboard/outcome/send` — publishes `payload` onto the
+/// report-back stream. No RoleRef addressing (unlike `send_handoff`): there
+/// is exactly one intended reader (the Wayfinder poller), the same
+/// single-consumer shape `external-intake` already has in the other
+/// direction.
+pub async fn send_outcome(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OutcomeSendRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_whiteboard_scope(&state.project_root, &req.token, &req.team_session)
+    {
+        return resp.into_response();
+    }
+    let Some(transport) = &state.whiteboard_transport else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "[whiteboard] enabled = false for this project"})),
+        )
+            .into_response();
+    };
+    match transport
+        .stream_append(EXTERNAL_OUTCOME_STREAM, req.payload.into_bytes())
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PresenceForSourceQuery {
     pub source_dir: String,
@@ -755,6 +808,106 @@ mod tests {
             resp_body.get("error").and_then(|v| v.as_str()),
             Some("[whiteboard] enabled = false for this project")
         );
+    }
+
+    #[tokio::test]
+    async fn send_outcome_with_whiteboard_disabled_returns_503() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = false\n",
+        )
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            DaemonConfig::default(),
+        ));
+        let token = mint_test_token(dir.path(), "sess-1");
+        let router = crate::api::build_api_router(state).into_service();
+
+        let body = serde_json::json!({
+            "token": token,
+            "team_session": "sess-1",
+            "payload": "{}",
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/whiteboard/outcome/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn send_outcome_without_valid_scope_returns_403() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_whiteboard_enabled(dir.path());
+        let router = crate::api::build_api_router(state).into_service();
+
+        let body = serde_json::json!({
+            "token": "not-a-real-token",
+            "team_session": "sess-1",
+            "payload": "{}",
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/whiteboard/outcome/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn send_outcome_publishes_onto_the_external_outcome_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_whiteboard_enabled(dir.path());
+        let token = mint_test_token(dir.path(), "sess-1");
+        let transport = state.whiteboard_transport.clone().unwrap();
+        let router = crate::api::build_api_router(state).into_service();
+
+        let body = serde_json::json!({
+            "token": token,
+            "team_session": "sess-1",
+            "payload": serde_json::json!({
+                "candidate_id": "wayfinder-task:t1",
+                "outcome": "done",
+                "detail": "closed the loop",
+            }).to_string(),
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/whiteboard/outcome/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let envelope = transport
+            .stream_read_next(EXTERNAL_OUTCOME_STREAM, "test-consumer")
+            .await
+            .unwrap()
+            .expect("the outcome payload should have been published");
+        let payload: serde_json::Value = serde_json::from_slice(&envelope.payload).unwrap();
+        assert_eq!(payload["candidate_id"], "wayfinder-task:t1");
+        assert_eq!(payload["outcome"], "done");
     }
 
     /// The single most important test in this crate's whiteboard work:
