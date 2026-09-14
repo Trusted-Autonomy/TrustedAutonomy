@@ -6528,30 +6528,40 @@ fn write_whiteboard_session_file(
         "source_dir": project_root.display().to_string(),
     });
     let dest_path = dest_dir.join("whiteboard-session.json");
-    if let Err(e) = std::fs::write(&dest_path, payload.to_string()) {
-        tracing::warn!(
-            path = %dest_path.display(),
-            error = %e,
-            "ta run --team-session-id: failed to write whiteboard-session.json"
-        );
-        return;
-    }
-    // This file carries a live bearer token (whiteboard:team_session:<name>
-    // scope, 24h TTL) -- restrict it like every other secret-bearing file in
-    // this codebase (see ta-credentials's key/vault files).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&dest_path, std::fs::Permissions::from_mode(0o600))
-        {
+    match std::fs::write(&dest_path, payload.to_string()) {
+        Ok(()) => {
+            // This file carries a live bearer token
+            // (whiteboard:team_session:<name> scope, 24h TTL) -- restrict it
+            // like every other secret-bearing file in this codebase (see
+            // ta-credentials's key/vault files). `#[cfg(unix)]` here (not an
+            // early `return` above it) matters on Windows: an early return
+            // followed by a cfg(unix)-only tail makes that `return` the
+            // function's last statement on non-unix, which clippy flags as
+            // needless_return -- this shape avoids that trap entirely.
+            #[cfg(unix)]
+            write_whiteboard_session_file_permissions(&dest_path);
+        }
+        Err(e) => {
             tracing::warn!(
                 path = %dest_path.display(),
                 error = %e,
-                "ta run --team-session-id: failed to restrict whiteboard-session.json \
-                 permissions to 0600 -- the whiteboard token in this file may be readable \
-                 by other local users"
+                "ta run --team-session-id: failed to write whiteboard-session.json"
             );
         }
+    }
+}
+
+#[cfg(unix)]
+fn write_whiteboard_session_file_permissions(dest_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(dest_path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            path = %dest_path.display(),
+            error = %e,
+            "ta run --team-session-id: failed to restrict whiteboard-session.json \
+             permissions to 0600 -- the whiteboard token in this file may be readable \
+             by other local users"
+        );
     }
 }
 
