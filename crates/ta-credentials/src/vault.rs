@@ -79,6 +79,16 @@ pub trait CredentialVault: Send + Sync {
     /// Retrieve a credential by ID (includes secret).
     fn get(&self, id: Uuid) -> Result<Credential, VaultError>;
 
+    /// Replace an existing credential's secret in place (rotation), keeping
+    /// its `id`, `name`, `service`, and `created_at` unchanged. Any grants or
+    /// session tokens already issued for this credential remain valid — they
+    /// authorize access to the credential by id, not to the secret value
+    /// itself, and every real consumer (`ta run`'s `load_vault_credentials`)
+    /// reads the secret fresh via `get()` at launch time rather than caching
+    /// it, so a rotated secret takes effect on the next launch with no
+    /// separate re-authorization step needed.
+    fn update(&mut self, id: Uuid, secret: &str) -> Result<Credential, VaultError>;
+
     /// Revoke (delete) a credential.
     fn revoke(&mut self, id: Uuid) -> Result<(), VaultError>;
 
