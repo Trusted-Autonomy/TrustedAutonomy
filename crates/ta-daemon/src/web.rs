@@ -1318,6 +1318,14 @@ pub async fn serve_daemon_api(
     // in-flight when the daemon was last restarted (v0.12.6 item 11).
     start_goal_recovery_tasks(&app_state);
 
+    // Wake-on-demand listeners (v0.17.11.10) — must start here, not in
+    // main.rs alongside team_session::start, because it needs the same
+    // whiteboard_transport instance app_state's HTTP handlers use. For
+    // InMemoryTransport specifically, a second independently-constructed
+    // instance would not share state with this one, silently breaking
+    // delivery between ta_whiteboard_* tool calls and this watcher.
+    crate::wake_listener::start(&app_state, shutdown.clone());
+
     // Auto-spawn agent supervisor (runs in background, shares the same AppState).
     let supervisor_shutdown = shutdown.clone();
     tokio::spawn(crate::api::agent::auto_spawn_supervisor(

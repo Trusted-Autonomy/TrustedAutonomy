@@ -108,7 +108,7 @@ pub struct TeamMember {
 // ── RoleRef ───────────────────────────────────────────────────────────────────
 
 /// Reference to a recipient for an escalation — by role or by specific agent ID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RoleRef {
     Role(TeamRole),

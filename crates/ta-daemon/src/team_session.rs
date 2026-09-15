@@ -73,6 +73,24 @@ pub struct TeamSessionConfig {
     /// existed still load.
     #[serde(default)]
     pub role_prompts: std::collections::HashMap<String, String>,
+    /// Biscuit-backed grant scoped to `whiteboard:team_session:<name>`,
+    /// minted at `start()` time when `[whiteboard] enabled = true`. `None`
+    /// when whiteboard coordination is off for this project. Threaded into
+    /// each role's launch so agent processes can call the new
+    /// `ta_whiteboard_*` MCP tools.
+    #[serde(default)]
+    pub whiteboard_token: Option<String>,
+    /// When `whiteboard_token` expires (v0.17.11.12) — `token_refresh.rs`'s
+    /// periodic task re-mints the token and updates both fields together
+    /// well before this passes, so a long-running session never actually
+    /// hits it. `None` for a session with no whiteboard token, or one
+    /// started before this field existed (`#[serde(default)]`) — the
+    /// refresh task treats a missing expiry on a *present* token as
+    /// "refresh it now" rather than "never expires", so an old session
+    /// self-heals into having a real expiry on its next refresh check
+    /// instead of silently never being refreshed.
+    #[serde(default)]
+    pub whiteboard_token_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +98,15 @@ pub struct TeamSessionState {
     pub id: String,
     pub config: TeamSessionConfig,
     pub stages: Vec<TeamSessionStageConfig>,
+    /// Roles launched on demand by `wake_listener.rs` when a message
+    /// arrives on one of their registered keys, instead of taking a turn in
+    /// `stages`' round-robin rotation (v0.17.11.10). A sibling list, not a
+    /// flag on `TeamSessionStageConfig` -- keeps `stages` unambiguously
+    /// "the rotation" and avoids conflating the two membership questions.
+    /// `#[serde(default)]` so state.json files written before this field
+    /// existed still load.
+    #[serde(default)]
+    pub wake_on_demand_listeners: Vec<crate::wake_listener::WakeListenerConfig>,
     pub status: TeamSessionStatus,
     pub current_stage_index: usize,
     pub findings: Vec<RoleFinding>,
@@ -95,6 +122,7 @@ impl TeamSessionState {
             id,
             config,
             stages,
+            wake_on_demand_listeners: Vec::new(),
             status: TeamSessionStatus::Active,
             current_stage_index: 0,
             findings: Vec::new(),
@@ -102,6 +130,14 @@ impl TeamSessionState {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    pub fn with_wake_on_demand_listeners(
+        mut self,
+        listeners: Vec<crate::wake_listener::WakeListenerConfig>,
+    ) -> Self {
+        self.wake_on_demand_listeners = listeners;
+        self
     }
 
     pub fn state_dir(project_root: &Path, id: &str) -> PathBuf {
@@ -383,18 +419,24 @@ pub fn write_session_context(
     Ok(path)
 }
 
-/// Builds the `ta run` argument list for firing the next role's goal-run,
+/// Builds the `ta run` argument list for firing a role's goal-run,
 /// mirroring `apps/ta-cli/src/commands/intake.rs::execute_routed_goal`'s
 /// command construction. Returns a plain `Vec<String>` (not a `Command`)
 /// so the argument logic is unit-testable without spawning a process.
+///
+/// `label` is a free-text title component (a rotation stage's name, or
+/// e.g. `"wake-on-demand"` for `wake_listener.rs`'s launches) -- this
+/// function only needs a string for the title, not a full stage struct, so
+/// it's callable outside `team_session.rs`'s rotation state machine too
+/// (v0.17.11.10).
 pub fn build_ta_run_args(
     state: &TeamSessionState,
-    stage: &TeamSessionStageConfig,
+    label: &str,
     role: &str,
     team_config: &TeamConfig,
     context_path: &Path,
 ) -> Vec<String> {
-    let title = format!("{}: {} ({})", state.config.name, stage.name, role);
+    let title = format!("{}: {} ({})", state.config.name, label, role);
     let mut args = vec![
         "run".to_string(),
         title,
@@ -403,6 +445,12 @@ pub fn build_ta_run_args(
         context_path.to_string_lossy().to_string(),
         "--team".to_string(),
         role.to_string(),
+        // v0.17.11.8: lets `ta run` deliver `state.config.whiteboard_token`
+        // into this role's staging workspace (see apps/ta-cli/src/commands/
+        // run.rs's `write_whiteboard_session_file`) so the agent's
+        // `ta_whiteboard_*` MCP tools can authenticate.
+        "--team-session-id".to_string(),
+        state.id.clone(),
     ];
 
     if let Some(member) = team_config.find_by_role(&TeamRole::new(role)) {
@@ -532,7 +580,7 @@ pub fn run_one_cycle(
 
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
     let context_path = write_session_context(project_root, &state, &stage.name, &role)?;
-    let args = build_ta_run_args(&state, &stage, &role, &team_config, &context_path);
+    let args = build_ta_run_args(&state, &stage.name, &role, &team_config, &context_path);
 
     let output = std::process::Command::new(ta_bin)
         .args(&args)
@@ -714,6 +762,8 @@ mod tests {
             objective: "Generate income > 2x within 6 months after fees".to_string(),
             budget: None,
             role_prompts: std::collections::HashMap::new(),
+            whiteboard_token: None,
+            whiteboard_token_expires_at: None,
         }
     }
 
@@ -1067,7 +1117,7 @@ mod tests {
             Some("careful-analyst".to_string()),
         );
 
-        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--headless".to_string()));
@@ -1105,7 +1155,7 @@ mod tests {
             .insert("highest".to_string(), "claude-opus-5".to_string());
         team_config.members[0].model_tier = Some("highest".to_string());
 
-        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
 
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
@@ -1131,7 +1181,7 @@ mod tests {
         // block launching the role, just fall back to agent_id.
         team_config.members[0].model_tier = Some("nonexistent-tier".to_string());
 
-        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
 
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
@@ -1147,13 +1197,34 @@ mod tests {
 
         let team_config = TeamConfig::default(); // no members assigned
 
-        let args = build_ta_run_args(&state, stage, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
 
         assert!(!args.contains(&"--security".to_string()));
         assert!(!args.contains(&"--persona".to_string()));
         assert!(!args.contains(&"--agent".to_string()));
         // Still fires the goal — just without an assignment-derived override.
         assert!(args.contains(&"--team".to_string()));
+    }
+
+    #[test]
+    fn build_args_always_includes_team_session_id() {
+        // v0.17.11.8: every team-session role launch passes its own
+        // session id so `ta run` can look up `whiteboard_token` from the
+        // real project root and deliver it into the role's staging copy.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-42".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+        let team_config = TeamConfig::default();
+
+        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
+
+        let flag_idx = args
+            .iter()
+            .position(|a| a == "--team-session-id")
+            .expect("--team-session-id flag missing");
+        assert_eq!(args[flag_idx + 1], "sess-42");
     }
 
     #[cfg(unix)]
