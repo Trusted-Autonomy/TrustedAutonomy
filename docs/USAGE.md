@@ -7523,6 +7523,14 @@ ta credentials revoke <credential-id>
 ta credentials grant <credential-id> --agent <goal-id> --scope "read" --ttl 3600
 ```
 
+**Headless/scripted use**: the vault's encryption key is protected by the OS keychain
+by default, which can require an interactive GUI permission prompt the first time a
+project's vault is created. On a machine with nobody present to answer that prompt
+(CI, an installer script, an SSH session), this **hangs indefinitely** rather than
+failing -- set the `TA_NO_KEYCHAIN` environment variable (to any value) before running
+`ta credentials add`/`update`/`revoke`/`grant` to force file-based key custody
+(chmod 0600) instead and skip the keychain entirely.
+
 `<credential-id>` accepts a full UUID or any unambiguous prefix, for `update`, `revoke`, and `grant` alike.
 
 Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. Session

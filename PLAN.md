@@ -10668,6 +10668,18 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Version note**: `Cargo.toml` is left at `0.17.11-alpha.8` (unchanged, and already current — v0.17.11.8's own merge already bumped it there) — like v0.17.11.8/.10/.11/.12 before it, this phase was implemented directly on a feature branch rather than through `ta draft apply --phase`'s automated version bump, so no further bump is needed here.
 
+### v0.17.11.14 — `TA_NO_KEYCHAIN` Opt-Out (Headless Credential Vault Hang)
+<!-- status: done -->
+**Depends on**: none — independent fix, found live while building the `ta-virtual-team` installer's `wayfinder-pair.sh` (`docs/superpowers/specs/2026-09-14-virtual-team-install-and-config-design.md`).
+
+**Goal**: A real, previously-undiscovered bug found live: `ta credentials add` (and `update`/`revoke`/`grant`) hangs **indefinitely with no output** on a fresh vault when the OS keychain requires an interactive GUI permission prompt and nothing is present to answer it (CI, an installer script, an SSH session). `CredentialsConfig`/`GatewayConfig` both hardcoded `use_keychain: true` in `for_project()` with no override — `use_keychain: false` was reachable only by constructing the struct by hand (test fixtures did this; no real caller could).
+
+**Items**:
+1. [x] `CredentialsConfig::for_project` (`crates/ta-credentials/src/config.rs`) and `GatewayConfig::for_project` (`crates/ta-mcp-gateway/src/config.rs`) both now read a new `TA_NO_KEYCHAIN` environment variable (presence, not value — mirrors the existing `TA_IS_STAGING` convention already used for `GatewayConfig::is_staging`). Set it to force file-based key custody (chmod 0600) and skip the OS keychain call that can hang.
+2. [x] Tests for both (env var unset -> keychain true; set -> false), each self-contained in one test function so parallel test execution can't interleave the set/remove with another test's read.
+3. [x] `docs/USAGE.md`'s Credential Management section documents the hang and the fix.
+4. [x] **Deliberately not fixed here**: the underlying "OS keychain call blocks forever instead of erroring/timing out" behavior itself — the `keyring` crate's blocking OS call isn't cancelable from Rust without spawning and abandoning a thread, a materially bigger change than an opt-out env var. `load_or_create_identity`'s existing graceful-fallback-on-`Err` path (already correct) was never the bug; a GUI prompt that never resolves to `Err` or `Ok` is.
+
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->

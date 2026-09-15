@@ -62,6 +62,10 @@ pub struct GatewayConfig {
     /// `ta_credentials::CredentialsConfig::use_keychain` documents — the
     /// keychain is a process/OS-global resource that must not leak between
     /// tests or interfere with the developer's real keychain.
+    /// `for_project()` also honors `TA_NO_KEYCHAIN`, same as
+    /// `CredentialsConfig::for_project` — set it to avoid an indefinite
+    /// hang on a headless machine where nothing can answer the OS
+    /// keychain's permission prompt.
     #[serde(default = "default_credential_vault_use_keychain")]
     pub credential_vault_use_keychain: bool,
 }
@@ -87,7 +91,34 @@ impl GatewayConfig {
             review_channel: ReviewChannelConfig::default(),
             web_ui_port: None,
             is_staging: std::env::var("TA_IS_STAGING").is_ok(),
-            credential_vault_use_keychain: true,
+            credential_vault_use_keychain: std::env::var("TA_NO_KEYCHAIN").is_err(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both assertions live in one test function, not split across two, so
+    /// a parallel test runner never interleaves this env var's set/remove
+    /// with a read from another test — `TA_NO_KEYCHAIN` isn't touched
+    /// anywhere else in this crate.
+    #[test]
+    fn for_project_respects_ta_no_keychain_env_var() {
+        std::env::remove_var("TA_NO_KEYCHAIN");
+        let config = GatewayConfig::for_project("/tmp/does-not-need-to-exist");
+        assert!(
+            config.credential_vault_use_keychain,
+            "credential_vault_use_keychain must default to true when TA_NO_KEYCHAIN is unset"
+        );
+
+        std::env::set_var("TA_NO_KEYCHAIN", "1");
+        let config = GatewayConfig::for_project("/tmp/does-not-need-to-exist");
+        assert!(
+            !config.credential_vault_use_keychain,
+            "TA_NO_KEYCHAIN being set must disable keychain use, regardless of its value"
+        );
+        std::env::remove_var("TA_NO_KEYCHAIN");
     }
 }
