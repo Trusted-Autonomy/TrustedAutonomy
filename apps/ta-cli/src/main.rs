@@ -407,6 +407,19 @@ enum Commands {
         /// nothing but the baseline and unscoped credentials.
         #[arg(long, value_delimiter = ',')]
         credential_scopes: Option<Vec<String>>,
+        /// Team session this goal run belongs to (v0.17.11.8), set internally
+        /// by `ta-daemon`'s `build_ta_run_args` when launching a team-session
+        /// role — not intended for manual use.
+        ///
+        /// When set, the real project root's `.ta/team-sessions/<id>/state.json`
+        /// is consulted for a `whiteboard_token`; if present, it is written to
+        /// `staging_path/.ta/whiteboard-session.json` so the agent's
+        /// `ta_whiteboard_*` MCP tools can authenticate without the token ever
+        /// passing through an LLM-supplied argument or environment variable.
+        /// Omitted (the default for every non-team-session goal): no new file
+        /// is written and no other behavior changes.
+        #[arg(long)]
+        team_session_id: Option<String>,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1607,6 +1620,7 @@ fn dispatch_raw(
             security,
             priority,
             credential_scopes,
+            team_session_id,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -1720,6 +1734,7 @@ fn dispatch_raw(
                 persona.as_deref(),
                 context.as_deref(),
                 credential_scopes.as_deref(),
+                team_session_id.as_deref(),
             )
         }
         Commands::Events { command } => {

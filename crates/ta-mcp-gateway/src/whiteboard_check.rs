@@ -14,7 +14,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ta_agent_whiteboard::{discovery, select_transport, WhiteboardConfig};
+use ta_agent_whiteboard::WhiteboardConfig;
+
+use crate::daemon_client::WhiteboardDaemonClient;
 
 /// How long the whole check (connect + query) is allowed to take before
 /// being abandoned. A pre-launch check that hangs indefinitely because a
@@ -51,7 +53,7 @@ pub fn other_active_agents_on(source_dir: &str) -> Vec<String> {
                 return Vec::new();
             }
         };
-        rt.block_on(async move { query(&config, &source_dir).await })
+        rt.block_on(async move { query(&source_dir).await })
     })
     .join();
 
@@ -64,21 +66,16 @@ pub fn other_active_agents_on(source_dir: &str) -> Vec<String> {
     }
 }
 
-async fn query(config: &WhiteboardConfig, source_dir: &str) -> Vec<String> {
+/// Queries the daemon's shared whiteboard transport (Task 2) rather than
+/// instantiating a private transport in this process — with `transport =
+/// "memory"`, two concurrent `ta serve` processes each selecting their own
+/// transport directly would get their own empty map and both report "no
+/// conflict" even when one exists. `source_dir` doubles as the project
+/// root used to locate the daemon's port (`.ta/daemon.pid`).
+async fn query(source_dir: &str) -> Vec<String> {
     let outcome = tokio::time::timeout(CHECK_TIMEOUT, async {
-        let transport = match select_transport(config) {
-            Ok(Some(t)) => t,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::debug!(error = %e, "whiteboard pre-launch check: config error");
-                return Vec::new();
-            }
-        };
-        if let Err(e) = transport.connect().await {
-            tracing::debug!(error = %e, "whiteboard pre-launch check: connect failed");
-            return Vec::new();
-        }
-        match discovery::active_agents_for_source(transport.as_ref(), source_dir).await {
+        let client = WhiteboardDaemonClient::new(Path::new(source_dir));
+        match client.list_presence_for_source(source_dir).await {
             Ok(records) => records
                 .into_iter()
                 .map(|r| format!("{} (goal {})", r.agent_id, r.goal_run_id))

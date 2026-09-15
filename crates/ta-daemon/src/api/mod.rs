@@ -37,6 +37,7 @@ pub mod stats;
 pub mod status;
 pub mod team;
 pub mod webhooks;
+pub mod whiteboard;
 pub mod workflow;
 
 use std::path::PathBuf;
@@ -89,6 +90,12 @@ pub struct AppState {
     /// Dashboard's SSE-triggered background refreshes from re-parsing
     /// PLAN.md and re-scanning every goal file on every event.
     pub plan_cache: Arc<plan::PlanCache>,
+    /// Shared whiteboard coordination transport, owned by the daemon so
+    /// every agent process talks to the same instance instead of each
+    /// instantiating its own (see `docs/superpowers/specs/
+    /// 2026-09-11-daemon-hosted-whiteboard-design.md`). `None` when
+    /// `[whiteboard] enabled = false` (the default).
+    pub whiteboard_transport: Option<std::sync::Arc<dyn ta_agent_whiteboard::WhiteboardTransport>>,
     /// Semaphore bounding concurrent background tasks from `POST /api/cmd` (v0.17.0.9).
     /// Size comes from `commands.max_background_tasks` in daemon.toml (default 4).
     pub cmd_semaphore: Arc<Semaphore>,
@@ -110,6 +117,13 @@ impl AppState {
         );
 
         let cmd_max = daemon_config.commands.max_background_tasks;
+        let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(&project_root);
+        let whiteboard_transport = ta_agent_whiteboard::select_transport(&whiteboard_config)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "whiteboard: invalid [whiteboard] config, disabling coordination");
+                None
+            });
+
         Self {
             pr_packages_dir: ta_dir.join("pr_packages"),
             memory_dir: ta_dir.join("memory"),
@@ -131,6 +145,7 @@ impl AppState {
             plan_cache: Arc::new(plan::PlanCache::new()),
             cmd_semaphore: Arc::new(Semaphore::new(cmd_max)),
             last_shutdown_attempt: Arc::new(std::sync::Mutex::new(None)),
+            whiteboard_transport,
             project_root,
             daemon_config,
         }
@@ -525,6 +540,39 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Daemon lifecycle routes (v0.10.10 / v0.17.0.12.2).
         .route("/api/shutdown", post(shutdown_daemon))
         .route("/api/drain/status", get(drain::drain_status))
+        // Daemon-hosted whiteboard coordination.
+        .route(
+            "/api/whiteboard/presence",
+            get(whiteboard::list_presence).post(whiteboard::register_presence),
+        )
+        // Daemon-hosted whiteboard handoff + task claim/complete.
+        .route(
+            "/api/whiteboard/handoff/send",
+            post(whiteboard::send_handoff),
+        )
+        .route(
+            "/api/whiteboard/handoff/receive",
+            post(whiteboard::receive_handoff),
+        )
+        .route("/api/whiteboard/tasks/claim", post(whiteboard::claim_task))
+        .route(
+            "/api/whiteboard/tasks/complete",
+            post(whiteboard::complete_task),
+        )
+        // Report-back leg (v0.17.11.11): chief-of-staff publishes an
+        // outcome for Wayfinder-sourced work here; the Wayfinder poller
+        // drains it and turns each message into a PATCH/POST back to
+        // Wayfinder's task API.
+        .route(
+            "/api/whiteboard/outcome/send",
+            post(whiteboard::send_outcome),
+        )
+        // Unauthenticated advisory pre-launch conflict check:
+        // runs before any team-session/goal exists to mint a scope against.
+        .route(
+            "/api/whiteboard/presence_for_source",
+            get(whiteboard::presence_for_source),
+        )
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -534,4 +582,29 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
 
     // Merge: health (no auth), webhooks (HMAC auth), api (Bearer auth).
     health_routes.merge(webhook_routes).merge(api_routes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_state_whiteboard_transport_is_none_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf(), DaemonConfig::default());
+        assert!(state.whiteboard_transport.is_none());
+    }
+
+    #[tokio::test]
+    async fn app_state_whiteboard_transport_is_some_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = true\ntransport = \"memory\"\n",
+        )
+        .unwrap();
+        let state = AppState::new(dir.path().to_path_buf(), DaemonConfig::default());
+        assert!(state.whiteboard_transport.is_some());
+    }
 }

@@ -29,6 +29,7 @@
 //! - `ta_event_subscribe` — query/watch events for orchestration (v0.9.4)
 
 pub mod config;
+pub mod daemon_client;
 pub mod error;
 pub mod interceptor;
 pub mod server;

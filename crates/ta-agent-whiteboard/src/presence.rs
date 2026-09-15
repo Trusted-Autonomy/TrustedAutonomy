@@ -41,6 +41,11 @@ pub struct PresenceRecord {
     /// second one (see the design doc §6, "borrow vocabulary, not invent").
     #[serde(default)]
     pub resources: Vec<String>,
+    /// Which daemon published this record — unused today (single-daemon
+    /// scope), present so a future LAN/VPN multi-daemon transport doesn't
+    /// need a schema migration. `None` means "the only daemon there is."
+    #[serde(default)]
+    pub host_id: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
 }
 
@@ -56,6 +61,7 @@ impl PresenceRecord {
             source_dir: source_dir.into(),
             phase: None,
             resources: Vec::new(),
+            host_id: None,
             last_heartbeat: Utc::now(),
         }
     }
@@ -67,6 +73,11 @@ impl PresenceRecord {
 
     pub fn with_resources(mut self, resources: Vec<String>) -> Self {
         self.resources = resources;
+        self
+    }
+
+    pub fn with_host_id(mut self, host_id: impl Into<String>) -> Self {
+        self.host_id = Some(host_id.into());
         self
     }
 }
@@ -136,5 +147,25 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn new_presence_record_has_no_host_id_by_default() {
+        let record = PresenceRecord::new("agent-1", "goal-1", "/tmp/proj");
+        assert_eq!(record.host_id, None);
+    }
+
+    #[test]
+    fn with_host_id_sets_the_field() {
+        let record = PresenceRecord::new("agent-1", "goal-1", "/tmp/proj").with_host_id("daemon-a");
+        assert_eq!(record.host_id, Some("daemon-a".to_string()));
+    }
+
+    #[test]
+    fn presence_record_without_host_id_still_deserializes() {
+        // Backward compat: a record written before this field existed.
+        let json = r#"{"agent_id":"a","goal_run_id":"g","source_dir":"/tmp","phase":null,"resources":[],"last_heartbeat":"2026-01-01T00:00:00Z"}"#;
+        let record: PresenceRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.host_id, None);
     }
 }
