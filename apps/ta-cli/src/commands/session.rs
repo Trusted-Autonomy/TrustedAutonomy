@@ -195,6 +195,7 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
                 None,  // persona_name = None
                 None,  // context_path = None
                 None,  // credential_scopes = None (v0.17.6.1)
+                None,  // team_session_id = None (v0.17.11.8)
             )
         }
         SessionCommands::Pause { id } => pause_session(config, id),

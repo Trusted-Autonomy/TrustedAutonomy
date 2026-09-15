@@ -14,4 +14,5 @@ pub mod human_verify;
 pub mod plan;
 pub mod unity;
 pub mod unreal;
+pub mod whiteboard;
 pub mod workflow;
