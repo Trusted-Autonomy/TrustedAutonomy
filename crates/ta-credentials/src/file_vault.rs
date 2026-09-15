@@ -174,6 +174,20 @@ impl CredentialVault for FileVault {
             .ok_or(VaultError::NotFound(id))
     }
 
+    fn update(&mut self, id: Uuid, secret: &str) -> Result<Credential, VaultError> {
+        let cred = self
+            .data
+            .credentials
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or(VaultError::NotFound(id))?;
+        cred.secret = secret.to_string();
+        let updated = cred.clone();
+        self.save()?;
+        info!(%id, name = %updated.name, "credential secret rotated");
+        Ok(updated)
+    }
+
     fn revoke(&mut self, id: Uuid) -> Result<(), VaultError> {
         let before = self.data.credentials.len();
         self.data.credentials.retain(|c| c.id != id);
@@ -294,6 +308,71 @@ mod tests {
         let cred = vault.add("test", "svc", "secret", vec![]).unwrap();
         vault.revoke(cred.id).unwrap();
         assert!(vault.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_rotates_secret_in_place() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = FileVault::open(&test_config(&dir)).unwrap();
+
+        let cred = vault
+            .add("test", "svc", "old-secret", vec!["read".into()])
+            .unwrap();
+        let updated = vault.update(cred.id, "new-secret").unwrap();
+
+        // id, name, service, scopes, created_at all preserved; only the
+        // secret changes.
+        assert_eq!(updated.id, cred.id);
+        assert_eq!(updated.name, cred.name);
+        assert_eq!(updated.service, cred.service);
+        assert_eq!(updated.scopes, cred.scopes);
+        assert_eq!(updated.created_at, cred.created_at);
+        assert_eq!(updated.secret, "new-secret");
+
+        // And it persists.
+        assert_eq!(vault.get(cred.id).unwrap().secret, "new-secret");
+    }
+
+    #[test]
+    fn update_persists_across_opens() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let cred_id;
+
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            let cred = vault.add("test", "svc", "old-secret", vec![]).unwrap();
+            cred_id = cred.id;
+            vault.update(cred_id, "new-secret").unwrap();
+        }
+
+        let vault = FileVault::open(&config).unwrap();
+        assert_eq!(vault.get(cred_id).unwrap().secret, "new-secret");
+    }
+
+    #[test]
+    fn update_does_not_invalidate_existing_tokens() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = FileVault::open(&test_config(&dir)).unwrap();
+
+        let cred = vault.add("test", "svc", "old-secret", vec![]).unwrap();
+        let token = vault.issue_token(cred.id, "agent-1", vec![], 3600).unwrap();
+        vault.update(cred.id, "new-secret").unwrap();
+
+        // Rotation changes the secret, not the credential's identity — a
+        // token authorizing access to this credential id stays valid; the
+        // next resolution of the secret just returns the new value.
+        let validated = vault.validate_token(token.token_id).unwrap();
+        assert_eq!(validated.credential_id, cred.id);
+    }
+
+    #[test]
+    fn update_nonexistent_returns_not_found() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = FileVault::open(&test_config(&dir)).unwrap();
+
+        let result = vault.update(Uuid::new_v4(), "secret");
+        assert!(matches!(result, Err(VaultError::NotFound(_))));
     }
 
     #[test]

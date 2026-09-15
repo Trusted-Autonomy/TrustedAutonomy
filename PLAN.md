@@ -10654,6 +10654,20 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Alternative to consider before implementing**: if one daemon is meant to host at most one team session at a time (a legitimate simpler model for the near term), write that constraint explicitly into `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md`'s §3 instead of implementing isolation — the design doc currently promises per-session isolation the code doesn't provide, and that mismatch itself needs resolving one way or the other, not left implicit.
 
+### v0.17.11.13 — `ta credentials update` (In-Place Credential Rotation)
+<!-- status: done -->
+**Depends on**: none (independent of the v0.17.11.9-.12 whiteboard/wake-listener/token-refresh work)
+
+**Goal**: Close a real gap surfaced while designing the virtual-team install+config spec's key-rotation section (`ta-virtual-team` repo, `docs/superpowers/specs/2026-09-14-virtual-team-install-and-config-design.md`): `FileVault::add()` rejects a duplicate credential `name` rather than upserting, so rotating a model-provider API key (or any credential) meant finding its UUID and doing `revoke` + `add` by hand — easy to get wrong, and not something to hand a customer as-is.
+
+**Items**:
+1. [x] `CredentialVault::update(id, secret) -> Credential` added to the trait (`crates/ta-credentials/src/vault.rs`) and implemented in `FileVault` (`file_vault.rs`) — replaces the secret in place, preserving `id`/`name`/`service`/`scopes`/`created_at`. Confirmed via `run.rs`'s `load_vault_credentials` that this is sufficient for rotation to actually take effect: every real credential read happens fresh via `vault.get(id)` at each `ta run`/wave launch, never cached, so a rotated secret is live on the next launch with no separate invalidation step.
+2. [x] `ta credentials update <id-or-prefix> --secret <new-secret>` CLI subcommand (`apps/ta-cli/src/commands/credentials.rs`). Extracted the id-prefix-resolution logic (previously duplicated in `revoke_credential` and `mint_grant`) into a shared `resolve_credential_prefix` helper, now used by `update`/`revoke`/`grant` alike.
+3. [x] Tests: `FileVault::update` (rotates in place, persists across opens, does not invalidate already-issued grants/tokens, errors on unknown id) and CLI-level (`update_credential` by prefix, unknown/ambiguous prefix errors, an issued grant surviving a rotation, `revoke` still works after the helper extraction).
+4. [x] `docs/USAGE.md` updated with the new command and the id-prefix note.
+
+**Version note**: `Cargo.toml` is left at `0.17.11-alpha.8` (unchanged, and already current — v0.17.11.8's own merge already bumped it there) — like v0.17.11.8/.10/.11/.12 before it, this phase was implemented directly on a feature branch rather than through `ta draft apply --phase`'s automated version bump, so no further bump is needed here.
+
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->

@@ -7509,12 +7509,21 @@ ta credentials add --name "Gmail Read" --service gmail --secret "ya29.a0..." \
 # List credentials (secrets are never shown -- only name, service, scopes)
 ta credentials list
 
+# Rotate a credential's secret in place (e.g. a rotated model-provider API
+# key) -- keeps its id, name, service, and scopes unchanged, so anything
+# already referring to it by id (an issued grant, a role binding in
+# .ta/team.toml) keeps working and just resolves to the new secret on the
+# next agent launch. Prefer this over revoke + add for rotation.
+ta credentials update <credential-id> --secret "sk-ant-new..."
+
 # Revoke a credential
 ta credentials revoke <credential-id>
 
 # Issue a scoped, time-limited session token for a specific agent
 ta credentials grant <credential-id> --agent <goal-id> --scope "read" --ttl 3600
 ```
+
+`<credential-id>` accepts a full UUID or any unambiguous prefix, for `update`, `revoke`, and `grant` alike.
 
 Credentials are stored, **encrypted at rest**, in `.ta/credentials.json`. Session
 grants are minted by `ta-credential-broker` as signed
