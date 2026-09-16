@@ -1243,6 +1243,69 @@ impl TaGatewayServer {
         tools::whiteboard::handle_outcome_send(&self.state, params)
     }
 
+    // ── Wayfinder wiki tools (v0.17.11.15) ────────────────────────────
+    //
+    // Read/write Wayfinder's org/project wiki via a gateway-held
+    // credential: the agent never talks to Wayfinder directly. See
+    // `tools::wiki`'s module doc for the full rationale and
+    // `docs/superpowers/specs/2026-09-15-virtual-team-wiki-retrieval-design.md`
+    // (`ta-virtual-team` repo) for the design.
+
+    #[tool(
+        description = "Search Wayfinder's org or project wiki for pages matching a query. Always live (never cached); ranking will improve transparently over time. scope is \"project\" or \"org\"; id is that scope's Wayfinder id."
+    )]
+    fn ta_wiki_search(
+        &self,
+        Parameters(params): Parameters<tools::wiki::WikiSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wiki_search", None, None);
+        tools::wiki::handle_wiki_search(&self.state, params)
+    }
+
+    #[tool(
+        description = "Fetch one wiki page by id (scope: \"project\" or \"org\", plus that scope's id). Cache-first: served from the local cache when present, which is deliberately stale-tolerant (freshness depends on the periodic background sync, not a check on every call)."
+    )]
+    fn ta_wiki_get(
+        &self,
+        Parameters(params): Parameters<tools::wiki::WikiGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wiki_get", None, None);
+        tools::wiki::handle_wiki_get(&self.state, params)
+    }
+
+    #[tool(
+        description = "List the current wiki type taxonomy for a scope (\"project\" or \"org\"): call before ta_wiki_create/ta_wiki_update to reuse an existing type rather than minting a near-duplicate. Always live, never cached."
+    )]
+    fn ta_wiki_types(
+        &self,
+        Parameters(params): Parameters<tools::wiki::WikiTypesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wiki_types", None, None);
+        tools::wiki::handle_wiki_types(&self.state, params)
+    }
+
+    #[tool(
+        description = "Create a new wiki page in the given scope (\"project\" or \"org\"). Uses an elevated, write-specific credential distinct from the one ta_wiki_search/ta_wiki_get use."
+    )]
+    fn ta_wiki_create(
+        &self,
+        Parameters(params): Parameters<tools::wiki::WikiCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wiki_create", None, None);
+        tools::wiki::handle_wiki_create(&self.state, params)
+    }
+
+    #[tool(
+        description = "Update an existing wiki page. Pass if_sha (the sha last read) to reject the write on a conflicting concurrent edit instead of silently overwriting it; omit it to accept last-write-wins."
+    )]
+    fn ta_wiki_update(
+        &self,
+        Parameters(params): Parameters<tools::wiki::WikiUpdateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wiki_update", None, None);
+        tools::wiki::handle_wiki_update(&self.state, params)
+    }
+
     // ── Unreal Engine 5 tools (v0.14.14) ─────────────────────────────
 
     #[tool(
@@ -1676,8 +1739,10 @@ mod tests {
         //           ta_whiteboard_handoff_send, ta_whiteboard_handoff_receive,
         //           ta_whiteboard_task_claim, ta_whiteboard_task_complete (v0.17.11.8)
         //           ta_whiteboard_outcome_send (v0.17.11.11)
+        //           ta_wiki_search, ta_wiki_get, ta_wiki_types, ta_wiki_create,
+        //           ta_wiki_update (v0.17.11.15)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 48, "expected 48 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 53, "expected 53 tools, got: {:?}", names);
     }
 
     #[test]

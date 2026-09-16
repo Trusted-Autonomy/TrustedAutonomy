@@ -17,7 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 schemars = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
@@ -53,3 +53,9 @@ ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alph
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+axum = { workspace = true }
+tokio-util = "0.7"
+# Test-only: an in-process Streamable HTTP MCP server to test wiki_client.rs
+# against, mirroring a real Wayfinder wiki endpoint's transport. Cargo's v2
+# resolver keeps dev-dependency-only features out of the production build.
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }

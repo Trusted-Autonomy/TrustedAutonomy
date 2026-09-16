@@ -38,6 +38,8 @@ pub mod tools;
 pub mod validation;
 pub mod verify_audit;
 pub mod whiteboard_check;
+pub mod wiki_cache;
+pub mod wiki_client;
 
 pub use config::GatewayConfig;
 pub use error::GatewayError;
