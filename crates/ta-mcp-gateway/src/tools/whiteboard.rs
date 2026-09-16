@@ -26,9 +26,11 @@
 //! the gateway's own async runtime, so calling `WhiteboardDaemonClient`'s
 //! `async fn`s must not `block_on` directly on the calling thread (risk of
 //! nesting runtimes — see `whiteboard_check.rs`'s module doc). Each handler
-//! spawns a dedicated OS thread, builds a
+//! calls `super::sync_bridge::run_on_dedicated_thread`, which spawns a
+//! dedicated OS thread, builds a
 //! `tokio::runtime::Builder::new_current_thread()` runtime on it, and joins
-//! the result back — the same pattern `whiteboard_check.rs` already uses.
+//! the result back, the same pattern `whiteboard_check.rs` already uses,
+//! and now shared with `tools/wiki.rs` for the identical need.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -106,29 +108,7 @@ fn workspace_root(state: &Arc<Mutex<GatewayState>>) -> Result<PathBuf, McpError>
     Ok(locked.config.workspace_root.clone())
 }
 
-/// Runs `f` to completion on a dedicated OS thread with its own
-/// single-threaded Tokio runtime, joining the result back onto the calling
-/// thread. See this module's doc comment for why a direct `block_on` on the
-/// calling thread is not safe here.
-fn run_on_dedicated_thread<F, Fut, T>(f: F) -> Result<T, McpError>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-    T: Send + 'static,
-{
-    let result = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to start whiteboard worker runtime: {e}"))?;
-        rt.block_on(f())
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("whiteboard worker thread panicked"))
-    .and_then(|inner| inner);
-
-    result.map_err(|e| McpError::internal_error(e.to_string(), None))
-}
+use super::sync_bridge::run_on_dedicated_thread;
 
 fn success_json(value: serde_json::Value) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::json(value)
