@@ -88,8 +88,14 @@ pub struct MergeResult {
 
 /// Parse PLAN.md into sections.
 ///
-/// Sections without a `### v0.x.y` version header (preamble, appendices) are
-/// returned as opaque sections with `id = "__preamble__"` or `"__tail_N__"`.
+/// Every top-level `### ...` heading starts its own section, whether or not
+/// its title is version-shaped (`### v0.x.y`) -- a plain-named phase
+/// heading (`### Phase 1 -- Real roster, real work`) gets its own section
+/// exactly like a version-style one does; see `extract_version_header`'s
+/// own doc comment for why this matters. Only content before the very
+/// first `###` heading of any kind is returned as the opaque
+/// `"__preamble__"` section (or `"__tail__"` if the document has no
+/// heading at all).
 pub fn parse_plan_sections(content: &str) -> Vec<PlanSection> {
     let mut sections: Vec<PlanSection> = Vec::new();
     let mut current_header: Option<String> = None;
@@ -140,6 +146,44 @@ pub fn parse_plan_sections(content: &str) -> Vec<PlanSection> {
     sections
 }
 
+/// True for a token shaped like `v0.x.y[.z...]` -- the same test
+/// `extract_version_header` uses to decide whether a heading's first word
+/// is a version number rather than an ordinary title word. Exposed
+/// separately so `validate_plan_merge` can tell a genuinely version-style
+/// section id apart from a plain-heading-text id derived from a non-
+/// version heading (see `extract_version_header`'s doc comment).
+fn is_version_token(token: &str) -> bool {
+    token.starts_with('v')
+        && token
+            .trim_start_matches('v')
+            .split('.')
+            .all(|p| p.chars().all(|c| c.is_ascii_digit()))
+        && token.trim_start_matches('v').contains('.')
+}
+
+/// Extracts a section-boundary id from a `### ...` heading line.
+///
+/// A version-shaped title (`### v0.x.y ...`) yields its version token
+/// (`"0.x.y"`) as the id, matching this function's original, narrower
+/// behavior. Any other `### ...` heading (`### Phase 1 -- Real roster,
+/// real work`, `### Wiki retrieval + ingestion design`) still yields an
+/// id -- the heading's own full title text -- rather than `None`.
+///
+/// This function used to return `None` for a non-version heading, on the
+/// assumption that every real phase in a PLAN.md is version-numbered. That
+/// assumption doesn't hold: several real PLAN.md files (this repo's own
+/// included, and `ta-virtual-team`'s) mix version-style phases with
+/// plain-named ones. Returning `None` for those meant `parse_plan_sections`
+/// silently swallowed a plain-named heading's entire body -- including its
+/// own `<!-- status: ... -->` marker and item list -- into whichever
+/// version-style section happened to precede it, or into `__preamble__` if
+/// none had appeared yet. `reconstruct_body` then overwrote every embedded
+/// status marker it found inside that swallowed body with the *enclosing*
+/// section's single reconciled status, and `auto_correct_done_phase_items`
+/// force-checked whatever unchecked items followed -- corrupting phases the
+/// merge never should have touched. Found live 2026-09-15 (see this
+/// module's `golden_failure_*` tests for the exact reproduction); treating
+/// every heading as a real boundary is the fix.
 fn extract_version_header(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if !trimmed.starts_with("### ") {
@@ -148,16 +192,10 @@ fn extract_version_header(line: &str) -> Option<String> {
     let rest = &trimmed[4..];
     // Accept "v0.x.y" or "v0.x.y.z" at the start, optionally followed by " —" or " -" title.
     let token = rest.split_whitespace().next().unwrap_or("");
-    if token.starts_with('v')
-        && token
-            .trim_start_matches('v')
-            .split('.')
-            .all(|p| p.chars().all(|c| c.is_ascii_digit()))
-        && token.trim_start_matches('v').contains('.')
-    {
+    if is_version_token(token) {
         Some(token.to_string())
     } else {
-        None
+        Some(rest.trim().to_string())
     }
 }
 
@@ -381,10 +419,54 @@ fn merge_three_way(
         conflicts,
     );
 
+    // --- Non-item body text reconciliation ---
+    //
+    // `reconstruct_body` only ever substitutes into whichever body string
+    // it's handed here -- it has no way to insert a line that exists only
+    // in the OTHER body it wasn't given. Always handing it `source.raw_body`
+    // (the pre-fix, only behavior) meant prose the agent added during
+    // staging (a note, a new paragraph -- anything that isn't a checkbox
+    // item or a status marker line) had no path into the merged result at
+    // all: silently dropped, every time, regardless of whether source ever
+    // touched that text. Found live 2026-09-15 via
+    // `golden_failure_untouched_plain_named_phases_keep_their_own_status_and_items`
+    // once the section-boundary fix above stopped masking it. Reconcile
+    // which body to use as the substitution template the same way status
+    // is reconciled: prefer whichever side's non-item, non-marker text
+    // actually changed relative to base; a genuine three-way prose
+    // conflict is possible (`SectionBodyConflict`, declared for exactly
+    // this but never constructed until now) and defaults to source,
+    // conservative like every other unresolved conflict in this module.
+    let base_prose = non_item_body_signature(&base.raw_body);
+    let staging_prose = non_item_body_signature(&staging.raw_body);
+    let source_prose = non_item_body_signature(&source.raw_body);
+    let staging_prose_changed = staging_prose != base_prose;
+    let source_prose_changed = source_prose != base_prose;
+
+    let body_template: &str = match (staging_prose_changed, source_prose_changed) {
+        (true, false) => &staging.raw_body,
+        (true, true) if staging_prose == source_prose => &staging.raw_body,
+        (true, true) => {
+            conflicts.push(PlanConflict {
+                section_id: section_id.to_string(),
+                conflict_type: ConflictType::SectionBodyConflict,
+                base_text: base.raw_body.clone(),
+                staging_text: staging.raw_body.clone(),
+                source_text: source.raw_body.clone(),
+                description:
+                    "Section body text differs between staging and source (both diverged from \
+                     base) -- taking source for the merge, review needed"
+                        .to_string(),
+            });
+            &source.raw_body
+        }
+        (false, _) => &source.raw_body,
+    };
+
     // Reconstruct raw_body from merged items and non-item lines.
     let merged_body = reconstruct_body(
         &base.raw_body,
-        &source.raw_body,
+        body_template,
         &merged_status,
         &merged_items,
         section_id,
@@ -599,6 +681,21 @@ fn merge_items(
     merged
 }
 
+/// A comparable signature of a section body's non-item, non-marker
+/// content -- everything that isn't a `<!-- status: ... -->` line or a
+/// checkbox item line. Used to detect whether the *prose* of a section
+/// changed, independent of the item/status reconciliation that already
+/// handles checkbox and marker lines on their own.
+fn non_item_body_signature(body: &str) -> String {
+    body.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !(t.starts_with("<!-- status:") && t.ends_with("-->")) && !is_any_item(t)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Reconstruct a section body from the source body, replacing status marker and items.
 fn reconstruct_body(
     _base_body: &str,
@@ -725,12 +822,27 @@ pub fn validate_plan_merge(merged: &str, source: &str) -> Result<(), PlanValidat
         }
     }
 
-    // (b) Each versioned merged heading must have a <!-- status: ... --> marker.
+    // (b) Each merged heading must have a <!-- status: ... --> marker if
+    //     it's version-style (unconditionally, matching this rule's
+    //     original behavior exactly), or if it's a plain-named phase that
+    //     already had a marker in source (a real dropped-marker
+    //     regression). A plain-named heading that never had a status
+    //     marker in the first place (a purely narrative section) is not
+    //     required to gain one -- see `extract_version_header`'s doc
+    //     comment for why plain headings are now their own sections at
+    //     all, and `golden_failure_validate_plan_merge_does_not_require_a_marker_on_narrative_headings`.
+    let source_had_marker: std::collections::HashSet<&str> = source_sections
+        .iter()
+        .filter(|s| !s.id.starts_with("__") && s.status_marker.is_some())
+        .map(|s| s.id.as_str())
+        .collect();
     for sec in &merged_sections {
         if sec.id.starts_with("__") {
             continue;
         }
-        if sec.status_marker.is_none() {
+        let must_have_marker =
+            is_version_token(&sec.id) || source_had_marker.contains(sec.id.as_str());
+        if must_have_marker && sec.status_marker.is_none() {
             issues.push(PlanValidationIssue {
                 section_id: sec.id.clone(),
                 description: format!(
@@ -1319,5 +1431,292 @@ mod tests {
     fn phase_has_unchecked_items_matches_id_without_leading_v() {
         let plan = make_plan(&[("v0.17.10.1", "in_progress", &["- [ ] item a"])]);
         assert!(phase_has_unchecked_items(&plan, "0.17.10.1"));
+    }
+
+    // ── Golden-failure regressions: mixed version/plain-named headings ─────
+    //
+    // Found live 2026-09-15 against `ta-virtual-team`'s real PLAN.md (goal
+    // `d61f9301`): that file mixes `### v0.x.y.z` version-style phase
+    // headings with plain-named ones (`### Phase 1 -- ...`, `### Wiki
+    // retrieval + ingestion design`, no version token at all).
+    // `extract_version_header` only recognized the version-style form, so
+    // every plain-named heading's content was silently swallowed into
+    // whichever version-style section preceded it (or `__preamble__` if
+    // none had appeared yet). Two independent corruptions followed:
+    //   1. `reconstruct_body` blindly overwrites *every* embedded
+    //      `<!-- status: ... -->` line it finds inside a swallowed
+    //      section's body with that section's own single reconciled
+    //      status -- clobbering every unrecognized sub-heading's real
+    //      marker with an unrelated one.
+    //   2. `auto_correct_done_phase_items`'s own raw-text scanner then
+    //      sees those freshly-clobbered "done" markers and force-checks
+    //      whatever `[ ]` items follow, using one running item counter
+    //      that spans every swallowed phase, not just the one that
+    //      "owns" that counter.
+    //
+    // This fixture reproduces the real document's structure closely
+    // enough to trigger both: a `done` phase (Phase 0) immediately
+    // followed by an `in_progress` phase with unchecked items (Phase 1,
+    // items 2-4) inside `__preamble__`; a `done` version-style phase
+    // (v0.0.0.1) swallowing two `in_progress` plain phases with checked
+    // items (Phase 5, 6); and the actually-touched phase (v0.0.0.1.1)
+    // swallowing a plain `in_progress` phase and two `pending` ones
+    // (Phase 7, 8). Confirmed via direct reproduction before writing the
+    // fix that these exact corruptions occur on unfixed code: Phase 1
+    // items 2-4 force-checked and its own status flipped `done`; Phase 5/6
+    // flipped `in_progress` -> `done`; Phase 7/8 flipped `pending` ->
+    // `in_progress`. None of these phases were ever touched by the
+    // agent's own edit, which only added one line under v0.0.0.1.1.
+
+    fn mixed_heading_incident_fixture() -> &'static str {
+        "\
+# Plan
+Some preamble text.
+
+## Stage 1
+
+### Phase 0 — Repo scaffold
+<!-- status: done -->
+**Items**:
+1. [x] scaffold done
+
+## Stage 2
+
+### Phase 1 — Real roster, real work
+<!-- status: in_progress -->
+
+**Items**:
+1. [x] roster done
+2. [ ] run real goals
+3. [ ] exercise whiteboard
+4. [ ] draft review apply cycle
+
+---
+
+### v0.0.0.1 — CONTRIBUTING note (original)
+<!-- status: done -->
+*Inserted goal.*
+
+### Phase 5 — Wire intake end to end
+<!-- status: in_progress -->
+**Items**:
+1. [x] poller publishes candidate
+
+### Phase 6 — Report-back leg
+<!-- status: in_progress -->
+**Items**:
+1. [x] outcome messages drive patch
+
+### v0.0.0.1.1 — CONTRIBUTING note (duplicate)
+<!-- status: in_progress -->
+*Inserted goal.*
+
+### Wiki retrieval + ingestion design
+<!-- status: in_progress -->
+**Items**:
+1. [x] retrieval spec
+6. [ ] background sync
+
+### Phase 7 — Human escalation
+<!-- status: pending -->
+**Items**:
+1. [ ] comment flag glue
+
+### Phase 8 — Cross-links
+<!-- status: pending -->
+**Items**:
+1. [ ] wayfinder task link
+"
+    }
+
+    /// Builds the incident's exact base/staging/source triple: base and
+    /// source are byte-identical (nothing else touched PLAN.md before this
+    /// apply); staging is base plus one plain-text line the agent added
+    /// under v0.0.0.1.1's own body -- no checkbox, no status change,
+    /// exactly what the real incident's draft diff contained.
+    fn mixed_heading_incident_triple() -> (&'static str, String, &'static str) {
+        let content = mixed_heading_incident_fixture();
+        let staging = content.replace(
+            "### v0.0.0.1.1 — CONTRIBUTING note (duplicate)\n<!-- status: in_progress -->\n*Inserted goal.*\n",
+            "### v0.0.0.1.1 — CONTRIBUTING note (duplicate)\n<!-- status: in_progress -->\n*Inserted goal.*\n\n**Note**: Already satisfied.\n",
+        );
+        assert_ne!(content, staging, "the fixture edit must actually apply");
+        (content, staging, content)
+    }
+
+    #[test]
+    fn golden_failure_untouched_plain_named_phases_keep_their_own_status_and_items() {
+        let (base, staging, source) = mixed_heading_incident_triple();
+
+        let result = merge_plan_md(base, &staging, source);
+        let (merged, corrections) = auto_correct_done_phase_items(&result.merged);
+
+        // The only line that should differ anywhere in the whole document
+        // is the one the agent actually added, under v0.0.0.1.1.
+        assert!(
+            merged.contains("**Note**: Already satisfied."),
+            "the agent's real edit must still be present"
+        );
+        assert!(
+            merged.contains("### Phase 1 — Real roster, real work\n<!-- status: in_progress -->"),
+            "Phase 1's own status marker must stay in_progress -- it was never touched:\n{merged}"
+        );
+        assert!(
+            merged.contains("2. [ ] run real goals")
+                && merged.contains("3. [ ] exercise whiteboard")
+                && merged.contains("4. [ ] draft review apply cycle"),
+            "Phase 1's own unchecked items must stay unchecked -- it was never touched:\n{merged}"
+        );
+        assert!(
+            merged.contains("### Phase 5 — Wire intake end to end\n<!-- status: in_progress -->"),
+            "Phase 5's own status marker must stay in_progress -- it was never touched:\n{merged}"
+        );
+        assert!(
+            merged.contains("### Phase 6 — Report-back leg\n<!-- status: in_progress -->"),
+            "Phase 6's own status marker must stay in_progress -- it was never touched:\n{merged}"
+        );
+        assert!(
+            merged.contains("### Phase 7 — Human escalation\n<!-- status: pending -->"),
+            "Phase 7's own status marker must stay pending -- it was never touched:\n{merged}"
+        );
+        assert!(
+            merged.contains("### Phase 8 — Cross-links\n<!-- status: pending -->"),
+            "Phase 8's own status marker must stay pending -- it was never touched:\n{merged}"
+        );
+        assert!(
+            corrections.is_empty(),
+            "no phase in this document actually has a done-status/unchecked-item \
+             inconsistency -- any correction here is by definition touching a phase \
+             that was never part of this apply's own diff: {corrections:?}"
+        );
+    }
+
+    #[test]
+    fn golden_failure_plain_named_heading_is_its_own_parsed_section() {
+        // The narrower regression, isolated from the full merge pipeline:
+        // a plain `### Phase N -- Title` heading must be recognized as its
+        // own section boundary, not swallowed into whichever version-style
+        // section happens to precede it.
+        let sections = parse_plan_sections(mixed_heading_incident_fixture());
+        let ids: Vec<&str> = sections.iter().map(|s| s.id.as_str()).collect();
+        for expected in [
+            "Phase 0 — Repo scaffold",
+            "Phase 1 — Real roster, real work",
+            "v0.0.0.1",
+            "Phase 5 — Wire intake end to end",
+            "Phase 6 — Report-back leg",
+            "v0.0.0.1.1",
+            "Wiki retrieval + ingestion design",
+            "Phase 7 — Human escalation",
+            "Phase 8 — Cross-links",
+        ] {
+            assert!(
+                ids.contains(&expected),
+                "expected a distinct section for {expected:?}, got: {ids:?}"
+            );
+        }
+
+        let phase1 = sections
+            .iter()
+            .find(|s| s.id == "Phase 1 — Real roster, real work")
+            .expect("Phase 1 section must exist");
+        assert_eq!(
+            phase1.status_marker.as_deref(),
+            Some("<!-- status: in_progress -->")
+        );
+    }
+
+    #[test]
+    fn golden_failure_validate_plan_merge_does_not_require_a_marker_on_narrative_headings() {
+        // A widened parse must not turn every purely-narrative `###`
+        // heading (no <!-- status --> line, ever) into a false-positive
+        // "missing status marker" validation failure -- that would abort
+        // every apply touching a PLAN.md with any non-phase heading in it.
+        let plan = "\
+# Plan
+
+### Road to Public Alpha
+
+Some narrative prose with no status marker at all.
+
+### v0.1.0 — Real phase
+<!-- status: pending -->
+- [ ] item
+";
+        assert!(validate_plan_merge(plan, plan).is_ok());
+    }
+
+    #[test]
+    fn validate_plan_merge_still_catches_a_dropped_marker_on_a_plain_named_phase() {
+        // The relaxation above must not swallow real regressions: a plain-
+        // named phase that DID have a status marker in source, but lost it
+        // in the merged result, must still fail validation.
+        let source = "\
+### Phase 1 — Real roster, real work
+<!-- status: in_progress -->
+- [ ] item
+";
+        let merged = "\
+### Phase 1 — Real roster, real work
+- [ ] item
+";
+        let err = validate_plan_merge(merged, source).unwrap_err();
+        assert!(err
+            .issues
+            .iter()
+            .any(|i| i.section_id == "Phase 1 — Real roster, real work"));
+    }
+
+    #[test]
+    fn golden_failure_agent_added_prose_is_not_silently_dropped() {
+        // The second, independent bug this golden test uncovered:
+        // `reconstruct_body` only ever iterated `source_body`'s lines, so
+        // prose the agent added during staging (not a checkbox item, not a
+        // status marker) had no path into the merged output at all and
+        // was silently dropped, every time -- not just when section
+        // boundaries were also wrong. Minimal repro, isolated from the
+        // mixed-heading fixture above.
+        let base = make_plan(&[("v0.1.0", "in_progress", &["- [ ] item a"])]);
+        let staging = base.replace(
+            "<!-- status: in_progress -->\n",
+            "<!-- status: in_progress -->\n\n**Note**: added by the agent.\n",
+        );
+        let source = base.clone();
+        assert_ne!(base, staging);
+
+        let result = merge_plan_md(&base, &staging, &source);
+        assert!(
+            result.merged.contains("**Note**: added by the agent."),
+            "the agent's added prose must survive the merge:\n{}",
+            result.merged
+        );
+        assert!(result.conflicts.is_empty());
+    }
+
+    #[test]
+    fn section_body_conflict_when_staging_and_source_add_different_prose() {
+        // Both sides diverged from base in the section's own prose (not
+        // its items or status) -- a genuine conflict `SectionBodyConflict`
+        // was declared for but never constructed before this fix. Default
+        // outcome stays conservative (take source), matching every other
+        // unresolved conflict type in this module, but it must be
+        // reported, not silently resolved either way.
+        let base = make_plan(&[("v0.1.0", "in_progress", &["- [ ] item a"])]);
+        let staging = base.replace(
+            "<!-- status: in_progress -->\n",
+            "<!-- status: in_progress -->\n\n**Note**: agent's own note.\n",
+        );
+        let source = base.replace(
+            "<!-- status: in_progress -->\n",
+            "<!-- status: in_progress -->\n\n**Note**: a human's own note.\n",
+        );
+
+        let result = merge_plan_md(&base, &staging, &source);
+        assert!(result
+            .conflicts
+            .iter()
+            .any(|c| c.conflict_type == ConflictType::SectionBodyConflict
+                && c.section_id == "v0.1.0"));
+        assert!(result.merged.contains("a human's own note."));
     }
 }
