@@ -40,6 +40,7 @@ pub mod verify_audit;
 pub mod whiteboard_check;
 pub mod wiki_cache;
 pub mod wiki_client;
+pub mod wiki_resources;
 
 pub use config::GatewayConfig;
 pub use error::GatewayError;

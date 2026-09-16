@@ -29,7 +29,7 @@
 //! every tool here fails with a clear, actionable error, never a silent
 //! no-op.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rmcp::model::{CallToolResult, Content};
@@ -40,60 +40,9 @@ use serde::Deserialize;
 use crate::server::GatewayState;
 use crate::wiki_cache::WikiCache;
 use crate::wiki_client::{WikiMcpClient, WikiPage};
+use crate::wiki_resources::{self, WikiResourcesConfig};
 
 use super::sync_bridge::run_on_dedicated_thread;
-
-// ── Config: .ta/wiki-resources.toml ─────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize)]
-struct WikiResourcesConfig {
-    #[serde(default)]
-    scopes: Vec<ScopeConfig>,
-    wayfinder: WayfinderConfig,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ScopeConfig {
-    /// Human-readable label, not otherwise used by these tools (callers
-    /// address a scope by `scope`+`id`, matching Wayfinder's own tool
-    /// signatures), kept for the config file's own readability and for
-    /// the background sync task (sub-project 1's daemon task, not yet
-    /// implemented) to enumerate what to sync.
-    #[allow(dead_code)]
-    name: String,
-    /// `"project"` or `"org"`.
-    scope: String,
-    id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct WayfinderConfig {
-    /// Wayfinder's wiki MCP endpoint, e.g. `https://wayfinder.example.com/mcp`.
-    base_url: String,
-    read_credential_name: String,
-    write_credential_name: String,
-}
-
-fn load_wiki_resources_config(project_root: &Path) -> Result<WikiResourcesConfig, McpError> {
-    let path = project_root.join(".ta").join("wiki-resources.toml");
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        McpError::invalid_request(
-            format!(
-                "ta_wiki_*: no wiki configuration found at {} ({e}). Wiki access requires a \
-                 .ta/wiki-resources.toml declaring the org/project scopes to reach and the \
-                 Wayfinder credentials to use; see the virtual-team install+config docs.",
-                path.display()
-            ),
-            None,
-        )
-    })?;
-    toml::from_str(&raw).map_err(|e| {
-        McpError::internal_error(
-            format!("ta_wiki_*: malformed {} ({e}).", path.display()),
-            None,
-        )
-    })
-}
 
 /// Confirms `scope`/`id` is one this project actually declared, rather
 /// than silently proxying a call for an org/project this installation was
@@ -120,48 +69,6 @@ fn require_declared_scope(
     }
 }
 
-// ── Credential resolution ────────────────────────────────────────────────
-
-fn resolve_credential_secret(
-    project_root: &Path,
-    use_keychain: bool,
-    credential_name: &str,
-) -> Result<String, McpError> {
-    use ta_credentials::CredentialVault;
-
-    let mut cred_config = ta_credentials::CredentialsConfig::for_project(project_root);
-    cred_config.use_keychain = use_keychain;
-    let vault = ta_credentials::FileVault::open(&cred_config).map_err(|e| {
-        McpError::internal_error(
-            format!("ta_wiki_*: could not open the credential vault: {e}"),
-            None,
-        )
-    })?;
-    let summaries = vault.list().map_err(|e| {
-        McpError::internal_error(format!("ta_wiki_*: could not list credentials: {e}"), None)
-    })?;
-    let summary = summaries
-        .iter()
-        .find(|c| c.name == credential_name)
-        .ok_or_else(|| {
-            McpError::invalid_request(
-                format!(
-                    "ta_wiki_*: no credential named '{credential_name}' found. Run \
-                     `ta credentials list` to see what's stored, or re-run the pairing step \
-                     if this project hasn't been paired with Wayfinder yet."
-                ),
-                None,
-            )
-        })?;
-    let full = vault.get(summary.id).map_err(|e| {
-        McpError::internal_error(
-            format!("ta_wiki_*: could not resolve credential '{credential_name}': {e}"),
-            None,
-        )
-    })?;
-    Ok(full.secret)
-}
-
 // ── Shared plumbing ──────────────────────────────────────────────────────
 
 struct WikiContext {
@@ -180,7 +87,8 @@ fn load_context(state: &Arc<Mutex<GatewayState>>) -> Result<WikiContext, McpErro
             locked.config.credential_vault_use_keychain,
         )
     };
-    let config = load_wiki_resources_config(&project_root)?;
+    let config = wiki_resources::load_wiki_resources_config(&project_root)
+        .map_err(|e| McpError::invalid_request(format!("ta_wiki_*: {e}"), None))?;
     Ok(WikiContext {
         project_root,
         config,
@@ -189,27 +97,13 @@ fn load_context(state: &Arc<Mutex<GatewayState>>) -> Result<WikiContext, McpErro
 }
 
 fn read_client(ctx: &WikiContext) -> Result<WikiMcpClient, McpError> {
-    let token = resolve_credential_secret(
-        &ctx.project_root,
-        ctx.use_keychain,
-        &ctx.config.wayfinder.read_credential_name,
-    )?;
-    Ok(WikiMcpClient::new(
-        ctx.config.wayfinder.base_url.clone(),
-        token,
-    ))
+    wiki_resources::read_client(&ctx.project_root, ctx.use_keychain, &ctx.config)
+        .map_err(|e| McpError::internal_error(format!("ta_wiki_*: {e}"), None))
 }
 
 fn write_client(ctx: &WikiContext) -> Result<WikiMcpClient, McpError> {
-    let token = resolve_credential_secret(
-        &ctx.project_root,
-        ctx.use_keychain,
-        &ctx.config.wayfinder.write_credential_name,
-    )?;
-    Ok(WikiMcpClient::new(
-        ctx.config.wayfinder.base_url.clone(),
-        token,
-    ))
+    wiki_resources::write_client(&ctx.project_root, ctx.use_keychain, &ctx.config)
+        .map_err(|e| McpError::internal_error(format!("ta_wiki_*: {e}"), None))
 }
 
 fn success_json(value: serde_json::Value) -> Result<CallToolResult, McpError> {
@@ -444,63 +338,22 @@ mod tests {
     use crate::GatewayConfig;
 
     // ── Pure-logic tests: no server, no credential vault needed ────────
-
-    #[test]
-    fn load_wiki_resources_config_errors_clearly_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_wiki_resources_config(dir.path()).unwrap_err();
-        assert!(format!("{err}").contains("no wiki configuration found"));
-    }
-
-    #[test]
-    fn load_wiki_resources_config_errors_clearly_when_malformed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
-        std::fs::write(dir.path().join(".ta/wiki-resources.toml"), "not = [valid").unwrap();
-        let err = load_wiki_resources_config(dir.path()).unwrap_err();
-        assert!(format!("{err}").contains("malformed"));
-    }
-
-    #[test]
-    fn load_wiki_resources_config_parses_a_valid_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
-        std::fs::write(
-            dir.path().join(".ta/wiki-resources.toml"),
-            r#"
-[[scopes]]
-name = "project"
-scope = "project"
-id = "proj-1"
-
-[wayfinder]
-base_url = "http://127.0.0.1:1/mcp"
-read_credential_name = "wayfinder-service-account"
-write_credential_name = "wayfinder-wiki-writer"
-"#,
-        )
-        .unwrap();
-        let config = load_wiki_resources_config(dir.path()).unwrap();
-        assert_eq!(config.scopes.len(), 1);
-        assert_eq!(config.scopes[0].scope, "project");
-        assert_eq!(config.scopes[0].id, "proj-1");
-        assert_eq!(
-            config.wayfinder.read_credential_name,
-            "wayfinder-service-account"
-        );
-    }
+    //
+    // Config parsing and credential resolution now live in
+    // `wiki_resources.rs` and are tested there; this module only tests
+    // logic that's still local to it (`require_declared_scope`).
 
     fn test_config(scopes: &[(&str, &str)]) -> WikiResourcesConfig {
         WikiResourcesConfig {
             scopes: scopes
                 .iter()
-                .map(|(scope, id)| ScopeConfig {
+                .map(|(scope, id)| wiki_resources::ScopeConfig {
                     name: format!("{scope}-{id}"),
                     scope: scope.to_string(),
                     id: id.to_string(),
                 })
                 .collect(),
-            wayfinder: WayfinderConfig {
+            wayfinder: wiki_resources::WayfinderConfig {
                 base_url: "http://127.0.0.1:1/mcp".to_string(),
                 read_credential_name: "wayfinder-service-account".to_string(),
                 write_credential_name: "wayfinder-wiki-writer".to_string(),
@@ -528,60 +381,6 @@ write_credential_name = "wayfinder-wiki-writer"
         let config = test_config(&[("project", "proj-1")]);
         let err = require_declared_scope(&config, "org", "proj-1").unwrap_err();
         assert!(format!("{err}").contains("not declared"));
-    }
-
-    // ── Credential resolution ───────────────────────────────────────────
-
-    #[test]
-    fn resolve_credential_secret_errors_clearly_when_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let err =
-            resolve_credential_secret(dir.path(), false, "wayfinder-service-account").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("no credential named"));
-        assert!(msg.contains("wayfinder-service-account"));
-    }
-
-    #[test]
-    fn resolve_credential_secret_finds_a_stored_credential_by_name() {
-        use ta_credentials::CredentialVault;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut cred_config = ta_credentials::CredentialsConfig::for_project(dir.path());
-        cred_config.use_keychain = false;
-        let mut vault = ta_credentials::FileVault::open(&cred_config).unwrap();
-        vault
-            .add("wayfinder-service-account", "wayfinder", "tok-abc", vec![])
-            .unwrap();
-
-        let secret =
-            resolve_credential_secret(dir.path(), false, "wayfinder-service-account").unwrap();
-        assert_eq!(secret, "tok-abc");
-    }
-
-    #[test]
-    fn resolve_credential_secret_distinguishes_read_and_write_credentials() {
-        use ta_credentials::CredentialVault;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut cred_config = ta_credentials::CredentialsConfig::for_project(dir.path());
-        cred_config.use_keychain = false;
-        let mut vault = ta_credentials::FileVault::open(&cred_config).unwrap();
-        vault
-            .add("wayfinder-service-account", "wayfinder", "read-tok", vec![])
-            .unwrap();
-        vault
-            .add("wayfinder-wiki-writer", "wayfinder", "write-tok", vec![])
-            .unwrap();
-
-        assert_eq!(
-            resolve_credential_secret(dir.path(), false, "wayfinder-service-account").unwrap(),
-            "read-tok"
-        );
-        assert_eq!(
-            resolve_credential_secret(dir.path(), false, "wayfinder-wiki-writer").unwrap(),
-            "write-tok"
-        );
     }
 
     // ── End-to-end: full handler through a real mock Wayfinder server ──

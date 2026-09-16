@@ -52,6 +52,7 @@ pub mod transport;
 pub mod wake_listener;
 pub mod watchdog;
 mod web;
+pub mod wiki_sync;
 
 use anyhow::Result;
 use clap::Parser;
@@ -425,6 +426,16 @@ async fn main() -> Result<()> {
                 token_refresh::start(tr_root, tr_shutdown);
             }
 
+            // Periodic Wayfinder wiki cache sync -- independent of the
+            // rotation supervisor for the same reason token_refresh is,
+            // see wiki_sync.rs's module doc. No-ops for a project with no
+            // .ta/wiki-resources.toml.
+            {
+                let ws_root = project_root.clone();
+                let ws_shutdown = shutdown.clone();
+                wiki_sync::start(ws_root, ws_shutdown);
+            }
+
             // Periodic GC task: run every `gc_interval_hours` (default 6h).
             if gc_interval_hours > 0 {
                 let gc_project_root = project_root.clone();
@@ -534,6 +545,13 @@ async fn main() -> Result<()> {
             let tr_root = project_root.clone();
             let tr_shutdown = shutdown.clone();
             token_refresh::start(tr_root, tr_shutdown);
+        }
+
+        // Periodic Wayfinder wiki cache sync in MCP mode too.
+        {
+            let ws_root = project_root.clone();
+            let ws_shutdown = shutdown.clone();
+            wiki_sync::start(ws_root, ws_shutdown);
         }
 
         // Serve MCP using the configured transport.
