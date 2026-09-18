@@ -22,6 +22,7 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "constitutions/",
     "project-memory/", // VCS-committed shared knowledge (was incorrectly "memory/")
     "wiki-resources.toml", // declares the Wayfinder org/project scopes ta_wiki_* tools sync (v0.17.11.15): team policy, VCS-committed like connectors.toml
+    "wiki-ingestion.toml", // declares the VCS-connector's brain-worthy path patterns (ta-virtual-team sub-project 2): team policy, VCS-committed like wiki-resources.toml
     "personas/",
     "templates/",
     "plan_history.jsonl",   // append-only audit trail of plan phase completions
@@ -59,6 +60,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "memory/", // local memory cache (project-memory/ is the VCS-committed counterpart)
     "link-cache/", // cached remote project manifests (v0.16.1.5)
     "wiki-cache/", // materialized Wayfinder wiki pages + local sha manifest (v0.17.11.15): machine-local, not shared state
+    "wiki-ingestion-state.json", // VCS-connector's last-reviewed-sha checkpoint (ta-virtual-team sub-project 2): machine-local, not shared state
     // Runtime files
     "velocity-stats.jsonl",
     "audit-ledger.jsonl",
