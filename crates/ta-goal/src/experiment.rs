@@ -1,9 +1,10 @@
 //! Generic cost-experiment definitions (`.ta/experiments/<id>.toml`).
 //!
 //! An experiment assigns goal runs to named arms, each an opaque config-
-//! override map. This module owns only the storage format; arm assignment
-//! and config-override application live in the CLI/gateway layers that
-//! consume this (see `apps/ta-cli/src/commands/experiment.rs`).
+//! override map. This module owns the storage format and the arm-assignment
+//! logic (`assign_arm`); config-override *application* (actually interpreting
+//! an arm's opaque JSON map) lives in the CLI/gateway layers that consume
+//! this (see `apps/ta-cli/src/commands/experiment.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -229,6 +230,36 @@ mod tests {
             ids,
             vec!["cost-test-1".to_string(), "cost-test-2".to_string()]
         );
+    }
+
+    #[test]
+    fn load_malformed_toml_returns_err_not_panic() {
+        let dir = tempdir().unwrap();
+        let experiments_dir = experiments_dir(dir.path());
+        std::fs::create_dir_all(&experiments_dir).unwrap();
+        std::fs::write(
+            experiments_dir.join("cost-test-bad.toml"),
+            "this is not valid toml = = =",
+        )
+        .unwrap();
+
+        let result = ExperimentConfig::load(dir.path(), "cost-test-bad");
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn list_with_malformed_toml_returns_err_not_panic() {
+        let dir = tempdir().unwrap();
+        sample_config().save(dir.path()).unwrap();
+        let experiments_dir = experiments_dir(dir.path());
+        std::fs::write(
+            experiments_dir.join("cost-test-bad.toml"),
+            "this is not valid toml = = =",
+        )
+        .unwrap();
+
+        let result = ExperimentConfig::list(dir.path());
+        assert!(result.is_err(), "expected Err, got {result:?}");
     }
 
     use rand::SeedableRng;
