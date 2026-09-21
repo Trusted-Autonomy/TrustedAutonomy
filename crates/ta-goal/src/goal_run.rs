@@ -318,7 +318,7 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment_id: Option<String>,
 
-    /// The arm this goal was assigned within `experiment_id` (e.g. "brain_on").
+    /// The arm this goal was assigned within `experiment_id` (e.g. "variant-on").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment_arm: Option<String>,
 
