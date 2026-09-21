@@ -2258,6 +2258,7 @@ pub fn execute(
     context_path: Option<&Path>,
     credential_scopes: Option<&[String]>,
     team_session_id: Option<&str>,
+    workflow_tag: Option<&str>,
     shadow_experiment: Option<&ShadowExperimentFlags>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
@@ -2889,6 +2890,13 @@ pub fn execute(
             updated_goal.is_macro = true;
         }
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
+
+        // Generic cost-classification tag (v0.17.x cost-experiment
+        // framework): `--workflow-tag`, opaque to TA core. Set unconditionally
+        // from the CLI flag, independent of the cost-experiment arm-assignment
+        // logic below -- a goal can be tagged without being part of any
+        // experiment, and vice versa.
+        updated_goal.workflow = workflow_tag.map(|s| s.to_string());
 
         // Cost-experiment arm assignment: check every defined experiment, apply
         // the first one whose roll selects this goal. Multiple simultaneously
@@ -9742,6 +9750,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
@@ -9758,6 +9767,105 @@ context_inject = "{mode_toml}"
 
         // Settings should also be restored (removed since it didn't exist).
         assert!(!goals[0].workspace_path.join(SETTINGS_REL_PATH).exists());
+    }
+
+    #[test]
+    fn workflow_tag_flag_sets_goal_workflow_field() {
+        // Generic cost-classification tag (v0.17.x cost-experiment
+        // framework): `--workflow-tag <tag>` sets `GoalRun.workflow`.
+        // Exercises the real `ta run` command path (same pattern as
+        // `run_creates_goal_and_restores_on_no_launch` above), with
+        // `no_launch: true` so no agent subprocess is spawned.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false,                     // not headless
+            false,                     // skip_verify = false
+            false,                     // quiet = false
+            None,                      // no existing goal id
+            None,                      // workflow = default (single-agent)
+            None,                      // persona_name = None
+            None,                      // context_path = None
+            None,                      // credential_scopes = None (v0.17.6.1)
+            None,                      // team_session_id = None (v0.17.11.8)
+            Some("brain-maintenance"), // workflow_tag
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].workflow.as_deref(), Some("brain-maintenance"));
+    }
+
+    #[test]
+    fn workflow_tag_flag_omitted_leaves_goal_workflow_none() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false, // not headless
+            false, // skip_verify = false
+            false, // quiet = false
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (omitted)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].workflow, None);
     }
 
     #[test]
@@ -9814,6 +9922,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
@@ -9894,6 +10003,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
@@ -9962,6 +10072,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             Some(&flags),
         )
         .unwrap();
@@ -11972,6 +12083,7 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
@@ -12009,6 +12121,7 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();

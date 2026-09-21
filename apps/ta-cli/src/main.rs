@@ -420,6 +420,15 @@ enum Commands {
         /// is written and no other behavior changes.
         #[arg(long)]
         team_session_id: Option<String>,
+        /// Generic cost-classification tag for this goal (e.g.
+        /// "brain-maintenance", "feature-work"). Fully opaque to TA core --
+        /// downstream products define what tags mean and use them to bucket
+        /// goals for cost/velocity reporting. Distinct from `--workflow`,
+        /// which selects the *execution engine* (single-agent, serial-phases,
+        /// swarm); this flag only classifies the goal, it never changes how
+        /// it runs. Set on `GoalRun.workflow`.
+        #[arg(long = "workflow-tag")]
+        workflow_tag: Option<String>,
         /// Internal: set by a canonical goal's paired cost-experiment
         /// shadow spawn (`spawn_shadow_experiment_goal`, v0.17.x). Not for
         /// direct human use. Present together with `--experiment-shadow-arm`,
@@ -1659,6 +1668,7 @@ fn dispatch_raw(
             priority,
             credential_scopes,
             team_session_id,
+            workflow_tag,
             experiment_shadow_id,
             experiment_shadow_arm,
             experiment_shadow_pair_id,
@@ -1795,6 +1805,7 @@ fn dispatch_raw(
                 context.as_deref(),
                 credential_scopes.as_deref(),
                 team_session_id.as_deref(),
+                workflow_tag.as_deref(),
                 shadow_experiment.as_ref(),
             )
         }

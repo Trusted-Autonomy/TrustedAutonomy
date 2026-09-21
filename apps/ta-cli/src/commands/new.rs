@@ -898,6 +898,7 @@ fn run_new(
         None,  // context_path = None
         None,  // credential_scopes = None (v0.17.6.1)
         None,  // team_session_id = None (v0.17.11.8)
+        None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
     )?;
 
