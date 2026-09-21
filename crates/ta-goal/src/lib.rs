@@ -21,6 +21,7 @@ pub mod commit_context;
 pub mod conversation;
 pub mod error;
 pub mod events;
+pub mod experiment;
 pub mod goal_run;
 pub mod history;
 pub mod human_review;
@@ -43,6 +44,7 @@ pub use commit_context::CommitContext;
 pub use conversation::{ConversationStore, ConversationTurn, TurnRole};
 pub use error::GoalError;
 pub use events::{EventDispatcher, LogSink, NotificationSink, TaEvent};
+pub use experiment::{experiments_dir, ExperimentConfig};
 pub use goal_run::{slugify_title, GoalRun, GoalRunState};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use human_review::{
