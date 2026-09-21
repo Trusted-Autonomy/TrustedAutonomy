@@ -2967,16 +2967,38 @@ fn auto_cancel_shadow_experiment_goal(
         closed_by: "auto-cancel (cost-experiment shadow)".to_string(),
         applied_externally_ref: None,
     };
-    save_package(config, pkg)?;
+    // Log-and-continue on a transient store error, mirroring the sibling
+    // `close_package`'s handling of its own `goal_store.transition` call
+    // below: the draft already exists on disk with real artifacts at this
+    // point, so a transient save/transition hiccup here must not turn an
+    // otherwise-successful `ta draft build` into an overall failure: that
+    // would be strictly worse than a shadow goal staying stuck at PrReady
+    // with a stale status, since the caller's `?` would propagate all the
+    // way out of the draft build that already succeeded.
+    if let Err(e) = save_package(config, pkg) {
+        tracing::warn!(
+            "Failed to save auto-cancelled status for shadow experiment draft {}: {}",
+            pkg.package_id,
+            e
+        );
+    }
 
-    let closed_goal = goal_store.transition(
+    match goal_store.transition(
         goal.goal_run_id,
         GoalRunState::Closed {
             reason: Some(REASON.to_string()),
             applied_externally_ref: None,
         },
-    )?;
-    *goal = closed_goal;
+    ) {
+        Ok(closed_goal) => *goal = closed_goal,
+        Err(e) => {
+            tracing::warn!(
+                goal_id = %goal.goal_run_id,
+                error = %e,
+                "Failed to transition auto-cancelled shadow goal to Closed"
+            );
+        }
+    }
 
     {
         use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
