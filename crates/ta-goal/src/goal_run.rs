@@ -312,6 +312,37 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_phase: Option<String>,
 
+    /// Cost-experiment id this goal was assigned to at launch (e.g. "wiki-brain").
+    /// `None` for goals not participating in any experiment. Generic: TA core
+    /// never interprets this string, only stores and threads it through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
+
+    /// The arm this goal was assigned within `experiment_id` (e.g. "brain_on").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_arm: Option<String>,
+
+    /// Links this goal to its paired counterpart's goal_run_id when the
+    /// experiment's paired-shadow-sampling mode assigned it. `None` for an
+    /// unpaired-holdout assignment or a non-participating goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_pair_id: Option<Uuid>,
+
+    /// The resolved config-override map for this goal's assigned arm, merged
+    /// into the staging copy's effective configuration at launch time.
+    /// Opaque to TA core: keys and values are entirely the experiment
+    /// definition's own concern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_overrides: Option<serde_json::Value>,
+
+    /// Generic cost-category classification for this goal (e.g.
+    /// "feature-work", "brain-maintenance"), set by whatever launched it
+    /// (a wake-on-demand listener's persona config, a CLI flag). `None` when
+    /// unclassified. Distinct from `VelocityEntry.workflow`, which is the
+    /// plain-`String` form this field is copied into at completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+
     /// Parent goal ID for follow-up goals (enables iterative refinement).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_goal_id: Option<Uuid>,
@@ -572,6 +603,11 @@ impl GoalRun {
             store_path,
             source_dir: None,
             plan_phase: None,
+            experiment_id: None,
+            experiment_arm: None,
+            experiment_pair_id: None,
+            experiment_overrides: None,
+            workflow: None,
             parent_goal_id: None,
             source_snapshot: None,
             is_macro: false,
@@ -1301,5 +1337,21 @@ mod tests {
     #[test]
     fn title_plain_text_unchanged() {
         assert_eq!(sanitize_title("Fix auth bug"), "Fix auth bug");
+    }
+
+    #[test]
+    fn new_goal_run_defaults_experiment_fields_to_none() {
+        let goal = GoalRun::new(
+            "title",
+            "objective",
+            "agent",
+            PathBuf::from("/tmp/ws"),
+            PathBuf::from("/tmp/store"),
+        );
+        assert_eq!(goal.experiment_id, None);
+        assert_eq!(goal.experiment_arm, None);
+        assert_eq!(goal.experiment_pair_id, None);
+        assert_eq!(goal.experiment_overrides, None);
+        assert_eq!(goal.workflow, None);
     }
 }
