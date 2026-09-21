@@ -166,7 +166,10 @@ pub enum TeamSessionCommands {
         /// opaque to TA core. Form: <role>=<tag>. Repeatable. A separate
         /// flag from `--wake-on-demand` itself so its existing
         /// `<role>:<key1>,<key2>` format never has to accommodate a third
-        /// field.
+        /// field. If a role appears more than once (e.g. it was registered
+        /// by two --wake-on-demand entries), the tag applies to every
+        /// listener for that role. If the same role is given twice across
+        /// separate --wake-on-demand-workflow flags, the last one wins.
         #[arg(long = "wake-on-demand-workflow")]
         wake_on_demand_workflow: Vec<String>,
     },
@@ -279,17 +282,35 @@ fn start(
                  (empty role or tag)"
             );
         }
-        let listener = wake_on_demand_listeners
-            .iter_mut()
-            .find(|l| l.role == role.trim())
-            .with_context(|| {
-                format!(
-                    "--wake-on-demand-workflow references role '{}', but no --wake-on-demand \
-                     entry registers that role",
-                    role.trim()
-                )
-            })?;
-        listener.workflow_tag = Some(tag.trim().to_string());
+        let role = role.trim();
+        let tag = tag.trim();
+        // A role can be registered by multiple --wake-on-demand entries (see
+        // start_parses_wake_on_demand_flag_into_state_json for that supported
+        // pattern), so tag every matching listener, not just the first --
+        // otherwise later listeners with the same role would launch untagged
+        // with no error or warning.
+        let mut matched = false;
+        for listener in wake_on_demand_listeners.iter_mut() {
+            if listener.role == role {
+                listener.workflow_tag = Some(tag.to_string());
+                matched = true;
+            }
+        }
+        if !matched {
+            let registered: Vec<&str> = wake_on_demand_listeners
+                .iter()
+                .map(|l| l.role.as_str())
+                .collect();
+            bail!(
+                "--wake-on-demand-workflow references role '{role}', but no --wake-on-demand \
+                 entry registers that role (registered roles: {})",
+                if registered.is_empty() {
+                    "none".to_string()
+                } else {
+                    registered.join(", ")
+                }
+            );
+        }
     }
 
     let workflow_full_path = project_root.join(workflow_path);
@@ -719,6 +740,39 @@ budget:
     }
 
     #[test]
+    fn start_applies_wake_on_demand_workflow_flag_to_every_listener_with_matching_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &[
+                "chief-of-staff:external-intake".to_string(),
+                "chief-of-staff:another-key".to_string(),
+            ],
+            &["chief-of-staff=brain-maintenance".to_string()],
+        )
+        .unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert_eq!(state.wake_on_demand_listeners.len(), 2);
+        assert_eq!(
+            state.wake_on_demand_listeners[0].workflow_tag.as_deref(),
+            Some("brain-maintenance"),
+            "first listener for the duplicated role must be tagged"
+        );
+        assert_eq!(
+            state.wake_on_demand_listeners[1].workflow_tag.as_deref(),
+            Some("brain-maintenance"),
+            "second listener for the duplicated role must also be tagged, not silently skipped"
+        );
+    }
+
+    #[test]
     fn start_rejects_wake_on_demand_workflow_flag_referencing_unregistered_role() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
@@ -737,6 +791,10 @@ budget:
         let message = format!("{}", result.unwrap_err());
         assert!(message.contains("some-other-role"));
         assert!(message.contains("no --wake-on-demand"));
+        assert!(
+            message.contains("chief-of-staff"),
+            "error should list the actually-registered role names so a typo is a one-shot fix: {message}"
+        );
         assert!(
             !state_path(dir.path(), "sess-1").exists(),
             "a --wake-on-demand-workflow referencing an unregistered role must fail before any state.json is written"
