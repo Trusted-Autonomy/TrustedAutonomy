@@ -20,11 +20,24 @@
 //! `transport-streamable-http-client-reqwest` features, already the
 //! workspace-pinned version) is confirmed to support it.
 
+use std::time::Duration;
+
 use rmcp::model::{CallToolRequestParams, ClientInfo};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::{ClientHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
+
+/// Bound on a whole `call_tool` invocation (connect handshake plus the tool
+/// call itself). Without this, a Wayfinder endpoint that's configured but
+/// unreachable (host down, port not listening, a firewall silently dropping
+/// SYNs instead of resetting) can hang indefinitely: neither `rmcp`'s
+/// transport nor its underlying HTTP client apply a timeout on their own,
+/// and the OS-level TCP connect timeout this falls back to varies widely by
+/// platform, from effectively instant to several minutes. Found via a real
+/// CI hang (a "configured but unreachable" test connecting to a closed
+/// local port ran past the CI job's own 15-minute timeout on macOS runners).
+const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum WikiClientError {
@@ -44,6 +57,15 @@ pub enum WikiClientError {
     ToolError { tool: &'static str, message: String },
     #[error("Wayfinder wiki tool '{tool}' returned an unexpected/malformed result: {reason}")]
     MalformedResult { tool: &'static str, reason: String },
+    #[error(
+        "Wayfinder wiki tool call '{tool}' to {url} timed out after {timeout:?} (connect or \
+         response never completed)"
+    )]
+    Timeout {
+        tool: &'static str,
+        url: String,
+        timeout: Duration,
+    },
 }
 
 /// Minimal `ClientHandler` -- this client only ever calls tools, never
@@ -117,11 +139,29 @@ impl WikiMcpClient {
     }
 
     /// Connects, issues one `call_tool`, and returns its parsed JSON
-    /// result. Prefers `structured_content` when present (the MCP-native
-    /// way a tool returns typed data); falls back to parsing the first
-    /// text content block as JSON otherwise, since not every server
-    /// populates `structured_content` for every tool.
+    /// result. Bounded by `CALL_TOOL_TIMEOUT` end to end (connect plus the
+    /// tool call itself), since neither phase has a timeout of its own; see
+    /// that constant's doc comment for why this matters.
     async fn call_tool(
+        &self,
+        tool: &'static str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, WikiClientError> {
+        match tokio::time::timeout(CALL_TOOL_TIMEOUT, self.call_tool_inner(tool, arguments)).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(WikiClientError::Timeout {
+                tool,
+                url: self.base_url.clone(),
+                timeout: CALL_TOOL_TIMEOUT,
+            }),
+        }
+    }
+
+    /// Prefers `structured_content` when present (the MCP-native way a tool
+    /// returns typed data); falls back to parsing the first text content
+    /// block as JSON otherwise, since not every server populates
+    /// `structured_content` for every tool.
+    async fn call_tool_inner(
         &self,
         tool: &'static str,
         arguments: serde_json::Value,
