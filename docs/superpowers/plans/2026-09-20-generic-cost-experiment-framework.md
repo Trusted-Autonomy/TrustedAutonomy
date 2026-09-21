@@ -833,6 +833,290 @@ git commit -m "feat: assign cost-experiment arms at goal creation"
 
 ---
 
+### Task 4b: Spawn the shadow goal run for paired-shadow-sampling
+
+**Files:**
+- Modify: `apps/ta-cli/src/commands/run.rs`
+- Test: `apps/ta-cli/src/commands/run.rs` (inline)
+
+**Interfaces:**
+- Consumes: `ta_goal::experiment::ArmAssignment::Paired` (Task 3), the goal-creation site (Task 4)
+- Produces: hidden/internal `ta run` flags `--experiment-shadow-id`, `--experiment-shadow-arm`,
+  `--experiment-shadow-pair-id`, `--experiment-shadow-overrides` (JSON), `--auto-cancel-after-draft`; a new
+  `GoalRun.auto_cancel_after_draft: bool` field; `fn spawn_shadow_experiment_goal(ta_bin: &Path, workspace_root:
+  &Path, title: &str, objective: &str, canonical: &ExperimentSpawnSpec) -> std::io::Result<std::process::Child>`
+
+Real precedent exists in this exact file for spawning a sibling `ta run` process: `build_swarm_sub_goal_command`
+(around line 1669) builds a `std::process::Command` for a nested `ta run` invocation with `--agent`/`--objective`,
+and its caller in `execute_swarm` (around line 1610) runs it with `cmd.status()` (blocking, waits for exit). This
+task's shadow goal deliberately does NOT block the canonical goal's own flow on the shadow's completion (the
+shadow's result is only needed later, when someone runs `ta experiment report`), it uses `.spawn()` instead of
+`.status()`, fire-and-forget, so the two arms' agent sessions run concurrently rather than doubling wall-clock time
+for the canonical goal.
+
+- [ ] **Step 1: Write the failing test for the spawned command's arguments**
+
+```rust
+#[test]
+fn spawn_shadow_experiment_goal_builds_correct_args() {
+    let spec = ExperimentSpawnSpec {
+        experiment_id: "wiki-brain".to_string(),
+        arm: "brain_off".to_string(),
+        pair_id: Uuid::new_v4(),
+        overrides: serde_json::json!({"wiki.disabled": true}),
+    };
+    let cmd = build_shadow_experiment_command(
+        Path::new("/usr/local/bin/ta"),
+        Path::new("/repo"),
+        "Fix the bug",
+        "Fix the null pointer in parser.rs",
+        &spec,
+    );
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    assert!(args.contains(&"--experiment-shadow-id".to_string()));
+    assert!(args.contains(&"wiki-brain".to_string()));
+    assert!(args.contains(&"--experiment-shadow-arm".to_string()));
+    assert!(args.contains(&"brain_off".to_string()));
+    assert!(args.contains(&"--auto-cancel-after-draft".to_string()));
+    assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo")));
+}
+```
+
+Split the command-building logic (`build_shadow_experiment_command`, pure and inspectable, mirroring
+`build_swarm_sub_goal_command`'s own doc comment: "Pure and side-effect-free (builds but does not spawn) so the
+resulting `Command`'s args/env are directly inspectable in tests") from the actual spawning
+(`spawn_shadow_experiment_goal`, which calls `.spawn()` on the built command), the same separation this file
+already uses for the swarm case, for the same testability reason.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./dev cargo test -p ta-cli spawn_shadow_experiment_goal_builds_correct_args -- --nocapture`
+Expected: FAIL (compile error: no `ExperimentSpawnSpec`, no `build_shadow_experiment_command`)
+
+- [ ] **Step 3: Implement `ExperimentSpawnSpec`, `build_shadow_experiment_command`, `spawn_shadow_experiment_goal`**
+
+```rust
+/// Fully-resolved experiment assignment to hand to a spawned shadow goal.
+/// Passed explicitly (not re-rolled) so the shadow always gets the specific
+/// arm the canonical goal's own roll paired it with.
+#[derive(Debug, Clone)]
+struct ExperimentSpawnSpec {
+    experiment_id: String,
+    arm: String,
+    pair_id: Uuid,
+    overrides: serde_json::Value,
+}
+
+/// Build (but do not spawn) the `ta run` command for a paired-sampling
+/// shadow goal. Pure and side-effect-free, mirroring
+/// `build_swarm_sub_goal_command`'s own testability pattern.
+fn build_shadow_experiment_command(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    title: &str,
+    objective: &str,
+    spec: &ExperimentSpawnSpec,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(ta_bin);
+    cmd.arg("run")
+        .arg(title)
+        .arg("--headless")
+        .arg("--objective")
+        .arg(objective)
+        .arg("--experiment-shadow-id")
+        .arg(&spec.experiment_id)
+        .arg("--experiment-shadow-arm")
+        .arg(&spec.arm)
+        .arg("--experiment-shadow-pair-id")
+        .arg(spec.pair_id.to_string())
+        .arg("--experiment-shadow-overrides")
+        .arg(spec.overrides.to_string())
+        .arg("--auto-cancel-after-draft");
+    cmd.current_dir(workspace_root);
+    cmd
+}
+
+/// Spawn the shadow goal in the background. Fire-and-forget: the caller does
+/// not wait on the returned `Child`, so the canonical goal's own flow isn't
+/// slowed down by the shadow's agent session.
+fn spawn_shadow_experiment_goal(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    title: &str,
+    objective: &str,
+    spec: &ExperimentSpawnSpec,
+) -> std::io::Result<std::process::Child> {
+    build_shadow_experiment_command(ta_bin, workspace_root, title, objective, spec).spawn()
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `./dev cargo test -p ta-cli spawn_shadow_experiment_goal_builds_correct_args -- --nocapture`
+Expected: PASS
+
+- [ ] **Step 5: Wire the spawn call into the `Paired` branch from Task 4, and add the four new CLI flags**
+
+In Task 4's goal-creation hook, replace the `ArmAssignment::Paired { canonical_arm, shadow_arm, pair_id }` match
+arm (which currently degrades to canonical-only) with:
+
+```rust
+                ta_goal::experiment::ArmAssignment::Paired {
+                    canonical_arm,
+                    shadow_arm,
+                    pair_id,
+                } => {
+                    let shadow_spec = ExperimentSpawnSpec {
+                        experiment_id: config.id.clone(),
+                        arm: shadow_arm.clone(),
+                        pair_id,
+                        overrides: config.arms.get(&shadow_arm).cloned().unwrap_or_default(),
+                    };
+                    // Best-effort: a failed shadow spawn must never block or
+                    // fail the canonical goal it's paired with. Log and move
+                    // on, matching this file's existing warning-not-failure
+                    // pattern for the swarm integration agent above.
+                    if let Err(e) = spawn_shadow_experiment_goal(
+                        &ta_bin,
+                        &project_root,
+                        &title,
+                        &objective,
+                        &shadow_spec,
+                    ) {
+                        eprintln!("Warning: failed to spawn paired shadow experiment goal: {e}");
+                    }
+                    goal.experiment_id = Some(config.id.clone());
+                    goal.experiment_overrides = config.arms.get(&canonical_arm).cloned();
+                    goal.experiment_arm = Some(canonical_arm);
+                    goal.experiment_pair_id = Some(pair_id);
+                    break;
+                }
+```
+
+Confirm `ta_bin`, `title`, and `objective` are in-scope local variables with those names at this point in
+`execute()`; if named differently, use the real names (the same caveat Task 4 already flags for `project_root`).
+
+Add the four new flags to `ta run`'s clap arg struct, next to `--workflow` (added in Task 7 below, or before it if
+these tasks execute out of order; either ordering compiles fine since they're independent fields):
+
+```rust
+    /// Internal: set by a canonical goal's paired-sampling spawn. Not for
+    /// direct human use.
+    #[arg(long, hide = true)]
+    experiment_shadow_id: Option<String>,
+    #[arg(long, hide = true)]
+    experiment_shadow_arm: Option<String>,
+    #[arg(long, hide = true)]
+    experiment_shadow_pair_id: Option<Uuid>,
+    #[arg(long, hide = true)]
+    experiment_shadow_overrides: Option<String>,
+    #[arg(long, hide = true)]
+    auto_cancel_after_draft: bool,
+```
+
+- [ ] **Step 6: Write the failing test for shadow flags bypassing the random roll**
+
+```rust
+#[test]
+fn explicit_shadow_flags_set_goal_fields_without_rolling_dice() {
+    let dir = tempfile::tempdir().unwrap();
+    // No .ta/experiments/*.toml written: if the random-roll path ran instead
+    // of the explicit-flags path, nothing would be assigned.
+    let goal = create_goal_for_test_with_shadow_flags(
+        dir.path(),
+        "title",
+        "objective",
+        "wiki-brain",
+        "brain_off",
+        Uuid::new_v4(),
+        serde_json::json!({"wiki.disabled": true}),
+    );
+    assert_eq!(goal.experiment_id.as_deref(), Some("wiki-brain"));
+    assert_eq!(goal.experiment_arm.as_deref(), Some("brain_off"));
+    assert!(goal.auto_cancel_after_draft);
+}
+```
+
+(As with Task 4's own tests, use whichever real goal-creation test helper this file already has, extended with the
+shadow-flag parameters, rather than the placeholder helper name above.)
+
+- [ ] **Step 7: Run test to verify it fails**
+
+Run: `./dev cargo test -p ta-cli explicit_shadow_flags_set_goal_fields_without_rolling_dice -- --nocapture`
+Expected: FAIL
+
+- [ ] **Step 8: Implement the explicit-flags bypass**
+
+At the very top of Task 4's arm-assignment block (before the `ExperimentConfig::list` random-roll loop), add:
+
+```rust
+    if let Some(experiment_id) = experiment_shadow_id.clone() {
+        goal.experiment_id = Some(experiment_id);
+        goal.experiment_arm = experiment_shadow_arm.clone();
+        goal.experiment_pair_id = experiment_shadow_pair_id;
+        goal.experiment_overrides = experiment_shadow_overrides
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        goal.auto_cancel_after_draft = auto_cancel_after_draft;
+    } else if let Ok(experiments) = ta_goal::ExperimentConfig::list(&project_root) {
+        // ... existing random-roll loop from Task 4 unchanged ...
+    }
+```
+
+Add `pub auto_cancel_after_draft: bool` to `GoalRun` (in `crates/ta-goal/src/goal_run.rs`, alongside the other
+Task 1 fields, defaulting to `false` in `GoalRun::new()`), since this field crosses the same TA-core boundary
+Task 1's fields do. If this plan's tasks are dispatched in written order, this means Task 4b technically needs a
+small addition back into Task 1's file; note this dependency for whichever implementer handles Task 4b (add the
+field there directly, it's a one-line, low-risk addition to a struct Task 1 already modified, not a redesign).
+
+- [ ] **Step 9: Run test to verify it passes**
+
+Run: `./dev cargo test -p ta-cli explicit_shadow_flags_set_goal_fields_without_rolling_dice -- --nocapture`
+Expected: PASS
+
+- [ ] **Step 10: Write the failing test for the auto-cancel hook**
+
+Locate where a goal transitions from agent-completion to `PrReady`/`UnderReview` (search `grep -n
+"GoalRunState::PrReady\|transition(GoalRunState" apps/ta-cli/src/commands/run.rs apps/ta-cli/src/commands/draft.rs`).
+Add a test asserting that a goal with `auto_cancel_after_draft: true` ends in `GoalRunState`'s cancelled/denied
+terminal state (check `GoalRunState`'s real variant name for this, likely `Cancelled` or `Denied`, via `grep -n
+"enum GoalRunState" -A15 crates/ta-goal/src/goal_run.rs`) immediately after its draft is built, without waiting for
+a human `ta draft approve`/`deny` call, and that a `VelocityEntry` is still recorded with that outcome and its real
+token cost (reusing whichever `VelocityEntry::from_goal` call site Task 1 already touches for the normal
+Denied/Cancelled path, e.g. the one near line 4643 found during Task 1's own research: `VelocityEntry::from_goal(&goal,
+GoalOutcome::Denied).with_denial_reason(reason)`).
+
+- [ ] **Step 11: Run test to verify it fails**
+
+Run whatever the located test module's scoped test command is.
+Expected: FAIL
+
+- [ ] **Step 12: Implement the auto-cancel hook**
+
+At the draft-build completion point found in Step 10, add: if `goal.auto_cancel_after_draft`, immediately transition
+the goal to its terminal cancelled/denied state with a clear reason ("paired cost-experiment shadow run, not
+eligible for review or apply") instead of leaving it in `PrReady`/`UnderReview`, and ensure the existing
+`VelocityEntry::from_goal(..., GoalOutcome::Denied` (or whichever the codebase's real cancelled-outcome path is)
+call already covers this state so the shadow's token cost is captured exactly like any other terminal goal.
+
+- [ ] **Step 13: Run test to verify it passes**
+
+Expected: PASS
+
+- [ ] **Step 14: Run the full ta-cli and ta-goal suites**
+
+Run: `./dev cargo test -p ta-cli -p ta-goal`
+Expected: PASS
+
+- [ ] **Step 15: Commit**
+
+```bash
+git add apps/ta-cli/src/commands/run.rs apps/ta-cli/src/commands/draft.rs crates/ta-goal/src/goal_run.rs
+git commit -m "feat: spawn and auto-cancel the shadow goal for paired cost-experiment sampling"
+```
+
+---
+
 ### Task 5: `ta experiment start/stop/report` CLI commands
 
 **Files:**
