@@ -312,7 +312,7 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_phase: Option<String>,
 
-    /// Cost-experiment id this goal was assigned to at launch (e.g. "wiki-brain").
+    /// Cost-experiment id this goal was assigned to at launch (e.g. "experiment-a").
     /// `None` for goals not participating in any experiment. Generic: TA core
     /// never interprets this string, only stores and threads it through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,10 +336,11 @@ pub struct GoalRun {
     pub experiment_overrides: Option<serde_json::Value>,
 
     /// Generic cost-category classification for this goal (e.g.
-    /// "feature-work", "brain-maintenance"), set by whatever launched it
+    /// "feature-work", "maintenance-task"), set by whatever launched it
     /// (a wake-on-demand listener's persona config, a CLI flag). `None` when
-    /// unclassified. Distinct from `VelocityEntry.workflow`, which is the
-    /// plain-`String` form this field is copied into at completion.
+    /// unclassified. Distinct from the pre-existing `workflow_id` field and from
+    /// `VelocityEntry.workflow`, which is the plain-`String` form this field is
+    /// copied into at completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
 

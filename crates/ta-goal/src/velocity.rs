@@ -1336,12 +1336,12 @@ mod tests {
         let goal = make_goal();
         let pair_id = Uuid::new_v4();
         let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied).with_experiment(
-            "wiki-brain",
-            "brain_off",
+            "experiment-a",
+            "variant-off",
             Some(pair_id),
         );
-        assert_eq!(entry.experiment_id.as_deref(), Some("wiki-brain"));
-        assert_eq!(entry.experiment_arm.as_deref(), Some("brain_off"));
+        assert_eq!(entry.experiment_id.as_deref(), Some("experiment-a"));
+        assert_eq!(entry.experiment_arm.as_deref(), Some("variant-off"));
         assert_eq!(entry.experiment_pair_id, Some(pair_id));
     }
 
@@ -1358,8 +1358,8 @@ mod tests {
     #[test]
     fn from_goal_copies_goal_workflow_into_entry_workflow() {
         let mut goal = make_goal();
-        goal.workflow = Some("brain-maintenance".to_string());
+        goal.workflow = Some("maintenance-task".to_string());
         let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
-        assert_eq!(entry.workflow, "brain-maintenance");
+        assert_eq!(entry.workflow, "maintenance-task");
     }
 }
