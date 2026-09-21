@@ -1716,6 +1716,101 @@ fn build_swarm_sub_goal_command(
     cmd
 }
 
+// ── Paired cost-experiment shadow goal spawn (Task 4b) ──────────────────
+//
+// `assign_arm()` (Task 3) can roll `ArmAssignment::Paired`, meaning the
+// canonical goal `ta run` is about to create needs a sibling "shadow" goal
+// run under the paired arm, so the two can later be compared by `ta
+// experiment report`. The shadow's own agent session runs independently and
+// concurrently (fire-and-forget `.spawn()`, not a blocking `.status()` like
+// `execute_swarm`'s sub-goals): its result is only needed later, not before
+// the canonical goal's own flow can proceed. A failed spawn is logged and
+// swallowed by the caller: the canonical goal must never fail or block
+// because its shadow couldn't be launched.
+
+/// Fully-resolved experiment assignment to hand to a spawned shadow goal.
+/// Passed explicitly (not re-rolled) so the shadow always gets the specific
+/// arm the canonical goal's own roll paired it with.
+#[derive(Debug, Clone)]
+struct ExperimentSpawnSpec {
+    experiment_id: String,
+    arm: String,
+    pair_id: uuid::Uuid,
+    overrides: serde_json::Value,
+}
+
+/// Bundle of the hidden `--experiment-shadow-*`/`--auto-cancel-after-draft`
+/// CLI flags a spawned shadow goal's own `ta run` invocation receives. `None`
+/// (the overwhelming majority of `ta run` invocations, including every
+/// caller in this codebase other than `spawn_shadow_experiment_goal` itself)
+/// means "not a shadow goal, roll experiment arms normally".
+///
+/// Bundled into one struct (rather than five separate `execute()`
+/// parameters, as an earlier draft of this design had it) so the many
+/// existing `super::run::execute(...)` call sites across the CLI only need
+/// one extra trailing `None`, not five, to keep compiling.
+#[derive(Debug, Clone)]
+pub struct ShadowExperimentFlags {
+    /// `--experiment-shadow-id`. Always present for a real shadow goal (a
+    /// spawn with no experiment id could not have been paired in the first
+    /// place), but kept `Option` since it arrives from an `Option<&str>`
+    /// CLI flag like the others.
+    pub experiment_id: Option<String>,
+    /// `--experiment-shadow-arm`.
+    pub arm: Option<String>,
+    /// `--experiment-shadow-pair-id`.
+    pub pair_id: Option<uuid::Uuid>,
+    /// `--experiment-shadow-overrides`, raw JSON text as received on the
+    /// command line (parsed by the caller, not here, so a malformed value
+    /// degrades to "no overrides" rather than failing the whole goal).
+    pub overrides_json: Option<String>,
+    /// `--auto-cancel-after-draft`.
+    pub auto_cancel_after_draft: bool,
+}
+
+/// Build (but do not spawn) the `ta run` command for a paired-sampling
+/// shadow goal. Pure and side-effect-free, mirroring
+/// `build_swarm_sub_goal_command`'s own testability pattern: the resulting
+/// `Command`'s args are directly inspectable in tests via `Command::get_args`.
+fn build_shadow_experiment_command(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    title: &str,
+    objective: &str,
+    spec: &ExperimentSpawnSpec,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(ta_bin);
+    cmd.arg("run")
+        .arg(title)
+        .arg("--headless")
+        .arg("--objective")
+        .arg(objective)
+        .arg("--experiment-shadow-id")
+        .arg(&spec.experiment_id)
+        .arg("--experiment-shadow-arm")
+        .arg(&spec.arm)
+        .arg("--experiment-shadow-pair-id")
+        .arg(spec.pair_id.to_string())
+        .arg("--experiment-shadow-overrides")
+        .arg(spec.overrides.to_string())
+        .arg("--auto-cancel-after-draft");
+    cmd.current_dir(workspace_root);
+    cmd
+}
+
+/// Spawn the shadow goal in the background. Fire-and-forget: the caller does
+/// not wait on the returned `Child`, so the canonical goal's own flow isn't
+/// slowed down by the shadow's agent session running concurrently.
+fn spawn_shadow_experiment_goal(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    title: &str,
+    objective: &str,
+    spec: &ExperimentSpawnSpec,
+) -> std::io::Result<std::process::Child> {
+    build_shadow_experiment_command(ta_bin, workspace_root, title, objective, spec).spawn()
+}
+
 /// Run a single swarm sub-goal to completion: launch the agent subprocess,
 /// find its resulting goal record, and evaluate gates. Synchronous — a wave
 /// member runs one of these on its own OS thread via
@@ -2057,6 +2152,7 @@ pub fn execute(
     context_path: Option<&Path>,
     credential_scopes: Option<&[String]>,
     team_session_id: Option<&str>,
+    shadow_experiment: Option<&ShadowExperimentFlags>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -2694,7 +2790,22 @@ pub fn execute(
         // `ta experiment start` should refuse to start a second experiment
         // while one is already active (enforced in Task 5).
         let experiment_source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
-        if let Ok(experiments) = ta_goal::ExperimentConfig::list(experiment_source_root) {
+        if let Some(flags) = shadow_experiment {
+            // This goal *is* a shadow spawned by `spawn_shadow_experiment_goal`
+            // (Task 4b) below, via its own `ta run --experiment-shadow-*`
+            // invocation. The canonical goal's roll already picked this exact
+            // arm/pair, so re-rolling here would defeat the whole point of
+            // pairing: use the explicit flags verbatim instead of touching
+            // `ExperimentConfig::list`/`assign_arm` at all.
+            updated_goal.experiment_id = flags.experiment_id.clone();
+            updated_goal.experiment_arm = flags.arm.clone();
+            updated_goal.experiment_pair_id = flags.pair_id;
+            updated_goal.experiment_overrides = flags
+                .overrides_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            updated_goal.auto_cancel_after_draft = flags.auto_cancel_after_draft;
+        } else if let Ok(experiments) = ta_goal::ExperimentConfig::list(experiment_source_root) {
             let mut rng = rand::thread_rng();
             for exp_config in experiments {
                 match ta_goal::experiment::assign_arm(&exp_config, &mut rng) {
@@ -2707,21 +2818,51 @@ pub fn execute(
                     }
                     ta_goal::experiment::ArmAssignment::Paired {
                         canonical_arm,
-                        shadow_arm: _,
-                        pair_id: _,
+                        shadow_arm,
+                        pair_id,
                     } => {
-                        // Paired mode requires launching a second goal run from
-                        // the same source snapshot, which this single-goal
-                        // creation path cannot do alone. Deferred to Task 6
-                        // (poller_daemon / wake_listener launch integration),
-                        // which owns spawning both runs. For now, a paired roll
-                        // here degrades to an unpaired assignment on the
-                        // canonical arm rather than silently dropping the
-                        // experiment membership.
+                        // Spawn the shadow goal (Task 4b) under the shadow arm,
+                        // fire-and-forget, before tagging this (canonical) goal
+                        // with its own half of the pair. A failed spawn is
+                        // logged and swallowed: the canonical goal must never
+                        // fail or block because its shadow couldn't launch.
+                        match std::env::current_exe() {
+                            Ok(ta_bin) => {
+                                let shadow_spec = ExperimentSpawnSpec {
+                                    experiment_id: exp_config.id.clone(),
+                                    arm: shadow_arm.clone(),
+                                    pair_id,
+                                    overrides: exp_config
+                                        .arms
+                                        .get(&shadow_arm)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                };
+                                if let Err(e) = spawn_shadow_experiment_goal(
+                                    &ta_bin,
+                                    experiment_source_root,
+                                    title,
+                                    objective,
+                                    &shadow_spec,
+                                ) {
+                                    eprintln!(
+                                        "Warning: failed to spawn paired shadow \
+                                         experiment goal: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: could not resolve ta binary path to spawn \
+                                     paired shadow experiment goal: {e}"
+                                );
+                            }
+                        }
                         updated_goal.experiment_id = Some(exp_config.id.clone());
                         updated_goal.experiment_overrides =
                             exp_config.arms.get(&canonical_arm).cloned();
                         updated_goal.experiment_arm = Some(canonical_arm);
+                        updated_goal.experiment_pair_id = Some(pair_id);
                         break;
                     }
                 }
@@ -9464,6 +9605,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -9535,6 +9677,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -9547,6 +9690,70 @@ context_inject = "{mode_toml}"
         assert!(
             ["variant-on", "variant-off"].contains(&goals[0].experiment_arm.as_deref().unwrap())
         );
+    }
+
+    #[test]
+    fn explicit_shadow_flags_set_goal_fields_without_rolling_dice() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        // Deliberately no `.ta/experiments/*.toml` written: if the random-roll
+        // path ran instead of the explicit-flags bypass, `assign_arm` would
+        // have nothing to roll against and every experiment_* field would
+        // stay `None`, so a passing assertion below proves the bypass ran.
+        let config = GatewayConfig::for_project(project.path());
+
+        let pair_id = uuid::Uuid::new_v4();
+        let overrides = serde_json::json!({"feature.disabled": true});
+        let flags = ShadowExperimentFlags {
+            experiment_id: Some("cost-test-1".to_string()),
+            arm: Some("variant-off".to_string()),
+            pair_id: Some(pair_id),
+            overrides_json: Some(overrides.to_string()),
+            auto_cancel_after_draft: true,
+        };
+
+        execute(
+            &config,
+            Some("Shadow goal"),
+            "claude-code",
+            Some(project.path()),
+            "Shadow objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,  // no_launch
+            false, // interactive
+            false, // macro_goal
+            None,  // resume
+            true,  // headless (shadow goals always run headless)
+            false, // skip_verify = false
+            true,  // quiet
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            Some(&flags),
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].experiment_id.as_deref(), Some("cost-test-1"));
+        assert_eq!(goals[0].experiment_arm.as_deref(), Some("variant-off"));
+        assert_eq!(goals[0].experiment_pair_id, Some(pair_id));
+        assert_eq!(goals[0].experiment_overrides, Some(overrides));
+        assert!(goals[0].auto_cancel_after_draft);
     }
 
     #[test]
@@ -11545,6 +11752,7 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -11581,6 +11789,7 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -12551,5 +12760,43 @@ plan_pending_window = 7
             envs.get("TA_PREFIXED_CANARY_SHOULD_SURVIVE"),
             Some(&Some("kept".to_string()))
         );
+    }
+
+    // ── Paired cost-experiment shadow goal spawn (v0.17.x, Task 4b) ─────────
+
+    #[test]
+    fn spawn_shadow_experiment_goal_builds_correct_args() {
+        use uuid::Uuid;
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({"feature.disabled": true}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "Fix the null pointer in parser.rs",
+            &spec,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--experiment-shadow-id".to_string()));
+        assert!(args.contains(&"cost-test-1".to_string()));
+        assert!(args.contains(&"--experiment-shadow-arm".to_string()));
+        assert!(args.contains(&"variant-off".to_string()));
+        assert!(args.contains(&"--experiment-shadow-pair-id".to_string()));
+        assert!(args.contains(&spec.pair_id.to_string()));
+        assert!(args.contains(&"--experiment-shadow-overrides".to_string()));
+        assert!(args.contains(&spec.overrides.to_string()));
+        assert!(args.contains(&"--auto-cancel-after-draft".to_string()));
+        assert!(args.contains(&"--headless".to_string()));
+        assert!(args.contains(&"Fix the bug".to_string()));
+        assert!(args.contains(&"Fix the null pointer in parser.rs".to_string()));
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo")));
     }
 }

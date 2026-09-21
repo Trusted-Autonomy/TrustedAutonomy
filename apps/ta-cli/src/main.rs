@@ -420,6 +420,31 @@ enum Commands {
         /// is written and no other behavior changes.
         #[arg(long)]
         team_session_id: Option<String>,
+        /// Internal: set by a canonical goal's paired cost-experiment
+        /// shadow spawn (`spawn_shadow_experiment_goal`, v0.17.x). Not for
+        /// direct human use. Present together with `--experiment-shadow-arm`,
+        /// `--experiment-shadow-pair-id`, `--experiment-shadow-overrides`,
+        /// and `--auto-cancel-after-draft` on every shadow goal's own `ta
+        /// run` invocation, so the shadow gets the exact arm the canonical
+        /// goal's own roll paired it with instead of rolling its own.
+        #[arg(long, hide = true)]
+        experiment_shadow_id: Option<String>,
+        /// Internal: see `--experiment-shadow-id`.
+        #[arg(long, hide = true)]
+        experiment_shadow_arm: Option<String>,
+        /// Internal: see `--experiment-shadow-id`.
+        #[arg(long, hide = true)]
+        experiment_shadow_pair_id: Option<uuid::Uuid>,
+        /// Internal: see `--experiment-shadow-id`. Raw JSON text for the
+        /// shadow arm's config-override map.
+        #[arg(long, hide = true)]
+        experiment_shadow_overrides: Option<String>,
+        /// Internal: set by a paired cost-experiment shadow spawn. Closes
+        /// the goal's draft immediately after `ta draft build` instead of
+        /// leaving it at `pr_ready` for human review: a shadow run's only
+        /// purpose is recording its token cost, never applying.
+        #[arg(long, hide = true)]
+        auto_cancel_after_draft: bool,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1621,9 +1646,31 @@ fn dispatch_raw(
             priority,
             credential_scopes,
             team_session_id,
+            experiment_shadow_id,
+            experiment_shadow_arm,
+            experiment_shadow_pair_id,
+            experiment_shadow_overrides,
+            auto_cancel_after_draft,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
+
+            // Paired cost-experiment shadow-goal bypass flags (v0.17.x,
+            // internal/hidden): bundle the four `--experiment-shadow-*`
+            // flags plus `--auto-cancel-after-draft` into one struct so
+            // `commands::run::execute()` takes one extra parameter instead
+            // of five. `None` for every normal (non-shadow) invocation:
+            // `--experiment-shadow-id` absent is the signal.
+            let shadow_experiment: Option<commands::run::ShadowExperimentFlags> =
+                experiment_shadow_id
+                    .as_ref()
+                    .map(|id| commands::run::ShadowExperimentFlags {
+                        experiment_id: Some(id.clone()),
+                        arm: experiment_shadow_arm.clone(),
+                        pair_id: *experiment_shadow_pair_id,
+                        overrides_json: experiment_shadow_overrides.clone(),
+                        auto_cancel_after_draft: *auto_cancel_after_draft,
+                    });
 
             // Normalize `--credential-scopes` (v0.17.6.1): `Some(vec![])` (flag
             // given with no value, or clap's empty-string split) means "scope
@@ -1735,6 +1782,7 @@ fn dispatch_raw(
                 context.as_deref(),
                 credential_scopes.as_deref(),
                 team_session_id.as_deref(),
+                shadow_experiment.as_ref(),
             )
         }
         Commands::Events { command } => {

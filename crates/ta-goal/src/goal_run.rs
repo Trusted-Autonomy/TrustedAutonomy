@@ -411,6 +411,17 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub heartbeat_required: bool,
 
+    /// When `true`, `ta draft build` immediately closes this goal's draft
+    /// instead of leaving it at `PrReady` awaiting human review/apply.
+    ///
+    /// Set by a cost-experiment paired-shadow spawn (`ta run
+    /// --auto-cancel-after-draft`, internal flag): the shadow arm's only
+    /// purpose is to record its token cost for `ta experiment report`, it
+    /// is never meant to reach a human reviewer. `false` (default) for
+    /// every normal goal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_cancel_after_draft: bool,
+
     /// PR URL created by `ta draft apply` (v0.11.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
@@ -622,6 +633,7 @@ impl GoalRun {
             project_name: None,
             agent_pid: None,
             heartbeat_required: false,
+            auto_cancel_after_draft: false,
             pr_url: None,
             pr_package_id: None,
             progress_note: None,
@@ -1354,5 +1366,6 @@ mod tests {
         assert_eq!(goal.experiment_pair_id, None);
         assert_eq!(goal.experiment_overrides, None);
         assert_eq!(goal.workflow, None);
+        assert!(!goal.auto_cancel_after_draft);
     }
 }

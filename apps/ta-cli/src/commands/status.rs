@@ -745,6 +745,7 @@ mod tests {
             project_name: None,
             agent_pid: None,
             heartbeat_required: false,
+            auto_cancel_after_draft: false,
             pr_url: None,
             pr_package_id: None,
             progress_note: None,

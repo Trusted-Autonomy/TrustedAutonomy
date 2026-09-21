@@ -240,6 +240,7 @@ fn run_init(
         None,             // context_path = None
         None,             // credential_scopes = None (v0.17.6.1)
         None,             // team_session_id = None (v0.17.11.8)
+        None,             // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
     )?;
 
     println!();
@@ -1511,6 +1512,7 @@ fn create_constitution_amend_draft(
             .map(|s| s.to_string()),
         agent_pid: None,
         heartbeat_required: false,
+        auto_cancel_after_draft: false,
         pr_url: None,
         pr_package_id: None,
         progress_note: None,
@@ -2292,6 +2294,7 @@ fn create_review_draft(
             .map(|s| s.to_string()),
         agent_pid: None,
         heartbeat_required: false,
+        auto_cancel_after_draft: false,
         pr_url: None,
         pr_package_id: None,
         progress_note: None,
