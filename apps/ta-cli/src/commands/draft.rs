@@ -2928,8 +2928,105 @@ pub(crate) fn build_package(
         println!("    {:?}  {}", artifact.change_type, artifact.resource_uri);
     }
     println!();
-    println!("Review with:  ta draft view {}", draft_display);
-    println!("Approve with: ta draft approve {}", draft_display);
+
+    // v0.17.x (Task 4b): a paired cost-experiment shadow goal's draft is
+    // never meant to reach a human reviewer, so close it out immediately
+    // instead of printing the normal review/approve prompts.
+    if goal.auto_cancel_after_draft {
+        auto_cancel_shadow_experiment_goal(config, &goal_store, &mut goal, &mut pkg)?;
+    } else {
+        println!("Review with:  ta draft view {}", draft_display);
+        println!("Approve with: ta draft approve {}", draft_display);
+    }
+
+    Ok(())
+}
+
+/// Immediately close out a goal that was spawned as a paired cost-experiment
+/// shadow run (`GoalRun.auto_cancel_after_draft`, Task 4b). A shadow arm's
+/// only purpose is recording its token cost for later `ta experiment
+/// report` comparison, so it must never sit at `PrReady` waiting for a human
+/// review/apply that will never come.
+///
+/// Mirrors `close_package`'s terminal-state effects (draft status, goal
+/// state, plan-phase reset) plus a `VelocityEntry`, the same shape
+/// `deny_package` records for a normal denial, so the shadow's real token
+/// cost is captured exactly like any other terminal goal instead of being
+/// silently dropped just because no human ever reviewed it.
+fn auto_cancel_shadow_experiment_goal(
+    config: &GatewayConfig,
+    goal_store: &GoalRunStore,
+    goal: &mut GoalRun,
+    pkg: &mut DraftPackage,
+) -> anyhow::Result<()> {
+    const REASON: &str = "paired cost-experiment shadow run, not eligible for review or apply";
+
+    pkg.status = DraftStatus::Closed {
+        closed_at: Utc::now(),
+        reason: Some(REASON.to_string()),
+        closed_by: "auto-cancel (cost-experiment shadow)".to_string(),
+        applied_externally_ref: None,
+    };
+    save_package(config, pkg)?;
+
+    let closed_goal = goal_store.transition(
+        goal.goal_run_id,
+        GoalRunState::Closed {
+            reason: Some(REASON.to_string()),
+            applied_externally_ref: None,
+        },
+    )?;
+    *goal = closed_goal;
+
+    {
+        use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
+        let vs = VelocityStore::for_project(&config.workspace_root);
+        let entry =
+            VelocityEntry::from_goal(goal, GoalOutcome::Cancelled).with_cancel_reason(REASON);
+        if let Err(e) = vs.append(&entry) {
+            tracing::warn!(
+                "Failed to record velocity entry for auto-cancelled shadow goal: {}",
+                e
+            );
+        }
+    }
+
+    write_goal_audit_entry(
+        config,
+        pkg,
+        Some(goal),
+        ta_audit::AuditDisposition::Cancelled,
+        None,
+        None,
+        Some(REASON),
+    );
+
+    // Same phase-reset-on-abandon logic `deny_package`/`close_package` apply:
+    // the shadow was doing work on a phase, and its auto-cancel means it's
+    // no longer in progress.
+    if let Some(ref phase_id) = goal.plan_phase {
+        let note = "phase reset to pending (auto-cancelled shadow goal)";
+        match super::plan::reset_phase_if_in_progress(&config.workspace_root, phase_id, note) {
+            Ok(true) => {
+                println!(
+                    "Plan: phase {} reset to pending (auto-cancelled shadow goal)",
+                    phase_id
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    phase = %phase_id,
+                    error = %e,
+                    "Failed to reset plan phase on shadow goal auto-cancel"
+                );
+            }
+        }
+        release_phase_claim_via_daemon(&config.workspace_root, phase_id);
+    }
+
+    println!("Auto-cancelled: {}", REASON);
+    println!("  (paired cost-experiment shadow goal, no review/apply needed)");
 
     Ok(())
 }
@@ -3211,6 +3308,13 @@ fn build_memory_only_draft(
         entry_count
     );
     println!();
+
+    // v0.17.x (Task 4b): see `build_package`'s identical check. A paired
+    // cost-experiment shadow goal is never meant to reach a human reviewer.
+    if goal.auto_cancel_after_draft {
+        auto_cancel_shadow_experiment_goal(config, &goal_store, &mut goal, &mut pkg)?;
+        return Ok(());
+    }
     println!("Review with:  ta draft view {}", draft_display);
     println!("Approve with: ta draft approve {}", draft_display);
     println!(
@@ -12950,6 +13054,81 @@ fn run() {
         let updated_goal = goal_store.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(updated_goal.state, GoalRunState::PrReady);
         assert!(updated_goal.pr_package_id.is_some());
+    }
+
+    /// v0.17.x (Task 4b): a goal spawned as a paired cost-experiment shadow
+    /// run (`auto_cancel_after_draft: true`) must never be left stranded at
+    /// `PrReady` waiting for a human review/apply that will never come.
+    /// `ta draft build` closes it out immediately, and its token cost is
+    /// still captured via a `VelocityEntry` exactly like any other terminal
+    /// goal.
+    #[test]
+    fn build_package_auto_cancels_shadow_experiment_goal() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Shadow arm goal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Cost-experiment shadow run".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let mut goal = goals[0].clone();
+        goal.auto_cancel_after_draft = true;
+        goal_store.save(&goal).unwrap();
+
+        // Make a staging change so the draft build has something to diff.
+        std::fs::write(
+            goal.workspace_path.join("README.md"),
+            "# Modified (shadow arm)\n",
+        )
+        .unwrap();
+
+        build_package(
+            &config,
+            &goal.goal_run_id.to_string(),
+            "Shadow arm changes",
+            false,
+        )
+        .unwrap();
+
+        // The goal must be terminal (Closed), never left at PrReady.
+        let updated_goal = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert!(
+            matches!(updated_goal.state, GoalRunState::Closed { .. }),
+            "expected Closed, got {:?}",
+            updated_goal.state
+        );
+
+        // The draft package itself must also reflect the closed disposition.
+        let packages = load_all_packages(&config).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert!(
+            matches!(packages[0].status, DraftStatus::Closed { .. }),
+            "expected draft status Closed, got {:?}",
+            packages[0].status
+        );
+
+        // The shadow's token cost must still be captured, with a Cancelled
+        // outcome (not silently dropped just because no human ever reviewed it).
+        let vs = ta_goal::VelocityStore::for_project(&config.workspace_root);
+        let entries = vs
+            .load_by_outcome(&ta_goal::GoalOutcome::Cancelled)
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].goal_id, goal.goal_run_id);
     }
 
     /// v0.17.6.3.1: A goal that reaches `pr_ready`, gets a staging edit (simulating a
