@@ -41,13 +41,21 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 pub struct WakeListenerConfig {
     pub role: String,
     pub keys: Vec<String>,
+    /// Opaque classification tag applied to every goal this listener
+    /// launches (via `ta run --workflow-tag <tag>`), e.g.
+    /// "brain-maintenance". `None` for a listener whose launches shouldn't
+    /// be classified. Fully opaque to TA core -- downstream products define
+    /// what tags mean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_tag: Option<String>,
 }
 
 impl WakeListenerConfig {
-    pub fn new(role: impl Into<String>, keys: Vec<String>) -> Self {
+    pub fn new(role: impl Into<String>, keys: Vec<String>, workflow_tag: Option<String>) -> Self {
         Self {
             role: role.into(),
             keys,
+            workflow_tag,
         }
     }
 }
@@ -152,10 +160,11 @@ async fn run_listener_loop(
             let role = listener.role.clone();
             let bin = ta_bin.clone();
             let payload = envelope.payload.clone();
+            let workflow_tag = listener.workflow_tag.clone();
 
             let launch_result = tokio::select! {
                 r = tokio::task::spawn_blocking(move || {
-                    launch_wake_on_demand(&pr, &sid, &role, &bin, &payload)
+                    launch_wake_on_demand(&pr, &sid, &role, &bin, &payload, workflow_tag.as_deref())
                 }) => r,
                 _ = shutdown.notified() => return,
             };
@@ -211,6 +220,7 @@ fn launch_wake_on_demand(
     role: &str,
     ta_bin: &Path,
     payload: &[u8],
+    workflow_tag: Option<&str>,
 ) -> std::io::Result<()> {
     let mut state = match TeamSessionState::load(project_root, session_id)? {
         Some(s) => s,
@@ -227,7 +237,14 @@ fn launch_wake_on_demand(
 
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
     let label = "wake-on-demand".to_string();
-    let args = build_ta_run_args(&state, &label, role, &team_config, &context_path);
+    let args = build_ta_run_args(
+        &state,
+        &label,
+        role,
+        &team_config,
+        &context_path,
+        workflow_tag,
+    );
 
     let output = std::process::Command::new(ta_bin)
         .args(&args)
@@ -310,6 +327,7 @@ mod tests {
             .with_wake_on_demand_listeners(vec![WakeListenerConfig::new(
                 "chief-of-staff",
                 vec!["external-intake".to_string()],
+                None,
             )]);
         state.save(tmp.path()).unwrap();
 
@@ -321,6 +339,27 @@ mod tests {
         assert_eq!(
             loaded.wake_on_demand_listeners[0].keys,
             vec!["external-intake".to_string()]
+        );
+        assert_eq!(loaded.wake_on_demand_listeners[0].workflow_tag, None);
+    }
+
+    #[test]
+    fn wake_listener_config_with_workflow_tag_round_trips_through_team_session_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new())
+            .with_wake_on_demand_listeners(vec![WakeListenerConfig::new(
+                "specialist",
+                vec!["some-key".to_string()],
+                Some("brain-maintenance".to_string()),
+            )]);
+        state.save(tmp.path()).unwrap();
+
+        let loaded = TeamSessionState::load(tmp.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.wake_on_demand_listeners[0].workflow_tag.as_deref(),
+            Some("brain-maintenance")
         );
     }
 
@@ -396,6 +435,7 @@ mod tests {
             "chief-of-staff",
             Path::new("ta"),
             b"content",
+            None,
         )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
