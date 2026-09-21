@@ -1804,6 +1804,11 @@ fn should_spawn_shadow(no_launch: bool) -> bool {
 /// entirely: a fatal confound for a paired-sampling comparison whose
 /// entire point is holding task and model fixed while only the arm's
 /// config overrides vary.
+///
+/// Also forwards the canonical goal's resolved `workflow_tag` (when set), so
+/// the canonical and shadow halves of a paired-sampling pair land in the
+/// same cost-report bucket (`VelocityEntry.workflow`) instead of the shadow
+/// silently landing untagged and undermining the arm comparison.
 #[allow(clippy::too_many_arguments)]
 fn build_shadow_experiment_command(
     ta_bin: &Path,
@@ -1814,6 +1819,7 @@ fn build_shadow_experiment_command(
     objective_file: Option<&Path>,
     spec: &ExperimentSpawnSpec,
     credential_scopes: &[String],
+    workflow_tag: Option<&str>,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(ta_bin);
     cmd.arg("run")
@@ -1825,6 +1831,9 @@ fn build_shadow_experiment_command(
         cmd.arg("--objective-file").arg(obj_file);
     } else {
         cmd.arg("--objective").arg(objective);
+    }
+    if let Some(tag) = workflow_tag {
+        cmd.arg("--workflow-tag").arg(tag);
     }
     cmd.arg("--experiment-shadow-id")
         .arg(&spec.experiment_id)
@@ -1903,6 +1912,7 @@ fn spawn_shadow_experiment_goal(
     objective_file: Option<&Path>,
     spec: &ExperimentSpawnSpec,
     credential_scopes: &[String],
+    workflow_tag: Option<&str>,
 ) -> std::io::Result<std::process::Child> {
     build_shadow_experiment_command(
         ta_bin,
@@ -1913,6 +1923,7 @@ fn spawn_shadow_experiment_goal(
         objective_file,
         spec,
         credential_scopes,
+        workflow_tag,
     )
     .spawn()
 }
@@ -2892,11 +2903,16 @@ pub fn execute(
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
 
         // Generic cost-classification tag (v0.17.x cost-experiment
-        // framework): `--workflow-tag`, opaque to TA core. Set unconditionally
-        // from the CLI flag, independent of the cost-experiment arm-assignment
-        // logic below -- a goal can be tagged without being part of any
-        // experiment, and vice versa.
-        updated_goal.workflow = workflow_tag.map(|s| s.to_string());
+        // framework): `--workflow-tag`, opaque to TA core. Set only when the
+        // flag is actually present -- this block also runs on the
+        // `--goal-id` reuse path, and an omitted flag there must leave any
+        // existing tag on the goal alone rather than silently clearing it.
+        // Independent of the cost-experiment arm-assignment logic below -- a
+        // goal can be tagged without being part of any experiment, and vice
+        // versa.
+        if let Some(tag) = workflow_tag {
+            updated_goal.workflow = Some(tag.to_string());
+        }
 
         // Cost-experiment arm assignment: check every defined experiment, apply
         // the first one whose roll selects this goal. Multiple simultaneously
@@ -2979,6 +2995,9 @@ pub fn execute(
                                     // `goal.rs`'s own file-overrides-string
                                     // precedence) so the shadow runs the identical
                                     // task on the identical model (Important #4).
+                                    // Also forward the canonical goal's resolved
+                                    // workflow tag so both halves of the pair
+                                    // land in the same cost-report bucket.
                                     if let Err(e) = spawn_shadow_experiment_goal(
                                         &ta_bin,
                                         experiment_source_root,
@@ -2988,6 +3007,7 @@ pub fn execute(
                                         objective_file,
                                         &shadow_spec,
                                         credential_scopes.unwrap_or(&[]),
+                                        updated_goal.workflow.as_deref(),
                                     ) {
                                         eprintln!(
                                             "Warning: failed to spawn paired shadow \
@@ -13126,6 +13146,7 @@ plan_pending_window = 7
             None,
             &spec,
             &[],
+            None, // workflow_tag = None (covered separately below)
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -13185,6 +13206,7 @@ plan_pending_window = 7
             None,
             &spec,
             &[],
+            None, // workflow_tag = None (covered separately below)
         );
 
         let envs: HashMap<String, Option<String>> = cmd
@@ -13231,6 +13253,7 @@ plan_pending_window = 7
             Some(Path::new("/repo/OBJECTIVE.md")),
             &spec,
             &[],
+            None, // workflow_tag = None (covered separately below)
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -13240,5 +13263,72 @@ plan_pending_window = 7
         assert!(args.contains(&"/repo/OBJECTIVE.md".to_string()));
         assert!(!args.contains(&"--objective".to_string()));
         assert!(!args.contains(&"this string must not be used".to_string()));
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_forwards_workflow_tag_when_canonical_goal_has_one() {
+        use uuid::Uuid;
+
+        // Important #2: the canonical and shadow halves of a paired-sampling
+        // pair must land in the same cost-report bucket
+        // (`VelocityEntry.workflow`), or the arm comparison the whole
+        // paired-sampling feature exists for is undermined.
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            Some("brain-maintenance"),
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--workflow-tag")
+            .expect("--workflow-tag must be present when the canonical goal has a workflow tag");
+        assert_eq!(args[flag_pos + 1], "brain-maintenance");
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_omits_workflow_tag_flag_when_canonical_goal_has_none() {
+        use uuid::Uuid;
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            None,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !args.contains(&"--workflow-tag".to_string()),
+            "--workflow-tag must be omitted when the canonical goal has no workflow tag"
+        );
     }
 }
