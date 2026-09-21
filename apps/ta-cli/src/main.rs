@@ -939,6 +939,19 @@ enum Commands {
         command: commands::stats::StatsCommands,
     },
 
+    /// Generic cost experiments: assign goals to named config-override arms
+    /// and report delta cost/savings from velocity history.
+    ///
+    /// `ta experiment start <id> --holdout-fraction <f> --arm name=<json> --arm name=<json>`
+    ///   defines and activates an experiment.
+    /// `ta experiment stop <id>` deactivates it.
+    /// `ta experiment report <id>` prints per-arm cost stats and net savings.
+    #[command(hide = true)]
+    Experiment {
+        #[command(subcommand)]
+        command: commands::experiment::ExperimentCommands,
+    },
+
     /// Effort and KPI analytics via Meridian (v0.17.0.12).
     ///
     /// Delegates to the `meridian` binary on PATH. TA emits token counts and
@@ -1926,6 +1939,7 @@ fn dispatch_raw(
             commands::workflow::execute(command, config)
         }
         Commands::Stats { command } => commands::stats::execute(command, config),
+        Commands::Experiment { command } => commands::experiment::execute(command, config),
         Commands::Community { command } => {
             if warn_legacy {
                 print_deprecation_notice("community", command);

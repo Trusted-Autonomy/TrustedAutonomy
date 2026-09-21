@@ -20,6 +20,7 @@ pub mod doctor;
 pub mod draft;
 pub mod email_manager;
 pub mod events;
+pub mod experiment;
 pub mod follow_up;
 pub mod gc;
 pub mod goal;
