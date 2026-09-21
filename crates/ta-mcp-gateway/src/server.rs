@@ -1759,6 +1759,16 @@ mod tests {
     use ta_changeset::PRStatus;
     use tempfile::tempdir;
 
+    /// Guards every test that sets/removes the process-global `TA_AGENT_ID`
+    /// env var. Rust's test runner executes tests in parallel threads within
+    /// one process by default, so without this lock one test's
+    /// `remove_var` can land between another's `set_var` and its use,
+    /// producing flaky failures. Mirrors the same pattern used elsewhere in
+    /// this codebase for env-var test isolation (e.g.
+    /// `apps/ta-cli/src/commands/credential_helper.rs`,
+    /// `crates/ta-credential-broker/src/shim.rs`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_server() -> (TaGatewayServer, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let config = GatewayConfig::for_project(dir.path());
@@ -2228,6 +2238,7 @@ mod tests {
     /// tests that touch the same env var produce flaky results.
     #[test]
     fn resolve_agent_id_priority_order() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let (server, _dir) = test_server();
 
         // 1. Env var takes priority.
@@ -2276,6 +2287,7 @@ mod tests {
 
     #[test]
     fn resolve_current_goal_run_id_uses_active_agents_map() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let (server, _dir) = test_server();
         let goal_run_id = Uuid::new_v4();
         {
@@ -2294,6 +2306,7 @@ mod tests {
 
     #[test]
     fn resolve_current_goal_run_id_is_none_when_no_agent_matches() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let (server, _dir) = test_server();
         std::env::remove_var("TA_AGENT_ID");
         let state = server.state.lock().unwrap();
@@ -2302,6 +2315,7 @@ mod tests {
 
     #[test]
     fn ta_wiki_search_returns_disabled_stub_when_wiki_disabled_override_is_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let (server, _dir) = test_server();
         {
             let mut state = server.state.lock().unwrap();
