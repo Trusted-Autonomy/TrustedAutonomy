@@ -852,6 +852,26 @@ impl GatewayState {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    /// Resolve the current goal run via `TA_AGENT_ID` and `active_agents`,
+    /// the same generic resolution `resolve_agent_id` already provides one
+    /// step of. Returns `None` when there's no matching active agent
+    /// session (a dev/manual call, or a caller mode with no goal context).
+    pub fn resolve_current_goal_run_id(&self) -> Option<Uuid> {
+        let agent_id = self.resolve_agent_id();
+        self.active_agents.get(&agent_id)?.goal_run_id
+    }
+
+    /// Look up the current goal's resolved experiment-override value for
+    /// `key`, if any. Generic: this method (and every caller of it) never
+    /// hardcodes what a key means, only that some tool handler decided to
+    /// check one.
+    pub fn experiment_override(&self, key: &str) -> Option<serde_json::Value> {
+        let goal_run_id = self.resolve_current_goal_run_id()?;
+        let goal = self.goal_store.get(goal_run_id).ok()??;
+        let overrides = goal.experiment_overrides?;
+        overrides.get(key).cloned()
+    }
+
     /// Record a per-tool-call audit entry with caller_mode and agent_id (v0.10.15).
     ///
     /// Called from each tool handler to produce a fine-grained audit trail.
@@ -1259,6 +1279,17 @@ impl TaGatewayServer {
         Parameters(params): Parameters<tools::wiki::WikiSearchParams>,
     ) -> Result<CallToolResult, McpError> {
         self.audit("ta_wiki_search", None, None);
+        if let Ok(state) = self.state.lock() {
+            if state
+                .experiment_override("wiki.disabled")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    r#"{"disabled": true, "reason": "wiki access disabled for this cost experiment"}"#,
+                )]));
+            }
+        }
         tools::wiki::handle_wiki_search(&self.state, params)
     }
 
@@ -1270,6 +1301,17 @@ impl TaGatewayServer {
         Parameters(params): Parameters<tools::wiki::WikiGetParams>,
     ) -> Result<CallToolResult, McpError> {
         self.audit("ta_wiki_get", None, None);
+        if let Ok(state) = self.state.lock() {
+            if state
+                .experiment_override("wiki.disabled")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    r#"{"disabled": true, "reason": "wiki access disabled for this cost experiment"}"#,
+                )]));
+            }
+        }
         tools::wiki::handle_wiki_get(&self.state, params)
     }
 
@@ -1281,6 +1323,17 @@ impl TaGatewayServer {
         Parameters(params): Parameters<tools::wiki::WikiTypesParams>,
     ) -> Result<CallToolResult, McpError> {
         self.audit("ta_wiki_types", None, None);
+        if let Ok(state) = self.state.lock() {
+            if state
+                .experiment_override("wiki.disabled")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    r#"{"disabled": true, "reason": "wiki access disabled for this cost experiment"}"#,
+                )]));
+            }
+        }
         tools::wiki::handle_wiki_types(&self.state, params)
     }
 
@@ -1292,6 +1345,17 @@ impl TaGatewayServer {
         Parameters(params): Parameters<tools::wiki::WikiCreateParams>,
     ) -> Result<CallToolResult, McpError> {
         self.audit("ta_wiki_create", None, None);
+        if let Ok(state) = self.state.lock() {
+            if state
+                .experiment_override("wiki.disabled")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    r#"{"disabled": true, "reason": "wiki access disabled for this cost experiment"}"#,
+                )]));
+            }
+        }
         tools::wiki::handle_wiki_create(&self.state, params)
     }
 
@@ -1303,6 +1367,17 @@ impl TaGatewayServer {
         Parameters(params): Parameters<tools::wiki::WikiUpdateParams>,
     ) -> Result<CallToolResult, McpError> {
         self.audit("ta_wiki_update", None, None);
+        if let Ok(state) = self.state.lock() {
+            if state
+                .experiment_override("wiki.disabled")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    r#"{"disabled": true, "reason": "wiki access disabled for this cost experiment"}"#,
+                )]));
+            }
+        }
         tools::wiki::handle_wiki_update(&self.state, params)
     }
 
@@ -2195,5 +2270,69 @@ mod tests {
         assert_eq!(last.caller_mode.as_deref(), Some("normal"));
         assert_eq!(last.goal_run_id, Some(goal_id));
         assert_eq!(last.target_uri.as_deref(), Some("fs://workspace/foo.rs"));
+    }
+
+    // v0.17.x: generic cost-experiment marker consultation.
+
+    #[test]
+    fn resolve_current_goal_run_id_uses_active_agents_map() {
+        let (server, _dir) = test_server();
+        let goal_run_id = Uuid::new_v4();
+        {
+            let mut state = server.state.lock().unwrap();
+            state.touch_agent_session("agent-1", "claude", Some(goal_run_id));
+        }
+        std::env::set_var("TA_AGENT_ID", "agent-1");
+
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.resolve_current_goal_run_id(), Some(goal_run_id));
+        }
+
+        std::env::remove_var("TA_AGENT_ID");
+    }
+
+    #[test]
+    fn resolve_current_goal_run_id_is_none_when_no_agent_matches() {
+        let (server, _dir) = test_server();
+        std::env::remove_var("TA_AGENT_ID");
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.resolve_current_goal_run_id(), None);
+    }
+
+    #[test]
+    fn ta_wiki_search_returns_disabled_stub_when_wiki_disabled_override_is_set() {
+        let (server, _dir) = test_server();
+        {
+            let mut state = server.state.lock().unwrap();
+            let mut goal = GoalRun::new(
+                "t",
+                "o",
+                "agent-1",
+                std::path::PathBuf::from("/tmp/ws"),
+                std::path::PathBuf::from("/tmp/store"),
+            );
+            goal.experiment_overrides = Some(serde_json::json!({"wiki.disabled": true}));
+            let goal_run_id = goal.goal_run_id;
+            state.goal_store.save(&goal).unwrap();
+            state.touch_agent_session("agent-1", "claude", Some(goal_run_id));
+        }
+        std::env::set_var("TA_AGENT_ID", "agent-1");
+
+        let result = server
+            .ta_wiki_search(Parameters(tools::wiki::WikiSearchParams {
+                scope: "project".to_string(),
+                id: "proj-1".to_string(),
+                query: "anything".to_string(),
+            }))
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.clone();
+        assert!(
+            text.contains("disabled"),
+            "expected disabled stub, got: {text}"
+        );
+
+        std::env::remove_var("TA_AGENT_ID");
     }
 }
