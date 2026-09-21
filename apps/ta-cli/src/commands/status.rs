@@ -756,6 +756,11 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             agent_model: String::new(),
+            experiment_id: None,
+            experiment_arm: None,
+            experiment_pair_id: None,
+            experiment_overrides: None,
+            workflow: None,
         };
         // Should match: this is a system reviewer goal.
         assert!(is_terminal_reviewer_goal(&make_goal(
