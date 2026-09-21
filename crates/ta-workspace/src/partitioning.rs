@@ -23,6 +23,7 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "project-memory/", // VCS-committed shared knowledge (was incorrectly "memory/")
     "wiki-resources.toml", // declares the Wayfinder org/project scopes ta_wiki_* tools sync (v0.17.11.15): team policy, VCS-committed like connectors.toml
     "wiki-ingestion.toml", // declares the VCS-connector's brain-worthy path patterns (ta-virtual-team sub-project 2): team policy, VCS-committed like wiki-resources.toml
+    "experiments/", // cost-experiment definitions (ta_goal::ExperimentConfig): team policy defining an active experiment, VCS-committed so every machine assigns arms against the same config
     "personas/",
     "templates/",
     "plan_history.jsonl",   // append-only audit trail of plan phase completions
