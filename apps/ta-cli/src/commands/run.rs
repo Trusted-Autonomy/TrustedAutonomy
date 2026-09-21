@@ -1770,6 +1770,24 @@ pub struct ShadowExperimentFlags {
     pub auto_cancel_after_draft: bool,
 }
 
+/// Whether a `Paired` roll's shadow goal should actually be launched.
+/// `ta run --no-launch` means "create the goal, don't launch an agent": a
+/// Paired roll's shadow session is a full agent launch too, so that
+/// prohibition must extend to it, or `--no-launch` would silently burn real
+/// tokens against the user's explicit instruction not to launch anything.
+///
+/// Pulled out as a pure, directly unit-testable predicate rather than
+/// relying solely on an end-to-end `execute()` test asserting on the goal
+/// store afterward: a removed/inverted gate at the call site would not
+/// reliably leave an observable trace there (the spawned subprocess is
+/// fire-and-forget, and in a test environment `ta_bin` resolves to the test
+/// binary itself, which fails for reasons unrelated to the gate, so an
+/// end-to-end assertion of "no second goal appeared" can pass by accident
+/// even with the gate deleted). This predicate is instead asserted directly.
+fn should_spawn_shadow(no_launch: bool) -> bool {
+    !no_launch
+}
+
 /// Build (but do not spawn) the `ta run` command for a paired-sampling
 /// shadow goal. Pure and side-effect-free, mirroring
 /// `build_swarm_sub_goal_command`'s own testability pattern: the resulting
@@ -1795,6 +1813,7 @@ fn build_shadow_experiment_command(
     objective: &str,
     objective_file: Option<&Path>,
     spec: &ExperimentSpawnSpec,
+    credential_scopes: &[String],
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(ta_bin);
     cmd.arg("run")
@@ -1833,6 +1852,41 @@ fn build_shadow_experiment_command(
         cmd.process_group(0);
     }
 
+    // Credential scoping (v0.17.6.1 pattern, mirrored from
+    // `build_swarm_sub_goal_command`): the shadow is a fully independent
+    // agent session running unattended and concurrently with the canonical
+    // goal, so it must not silently inherit the parent process's full
+    // environment (including any ambient long-lived secrets). Mint/attenuate
+    // only credentials within `credential_scopes`, clear the child's
+    // environment, and populate it with just the scoped baseline + secrets,
+    // plus an explicit `--credential-scopes` flag so the shadow's own `ta
+    // run` enforces the same scope for anything *it* spawns.
+    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let available = load_vault_credentials(
+        workspace_root,
+        &format!("cost-experiment-shadow:{title}"),
+        credential_scopes,
+        CREDENTIAL_TOKEN_TTL_SECS,
+        true,
+        &current_env,
+    );
+    let shadow_env = scoped_credential_env(&current_env, &available, credential_scopes);
+
+    cmd.env_clear();
+    for (k, v) in &shadow_env {
+        cmd.env(k, v);
+    }
+
+    // Always present, even when empty: an explicit "enforcement on, zero
+    // scopes" declaration, distinct from the flag being absent entirely
+    // (which would mean legacy full inheritance).
+    cmd.arg("--credential-scopes")
+        .arg(if credential_scopes.is_empty() {
+            String::new()
+        } else {
+            credential_scopes.join(",")
+        });
+
     cmd
 }
 
@@ -1848,6 +1902,7 @@ fn spawn_shadow_experiment_goal(
     objective: &str,
     objective_file: Option<&Path>,
     spec: &ExperimentSpawnSpec,
+    credential_scopes: &[String],
 ) -> std::io::Result<std::process::Child> {
     build_shadow_experiment_command(
         ta_bin,
@@ -1857,6 +1912,7 @@ fn spawn_shadow_experiment_goal(
         objective,
         objective_file,
         spec,
+        credential_scopes,
     )
     .spawn()
 }
@@ -2884,12 +2940,13 @@ pub fn execute(
                         // logged and swallowed: the canonical goal must never
                         // fail or block because its shadow couldn't launch.
                         //
-                        // Gated on `!no_launch`: `ta run --no-launch` means
-                        // "create the goal, don't launch an agent", so a
-                        // Paired roll must not launch a full shadow agent
-                        // session either under that flag, or it burns real
-                        // tokens against the user's explicit instruction not to.
-                        if no_launch {
+                        // Gated on `should_spawn_shadow(no_launch)`: `ta run
+                        // --no-launch` means "create the goal, don't launch
+                        // an agent", so a Paired roll must not launch a full
+                        // shadow agent session either under that flag, or it
+                        // burns real tokens against the user's explicit
+                        // instruction not to.
+                        if !should_spawn_shadow(no_launch) {
                             eprintln!(
                                 "Note: --no-launch set, skipping paired shadow \
                                  experiment goal spawn."
@@ -2922,6 +2979,7 @@ pub fn execute(
                                         objective,
                                         objective_file,
                                         &shadow_spec,
+                                        credential_scopes.unwrap_or(&[]),
                                     ) {
                                         eprintln!(
                                             "Warning: failed to spawn paired shadow \
@@ -12927,6 +12985,16 @@ plan_pending_window = 7
     // ── Paired cost-experiment shadow goal spawn (v0.17.x, Task 4b) ─────────
 
     #[test]
+    fn should_spawn_shadow_is_false_exactly_when_no_launch_is_set() {
+        // Direct, unambiguous regression guard for the `--no-launch` gate:
+        // unlike an end-to-end `execute()` assertion, this fails immediately
+        // and specifically if the predicate's logic is ever inverted or
+        // hardcoded, with no dependence on subprocess/goal-store side effects.
+        assert!(!should_spawn_shadow(true));
+        assert!(should_spawn_shadow(false));
+    }
+
+    #[test]
     fn spawn_shadow_experiment_goal_builds_correct_args() {
         use uuid::Uuid;
 
@@ -12944,6 +13012,7 @@ plan_pending_window = 7
             "Fix the null pointer in parser.rs",
             None,
             &spec,
+            &[],
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -12969,6 +13038,60 @@ plan_pending_window = 7
         assert!(args.contains(&"Fix the null pointer in parser.rs".to_string()));
         assert!(!args.contains(&"--objective-file".to_string()));
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo")));
+        // Credential scoping (review fix): the flag is always present, even
+        // when empty: "enforcement on, zero scopes", never legacy full
+        // inheritance.
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--credential-scopes")
+            .unwrap();
+        assert_eq!(args[flag_pos + 1], "");
+    }
+
+    #[test]
+    fn shadow_experiment_command_env_does_not_contain_full_parent_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mirrors `swarm_sub_goal_command_env_does_not_contain_full_parent_environment`:
+        // a shadow session runs unattended and must not silently inherit the
+        // parent process's full environment.
+        std::env::set_var("SHADOW_LEAK_CANARY_XYZ", "leaked");
+        std::env::set_var("TA_PREFIXED_SHADOW_CANARY_SHOULD_SURVIVE", "kept");
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: uuid::Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            dir.path(),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+        );
+
+        let envs: HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+
+        std::env::remove_var("SHADOW_LEAK_CANARY_XYZ");
+        std::env::remove_var("TA_PREFIXED_SHADOW_CANARY_SHOULD_SURVIVE");
+
+        assert!(!envs.contains_key("SHADOW_LEAK_CANARY_XYZ"));
+        assert_eq!(
+            envs.get("TA_PREFIXED_SHADOW_CANARY_SHOULD_SURVIVE"),
+            Some(&Some("kept".to_string()))
+        );
     }
 
     #[test]
@@ -12994,6 +13117,7 @@ plan_pending_window = 7
             "this string must not be used",
             Some(Path::new("/repo/OBJECTIVE.md")),
             &spec,
+            &[],
         );
         let args: Vec<String> = cmd
             .get_args()
