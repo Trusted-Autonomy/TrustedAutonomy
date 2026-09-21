@@ -42,6 +42,8 @@ struct TeamSessionStageConfig {
 struct WakeOnDemandListenerConfig {
     role: String,
     keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +161,14 @@ pub enum TeamSessionCommands {
         /// else in `ta_whiteboard_*`.
         #[arg(long = "wake-on-demand")]
         wake_on_demand: Vec<String>,
+        /// Classify every goal a --wake-on-demand role launches with this
+        /// generic cost-classification tag (e.g. "brain-maintenance"),
+        /// opaque to TA core. Form: <role>=<tag>. Repeatable. A separate
+        /// flag from `--wake-on-demand` itself so its existing
+        /// `<role>:<key1>,<key2>` format never has to accommodate a third
+        /// field.
+        #[arg(long = "wake-on-demand-workflow")]
+        wake_on_demand_workflow: Vec<String>,
     },
     /// Pause a running session — the supervisor stops firing new goal-runs
     /// until `ta team-session resume <name>`.
@@ -182,6 +192,7 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
             team_toml,
             objective,
             wake_on_demand,
+            wake_on_demand_workflow,
         } => start(
             project_root,
             name,
@@ -189,6 +200,7 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
             team_toml.as_deref(),
             objective,
             wake_on_demand,
+            wake_on_demand_workflow,
         ),
         TeamSessionCommands::Pause { name } => {
             write_signal(project_root, name, "pause-signal").context("writing pause-signal")?;
@@ -216,6 +228,7 @@ fn start(
     team_toml: Option<&str>,
     objective: &str,
     wake_on_demand: &[String],
+    wake_on_demand_workflow: &[String],
 ) -> Result<()> {
     if state_path(project_root, name).exists() {
         bail!(
@@ -226,7 +239,7 @@ fn start(
 
     // Each entry is "<role>:<key1>,<key2>,...". Parsed up front so a
     // malformed flag fails fast, before any workflow/state.json work.
-    let wake_on_demand_listeners: Vec<WakeOnDemandListenerConfig> = wake_on_demand
+    let mut wake_on_demand_listeners: Vec<WakeOnDemandListenerConfig> = wake_on_demand
         .iter()
         .map(|entry| {
             let (role, keys) = entry.split_once(':').with_context(|| {
@@ -245,9 +258,39 @@ fn start(
             Ok(WakeOnDemandListenerConfig {
                 role: role.trim().to_string(),
                 keys,
+                workflow_tag: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
+
+    // Each entry is "<role>=<tag>", referencing a role already registered
+    // via --wake-on-demand above. Parsed after that list exists so a
+    // reference to an unregistered role fails fast too, before any
+    // state.json work -- rather than silently doing nothing.
+    for entry in wake_on_demand_workflow {
+        let (role, tag) = entry.split_once('=').with_context(|| {
+            format!(
+                "--wake-on-demand-workflow '{entry}' is not in the form <role>=<tag> (missing '=')"
+            )
+        })?;
+        if role.trim().is_empty() || tag.trim().is_empty() {
+            bail!(
+                "--wake-on-demand-workflow '{entry}' is not in the form <role>=<tag> \
+                 (empty role or tag)"
+            );
+        }
+        let listener = wake_on_demand_listeners
+            .iter_mut()
+            .find(|l| l.role == role.trim())
+            .with_context(|| {
+                format!(
+                    "--wake-on-demand-workflow references role '{}', but no --wake-on-demand \
+                     entry registers that role",
+                    role.trim()
+                )
+            })?;
+        listener.workflow_tag = Some(tag.trim().to_string());
+    }
 
     let workflow_full_path = project_root.join(workflow_path);
     let definition = WorkflowDefinition::from_file(&workflow_full_path).with_context(|| {
@@ -403,7 +446,10 @@ fn start(
             state
                 .wake_on_demand_listeners
                 .iter()
-                .map(|l| format!("{} ({})", l.role, l.keys.join(", ")))
+                .map(|l| match &l.workflow_tag {
+                    Some(tag) => format!("{} ({}, workflow: {})", l.role, l.keys.join(", "), tag),
+                    None => format!("{} ({})", l.role, l.keys.join(", ")),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -602,6 +648,7 @@ budget:
             None,
             "Make money",
             &[],
+            &[],
         )
         .unwrap();
 
@@ -629,6 +676,7 @@ budget:
                 "chief-of-staff:external-intake".to_string(),
                 "chief-of-staff:another-key".to_string(),
             ],
+            &[],
         )
         .unwrap();
 
@@ -647,6 +695,74 @@ budget:
     }
 
     #[test]
+    fn start_parses_wake_on_demand_workflow_flag_into_matching_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &["chief-of-staff:external-intake".to_string()],
+            &["chief-of-staff=brain-maintenance".to_string()],
+        )
+        .unwrap();
+
+        let state = load_state(dir.path(), "sess-1").unwrap();
+        assert_eq!(state.wake_on_demand_listeners.len(), 1);
+        assert_eq!(
+            state.wake_on_demand_listeners[0].workflow_tag.as_deref(),
+            Some("brain-maintenance")
+        );
+    }
+
+    #[test]
+    fn start_rejects_wake_on_demand_workflow_flag_referencing_unregistered_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        let result = start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &["chief-of-staff:external-intake".to_string()],
+            &["some-other-role=brain-maintenance".to_string()],
+        );
+
+        assert!(result.is_err());
+        let message = format!("{}", result.unwrap_err());
+        assert!(message.contains("some-other-role"));
+        assert!(message.contains("no --wake-on-demand"));
+        assert!(
+            !state_path(dir.path(), "sess-1").exists(),
+            "a --wake-on-demand-workflow referencing an unregistered role must fail before any state.json is written"
+        );
+    }
+
+    #[test]
+    fn start_rejects_malformed_wake_on_demand_workflow_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+
+        let result = start(
+            dir.path(),
+            "sess-1",
+            &workflow_path,
+            None,
+            "Make money",
+            &["chief-of-staff:external-intake".to_string()],
+            &["chief-of-staff-no-equals-sign".to_string()],
+        );
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("chief-of-staff-no-equals-sign"));
+    }
+
+    #[test]
     fn start_parses_multiple_comma_separated_keys_for_one_listener() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
@@ -658,6 +774,7 @@ budget:
             None,
             "Make money",
             &["chief-of-staff:external-intake,urgent-review".to_string()],
+            &[],
         )
         .unwrap();
 
@@ -681,6 +798,7 @@ budget:
             None,
             "Make money",
             &["chief-of-staff-no-colon".to_string()],
+            &[],
         );
 
         assert!(result.is_err());
@@ -705,6 +823,7 @@ budget:
             &workflow_path,
             None,
             "Make money",
+            &[],
             &[],
         )
         .unwrap();
@@ -736,6 +855,7 @@ budget:
             None,
             "Make money",
             &[],
+            &[],
         )
         .unwrap();
 
@@ -765,6 +885,7 @@ budget:
             None,
             "Make money",
             &[],
+            &[],
         )
         .unwrap();
 
@@ -792,6 +913,7 @@ budget:
             None,
             "Make money",
             &[],
+            &[],
         )
         .unwrap();
 
@@ -810,6 +932,7 @@ budget:
             &workflow_path,
             None,
             "Make money",
+            &[],
             &[],
         )
         .unwrap();
@@ -873,9 +996,9 @@ budget:
     fn start_rejects_a_duplicate_name() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[]).unwrap();
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
 
-        let result = start(dir.path(), "sess-1", &workflow_path, None, "", &[]);
+        let result = start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -883,7 +1006,15 @@ budget:
     #[test]
     fn start_rejects_missing_workflow_file() {
         let dir = tempfile::tempdir().unwrap();
-        let result = start(dir.path(), "sess-1", "does-not-exist.yaml", None, "", &[]);
+        let result = start(
+            dir.path(),
+            "sess-1",
+            "does-not-exist.yaml",
+            None,
+            "",
+            &[],
+            &[],
+        );
         assert!(result.is_err());
     }
 
@@ -910,7 +1041,15 @@ stages:
         )
         .unwrap();
 
-        let result = start(dir.path(), "sess-1", "bad-workflow.yaml", None, "", &[]);
+        let result = start(
+            dir.path(),
+            "sess-1",
+            "bad-workflow.yaml",
+            None,
+            "",
+            &[],
+            &[],
+        );
 
         let err = result.unwrap_err().to_string();
         assert!(
@@ -924,7 +1063,7 @@ stages:
     fn pause_resume_stop_write_expected_signal_files() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[]).unwrap();
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
 
         execute(
             &TeamSessionCommands::Pause {
@@ -964,7 +1103,7 @@ stages:
     fn status_reports_persisted_state_before_any_supervisor_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[]).unwrap();
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
 
         // No supervisor-status.json written yet (daemon hasn't run a cycle) —
         // must not error, must fall back to persisted state.json.
@@ -1017,6 +1156,7 @@ stages:
             "trading-desk.yaml",
             None,
             "Generate income > 2x within 6 months after fees",
+            &[],
             &[],
         )
         .unwrap();
