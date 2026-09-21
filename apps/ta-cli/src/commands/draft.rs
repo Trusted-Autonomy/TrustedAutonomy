@@ -3003,8 +3003,9 @@ fn auto_cancel_shadow_experiment_goal(
     {
         use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
         let vs = VelocityStore::for_project(&config.workspace_root);
-        let entry =
-            VelocityEntry::from_goal(goal, GoalOutcome::Cancelled).with_cancel_reason(REASON);
+        let entry = VelocityEntry::from_goal(goal, GoalOutcome::Cancelled)
+            .with_cancel_reason(REASON)
+            .with_token_cost(goal.input_tokens, goal.output_tokens, &goal.agent_model);
         if let Err(e) = vs.append(&entry) {
             tracing::warn!(
                 "Failed to record velocity entry for auto-cancelled shadow goal: {}",
@@ -13109,6 +13110,14 @@ fn run() {
         let goals = goal_store.list().unwrap();
         let mut goal = goals[0].clone();
         goal.auto_cancel_after_draft = true;
+        // Simulate what `ta run`'s post-agent-exit flow (run.rs:3707-3709)
+        // already does before this hook ever fires: populate real token
+        // counts and the resolved model. This is the exact data the
+        // auto-cancel hook's `VelocityEntry` must carry forward: a
+        // regression back to always-zero cost must fail this test.
+        goal.input_tokens = 12_345;
+        goal.output_tokens = 6_789;
+        goal.agent_model = "claude-sonnet-4-5".to_string();
         goal_store.save(&goal).unwrap();
 
         // Make a staging change so the draft build has something to diff.
@@ -13144,13 +13153,30 @@ fn run() {
         );
 
         // The shadow's token cost must still be captured, with a Cancelled
-        // outcome (not silently dropped just because no human ever reviewed it).
+        // outcome (not silently dropped just because no human ever reviewed it),
+        // and it must be the *real* nonzero cost from the goal's own token
+        // counts, not the zeroed-out defaults `VelocityEntry::from_goal` alone
+        // would produce. This is the actual deliverable of the whole
+        // paired-shadow-sampling feature: a regression back to zero-cost
+        // shadow entries must fail this assertion.
         let vs = ta_goal::VelocityStore::for_project(&config.workspace_root);
         let entries = vs
             .load_by_outcome(&ta_goal::GoalOutcome::Cancelled)
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].goal_id, goal.goal_run_id);
+        let (expected_cost, _) =
+            ta_goal::compute_cost(&goal.agent_model, goal.input_tokens, goal.output_tokens);
+        assert!(
+            expected_cost > 0.0,
+            "test fixture's own model/token setup must yield a nonzero cost"
+        );
+        assert_eq!(entries[0].input_tokens, goal.input_tokens);
+        assert_eq!(entries[0].output_tokens, goal.output_tokens);
+        assert_eq!(entries[0].tokens_input, Some(goal.input_tokens));
+        assert_eq!(entries[0].tokens_output, Some(goal.output_tokens));
+        assert_eq!(entries[0].model, goal.agent_model);
+        assert_eq!(entries[0].cost_usd, expected_cost);
     }
 
     /// v0.17.6.3.1: A goal that reaches `pr_ready`, gets a staging edit (simulating a
