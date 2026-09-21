@@ -1665,7 +1665,7 @@ fn dispatch_raw(
                 experiment_shadow_id
                     .as_ref()
                     .map(|id| commands::run::ShadowExperimentFlags {
-                        experiment_id: Some(id.clone()),
+                        experiment_id: id.clone(),
                         arm: experiment_shadow_arm.clone(),
                         pair_id: *experiment_shadow_pair_id,
                         overrides_json: experiment_shadow_overrides.clone(),
