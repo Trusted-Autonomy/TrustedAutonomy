@@ -7,10 +7,12 @@ use rmcp::model::*;
 use rmcp::ErrorData as McpError;
 
 use ta_changeset::interaction::InteractionRequest;
-use ta_goal::{GoalRunState, TaEvent};
+use ta_changeset::pr_package::{PRPackage, PRStatus};
+use ta_goal::{GoalRun, GoalRunState, TaEvent};
 use ta_memory::{AutoCapture, DraftRejectEvent};
 use ta_policy::auto_approve::{self, DraftInfo};
 
+use crate::config::GatewayConfig;
 use crate::server::{DraftToolParams, GatewayState, GoalIdParams, PrBuildParams};
 use crate::validation::parse_uuid;
 
@@ -66,13 +68,26 @@ pub fn handle_pr_build(
     }
 
     let package_id = pr_package.package_id;
+
+    let mut updated_goal = goal;
+    updated_goal.pr_package_id = Some(package_id);
+
+    // Task 4b review fix (Important #1): a paired cost-experiment shadow
+    // goal's draft must never sit at `PrReady` waiting for a human review
+    // that will never come. The original auto-cancel hook only lived on the
+    // CLI's `ta draft build` call sites. An agent calling this MCP tool
+    // directly (which TA's own tool description tells it to do "when ready
+    // for review") would strand the goal at `PrReady` forever and silently
+    // lose the `VelocityEntry` the whole experiment exists to capture.
+    if updated_goal.auto_cancel_after_draft {
+        return close_shadow_experiment_pr_package(&mut state, updated_goal, pr_package);
+    }
+
     state
         .save_pr_package(pr_package)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
     // Transition goal to PrReady.
-    let mut updated_goal = goal;
-    updated_goal.pr_package_id = Some(package_id);
     updated_goal
         .transition(GoalRunState::PrReady)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -119,6 +134,232 @@ pub fn handle_pr_build(
         .map_err(|e| {
             McpError::internal_error(e.to_string(), None)
         })?]))
+}
+
+/// Immediately close out a goal that was spawned as a paired cost-experiment
+/// shadow run (`GoalRun.auto_cancel_after_draft`, Task 4b), reached via the
+/// `ta_pr_build` MCP tool rather than the CLI's `ta draft build`. A shadow
+/// arm's only purpose is recording its token cost for later `ta experiment
+/// report` comparison, so it must never sit at `PrReady` waiting for a human
+/// review/apply that will never come.
+///
+/// Deliberately duplicates (rather than shares) the shape of the CLI-side
+/// `auto_cancel_shadow_experiment_goal` hook in
+/// `apps/ta-cli/src/commands/draft.rs`: that function depends on several
+/// apps/ta-cli-only helpers (its own disk-backed `DraftPackage` store,
+/// `super::plan::reset_phase_if_in_progress`'s daemon-release wrapper) that
+/// live in the binary crate and can't be called from this library crate. The
+/// effects mirrored here are the same: draft closed, goal closed, a
+/// `VelocityEntry` recorded (the actual data this experiment exists to
+/// capture), a goal audit ledger entry, and a best-effort plan-phase reset.
+fn close_shadow_experiment_pr_package(
+    state: &mut GatewayState,
+    mut goal: GoalRun,
+    mut pr_package: PRPackage,
+) -> Result<CallToolResult, McpError> {
+    const REASON: &str = "paired cost-experiment shadow run, not eligible for review or apply";
+    let goal_run_id = goal.goal_run_id;
+
+    pr_package.status = PRStatus::Closed {
+        closed_at: Utc::now(),
+        reason: Some(REASON.to_string()),
+        closed_by: "auto-cancel (cost-experiment shadow)".to_string(),
+        applied_externally_ref: None,
+    };
+    let package_id = pr_package.package_id;
+
+    // Snapshot the fields the audit entry below needs before `pr_package` is
+    // moved into `save_pr_package`.
+    let audit_title = pr_package.goal.title.clone();
+    let audit_objective = pr_package.goal.objective.clone();
+    let artifact_records: Vec<ta_audit::ArtifactRecord> = pr_package
+        .changes
+        .artifacts
+        .iter()
+        .map(|a| ta_audit::ArtifactRecord {
+            uri: a.resource_uri.clone(),
+            change_type: format!("{:?}", a.change_type).to_lowercase(),
+        })
+        .collect();
+    let ai_summary = if pr_package.summary.what_changed.is_empty() {
+        None
+    } else {
+        Some(pr_package.summary.what_changed.clone())
+    };
+
+    // Log-and-continue on a transient store error rather than propagating:
+    // the draft/goal already exist by this point, so a save hiccup must not
+    // fail the whole `ta_pr_build` call out from under the caller.
+    if let Err(e) = state.save_pr_package(pr_package) {
+        tracing::warn!(
+            "Failed to save auto-cancelled status for shadow experiment draft {}: {}",
+            package_id,
+            e
+        );
+    }
+
+    goal.pr_package_id = Some(package_id);
+    // `(Running, Closed)` isn't a legal direct transition, so go through
+    // `PrReady` first, same as the CLI-side hook (which is called right
+    // after its own `goal_store.transition(.., PrReady)`).
+    if let Err(e) = goal.transition(GoalRunState::PrReady) {
+        tracing::warn!(
+            goal_id = %goal_run_id,
+            error = %e,
+            "Failed to transition shadow goal to PrReady en route to auto-cancel"
+        );
+    }
+    if let Err(e) = goal.transition(GoalRunState::Closed {
+        reason: Some(REASON.to_string()),
+        applied_externally_ref: None,
+    }) {
+        tracing::warn!(
+            goal_id = %goal_run_id,
+            error = %e,
+            "Failed to transition auto-cancelled shadow goal to Closed"
+        );
+    }
+    if let Err(e) = state.goal_store.save(&goal) {
+        tracing::warn!(
+            goal_id = %goal_run_id,
+            error = %e,
+            "Failed to save auto-cancelled shadow goal"
+        );
+    }
+
+    {
+        use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
+        let vs = VelocityStore::for_project(&state.config.workspace_root);
+        let entry =
+            VelocityEntry::from_goal(&goal, GoalOutcome::Cancelled).with_cancel_reason(REASON);
+        if let Err(e) = vs.append(&entry) {
+            tracing::warn!(
+                "Failed to record velocity entry for auto-cancelled shadow goal: {}",
+                e
+            );
+        }
+    }
+
+    write_shadow_goal_audit_entry(
+        &state.config,
+        &goal,
+        package_id,
+        &audit_title,
+        &audit_objective,
+        artifact_records,
+        ai_summary,
+        REASON,
+    );
+
+    // Same phase-reset-on-abandon logic the CLI-side hook applies: the
+    // shadow was doing work on a phase, and its auto-cancel means it's no
+    // longer in progress. Best-effort.
+    if let Some(ref phase_id) = goal.plan_phase {
+        let note = "phase reset to pending (auto-cancelled shadow goal)";
+        match ta_plan::reset_phase_if_in_progress(&state.config.workspace_root, phase_id, note) {
+            Ok(true) => {
+                release_phase_claim_via_daemon(&state.config.workspace_root, phase_id);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    phase = %phase_id,
+                    error = %e,
+                    "Failed to reset plan phase on shadow goal auto-cancel"
+                );
+            }
+        }
+    }
+
+    let response = serde_json::json!({
+        "pr_package_id": package_id.to_string(),
+        "goal_run_id": goal_run_id.to_string(),
+        "state": "closed",
+        "message": format!(
+            "Auto-cancelled: {REASON} (paired cost-experiment shadow goal, no review/apply needed)."
+        ),
+    });
+    Ok(CallToolResult::success(vec![Content::json(response)
+        .map_err(|e| {
+            McpError::internal_error(e.to_string(), None)
+        })?]))
+}
+
+/// Write a goal-level audit entry to the goal audit ledger for an
+/// auto-cancelled shadow experiment goal. Best-effort: failures are logged
+/// as warnings, never propagated. Mirrors the essential fields of the
+/// CLI-side `write_goal_audit_entry` helper, adapted to the data already
+/// available at this MCP call site.
+#[allow(clippy::too_many_arguments)]
+fn write_shadow_goal_audit_entry(
+    config: &GatewayConfig,
+    goal: &GoalRun,
+    package_id: uuid::Uuid,
+    title: &str,
+    objective: &str,
+    artifacts: Vec<ta_audit::ArtifactRecord>,
+    ai_summary: Option<String>,
+    cancel_reason: &str,
+) {
+    let ledger_path = ta_audit::GoalAuditLedger::path_for(&config.workspace_root);
+    let mut ledger = match ta_audit::GoalAuditLedger::open(&ledger_path) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("Failed to open goal audit ledger: {}", e);
+            return;
+        }
+    };
+
+    let now = Utc::now();
+    let total_seconds = now.signed_duration_since(goal.created_at).num_seconds();
+    let artifact_count = artifacts.len();
+
+    let mut entry = ta_audit::AuditEntry {
+        goal_id: goal.goal_run_id,
+        title: title.to_string(),
+        objective: Some(objective.to_string()),
+        disposition: ta_audit::AuditDisposition::Cancelled,
+        phase: goal.plan_phase.clone(),
+        agent: goal.agent_id.clone(),
+        created_at: goal.created_at,
+        pr_ready_at: None,
+        recorded_at: now,
+        build_seconds: total_seconds,
+        review_seconds: 0,
+        total_seconds,
+        draft_id: Some(package_id),
+        ai_summary,
+        reviewer: None,
+        denial_reason: None,
+        cancel_reason: Some(cancel_reason.to_string()),
+        artifact_count,
+        lines_changed: 0,
+        artifacts,
+        policy_result: None,
+        parent_goal_id: goal.parent_goal_id,
+        previous_hash: None,
+    };
+
+    if let Err(e) = ledger.append(&mut entry) {
+        tracing::warn!("Failed to write goal audit entry: {}", e);
+    }
+}
+
+/// Fire-and-forget HTTP call to release the daemon's in-memory phase claim,
+/// mirroring the CLI-side `release_phase_claim_via_daemon` helper. Errors
+/// are silently swallowed: the daemon may not be running, and PLAN.md is
+/// already the authoritative source of truth.
+fn release_phase_claim_via_daemon(workspace_root: &std::path::Path, phase_id: &str) {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return;
+    };
+    let daemon_url = crate::daemon_client::resolve_daemon_url(workspace_root);
+    let url = format!("{}/api/plan/phase/release", daemon_url);
+    let body = serde_json::json!({ "phase_id": phase_id });
+    let _ = client.post(&url).json(&body).send();
 }
 
 pub fn handle_pr_status(
