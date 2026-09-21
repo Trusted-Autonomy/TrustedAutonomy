@@ -5243,6 +5243,7 @@ dependencies = [
  "decision-gate",
  "glob",
  "libc",
+ "rand 0.8.7",
  "ratatui",
  "regex",
  "reqwest",

@@ -2687,6 +2687,47 @@ pub fn execute(
             updated_goal.is_macro = true;
         }
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
+
+        // Cost-experiment arm assignment: check every defined experiment, apply
+        // the first one whose roll selects this goal. Multiple simultaneously
+        // active experiments on the same goal are not supported in this pass;
+        // `ta experiment start` should refuse to start a second experiment
+        // while one is already active (enforced in Task 5).
+        let experiment_source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+        if let Ok(experiments) = ta_goal::ExperimentConfig::list(experiment_source_root) {
+            let mut rng = rand::thread_rng();
+            for exp_config in experiments {
+                match ta_goal::experiment::assign_arm(&exp_config, &mut rng) {
+                    ta_goal::experiment::ArmAssignment::None => continue,
+                    ta_goal::experiment::ArmAssignment::Unpaired { arm } => {
+                        updated_goal.experiment_id = Some(exp_config.id.clone());
+                        updated_goal.experiment_overrides = exp_config.arms.get(&arm).cloned();
+                        updated_goal.experiment_arm = Some(arm);
+                        break;
+                    }
+                    ta_goal::experiment::ArmAssignment::Paired {
+                        canonical_arm,
+                        shadow_arm: _,
+                        pair_id: _,
+                    } => {
+                        // Paired mode requires launching a second goal run from
+                        // the same source snapshot, which this single-goal
+                        // creation path cannot do alone. Deferred to Task 6
+                        // (poller_daemon / wake_listener launch integration),
+                        // which owns spawning both runs. For now, a paired roll
+                        // here degrades to an unpaired assignment on the
+                        // canonical arm rather than silently dropping the
+                        // experiment membership.
+                        updated_goal.experiment_id = Some(exp_config.id.clone());
+                        updated_goal.experiment_overrides =
+                            exp_config.arms.get(&canonical_arm).cloned();
+                        updated_goal.experiment_arm = Some(canonical_arm);
+                        break;
+                    }
+                }
+            }
+        }
+
         goal_store.save(&updated_goal)?;
     }
 
@@ -9438,6 +9479,74 @@ context_inject = "{mode_toml}"
 
         // Settings should also be restored (removed since it didn't exist).
         assert!(!goals[0].workspace_path.join(SETTINGS_REL_PATH).exists());
+    }
+
+    #[test]
+    fn run_assigns_experiment_arm_when_holdout_fraction_is_one() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let mut arms = std::collections::HashMap::new();
+        arms.insert("variant-on".to_string(), serde_json::json!({}));
+        arms.insert(
+            "variant-off".to_string(),
+            serde_json::json!({"feature.disabled": true}),
+        );
+        ta_goal::ExperimentConfig {
+            id: "cost-test-1".to_string(),
+            holdout_fraction: 1.0,
+            paired_fraction: 0.0,
+            maintenance_workflow: None,
+            canonical_arm: None,
+            arms,
+        }
+        .save(project.path())
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // Run with --no-launch to avoid actually starting the agent.
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false, // not headless
+            false, // skip_verify = false
+            false, // quiet = false
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+        )
+        .unwrap();
+
+        // Verify goal was created and tagged with the experiment arm rolled
+        // for it (holdout_fraction 1.0 guarantees a roll every time).
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].experiment_id.as_deref(), Some("cost-test-1"));
+        assert!(
+            ["variant-on", "variant-off"].contains(&goals[0].experiment_arm.as_deref().unwrap())
+        );
     }
 
     #[test]
