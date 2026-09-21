@@ -287,6 +287,10 @@
         "null"
       ]
     },
+    "auto_cancel_after_draft": {
+      "description": "When `true`, `ta draft build` immediately closes this goal's draft\ninstead of leaving it at `PrReady` awaiting human review/apply.\n\nSet by a cost-experiment paired-shadow spawn (`ta run\n--auto-cancel-after-draft`, internal flag): the shadow arm's only\npurpose is to record its token cost for `ta experiment report`, it\nis never meant to reach a human reviewer. `false` (default) for\nevery normal goal.",
+      "type": "boolean"
+    },
     "context_from": {
       "description": "Goals whose output feeds into this one's context (v0.9.8.2).",
       "items": {
@@ -299,6 +303,31 @@
       "description": "When this goal run was created.",
       "format": "date-time",
       "type": "string"
+    },
+    "experiment_arm": {
+      "description": "The arm this goal was assigned within `experiment_id` (e.g. \"variant-on\").",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "experiment_id": {
+      "description": "Cost-experiment id this goal was assigned to at launch (e.g. \"experiment-a\").\n`None` for goals not participating in any experiment. Generic: TA core\nnever interprets this string, only stores and threads it through.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "experiment_overrides": {
+      "description": "The resolved config-override map for this goal's assigned arm, merged\ninto the staging copy's effective configuration at launch time.\nOpaque to TA core: keys and values are entirely the experiment\ndefinition's own concern."
+    },
+    "experiment_pair_id": {
+      "description": "Links this goal to its paired counterpart's goal_run_id when the\nexperiment's paired-shadow-sampling mode assigned it. `None` for an\nunpaired-holdout assignment or a non-participating goal.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "goal_run_id": {
       "description": "Unique identifier for this goal run.",
@@ -466,6 +495,13 @@
     },
     "vcs_isolation": {
       "description": "VCS isolation mode active for this goal's agent (v0.13.17.3).\n\nSet by `ta run` after calling `stage_env()`. Examples:\n- `\"isolated (git)\"` — agent has its own `.git` in staging\n- `\"inherit-read (git)\"` — agent can read but not write to parent git\n- `\"none (git)\"` — all git operations blocked",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workflow": {
+      "description": "Generic cost-category classification for this goal (e.g.\n\"feature-work\", \"maintenance-task\"), set by whatever launched it\n(a wake-on-demand listener's persona config, a CLI flag). `None` when\nunclassified. Distinct from the pre-existing `workflow_id` field and from\n`VelocityEntry.workflow`, which is the plain-`String` form this field is\ncopied into at completion.",
       "type": [
         "string",
         "null"
