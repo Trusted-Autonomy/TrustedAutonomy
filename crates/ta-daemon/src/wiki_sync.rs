@@ -170,7 +170,18 @@ write_credential_name = "wayfinder-wiki-writer"
         );
     }
 
-    #[tokio::test]
+    // multi_thread: a plain #[tokio::test] runs a single-worker-thread
+    // runtime. `WikiMcpClient::call_tool`'s own internal timeout (see
+    // wiki_client.rs's CALL_TOOL_TIMEOUT) should already bound the
+    // connection attempt below, but a real CI hang on macOS runners
+    // (connecting to a closed local port apparently never resolves to any
+    // readiness event there, an OS/sandbox quirk, not reproduced on Linux,
+    // Windows, or this machine) outlasted even that: a multi_thread runtime
+    // plus the explicit outer bound below are a second, independent line of
+    // defense that doesn't depend on diagnosing that quirk further -- this
+    // test must never again be able to hang a CI job regardless of what the
+    // underlying connection attempt does.
+    #[tokio::test(flavor = "multi_thread")]
     async fn sync_once_with_configured_but_unreachable_wayfinder_does_not_panic() {
         // No mock server listening on this port -- confirms a real
         // connection failure is swallowed into a per-scope warning
@@ -180,6 +191,18 @@ write_credential_name = "wayfinder-wiki-writer"
         write_config(dir.path(), "http://127.0.0.1:1/mcp");
         // No credential stored either -- confirms the "no such credential"
         // path is likewise contained to this one scope.
-        sync_once(dir.path()).await.unwrap();
+        //
+        // Explicit outer bound, independent of WikiMcpClient's own internal
+        // timeout: this test must fail loudly (not hang the CI job) if
+        // sync_once ever again takes longer than a real connection attempt
+        // reasonably should, on any platform.
+        match tokio::time::timeout(std::time::Duration::from_secs(45), sync_once(dir.path())).await
+        {
+            Ok(result) => result.unwrap(),
+            Err(_elapsed) => panic!(
+                "sync_once did not return within 45s against an unreachable Wayfinder endpoint \
+                 -- this must never hang, see this test's own comment"
+            ),
+        }
     }
 }
