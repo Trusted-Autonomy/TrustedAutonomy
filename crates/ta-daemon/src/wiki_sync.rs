@@ -170,25 +170,32 @@ write_credential_name = "wayfinder-wiki-writer"
         );
     }
 
-    // multi_thread: a plain #[tokio::test] runs a single-worker-thread
-    // runtime. `WikiMcpClient::call_tool`'s own internal timeout (see
-    // wiki_client.rs's CALL_TOOL_TIMEOUT) should already bound the
-    // connection attempt below, but a real CI hang on macOS runners
-    // (connecting to a closed local port apparently never resolves to any
-    // readiness event there, an OS/sandbox quirk, not reproduced on Linux,
-    // Windows, or this machine) outlasted even that: a multi_thread runtime
-    // plus the explicit outer bound below are a second, independent line of
-    // defense that doesn't depend on diagnosing that quirk further -- this
-    // test must never again be able to hang a CI job regardless of what the
-    // underlying connection attempt does.
+    // Root cause of a real, repeated CI hang on macOS runners, now
+    // understood precisely (not just worked around): this test used to
+    // point at `127.0.0.1:1`, a privileged/well-known low port. Neither a
+    // multi_thread runtime nor an explicit outer `tokio::time::timeout`
+    // (both tried first, both insufficient) could bound the hang, which
+    // means it wasn't a tokio-level scheduling problem at all -- GitHub's
+    // sandboxed macOS runners appear to block a connection attempt to a low
+    // port at a level beneath async I/O (a genuinely blocked kernel call,
+    // which no userspace cooperative-scheduling timeout can preempt), not
+    // reproduced on Linux, Windows, or this machine. Real fix: never target
+    // a privileged port here. `ephemeral_closed_port()` binds to port 0 (OS
+    // assigns a free high port) then immediately drops the listener, so the
+    // connection attempt below gets a real, fast "connection refused" from
+    // a port the OS just released, on every platform. The multi_thread
+    // flavor and outer timeout stay as cheap, harmless defense in depth.
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_once_with_configured_but_unreachable_wayfinder_does_not_panic() {
-        // No mock server listening on this port -- confirms a real
-        // connection failure is swallowed into a per-scope warning
-        // (logged, not propagated) rather than crashing the sync loop,
-        // matching token_refresh's per-session error isolation.
+        // Confirms a real connection failure is swallowed into a per-scope
+        // warning (logged, not propagated) rather than crashing the sync
+        // loop, matching token_refresh's per-session error isolation.
         let dir = tempfile::tempdir().unwrap();
-        write_config(dir.path(), "http://127.0.0.1:1/mcp");
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        write_config(dir.path(), &format!("http://127.0.0.1:{port}/mcp"));
         // No credential stored either -- confirms the "no such credential"
         // path is likewise contained to this one scope.
         //

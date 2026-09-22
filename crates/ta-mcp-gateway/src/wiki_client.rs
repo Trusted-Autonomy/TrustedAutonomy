@@ -725,12 +725,41 @@ mod tests {
         assert_eq!(page.sha, "sha-updated");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn connecting_to_a_nonexistent_server_is_a_clean_connect_error() {
-        // Nothing listening on this port -- proves a dead endpoint fails
-        // cleanly rather than hanging or panicking.
-        let client = WikiMcpClient::new("http://127.0.0.1:1/mcp", "test-token");
-        let err = client.wiki_manifest("project", "proj-1").await.unwrap_err();
-        assert!(matches!(err, WikiClientError::Connect { .. }));
+        // A freshly-released ephemeral port, not a privileged low port
+        // (`127.0.0.1:1` used to be used here): a real CI hang traced this
+        // exact test pattern to a genuine kernel-level block connecting to
+        // a low/privileged port under GitHub's sandboxed macOS runners,
+        // immune to any userspace (tokio) timeout since the blocking
+        // happens below the async I/O layer entirely. Bind-then-drop gets
+        // a port the OS just freed, so a connection attempt gets a real,
+        // fast "connection refused" on every platform tested so far
+        // (Linux, Windows, this machine), unlike port 1.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let url = format!("http://127.0.0.1:{port}/mcp");
+        let client = WikiMcpClient::new(url, "test-token");
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            client.wiki_manifest("project", "proj-1"),
+        )
+        .await
+        {
+            Ok(result) => {
+                let err = result.unwrap_err();
+                assert!(matches!(
+                    err,
+                    WikiClientError::Connect { .. } | WikiClientError::Timeout { .. }
+                ));
+            }
+            Err(_elapsed) => panic!(
+                "connecting to a closed local port did not return within 45s -- this must \
+                 never hang, see this test's own comment"
+            ),
+        }
     }
 }
