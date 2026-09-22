@@ -32,4 +32,8 @@ pub enum GoalError {
     /// A notification dispatch failed (non-fatal).
     #[error("notification error: {0}")]
     NotificationError(String),
+
+    /// Failed to parse a config file (e.g. TOML) into its expected structure.
+    #[error("parse error: {0}")]
+    ParseError(String),
 }

@@ -435,6 +435,7 @@ pub fn build_ta_run_args(
     role: &str,
     team_config: &TeamConfig,
     context_path: &Path,
+    workflow_tag: Option<&str>,
 ) -> Vec<String> {
     let title = format!("{}: {} ({})", state.config.name, label, role);
     let mut args = vec![
@@ -470,6 +471,18 @@ pub fn build_ta_run_args(
     // A role with no `.ta/team.toml` assignment yet falls through to
     // `ta run`'s own default resolution chain (workflow.toml, daemon.toml,
     // "claude-code") rather than failing the cycle outright.
+
+    // Generic cost-classification tag (v0.17.x cost-experiment framework).
+    // Note: the CLI flag is `--workflow-tag`, not `--workflow` -- `ta run`
+    // already has a `--workflow` flag selecting the *execution engine*
+    // (single-agent/serial-phases/swarm, see apps/ta-cli/src/commands/
+    // run.rs's `WorkflowKind`), so this opaque classification tag needed a
+    // distinct name to avoid colliding with that existing, load-bearing
+    // flag.
+    if let Some(tag) = workflow_tag {
+        args.push("--workflow-tag".to_string());
+        args.push(tag.to_string());
+    }
 
     args
 }
@@ -580,7 +593,17 @@ pub fn run_one_cycle(
 
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
     let context_path = write_session_context(project_root, &state, &stage.name, &role)?;
-    let args = build_ta_run_args(&state, &stage.name, &role, &team_config, &context_path);
+    // Round-robin rotation launches are not yet classified with a workflow
+    // tag -- only wake-on-demand listeners (`wake_listener.rs`) carry one
+    // today, via their own `workflow_tag` config.
+    let args = build_ta_run_args(
+        &state,
+        &stage.name,
+        &role,
+        &team_config,
+        &context_path,
+        None,
+    );
 
     let output = std::process::Command::new(ta_bin)
         .args(&args)
@@ -1117,7 +1140,14 @@ mod tests {
             Some("careful-analyst".to_string()),
         );
 
-        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--headless".to_string()));
@@ -1155,7 +1185,14 @@ mod tests {
             .insert("highest".to_string(), "claude-opus-5".to_string());
         team_config.members[0].model_tier = Some("highest".to_string());
 
-        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
 
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
@@ -1181,7 +1218,14 @@ mod tests {
         // block launching the role, just fall back to agent_id.
         team_config.members[0].model_tier = Some("nonexistent-tier".to_string());
 
-        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
 
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
@@ -1197,7 +1241,14 @@ mod tests {
 
         let team_config = TeamConfig::default(); // no members assigned
 
-        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
 
         assert!(!args.contains(&"--security".to_string()));
         assert!(!args.contains(&"--persona".to_string()));
@@ -1218,13 +1269,69 @@ mod tests {
             write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
         let team_config = TeamConfig::default();
 
-        let args = build_ta_run_args(&state, &stage.name, "analyst", &team_config, &context_path);
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
 
         let flag_idx = args
             .iter()
             .position(|a| a == "--team-session-id")
             .expect("--team-session-id flag missing");
         assert_eq!(args[flag_idx + 1], "sess-42");
+    }
+
+    #[test]
+    fn build_ta_run_args_appends_workflow_tag_flag_when_listener_has_a_tag() {
+        // Generic cost-classification tag (v0.17.x cost-experiment
+        // framework): `--workflow-tag`, not `--workflow` -- the latter is
+        // already `ta run`'s execution-engine selector.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "specialist").unwrap();
+        let team_config = TeamConfig::default();
+
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "specialist",
+            &team_config,
+            &context_path,
+            Some("brain-maintenance"),
+        );
+
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--workflow-tag")
+            .expect("--workflow-tag flag present");
+        assert_eq!(args[flag_pos + 1], "brain-maintenance");
+    }
+
+    #[test]
+    fn build_ta_run_args_omits_workflow_tag_flag_when_no_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "researcher").unwrap();
+        let team_config = TeamConfig::default();
+
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "researcher",
+            &team_config,
+            &context_path,
+            None,
+        );
+
+        assert!(!args.contains(&"--workflow-tag".to_string()));
     }
 
     #[cfg(unix)]

@@ -192,6 +192,20 @@ pub struct VelocityEntry {
     /// installed or the call failed — the plain `title` field remains authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_title: Option<String>,
+
+    /// Cost-experiment id, copied from the goal at completion time. See
+    /// `GoalRun::experiment_id` for the generic, product-agnostic contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
+
+    /// The arm this goal ran under within `experiment_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_arm: Option<String>,
+
+    /// Links this entry to its paired counterpart's entry when the goal was
+    /// assigned via paired-shadow-sampling. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_pair_id: Option<Uuid>,
 }
 
 impl VelocityEntry {
@@ -213,7 +227,7 @@ impl VelocityEntry {
         Self {
             goal_id: goal.goal_run_id,
             title: goal.title.clone(),
-            workflow: String::new(),
+            workflow: goal.workflow.clone().unwrap_or_default(),
             agent: goal.agent_id.clone(),
             plan_phase: goal.plan_phase.clone(),
             outcome,
@@ -238,6 +252,9 @@ impl VelocityEntry {
             tokens_input: None,
             tokens_output: None,
             derived_title: None,
+            experiment_id: goal.experiment_id.clone(),
+            experiment_arm: goal.experiment_arm.clone(),
+            experiment_pair_id: goal.experiment_pair_id,
         }
     }
 
@@ -263,6 +280,22 @@ impl VelocityEntry {
     /// is unavailable or the summarize-title call failed — leaves the field unset.
     pub fn with_derived_title(mut self, derived_title: Option<String>) -> Self {
         self.derived_title = derived_title;
+        self
+    }
+
+    /// Tag this entry with the cost experiment it ran under. Overrides
+    /// whatever `from_goal` already copied from the `GoalRun`, so callers
+    /// that assign experiments after the fact (rather than at launch) can
+    /// still use this instead of constructing the fields by hand.
+    pub fn with_experiment(
+        mut self,
+        experiment_id: impl Into<String>,
+        arm: impl Into<String>,
+        pair_id: Option<Uuid>,
+    ) -> Self {
+        self.experiment_id = Some(experiment_id.into());
+        self.experiment_arm = Some(arm.into());
+        self.experiment_pair_id = pair_id;
         self
     }
 
@@ -1296,5 +1329,37 @@ mod tests {
         let entry: VelocityEntry = serde_json::from_str(old_json).unwrap();
         assert!(entry.machine_id.is_empty());
         assert!(entry.committer.is_none());
+    }
+
+    #[test]
+    fn with_experiment_sets_all_three_fields() {
+        let goal = make_goal();
+        let pair_id = Uuid::new_v4();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied).with_experiment(
+            "experiment-a",
+            "variant-off",
+            Some(pair_id),
+        );
+        assert_eq!(entry.experiment_id.as_deref(), Some("experiment-a"));
+        assert_eq!(entry.experiment_arm.as_deref(), Some("variant-off"));
+        assert_eq!(entry.experiment_pair_id, Some(pair_id));
+    }
+
+    #[test]
+    fn from_goal_without_experiment_leaves_fields_none() {
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+        assert_eq!(entry.experiment_id, None);
+        assert_eq!(entry.experiment_arm, None);
+        assert_eq!(entry.experiment_pair_id, None);
+        assert_eq!(entry.workflow, "");
+    }
+
+    #[test]
+    fn from_goal_copies_goal_workflow_into_entry_workflow() {
+        let mut goal = make_goal();
+        goal.workflow = Some("maintenance-task".to_string());
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+        assert_eq!(entry.workflow, "maintenance-task");
     }
 }

@@ -240,6 +240,8 @@ fn run_init(
         None,             // context_path = None
         None,             // credential_scopes = None (v0.17.6.1)
         None,             // team_session_id = None (v0.17.11.8)
+        None,             // workflow_tag = None (v0.17.x cost-experiment framework)
+        None,             // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
     )?;
 
     println!();
@@ -1511,6 +1513,7 @@ fn create_constitution_amend_draft(
             .map(|s| s.to_string()),
         agent_pid: None,
         heartbeat_required: false,
+        auto_cancel_after_draft: false,
         pr_url: None,
         pr_package_id: None,
         progress_note: None,
@@ -1522,6 +1525,11 @@ fn create_constitution_amend_draft(
         input_tokens: 0,
         output_tokens: 0,
         agent_model: String::new(),
+        experiment_id: None,
+        experiment_arm: None,
+        experiment_pair_id: None,
+        experiment_overrides: None,
+        workflow: None,
     };
 
     let goal_store = GoalRunStore::new(&config.goals_dir)
@@ -2287,6 +2295,7 @@ fn create_review_draft(
             .map(|s| s.to_string()),
         agent_pid: None,
         heartbeat_required: false,
+        auto_cancel_after_draft: false,
         pr_url: None,
         pr_package_id: None,
         progress_note: None,
@@ -2298,6 +2307,11 @@ fn create_review_draft(
         input_tokens: 0,
         output_tokens: 0,
         agent_model: String::new(),
+        experiment_id: None,
+        experiment_arm: None,
+        experiment_pair_id: None,
+        experiment_overrides: None,
+        workflow: None,
     };
 
     let goal_store = GoalRunStore::new(&config.goals_dir)

@@ -5243,6 +5243,7 @@ dependencies = [
  "decision-gate",
  "glob",
  "libc",
+ "rand 0.8.7",
  "ratatui",
  "regex",
  "reqwest",
@@ -5593,6 +5594,7 @@ version = "0.17.11-alpha.8"
 dependencies = [
  "anyhow",
  "chrono",
+ "rand 0.8.7",
  "schemars",
  "serde",
  "serde_json",

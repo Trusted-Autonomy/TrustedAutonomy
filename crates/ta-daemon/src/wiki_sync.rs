@@ -170,16 +170,46 @@ write_credential_name = "wayfinder-wiki-writer"
         );
     }
 
-    #[tokio::test]
+    // Root cause of a real, repeated CI hang on macOS runners, now
+    // understood precisely (not just worked around): this test used to
+    // point at `127.0.0.1:1`, a privileged/well-known low port. Neither a
+    // multi_thread runtime nor an explicit outer `tokio::time::timeout`
+    // (both tried first, both insufficient) could bound the hang, which
+    // means it wasn't a tokio-level scheduling problem at all -- GitHub's
+    // sandboxed macOS runners appear to block a connection attempt to a low
+    // port at a level beneath async I/O (a genuinely blocked kernel call,
+    // which no userspace cooperative-scheduling timeout can preempt), not
+    // reproduced on Linux, Windows, or this machine. Real fix: never target
+    // a privileged port here. `ephemeral_closed_port()` binds to port 0 (OS
+    // assigns a free high port) then immediately drops the listener, so the
+    // connection attempt below gets a real, fast "connection refused" from
+    // a port the OS just released, on every platform. The multi_thread
+    // flavor and outer timeout stay as cheap, harmless defense in depth.
+    #[tokio::test(flavor = "multi_thread")]
     async fn sync_once_with_configured_but_unreachable_wayfinder_does_not_panic() {
-        // No mock server listening on this port -- confirms a real
-        // connection failure is swallowed into a per-scope warning
-        // (logged, not propagated) rather than crashing the sync loop,
-        // matching token_refresh's per-session error isolation.
+        // Confirms a real connection failure is swallowed into a per-scope
+        // warning (logged, not propagated) rather than crashing the sync
+        // loop, matching token_refresh's per-session error isolation.
         let dir = tempfile::tempdir().unwrap();
-        write_config(dir.path(), "http://127.0.0.1:1/mcp");
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        write_config(dir.path(), &format!("http://127.0.0.1:{port}/mcp"));
         // No credential stored either -- confirms the "no such credential"
         // path is likewise contained to this one scope.
-        sync_once(dir.path()).await.unwrap();
+        //
+        // Explicit outer bound, independent of WikiMcpClient's own internal
+        // timeout: this test must fail loudly (not hang the CI job) if
+        // sync_once ever again takes longer than a real connection attempt
+        // reasonably should, on any platform.
+        match tokio::time::timeout(std::time::Duration::from_secs(45), sync_once(dir.path())).await
+        {
+            Ok(result) => result.unwrap(),
+            Err(_elapsed) => panic!(
+                "sync_once did not return within 45s against an unreachable Wayfinder endpoint \
+                 -- this must never hang, see this test's own comment"
+            ),
+        }
     }
 }

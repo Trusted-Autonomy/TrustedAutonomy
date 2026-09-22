@@ -2289,6 +2289,8 @@ fn plan_add(
         None,  // context_path = None
         None,  // credential_scopes = None (v0.17.6.1)
         None,  // team_session_id = None (v0.17.11.8)
+        None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+        None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
     )
 }
 
@@ -2545,6 +2547,8 @@ fn plan_from(
         None,  // context_path = None
         None,  // credential_scopes = None (v0.17.6.1)
         None,  // team_session_id = None (v0.17.11.8)
+        None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+        None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
     )
 }
 
@@ -2658,6 +2662,8 @@ fn plan_new(
         None,  // context_path = None
         None,  // credential_scopes = None (v0.17.6.1)
         None,  // team_session_id = None (v0.17.11.8)
+        None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+        None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
     )
 }
 
@@ -5017,6 +5023,8 @@ fn plan_build(
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )?;
 
         phases_built += 1;
@@ -5776,6 +5784,8 @@ fn plan_build_autonomous(
                     None,
                     None, // credential_scopes = None (v0.17.6.1)
                     None, // team_session_id = None (v0.17.11.8)
+                    None, // workflow_tag = None (v0.17.x cost-experiment framework)
+                    None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
                 ) {
                     let msg = format!("Goal launch failed for phase {}: {}", phase_id, e);
                     eprintln!("[escalate] {}", msg);
@@ -7773,6 +7783,8 @@ fn plan_pragma(config: &GatewayConfig, no_scan: bool) -> anyhow::Result<()> {
                     None, // context_path = None
                     None, // credential_scopes = None (v0.17.6.1)
                     None, // team_session_id = None (v0.17.11.8)
+                    None, // workflow_tag = None (v0.17.x cost-experiment framework)
+                    None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
                 )?;
             }
         } else {

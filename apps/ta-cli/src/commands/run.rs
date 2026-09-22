@@ -1716,6 +1716,238 @@ fn build_swarm_sub_goal_command(
     cmd
 }
 
+// ── Paired cost-experiment shadow goal spawn (Task 4b) ──────────────────
+//
+// `assign_arm()` (Task 3) can roll `ArmAssignment::Paired`, meaning the
+// canonical goal `ta run` is about to create needs a sibling "shadow" goal
+// run under the paired arm, so the two can later be compared by `ta
+// experiment report`. The shadow's own agent session runs independently and
+// concurrently (fire-and-forget `.spawn()`, not a blocking `.status()` like
+// `execute_swarm`'s sub-goals): its result is only needed later, not before
+// the canonical goal's own flow can proceed. A failed spawn is logged and
+// swallowed by the caller: the canonical goal must never fail or block
+// because its shadow couldn't be launched.
+
+/// Fully-resolved experiment assignment to hand to a spawned shadow goal.
+/// Passed explicitly (not re-rolled) so the shadow always gets the specific
+/// arm the canonical goal's own roll paired it with.
+#[derive(Debug, Clone)]
+struct ExperimentSpawnSpec {
+    experiment_id: String,
+    arm: String,
+    pair_id: uuid::Uuid,
+    overrides: serde_json::Value,
+}
+
+/// Bundle of the hidden `--experiment-shadow-*`/`--auto-cancel-after-draft`
+/// CLI flags a spawned shadow goal's own `ta run` invocation receives. `None`
+/// (the overwhelming majority of `ta run` invocations, including every
+/// caller in this codebase other than `spawn_shadow_experiment_goal` itself)
+/// means "not a shadow goal, roll experiment arms normally".
+///
+/// Bundled into one struct (rather than five separate `execute()`
+/// parameters, as an earlier draft of this design had it) so the many
+/// existing `super::run::execute(...)` call sites across the CLI only need
+/// one extra trailing `None`, not five, to keep compiling.
+#[derive(Debug, Clone)]
+pub struct ShadowExperimentFlags {
+    /// `--experiment-shadow-id`. Plain `String` (not `Option`), unlike the
+    /// other fields here: the presence signal for "is this a shadow goal at
+    /// all" already lives one level up, at the `Option<&ShadowExperimentFlags>`
+    /// call-site parameter. A hand-built `ShadowExperimentFlags` with
+    /// `experiment_id: None` but `auto_cancel_after_draft: true` would
+    /// otherwise silently produce an untagged auto-cancelling goal.
+    pub experiment_id: String,
+    /// `--experiment-shadow-arm`.
+    pub arm: Option<String>,
+    /// `--experiment-shadow-pair-id`.
+    pub pair_id: Option<uuid::Uuid>,
+    /// `--experiment-shadow-overrides`, raw JSON text as received on the
+    /// command line (parsed by the caller, not here, so a malformed value
+    /// degrades to "no overrides" rather than failing the whole goal).
+    pub overrides_json: Option<String>,
+    /// `--auto-cancel-after-draft`.
+    pub auto_cancel_after_draft: bool,
+}
+
+/// Whether a `Paired` roll's shadow goal should actually be launched.
+/// `ta run --no-launch` means "create the goal, don't launch an agent": a
+/// Paired roll's shadow session is a full agent launch too, so that
+/// prohibition must extend to it, or `--no-launch` would silently burn real
+/// tokens against the user's explicit instruction not to launch anything.
+///
+/// Pulled out as a pure, directly unit-testable predicate rather than
+/// relying solely on an end-to-end `execute()` test asserting on the goal
+/// store afterward: a removed/inverted gate at the call site would not
+/// reliably leave an observable trace there (the spawned subprocess is
+/// fire-and-forget, and in a test environment `ta_bin` resolves to the test
+/// binary itself, which fails for reasons unrelated to the gate, so an
+/// end-to-end assertion of "no second goal appeared" can pass by accident
+/// even with the gate deleted). This predicate is instead asserted directly.
+fn should_spawn_shadow(no_launch: bool) -> bool {
+    !no_launch
+}
+
+/// Build (but do not spawn) the `ta run` command for a paired-sampling
+/// shadow goal. Pure and side-effect-free, mirroring
+/// `build_swarm_sub_goal_command`'s own testability pattern: the resulting
+/// `Command`'s args are directly inspectable in tests via `Command::get_args`.
+///
+/// Forwards `agent` (the canonical goal's already-*resolved* agent, i.e.
+/// whatever `--agent` would have produced, never re-resolved from scratch)
+/// and either `objective_file` or `objective` (file wins when both would
+/// otherwise apply, mirroring `goal.rs`'s own "file overrides string"
+/// precedence) so the shadow runs the identical task on the identical
+/// model as the canonical goal. Without this, the shadow's own `ta run`
+/// invocation would re-resolve the agent independently and could pick a
+/// different model, and/or lose an `--objective-file`-sourced objective
+/// entirely: a fatal confound for a paired-sampling comparison whose
+/// entire point is holding task and model fixed while only the arm's
+/// config overrides vary.
+///
+/// Also forwards the canonical goal's resolved `workflow_tag` (when set), so
+/// the canonical and shadow halves of a paired-sampling pair land in the
+/// same cost-report bucket (`VelocityEntry.workflow`) instead of the shadow
+/// silently landing untagged and undermining the arm comparison.
+///
+/// Also forwards the canonical goal's resolved `persona` and
+/// execution-engine `workflow` (the pre-existing single-agent/serial-phases/
+/// swarm flag, distinct from `--workflow-tag`) when present. Without this,
+/// a shadow spawned from a wake-on-demand listener (the primary real-world
+/// path this framework targets) could run under a different persona/engine
+/// than its canonical twin -- a confound for the cost comparison, the same
+/// class of bug already fixed for `--agent`/objective above.
+#[allow(clippy::too_many_arguments)]
+fn build_shadow_experiment_command(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    title: &str,
+    agent: &str,
+    objective: &str,
+    objective_file: Option<&Path>,
+    spec: &ExperimentSpawnSpec,
+    credential_scopes: &[String],
+    workflow_tag: Option<&str>,
+    persona: Option<&str>,
+    engine_workflow: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(ta_bin);
+    cmd.arg("run")
+        .arg(title)
+        .arg("--headless")
+        .arg("--agent")
+        .arg(agent);
+    if let Some(obj_file) = objective_file {
+        cmd.arg("--objective-file").arg(obj_file);
+    } else {
+        cmd.arg("--objective").arg(objective);
+    }
+    if let Some(tag) = workflow_tag {
+        cmd.arg("--workflow-tag").arg(tag);
+    }
+    if let Some(p) = persona {
+        cmd.arg("--persona").arg(p);
+    }
+    if let Some(w) = engine_workflow {
+        cmd.arg("--workflow").arg(w);
+    }
+    cmd.arg("--experiment-shadow-id")
+        .arg(&spec.experiment_id)
+        .arg("--experiment-shadow-arm")
+        .arg(&spec.arm)
+        .arg("--experiment-shadow-pair-id")
+        .arg(spec.pair_id.to_string())
+        .arg("--experiment-shadow-overrides")
+        .arg(spec.overrides.to_string())
+        .arg("--auto-cancel-after-draft")
+        // Detach from terminal, matching `try_spawn_background_draft_build`'s
+        // own background-process hygiene: without this the shadow inherits
+        // the canonical's TTY (output interleaves) and, more importantly,
+        // the canonical's process group, so a Ctrl-C or terminal hangup on
+        // the canonical would silently kill the shadow mid-session too.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.current_dir(workspace_root);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New process group so the child doesn't die when the terminal closes.
+        cmd.process_group(0);
+    }
+
+    // Credential scoping (v0.17.6.1 pattern, mirrored from
+    // `build_swarm_sub_goal_command`): the shadow is a fully independent
+    // agent session running unattended and concurrently with the canonical
+    // goal, so it must not silently inherit the parent process's full
+    // environment (including any ambient long-lived secrets). Mint/attenuate
+    // only credentials within `credential_scopes`, clear the child's
+    // environment, and populate it with just the scoped baseline + secrets,
+    // plus an explicit `--credential-scopes` flag so the shadow's own `ta
+    // run` enforces the same scope for anything *it* spawns.
+    let current_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let available = load_vault_credentials(
+        workspace_root,
+        &format!("cost-experiment-shadow:{title}"),
+        credential_scopes,
+        CREDENTIAL_TOKEN_TTL_SECS,
+        true,
+        &current_env,
+    );
+    let shadow_env = scoped_credential_env(&current_env, &available, credential_scopes);
+
+    cmd.env_clear();
+    for (k, v) in &shadow_env {
+        cmd.env(k, v);
+    }
+
+    // Always present, even when empty: an explicit "enforcement on, zero
+    // scopes" declaration, distinct from the flag being absent entirely
+    // (which would mean legacy full inheritance).
+    cmd.arg("--credential-scopes")
+        .arg(if credential_scopes.is_empty() {
+            String::new()
+        } else {
+            credential_scopes.join(",")
+        });
+
+    cmd
+}
+
+/// Spawn the shadow goal in the background. Fire-and-forget: the caller does
+/// not wait on the returned `Child`, so the canonical goal's own flow isn't
+/// slowed down by the shadow's agent session running concurrently.
+#[allow(clippy::too_many_arguments)]
+fn spawn_shadow_experiment_goal(
+    ta_bin: &Path,
+    workspace_root: &Path,
+    title: &str,
+    agent: &str,
+    objective: &str,
+    objective_file: Option<&Path>,
+    spec: &ExperimentSpawnSpec,
+    credential_scopes: &[String],
+    workflow_tag: Option<&str>,
+    persona: Option<&str>,
+    engine_workflow: Option<&str>,
+) -> std::io::Result<std::process::Child> {
+    build_shadow_experiment_command(
+        ta_bin,
+        workspace_root,
+        title,
+        agent,
+        objective,
+        objective_file,
+        spec,
+        credential_scopes,
+        workflow_tag,
+        persona,
+        engine_workflow,
+    )
+    .spawn()
+}
+
 /// Run a single swarm sub-goal to completion: launch the agent subprocess,
 /// find its resulting goal record, and evaluate gates. Synchronous — a wave
 /// member runs one of these on its own OS thread via
@@ -2057,6 +2289,8 @@ pub fn execute(
     context_path: Option<&Path>,
     credential_scopes: Option<&[String]>,
     team_session_id: Option<&str>,
+    workflow_tag: Option<&str>,
+    shadow_experiment: Option<&ShadowExperimentFlags>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -2687,6 +2921,167 @@ pub fn execute(
             updated_goal.is_macro = true;
         }
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
+
+        // Generic cost-classification tag (v0.17.x cost-experiment
+        // framework): `--workflow-tag`, opaque to TA core. Set only when the
+        // flag is actually present -- this block also runs on the
+        // `--goal-id` reuse path, and an omitted flag there must leave any
+        // existing tag on the goal alone rather than silently clearing it.
+        // Independent of the cost-experiment arm-assignment logic below -- a
+        // goal can be tagged without being part of any experiment, and vice
+        // versa.
+        if let Some(tag) = workflow_tag {
+            updated_goal.workflow = Some(tag.to_string());
+        }
+
+        // Cost-experiment arm assignment: check every defined experiment, apply
+        // the first one whose roll selects this goal. Multiple simultaneously
+        // active experiments on the same goal are not supported in this pass;
+        // `ta experiment start` should refuse to start a second experiment
+        // while one is already active (enforced in Task 5).
+        let experiment_source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+        if let Some(flags) = shadow_experiment {
+            // This goal *is* a shadow spawned by `spawn_shadow_experiment_goal`
+            // (Task 4b) below, via its own `ta run --experiment-shadow-*`
+            // invocation. The canonical goal's roll already picked this exact
+            // arm/pair, so re-rolling here would defeat the whole point of
+            // pairing: use the explicit flags verbatim instead of touching
+            // `ExperimentConfig::list`/`assign_arm` at all.
+            updated_goal.experiment_id = Some(flags.experiment_id.clone());
+            updated_goal.experiment_arm = flags.arm.clone();
+            updated_goal.experiment_pair_id = flags.pair_id;
+            updated_goal.experiment_overrides = flags.overrides_json.as_deref().and_then(|s| {
+                serde_json::from_str(s)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            "Malformed --experiment-shadow-overrides JSON, \
+                             proceeding with no overrides: {e}"
+                        );
+                        e
+                    })
+                    .ok()
+            });
+            updated_goal.auto_cancel_after_draft = flags.auto_cancel_after_draft;
+        } else if updated_goal.experiment_id.is_some() {
+            // `--goal-id` reuse path: this goal already has an experiment
+            // arm assigned from its original roll. Re-rolling here would
+            // re-roll the arm on every retry and, on a `Paired` roll, spawn
+            // a SECOND shadow goal, doubling spend. Mirrors the
+            // `workflow_tag` guard immediately above: an already-assigned
+            // goal is left untouched.
+        } else {
+            match ta_goal::ExperimentConfig::list(experiment_source_root) {
+                Ok(experiments) => {
+                    let mut rng = rand::thread_rng();
+                    for exp_config in experiments {
+                        match ta_goal::experiment::assign_arm(&exp_config, &mut rng) {
+                            ta_goal::experiment::ArmAssignment::None => continue,
+                            ta_goal::experiment::ArmAssignment::Unpaired { arm } => {
+                                updated_goal.experiment_id = Some(exp_config.id.clone());
+                                updated_goal.experiment_overrides =
+                                    exp_config.arms.get(&arm).cloned();
+                                updated_goal.experiment_arm = Some(arm);
+                                break;
+                            }
+                            ta_goal::experiment::ArmAssignment::Paired {
+                                canonical_arm,
+                                shadow_arm,
+                                pair_id,
+                            } => {
+                                // Spawn the shadow goal (Task 4b) under the shadow arm,
+                                // fire-and-forget, before tagging this (canonical) goal
+                                // with its own half of the pair. A failed spawn is
+                                // logged and swallowed: the canonical goal must never
+                                // fail or block because its shadow couldn't launch.
+                                //
+                                // Gated on `should_spawn_shadow(no_launch)`: `ta run
+                                // --no-launch` means "create the goal, don't launch
+                                // an agent", so a Paired roll must not launch a full
+                                // shadow agent session either under that flag, or it
+                                // burns real tokens against the user's explicit
+                                // instruction not to.
+                                if !should_spawn_shadow(no_launch) {
+                                    eprintln!(
+                                        "Note: --no-launch set, skipping paired shadow \
+                                 experiment goal spawn."
+                                    );
+                                } else {
+                                    match std::env::current_exe() {
+                                        Ok(ta_bin) => {
+                                            let shadow_spec = ExperimentSpawnSpec {
+                                                experiment_id: exp_config.id.clone(),
+                                                arm: shadow_arm.clone(),
+                                                pair_id,
+                                                overrides: exp_config
+                                                    .arms
+                                                    .get(&shadow_arm)
+                                                    .cloned()
+                                                    .unwrap_or_default(),
+                                            };
+                                            // Forward the canonical goal's already-resolved
+                                            // `agent` and its objective (preferring
+                                            // `--objective-file` when the canonical was
+                                            // given one, since that's what wins per
+                                            // `goal.rs`'s own file-overrides-string
+                                            // precedence) so the shadow runs the identical
+                                            // task on the identical model (Important #4).
+                                            // Also forward the canonical goal's resolved
+                                            // workflow tag, persona, and execution-engine
+                                            // workflow mode so both halves of the pair
+                                            // land in the same cost-report bucket and run
+                                            // under the identical persona/engine (a
+                                            // confound otherwise).
+                                            if let Err(e) = spawn_shadow_experiment_goal(
+                                                &ta_bin,
+                                                experiment_source_root,
+                                                title,
+                                                agent,
+                                                objective,
+                                                objective_file,
+                                                &shadow_spec,
+                                                credential_scopes.unwrap_or(&[]),
+                                                updated_goal.workflow.as_deref(),
+                                                persona_name,
+                                                workflow,
+                                            ) {
+                                                eprintln!(
+                                                    "Warning: failed to spawn paired shadow \
+                                             experiment goal: {e}"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                        "Warning: could not resolve ta binary path to spawn \
+                                         paired shadow experiment goal: {e}"
+                                    );
+                                        }
+                                    }
+                                }
+                                updated_goal.experiment_id = Some(exp_config.id.clone());
+                                updated_goal.experiment_overrides =
+                                    exp_config.arms.get(&canonical_arm).cloned();
+                                updated_goal.experiment_arm = Some(canonical_arm);
+                                updated_goal.experiment_pair_id = Some(pair_id);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // A malformed `.ta/experiments/*.toml` file must not
+                    // silently disable cost-experiment tracking for every
+                    // subsequent goal with zero visible symptom -- warn so a
+                    // user can actually diagnose which file is broken.
+                    tracing::warn!(
+                        path = %experiment_source_root.display(),
+                        error = %e,
+                        "Failed to list cost experiments -- skipping arm assignment for this goal"
+                    );
+                }
+            }
+        }
+
         goal_store.save(&updated_goal)?;
     }
 
@@ -9423,6 +9818,8 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -9438,6 +9835,474 @@ context_inject = "{mode_toml}"
 
         // Settings should also be restored (removed since it didn't exist).
         assert!(!goals[0].workspace_path.join(SETTINGS_REL_PATH).exists());
+    }
+
+    #[test]
+    fn workflow_tag_flag_sets_goal_workflow_field() {
+        // Generic cost-classification tag (v0.17.x cost-experiment
+        // framework): `--workflow-tag <tag>` sets `GoalRun.workflow`.
+        // Exercises the real `ta run` command path (same pattern as
+        // `run_creates_goal_and_restores_on_no_launch` above), with
+        // `no_launch: true` so no agent subprocess is spawned.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false,                     // not headless
+            false,                     // skip_verify = false
+            false,                     // quiet = false
+            None,                      // no existing goal id
+            None,                      // workflow = default (single-agent)
+            None,                      // persona_name = None
+            None,                      // context_path = None
+            None,                      // credential_scopes = None (v0.17.6.1)
+            None,                      // team_session_id = None (v0.17.11.8)
+            Some("brain-maintenance"), // workflow_tag
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].workflow.as_deref(), Some("brain-maintenance"));
+    }
+
+    #[test]
+    fn workflow_tag_flag_omitted_leaves_goal_workflow_none() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false, // not headless
+            false, // skip_verify = false
+            false, // quiet = false
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (omitted)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].workflow, None);
+    }
+
+    #[test]
+    fn run_assigns_experiment_arm_when_holdout_fraction_is_one() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let mut arms = std::collections::HashMap::new();
+        arms.insert("variant-on".to_string(), serde_json::json!({}));
+        arms.insert(
+            "variant-off".to_string(),
+            serde_json::json!({"feature.disabled": true}),
+        );
+        ta_goal::ExperimentConfig {
+            id: "cost-test-1".to_string(),
+            holdout_fraction: 1.0,
+            paired_fraction: 0.0,
+            maintenance_workflow: None,
+            canonical_arm: None,
+            arms,
+        }
+        .save(project.path())
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // Run with --no-launch to avoid actually starting the agent.
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false, // not headless
+            false, // skip_verify = false
+            false, // quiet = false
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        // Verify goal was created and tagged with the experiment arm rolled
+        // for it (holdout_fraction 1.0 guarantees a roll every time).
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].experiment_id.as_deref(), Some("cost-test-1"));
+        assert!(
+            ["variant-on", "variant-off"].contains(&goals[0].experiment_arm.as_deref().unwrap())
+        );
+    }
+
+    #[test]
+    fn malformed_experiment_toml_does_not_crash_goal_creation() {
+        // Fix (review round): `ExperimentConfig::list` returning `Err` (e.g.
+        // one malformed `.ta/experiments/*.toml` file) must not crash goal
+        // creation -- it must degrade to "no experiment assigned" for this
+        // goal, with a warning logged (see `tracing::warn!` at the call
+        // site), not silently or fatally.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+        let experiments_dir = project.path().join(".ta/experiments");
+        std::fs::create_dir_all(&experiments_dir).unwrap();
+        std::fs::write(
+            experiments_dir.join("cost-test-bad.toml"),
+            "this is not valid toml = = =",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,
+            false,
+            false,
+            None,
+            false, // not headless
+            false, // skip_verify = false
+            false, // quiet = false
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1, "goal creation must still succeed cleanly");
+        assert_eq!(goals[0].experiment_id, None);
+    }
+
+    #[test]
+    fn goal_id_reuse_does_not_reroll_already_assigned_experiment_arm() {
+        // Fix (review round): a second `ta run --goal-id X` invocation (e.g.
+        // a retry after an early failure) must not re-roll the experiment
+        // arm -- on a `Paired` roll this would spawn a SECOND shadow goal,
+        // doubling spend. `holdout_fraction: 1.0` guarantees a re-roll would
+        // definitely happen (and be observable) if the reuse-path guard were
+        // missing, since every roll against this config produces an arm.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let mut arms = std::collections::HashMap::new();
+        arms.insert("variant-on".to_string(), serde_json::json!({}));
+        arms.insert(
+            "variant-off".to_string(),
+            serde_json::json!({"feature.disabled": true}),
+        );
+        ta_goal::ExperimentConfig {
+            id: "cost-test-1".to_string(),
+            holdout_fraction: 1.0,
+            paired_fraction: 0.0,
+            maintenance_workflow: None,
+            canonical_arm: None,
+            arms,
+        }
+        .save(project.path())
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        use ta_goal::GoalRun;
+        let mut goal = GoalRun::new(
+            "Test goal",
+            "Test objective",
+            "claude-code",
+            project.path().join(".ta/staging/existing"),
+            project.path().join(".ta/store/existing"),
+        );
+        goal.source_dir = Some(project.path().to_path_buf());
+        // Simulate a goal already assigned from a prior roll -- an arm name
+        // that isn't even a real arm in the config above, so any re-roll
+        // would be immediately visible as a change to a valid arm name.
+        goal.experiment_id = Some("cost-test-1".to_string());
+        goal.experiment_arm = Some("already-assigned-arm".to_string());
+        let goal_id = goal.goal_run_id;
+        goal_store.save(&goal).unwrap();
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true, // no_launch
+            false,
+            false,
+            None,
+            false,                      // not headless
+            false,                      // skip_verify = false
+            false,                      // quiet = false
+            Some(&goal_id.to_string()), // reuse via --goal-id
+            None,                       // workflow = default (single-agent)
+            None,                       // persona_name = None
+            None,                       // context_path = None
+            None,                       // credential_scopes = None (v0.17.6.1)
+            None,                       // team_session_id = None (v0.17.11.8)
+            None,                       // workflow_tag = None (v0.17.x cost-experiment framework)
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        let reloaded = goal_store.get(goal_id).unwrap().unwrap();
+        assert_eq!(reloaded.experiment_id.as_deref(), Some("cost-test-1"));
+        assert_eq!(
+            reloaded.experiment_arm.as_deref(),
+            Some("already-assigned-arm"),
+            "arm must not be re-rolled on --goal-id reuse"
+        );
+    }
+
+    #[test]
+    fn paired_roll_does_not_spawn_shadow_when_no_launch() {
+        // Important #3: `ta run --no-launch` means "create the goal, don't
+        // launch an agent", so a Paired roll must not launch a full shadow
+        // agent session either under that flag, since that would burn real
+        // tokens against the user's explicit instruction not to launch
+        // anything. `paired_fraction: 1.0` forces every roll to be `Paired`
+        // (never `Unpaired`/`None`), so if the spawn gate were missing this
+        // test's canonical `execute()` call would attempt to spawn a real
+        // `ta run` subprocess (using the test binary as `ta_bin`, since
+        // `std::env::current_exe()` inside a test resolves to the test
+        // binary, not a real `ta`): at minimum a spurious/hung child
+        // process, at worst a second goal record silently appearing in this
+        // same temp goal store.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        let mut arms = std::collections::HashMap::new();
+        arms.insert("variant-on".to_string(), serde_json::json!({}));
+        arms.insert(
+            "variant-off".to_string(),
+            serde_json::json!({"feature.disabled": true}),
+        );
+        ta_goal::ExperimentConfig {
+            id: "cost-test-1".to_string(),
+            holdout_fraction: 0.0,
+            paired_fraction: 1.0,
+            maintenance_workflow: None,
+            canonical_arm: None,
+            arms,
+        }
+        .save(project.path())
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        execute(
+            &config,
+            Some("Test goal"),
+            "claude-code",
+            Some(project.path()),
+            "Test objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true, // no_launch
+            false,
+            false,
+            None,
+            false, // not headless
+            false, // skip_verify = false
+            false, // quiet = false
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+            None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        )
+        .unwrap();
+
+        // The canonical goal still rolled and got tagged as the Paired
+        // canonical half (proving the roll itself still happens under
+        // --no-launch) ...
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(
+            goals.len(),
+            1,
+            "only the canonical goal should exist, no shadow goal spawned"
+        );
+        assert_eq!(goals[0].experiment_id.as_deref(), Some("cost-test-1"));
+        assert!(goals[0].experiment_pair_id.is_some());
+    }
+
+    #[test]
+    fn explicit_shadow_flags_set_goal_fields_without_rolling_dice() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Existing project instructions\n",
+        )
+        .unwrap();
+
+        // Deliberately no `.ta/experiments/*.toml` written: if the random-roll
+        // path ran instead of the explicit-flags bypass, `assign_arm` would
+        // have nothing to roll against and every experiment_* field would
+        // stay `None`, so a passing assertion below proves the bypass ran.
+        let config = GatewayConfig::for_project(project.path());
+
+        let pair_id = uuid::Uuid::new_v4();
+        let overrides = serde_json::json!({"feature.disabled": true});
+        let flags = ShadowExperimentFlags {
+            experiment_id: "cost-test-1".to_string(),
+            arm: Some("variant-off".to_string()),
+            pair_id: Some(pair_id),
+            overrides_json: Some(overrides.to_string()),
+            auto_cancel_after_draft: true,
+        };
+
+        execute(
+            &config,
+            Some("Shadow goal"),
+            "claude-code",
+            Some(project.path()),
+            "Shadow objective",
+            None,
+            None,
+            None, // follow_up_draft
+            None, // follow_up_goal
+            None,
+            true,  // no_launch
+            false, // interactive
+            false, // macro_goal
+            None,  // resume
+            true,  // headless (shadow goals always run headless)
+            false, // skip_verify = false
+            true,  // quiet
+            None,  // no existing goal id
+            None,  // workflow = default (single-agent)
+            None,  // persona_name = None
+            None,  // context_path = None
+            None,  // credential_scopes = None (v0.17.6.1)
+            None,  // team_session_id = None (v0.17.11.8)
+            None,  // workflow_tag = None (v0.17.x cost-experiment framework)
+            Some(&flags),
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].experiment_id.as_deref(), Some("cost-test-1"));
+        assert_eq!(goals[0].experiment_arm.as_deref(), Some("variant-off"));
+        assert_eq!(goals[0].experiment_pair_id, Some(pair_id));
+        assert_eq!(goals[0].experiment_overrides, Some(overrides));
+        assert!(goals[0].auto_cancel_after_draft);
     }
 
     #[test]
@@ -11436,6 +12301,8 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // workflow_tag = None (v0.17.x cost-experiment framework)
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -11472,6 +12339,8 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // workflow_tag = None (v0.17.x cost-experiment framework)
+            None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
         .unwrap();
 
@@ -12441,6 +13310,312 @@ plan_pending_window = 7
         assert_eq!(
             envs.get("TA_PREFIXED_CANARY_SHOULD_SURVIVE"),
             Some(&Some("kept".to_string()))
+        );
+    }
+
+    // ── Paired cost-experiment shadow goal spawn (v0.17.x, Task 4b) ─────────
+
+    #[test]
+    fn should_spawn_shadow_is_false_exactly_when_no_launch_is_set() {
+        // Direct, unambiguous regression guard for the `--no-launch` gate:
+        // unlike an end-to-end `execute()` assertion, this fails immediately
+        // and specifically if the predicate's logic is ever inverted or
+        // hardcoded, with no dependence on subprocess/goal-store side effects.
+        assert!(!should_spawn_shadow(true));
+        assert!(should_spawn_shadow(false));
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_builds_correct_args() {
+        use uuid::Uuid;
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({"feature.disabled": true}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            None, // workflow_tag = None (covered separately below)
+            None, // persona = None (covered separately below)
+            None, // engine_workflow = None (covered separately below)
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--experiment-shadow-id".to_string()));
+        assert!(args.contains(&"cost-test-1".to_string()));
+        assert!(args.contains(&"--experiment-shadow-arm".to_string()));
+        assert!(args.contains(&"variant-off".to_string()));
+        assert!(args.contains(&"--experiment-shadow-pair-id".to_string()));
+        assert!(args.contains(&spec.pair_id.to_string()));
+        assert!(args.contains(&"--experiment-shadow-overrides".to_string()));
+        assert!(args.contains(&spec.overrides.to_string()));
+        assert!(args.contains(&"--auto-cancel-after-draft".to_string()));
+        assert!(args.contains(&"--headless".to_string()));
+        assert!(args.contains(&"Fix the bug".to_string()));
+        // Important #4: the shadow must run the identical model and task as
+        // the canonical goal, never re-resolve the agent from scratch, and
+        // never silently drop the objective.
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"claude-opus-4".to_string()));
+        assert!(args.contains(&"--objective".to_string()));
+        assert!(args.contains(&"Fix the null pointer in parser.rs".to_string()));
+        assert!(!args.contains(&"--objective-file".to_string()));
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo")));
+        // Credential scoping (review fix): the flag is always present, even
+        // when empty: "enforcement on, zero scopes", never legacy full
+        // inheritance.
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--credential-scopes")
+            .unwrap();
+        assert_eq!(args[flag_pos + 1], "");
+    }
+
+    #[test]
+    fn shadow_experiment_command_env_does_not_contain_full_parent_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mirrors `swarm_sub_goal_command_env_does_not_contain_full_parent_environment`:
+        // a shadow session runs unattended and must not silently inherit the
+        // parent process's full environment.
+        std::env::set_var("SHADOW_LEAK_CANARY_XYZ", "leaked");
+        std::env::set_var("TA_PREFIXED_SHADOW_CANARY_SHOULD_SURVIVE", "kept");
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: uuid::Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            dir.path(),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            None, // workflow_tag = None (covered separately below)
+            None, // persona = None (covered separately below)
+            None, // engine_workflow = None (covered separately below)
+        );
+
+        let envs: HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+
+        std::env::remove_var("SHADOW_LEAK_CANARY_XYZ");
+        std::env::remove_var("TA_PREFIXED_SHADOW_CANARY_SHOULD_SURVIVE");
+
+        assert!(!envs.contains_key("SHADOW_LEAK_CANARY_XYZ"));
+        assert_eq!(
+            envs.get("TA_PREFIXED_SHADOW_CANARY_SHOULD_SURVIVE"),
+            Some(&Some("kept".to_string()))
+        );
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_forwards_objective_file_over_string() {
+        use uuid::Uuid;
+
+        // Important #4: when the canonical goal was given `--objective-file`,
+        // that file takes precedence over the objective string in `goal.rs`'s
+        // own resolution logic (`final_objective`), so the shadow must
+        // receive `--objective-file`, not `--objective`, or it would run a
+        // different/empty objective than the canonical goal.
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "this string must not be used",
+            Some(Path::new("/repo/OBJECTIVE.md")),
+            &spec,
+            &[],
+            None, // workflow_tag = None (covered separately below)
+            None, // persona = None (covered separately below)
+            None, // engine_workflow = None (covered separately below)
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--objective-file".to_string()));
+        assert!(args.contains(&"/repo/OBJECTIVE.md".to_string()));
+        assert!(!args.contains(&"--objective".to_string()));
+        assert!(!args.contains(&"this string must not be used".to_string()));
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_forwards_workflow_tag_when_canonical_goal_has_one() {
+        use uuid::Uuid;
+
+        // Important #2: the canonical and shadow halves of a paired-sampling
+        // pair must land in the same cost-report bucket
+        // (`VelocityEntry.workflow`), or the arm comparison the whole
+        // paired-sampling feature exists for is undermined.
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            Some("brain-maintenance"),
+            None, // persona = None (covered separately below)
+            None, // engine_workflow = None (covered separately below)
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--workflow-tag")
+            .expect("--workflow-tag must be present when the canonical goal has a workflow tag");
+        assert_eq!(args[flag_pos + 1], "brain-maintenance");
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_omits_workflow_tag_flag_when_canonical_goal_has_none() {
+        use uuid::Uuid;
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            None,
+            None, // persona = None (covered separately below)
+            None, // engine_workflow = None (covered separately below)
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !args.contains(&"--workflow-tag".to_string()),
+            "--workflow-tag must be omitted when the canonical goal has no workflow tag"
+        );
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_forwards_persona_and_engine_workflow_when_set() {
+        use uuid::Uuid;
+
+        // Review fix: without this, a shadow spawned from a wake-on-demand
+        // listener could run under a different persona/execution-engine
+        // than its canonical twin -- a confound for the cost comparison.
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            None,
+            Some("on-call-triage"),
+            Some("serial-phases"),
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let persona_pos = args
+            .iter()
+            .position(|a| a == "--persona")
+            .expect("--persona must be present when the canonical goal has a persona");
+        assert_eq!(args[persona_pos + 1], "on-call-triage");
+        let workflow_pos = args
+            .iter()
+            .position(|a| a == "--workflow")
+            .expect("--workflow must be present when the canonical goal has an engine workflow");
+        assert_eq!(args[workflow_pos + 1], "serial-phases");
+    }
+
+    #[test]
+    fn spawn_shadow_experiment_goal_omits_persona_and_engine_workflow_flags_when_none() {
+        use uuid::Uuid;
+
+        let spec = ExperimentSpawnSpec {
+            experiment_id: "cost-test-1".to_string(),
+            arm: "variant-off".to_string(),
+            pair_id: Uuid::new_v4(),
+            overrides: serde_json::json!({}),
+        };
+        let cmd = build_shadow_experiment_command(
+            Path::new("/usr/local/bin/ta"),
+            Path::new("/repo"),
+            "Fix the bug",
+            "claude-opus-4",
+            "Fix the null pointer in parser.rs",
+            None,
+            &spec,
+            &[],
+            None,
+            None,
+            None,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !args.contains(&"--persona".to_string()),
+            "--persona must be omitted when the canonical goal has no persona"
+        );
+        assert!(
+            !args.contains(&"--workflow".to_string()),
+            "--workflow must be omitted when the canonical goal has no engine workflow"
         );
     }
 }
