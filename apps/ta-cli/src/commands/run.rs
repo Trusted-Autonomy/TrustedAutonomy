@@ -2289,6 +2289,7 @@ pub fn execute(
     context_path: Option<&Path>,
     credential_scopes: Option<&[String]>,
     team_session_id: Option<&str>,
+    agent_id: Option<&str>,
     workflow_tag: Option<&str>,
     shadow_experiment: Option<&ShadowExperimentFlags>,
 ) -> anyhow::Result<()> {
@@ -3219,6 +3220,7 @@ pub fn execute(
             pending_window,
             &context_mode,
             user_context.as_deref(),
+            agent_id,
         )?;
         let ctx = ta_runtime::channels::AgentContext {
             goal_id: goal_id.clone(),
@@ -7451,7 +7453,21 @@ fn build_context_content(
     pending_window: usize,
     context_mode: &ta_submit::config::ContextMode,
     user_context: Option<&str>,
+    agent_id: Option<&str>,
 ) -> anyhow::Result<String> {
+    // v0.17.11.16: rendered only when this goal was launched by a
+    // wake-on-demand listener (`ta-daemon`'s `build_ta_run_args`) -- see
+    // `WakeListenerConfig`'s own doc comment for why this differs from
+    // `**Goal ID:**` above (fresh per goal, means nothing once it ends):
+    // this is the *listener's* globally unique, long-lived identity,
+    // stable across every goal it ever launches. The agent should report
+    // this (not its role name, and not the goal id) on whiteboard
+    // presence/claim calls whenever a claim needs to mean something
+    // beyond this one goal's lifetime.
+    let agent_id_section = agent_id
+        .map(|id| format!("**Agent ID:** {id}\n"))
+        .unwrap_or_default();
+
     // Build developer style section from ~/.config/ta/style.md (v0.16.1.7).
     let style_section = super::style::load_style()
         .map(|s| format!("\n## Developer Style\n\n{}\n", s.trim()))
@@ -7607,7 +7623,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -7724,6 +7740,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
 ---"#,
         title,
         goal_id,
+        agent_id_section,
         style_section,
         plan_section,
         parent_section,
@@ -7781,6 +7798,7 @@ fn inject_via_channel_for_test(
         done_window,
         pending_window,
         context_mode,
+        None,
         None,
     )?;
     let channel = ta_runtime::channels::ClaudeCodeChannel::new(staging_path.to_path_buf());
@@ -9818,6 +9836,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -9878,6 +9897,7 @@ context_inject = "{mode_toml}"
             None,                      // context_path = None
             None,                      // credential_scopes = None (v0.17.6.1)
             None,                      // team_session_id = None (v0.17.11.8)
+            None,                      // agent_id = None (v0.17.11.16)
             Some("brain-maintenance"), // workflow_tag
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -9925,6 +9945,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (omitted)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -9990,6 +10011,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -10054,6 +10076,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -10142,6 +10165,7 @@ context_inject = "{mode_toml}"
             None,                       // context_path = None
             None,                       // credential_scopes = None (v0.17.6.1)
             None,                       // team_session_id = None (v0.17.11.8)
+            None,                       // agent_id = None (v0.17.11.16)
             None,                       // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -10221,6 +10245,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -10290,6 +10315,7 @@ context_inject = "{mode_toml}"
             None,  // context_path = None
             None,  // credential_scopes = None (v0.17.6.1)
             None,  // team_session_id = None (v0.17.11.8)
+            None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             Some(&flags),
         )
@@ -12123,6 +12149,7 @@ plan_pending_window = 7
             5,
             &ta_submit::config::ContextMode::default(),
             Some("error[E0308]: mismatched types\n  --> src/lib.rs:42:5"),
+            None,
         )
         .unwrap();
 
@@ -12158,12 +12185,77 @@ plan_pending_window = 7
             5,
             &ta_submit::config::ContextMode::default(),
             None,
+            None,
         )
         .unwrap();
 
         assert!(
             !content.contains("## User-Provided Context"),
             "User-Provided Context should not appear when user_context is None"
+        );
+    }
+
+    #[test]
+    fn agent_id_section_included_when_present() {
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        let content = build_context_content(
+            "Some goal",
+            "goal-xyz",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::default(),
+            None,
+            Some("11111111-2222-3333-4444-555555555555"),
+        )
+        .unwrap();
+
+        assert!(
+            content.contains("**Agent ID:** 11111111-2222-3333-4444-555555555555"),
+            "missing Agent ID line"
+        );
+    }
+
+    #[test]
+    fn agent_id_section_absent_when_none() {
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        let content = build_context_content(
+            "Some goal",
+            "goal-xyz",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::default(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !content.contains("**Agent ID:**"),
+            "Agent ID line should not appear when agent_id is None"
         );
     }
 
@@ -12301,6 +12393,7 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // agent_id = None (v0.17.11.16)
             None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )
@@ -12339,6 +12432,7 @@ plan_pending_window = 7
             None,
             None, // credential_scopes = None (v0.17.6.1)
             None, // team_session_id = None (v0.17.11.8)
+            None, // agent_id = None (v0.17.11.16)
             None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         )

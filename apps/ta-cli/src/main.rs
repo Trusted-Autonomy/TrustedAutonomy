@@ -420,6 +420,20 @@ enum Commands {
         /// is written and no other behavior changes.
         #[arg(long)]
         team_session_id: Option<String>,
+        /// Globally unique, long-lived identifier for the wake-on-demand
+        /// listener launching this goal (v0.17.11.16), set internally by
+        /// `ta-daemon`'s `build_ta_run_args` -- not intended for manual use.
+        /// Distinct from `--agent` (which selects *which model* runs this
+        /// role): this identifies *which seat* is running it, stable across
+        /// every goal that listener ever launches. Rendered into the
+        /// injected context as `**Agent ID:**` so the agent can report it
+        /// back on whiteboard presence/claim calls, the same way `**Goal
+        /// ID:**` already lets it report which single goal it's on. Omitted
+        /// (the default): no such line is rendered -- this goal has no
+        /// persistent seat identity to report (round-robin team-session
+        /// stages and ordinary non-team-session goals alike).
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
         /// Generic cost-classification tag for this goal (e.g.
         /// "brain-maintenance", "feature-work"). Fully opaque to TA core --
         /// downstream products define what tags mean and use them to bucket
@@ -1668,6 +1682,7 @@ fn dispatch_raw(
             priority,
             credential_scopes,
             team_session_id,
+            agent_id,
             workflow_tag,
             experiment_shadow_id,
             experiment_shadow_arm,
@@ -1805,6 +1820,7 @@ fn dispatch_raw(
                 context.as_deref(),
                 credential_scopes.as_deref(),
                 team_session_id.as_deref(),
+                agent_id.as_deref(),
                 workflow_tag.as_deref(),
                 shadow_experiment.as_ref(),
             )
