@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ta_policy::business_budget::BudgetGuardrails;
@@ -433,6 +435,7 @@ pub fn build_ta_run_args(
     state: &TeamSessionState,
     label: &str,
     role: &str,
+    agent_id: Uuid,
     team_config: &TeamConfig,
     context_path: &Path,
     workflow_tag: Option<&str>,
@@ -453,6 +456,19 @@ pub fn build_ta_run_args(
         "--team-session-id".to_string(),
         state.id.clone(),
     ];
+
+    // The listener's own globally unique, long-lived identity (see
+    // WakeListenerConfig's doc comment) -- distinct from `--agent` below,
+    // which selects *which model* runs this role, not *which seat* is
+    // running it. Omitted (not just an empty flag) when nil: a `ta run`
+    // launched outside a wake-on-demand listener (or one loaded from a
+    // pre-agent-id state.json) has no persistent identity to report, and
+    // an explicit nil UUID rendered into an agent's own context would read
+    // as a real, if odd-looking, identity rather than "none assigned."
+    if !agent_id.is_nil() {
+        args.push("--agent-id".to_string());
+        args.push(agent_id.to_string());
+    }
 
     if let Some(member) = team_config.find_by_role(&TeamRole::new(role)) {
         args.push("--security".to_string());
@@ -595,11 +611,18 @@ pub fn run_one_cycle(
     let context_path = write_session_context(project_root, &state, &stage.name, &role)?;
     // Round-robin rotation launches are not yet classified with a workflow
     // tag -- only wake-on-demand listeners (`wake_listener.rs`) carry one
-    // today, via their own `workflow_tag` config.
+    // today, via their own `workflow_tag` config. Same story for a
+    // persistent agent_id: only wake-on-demand listeners have the
+    // long-lived "seat" concept an id would identify; a round-robin stage
+    // has no equivalent registration to hang one off yet, so this passes
+    // nil (omitted from the launched `ta run`'s args, see build_ta_run_args'
+    // own doc comment on why nil means "not rendered" rather than "render
+    // a nil UUID").
     let args = build_ta_run_args(
         &state,
         &stage.name,
         &role,
+        Uuid::nil(),
         &team_config,
         &context_path,
         None,
@@ -1144,6 +1167,7 @@ mod tests {
             &state,
             &stage.name,
             "analyst",
+            Uuid::nil(),
             &team_config,
             &context_path,
             None,
@@ -1189,6 +1213,7 @@ mod tests {
             &state,
             &stage.name,
             "analyst",
+            Uuid::nil(),
             &team_config,
             &context_path,
             None,
@@ -1222,6 +1247,7 @@ mod tests {
             &state,
             &stage.name,
             "analyst",
+            Uuid::nil(),
             &team_config,
             &context_path,
             None,
@@ -1245,6 +1271,7 @@ mod tests {
             &state,
             &stage.name,
             "analyst",
+            Uuid::nil(),
             &team_config,
             &context_path,
             None,
@@ -1273,6 +1300,7 @@ mod tests {
             &state,
             &stage.name,
             "analyst",
+            Uuid::nil(),
             &team_config,
             &context_path,
             None,
@@ -1301,6 +1329,7 @@ mod tests {
             &state,
             &stage.name,
             "specialist",
+            Uuid::nil(),
             &team_config,
             &context_path,
             Some("brain-maintenance"),
@@ -1326,12 +1355,66 @@ mod tests {
             &state,
             &stage.name,
             "researcher",
+            Uuid::nil(),
             &team_config,
             &context_path,
             None,
         );
 
         assert!(!args.contains(&"--workflow-tag".to_string()));
+    }
+
+    #[test]
+    fn build_ta_run_args_appends_agent_id_flag_when_non_nil() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "engineer").unwrap();
+        let team_config = TeamConfig::default();
+        let agent_id = Uuid::new_v4();
+
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "engineer",
+            agent_id,
+            &team_config,
+            &context_path,
+            None,
+        );
+
+        let flag_pos = args
+            .iter()
+            .position(|a| a == "--agent-id")
+            .expect("--agent-id flag present");
+        assert_eq!(args[flag_pos + 1], agent_id.to_string());
+    }
+
+    #[test]
+    fn build_ta_run_args_omits_agent_id_flag_when_nil() {
+        // A round-robin rotation launch (no wake-on-demand listener behind
+        // it) has no persistent seat identity to report -- must not render
+        // a nil UUID into the launched agent's own context as if it were a
+        // real one.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+        let team_config = TeamConfig::default();
+
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            Uuid::nil(),
+            &team_config,
+            &context_path,
+            None,
+        );
+
+        assert!(!args.contains(&"--agent-id".to_string()));
     }
 
     #[cfg(unix)]
