@@ -28,7 +28,7 @@ use std::time::Duration;
 use ta_agent_whiteboard::WhiteboardTransport;
 use ta_session::team::TeamConfig;
 
-use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState};
+use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState, TeamSessionStatus};
 
 /// How often an idle listener (nothing currently on its stream) re-polls.
 /// Deliberately short and decoupled from `team_session.rs`'s rotation
@@ -89,6 +89,13 @@ pub fn start(
         let Ok(Some(state)) = TeamSessionState::load(&project_root, &id) else {
             continue;
         };
+        // Mirrors team_session::start's own "don't spawn a loop for an
+        // already-Stopped session" filter -- a stopped session doesn't come
+        // back without a fresh registration, so there's nothing for a
+        // listener loop to wait around for.
+        if state.status == TeamSessionStatus::Stopped {
+            continue;
+        }
         for listener in state.wake_on_demand_listeners.clone() {
             let pr = project_root.clone();
             let bin = ta_bin.clone();
@@ -107,6 +114,46 @@ pub fn start(
         }
     }
     handles
+}
+
+/// Outcome of checking a team session's live status against disk, decoupled
+/// from async/sleep/logging so it can be unit-tested directly against real
+/// on-disk `TeamSessionState` fixtures.
+#[derive(Debug, PartialEq, Eq)]
+enum ListenerGate {
+    /// `Active` (or any status without special handling): proceed to read
+    /// and launch as normal.
+    Proceed,
+    /// Session is `Stopped` or no longer exists: the listener loop should
+    /// return permanently. Carries a human-readable reason for logging.
+    Exit(&'static str),
+    /// Session is `Paused`/`Suspended`, or its state couldn't be read: sleep
+    /// one poll interval and check again. Carries an optional reason to
+    /// warn-log (set only for the error case; pause/suspend is expected,
+    /// routine operation and logs at a lower level by the caller).
+    WaitAndRetry(Option<String>),
+}
+
+/// Pure status check used at the top of every `run_listener_loop` iteration.
+/// Mirrors `team_session::run_one_cycle`'s own pause/stop handling for the
+/// round-robin rotation, applied here to wake-on-demand listeners.
+fn gate_on_session_status(project_root: &Path, session_id: &str) -> ListenerGate {
+    match TeamSessionState::load(project_root, session_id) {
+        Ok(Some(state)) if state.status == TeamSessionStatus::Stopped => {
+            ListenerGate::Exit("team session stopped, listener exiting")
+        }
+        Ok(Some(state))
+            if state.status == TeamSessionStatus::Paused
+                || state.status == TeamSessionStatus::Suspended =>
+        {
+            ListenerGate::WaitAndRetry(None)
+        }
+        Ok(Some(_)) => ListenerGate::Proceed,
+        Ok(None) => ListenerGate::Exit("team session no longer exists, listener exiting"),
+        Err(e) => ListenerGate::WaitAndRetry(Some(format!(
+            "failed to read team session state, will retry next poll: {e}"
+        ))),
+    }
 }
 
 /// The supervised loop for one `(session, listener)` pair. Runs until the
@@ -132,6 +179,36 @@ async fn run_listener_loop(
     }
 
     loop {
+        // Live pause/stop check, re-read fresh every round -- not just once
+        // at startup -- so `ta team-session pause <id>` actually stops new
+        // inference from being spawned by this listener, the same way it
+        // already stops the round-robin rotation (team_session.rs's own
+        // `run_one_cycle`). Found live, 2026-10-01: before this check
+        // existed, "paused" only ever applied to the rotation; wake-on-demand
+        // listeners kept firing real `ta run` invocations regardless, which
+        // is not what a human pausing a session would reasonably expect.
+        //
+        // Not reading from the stream while paused loses nothing -- JetStream
+        // pull-consumer position is durable server-side, so a message that
+        // arrives while paused is still there, unconsumed, once resumed.
+        match gate_on_session_status(&project_root, &session_id) {
+            ListenerGate::Proceed => {}
+            ListenerGate::Exit(reason) => {
+                tracing::info!(session = %session_id, role = %listener.role, "wake_listener: {reason}");
+                return;
+            }
+            ListenerGate::WaitAndRetry(reason) => {
+                if let Some(reason) = reason {
+                    tracing::warn!(session = %session_id, role = %listener.role, "wake_listener: {reason}");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    _ = shutdown.notified() => return,
+                }
+                continue;
+            }
+        }
+
         let mut launched_this_round = false;
 
         for key in &listener.keys {
@@ -341,6 +418,68 @@ mod tests {
             vec!["external-intake".to_string()]
         );
         assert_eq!(loaded.wake_on_demand_listeners[0].workflow_tag, None);
+    }
+
+    #[test]
+    fn gate_proceeds_for_active_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::Proceed
+        );
+    }
+
+    #[test]
+    fn gate_waits_and_retries_for_paused_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.status = TeamSessionStatus::Paused;
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::WaitAndRetry(None),
+            "a paused session must not proceed to read/launch -- it should wait and re-check, \
+             the same way team_session's own round-robin rotation respects pause"
+        );
+    }
+
+    #[test]
+    fn gate_waits_and_retries_for_suspended_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.status = TeamSessionStatus::Suspended;
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::WaitAndRetry(None)
+        );
+    }
+
+    #[test]
+    fn gate_exits_for_stopped_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.status = TeamSessionStatus::Stopped;
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::Exit("team session stopped, listener exiting")
+        );
+    }
+
+    #[test]
+    fn gate_exits_when_session_no_longer_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "no-such-session"),
+            ListenerGate::Exit("team session no longer exists, listener exiting")
+        );
     }
 
     #[test]
