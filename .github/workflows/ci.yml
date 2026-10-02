@@ -62,7 +62,17 @@ jobs:
 
       - name: Run tests
         run: nix develop --command bash -c "cargo test --workspace -- --test-threads=4"
-        timeout-minutes: 15
+        # macos-latest gets a higher budget: its "Build all crates" step has
+        # been observed taking 8+ minutes (vs. a few minutes on
+        # ubuntu-latest), leaving too little of the flat 15-minute test
+        # budget for cargo test --workspace's full suite under
+        # --test-threads=4 and causing step-level timeouts mid-suite --
+        # not any specific test hanging, just the clock running out while
+        # genuinely-still-running tests are mid-flight (observed on PR #624
+        # and #625, 2026-10-01/02, and on main itself on 2026-09-18/22).
+        # Bumped here to test that theory; revert or tune further if it
+        # doesn't resolve the intermittent macOS timeouts.
+        timeout-minutes: ${{ matrix.os == 'macos-latest' && 25 || 15 }}
 
       - name: Run clippy
         run: nix develop --command bash -c "cargo clippy --workspace --all-targets -- -D warnings"
