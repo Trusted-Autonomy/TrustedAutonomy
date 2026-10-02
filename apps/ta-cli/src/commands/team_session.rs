@@ -176,8 +176,16 @@ pub enum TeamSessionCommands {
     /// Pause a running session — the supervisor stops firing new goal-runs
     /// until `ta team-session resume <name>`.
     Pause { name: String },
-    /// Resume a paused session.
+    /// Resume a Paused session. Has no effect on a Suspended one (reached
+    /// after repeated goal-run failures exhaust the retry/backoff budget) --
+    /// use `ta team-session restart <name>` for that instead; Paused and
+    /// Suspended are distinct statuses with distinct clearing signals.
     Resume { name: String },
+    /// Clear a Suspended session (reached after repeated goal-run failures
+    /// exhaust the retry/backoff budget) and resume its rotation from where
+    /// it left off, resetting the failure tracker. Has no effect on a
+    /// Paused session -- use `ta team-session resume <name>` for that.
+    Restart { name: String },
     /// Stop a session permanently (does not delete its state.json history).
     Stop { name: String },
     /// Show live supervisor status for one or all sessions.
@@ -213,6 +221,15 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
         TeamSessionCommands::Resume { name } => {
             write_signal(project_root, name, "resume-signal").context("writing resume-signal")?;
             println!("[team-session] resume requested for '{name}'.");
+            Ok(())
+        }
+        TeamSessionCommands::Restart { name } => {
+            write_signal(project_root, name, "restart-signal").context("writing restart-signal")?;
+            println!(
+                "[team-session] restart requested for '{name}' -- clears Suspended, resets the \
+                 failure tracker, and resumes rotation on the supervisor's next poll. No effect \
+                 if the session isn't currently Suspended."
+            );
             Ok(())
         }
         TeamSessionCommands::Stop { name } => {
@@ -476,7 +493,7 @@ fn start(
         )
     };
     println!(
-        "[team-session] started '{name}' with {} stage(s) from '{workflow_path}'.{wake_on_demand_note} The daemon supervisor picks it up on its next startup or poll cycle. Check progress with `ta team-session status {name}`.",
+        "[team-session] started '{name}' with {} stage(s) from '{workflow_path}'.{wake_on_demand_note} The daemon supervisor picks it up within ~30s (its periodic session-discovery scan) if it's already running, or immediately on its next startup. Check progress with `ta team-session status {name}`.",
         state.stages.len()
     );
     Ok(())
@@ -1155,6 +1172,37 @@ stages:
         assert!(session_dir(dir.path(), "sess-1")
             .join("stop-signal")
             .exists());
+    }
+
+    #[test]
+    fn restart_writes_restart_signal_distinct_from_resume_signal() {
+        // A Suspended session (reached via the backoff/crash-recovery path)
+        // is cleared by restart-signal, not resume-signal -- `resume` is a
+        // no-op against it, since the daemon's run_one_cycle checks a
+        // different signal for each status. Before this test/command
+        // existed, there was no CLI way to clear Suspended at all; USAGE.md
+        // told users to `touch .ta/team-sessions/<name>/restart-signal`
+        // directly. Found live, 2026-10-02.
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
+
+        execute(
+            &TeamSessionCommands::Restart {
+                name: "sess-1".to_string(),
+            },
+            dir.path(),
+        )
+        .unwrap();
+        assert!(session_dir(dir.path(), "sess-1")
+            .join("restart-signal")
+            .exists());
+        assert!(
+            !session_dir(dir.path(), "sess-1")
+                .join("resume-signal")
+                .exists(),
+            "restart must write a distinct signal file from resume, not alias it"
+        );
     }
 
     #[test]

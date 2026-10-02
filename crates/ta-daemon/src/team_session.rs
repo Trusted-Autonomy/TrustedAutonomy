@@ -580,7 +580,25 @@ pub fn run_one_cycle(
             tracker.reset();
             state.status = TeamSessionStatus::Active;
             state.save(project_root)?;
+            tracing::info!(
+                session_id = %id,
+                "team session restarted via `ta team-session restart` -- failure tracker reset, \
+                 rotation resuming"
+            );
         } else {
+            // Deliberately debug, not silent: a Suspended session with no
+            // restart signal polls forever doing nothing else, and this is
+            // the only place that fact is ever observable short of
+            // `ta team-session status` -- found live, 2026-10-02, when a
+            // user watching `RUST_LOG=debug` across a daemon restart saw
+            // zero team_session/supervisor log lines at all for a
+            // Suspended session and couldn't tell whether the supervisor
+            // was alive, polling, or never started.
+            tracing::debug!(
+                session_id = %id,
+                "team session is Suspended, no restart-signal present -- waiting \
+                 (`ta team-session restart {id}` to clear it)"
+            );
             return Ok((CycleOutcome::Suspended, tracker));
         }
     }
@@ -778,6 +796,41 @@ async fn run_team_session(
 /// one task per entry" shape. Returns the join handles for introspection
 /// (tests / graceful-shutdown awaiting), matching `connector_supervisor`'s
 /// `AllQueues` return-for-introspection precedent.
+/// How often the discovery loop (below) re-scans for team sessions created
+/// after this daemon process itself started. Matches `watchdog.rs`'s own
+/// `interval_secs` convention/default (30s) for consistency -- short enough
+/// that `ta team-session start` run against an already-running daemon gets
+/// picked up promptly, not "on next restart" as it silently required before
+/// this fix (found live, 2026-10-02: a session created after daemon startup
+/// never got a supervisor spawned for it at all -- not stuck, never started
+/// -- because `start()`'s one-time enumeration at process-launch was the
+/// *only* place new sessions were ever discovered).
+const SESSION_DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Spawns `run_team_session` for `id` if its persisted status isn't already
+/// `Stopped`. Shared by `start()`'s initial one-time scan and the ongoing
+/// discovery loop so both apply the identical "skip Stopped" rule.
+fn spawn_if_not_stopped(
+    project_root: &Path,
+    id: &str,
+    ta_bin: &Path,
+    shutdown: &Arc<tokio::sync::Notify>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let Ok(Some(state)) = TeamSessionState::load(project_root, id) else {
+        return None;
+    };
+    if state.status == TeamSessionStatus::Stopped {
+        return None;
+    }
+    let pr = project_root.to_path_buf();
+    let sid = id.to_string();
+    let bin = ta_bin.to_path_buf();
+    let sd = shutdown.clone();
+    Some(tokio::spawn(async move {
+        run_team_session(pr, sid, bin, sd).await;
+    }))
+}
+
 pub fn start(
     project_root: PathBuf,
     shutdown: Arc<tokio::sync::Notify>,
@@ -788,20 +841,47 @@ pub fn start(
     // back to bare "ta" resolved via PATH) rather than reinventing it.
     let ta_bin = PathBuf::from(crate::web::find_ta_binary_web());
     let mut handles = Vec::new();
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in TeamSessionState::list_ids(&project_root) {
-        let Ok(Some(state)) = TeamSessionState::load(&project_root, &id) else {
-            continue;
-        };
-        if state.status == TeamSessionStatus::Stopped {
-            continue;
+        known.insert(id.clone());
+        if let Some(h) = spawn_if_not_stopped(&project_root, &id, &ta_bin, &shutdown) {
+            handles.push(h);
         }
+    }
+
+    // Ongoing discovery: re-scan every SESSION_DISCOVERY_INTERVAL for
+    // session IDs not seen before, and spawn a supervisor for each one --
+    // the fix for the gap described in SESSION_DISCOVERY_INTERVAL's doc
+    // comment above. Already-known IDs are skipped outright (even a
+    // Stopped-then-restarted one keeps its original supervisor task, which
+    // already polls for exactly that transition -- see run_team_session's
+    // Suspended/Paused handling), so this never double-spawns.
+    {
         let pr = project_root.clone();
         let bin = ta_bin.clone();
         let sd = shutdown.clone();
         handles.push(tokio::spawn(async move {
-            run_team_session(pr, id, bin, sd).await;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(SESSION_DISCOVERY_INTERVAL) => {}
+                    _ = sd.notified() => return,
+                }
+                for id in TeamSessionState::list_ids(&pr) {
+                    if known.contains(&id) {
+                        continue;
+                    }
+                    tracing::info!(
+                        session = %id,
+                        "team_session: discovered session created after daemon startup, \
+                         spawning its supervisor now"
+                    );
+                    known.insert(id.clone());
+                    spawn_if_not_stopped(&pr, &id, &bin, &sd);
+                }
+            }
         }));
     }
+
     handles
 }
 
@@ -908,6 +988,67 @@ mod tests {
 
         let ids = TeamSessionState::list_ids(dir.path());
         assert_eq!(ids, vec!["sess-a".to_string()]);
+    }
+
+    #[test]
+    fn list_ids_sees_a_session_created_after_an_earlier_snapshot() {
+        // Validates the premise `start()`'s discovery loop relies on: a
+        // session created on disk after an earlier `list_ids()` call shows
+        // up in a later one. Doesn't spawn the real loop (which launches a
+        // real `ta` subprocess via `run_team_session` -- not something to
+        // exercise in a unit test), just the on-disk discovery primitive
+        // the fix for the "daemon never picks up a session created after
+        // its own startup" bug (found live, 2026-10-02) depends on.
+        let dir = tempfile::tempdir().unwrap();
+        let mut first =
+            TeamSessionState::new("sess-a".to_string(), sample_config(), sample_stages());
+        first.save(dir.path()).unwrap();
+
+        let snapshot_one: std::collections::HashSet<String> =
+            TeamSessionState::list_ids(dir.path()).into_iter().collect();
+        assert_eq!(snapshot_one, ["sess-a".to_string()].into());
+
+        // Simulates `ta team-session start` creating a new session while
+        // the daemon (holding `snapshot_one`) is already running.
+        let mut second =
+            TeamSessionState::new("sess-b".to_string(), sample_config(), sample_stages());
+        second.save(dir.path()).unwrap();
+
+        let snapshot_two: std::collections::HashSet<String> =
+            TeamSessionState::list_ids(dir.path()).into_iter().collect();
+        let newly_discovered: Vec<&String> = snapshot_two.difference(&snapshot_one).collect();
+        assert_eq!(newly_discovered, vec![&"sess-b".to_string()]);
+    }
+
+    #[test]
+    fn spawn_if_not_stopped_skips_a_stopped_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state =
+            TeamSessionState::new("sess-a".to_string(), sample_config(), sample_stages());
+        state.status = TeamSessionStatus::Stopped;
+        state.save(dir.path()).unwrap();
+
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle =
+            spawn_if_not_stopped(dir.path(), "sess-a", Path::new("/usr/bin/true"), &shutdown);
+        assert!(
+            handle.is_none(),
+            "a Stopped session must never get a supervisor spawned for it, \
+             whether at daemon startup or by the ongoing discovery loop"
+        );
+    }
+
+    #[test]
+    fn spawn_if_not_stopped_skips_a_nonexistent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = spawn_if_not_stopped(
+            dir.path(),
+            "no-such-session",
+            Path::new("/usr/bin/true"),
+            &shutdown,
+        );
+        assert!(handle.is_none());
     }
 
     #[test]
@@ -1561,5 +1702,54 @@ mod tests {
         signal_resume(dir.path(), "sess-1").unwrap();
         let (outcome2, _tracker2) = run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
         assert_eq!(outcome2, CycleOutcome::Advanced);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_one_cycle_suspended_then_restart_signal() {
+        // `resume-signal` only clears Paused (see the test above);
+        // Suspended (reached via the backoff/crash-recovery path, not a
+        // human pause) needs restart-signal, written by `ta team-session
+        // restart`, not `resume`. Found live, 2026-10-02: there was no CLI
+        // command for this at all before -- USAGE.md told users to
+        // manually `touch .ta/team-sessions/<name>/restart-signal`.
+        let dir = tempfile::tempdir().unwrap();
+        let ta_bin = write_fake_ta_binary(dir.path(), "#!/bin/sh\nexit 1\n");
+        let mut state =
+            TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        state.save(dir.path()).unwrap();
+
+        let mut tracker = FailureTracker::default();
+        let mut last_outcome = CycleOutcome::Advanced;
+        for _ in 0..5 {
+            let (outcome, next_tracker) =
+                run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
+            tracker = next_tracker;
+            last_outcome = outcome;
+        }
+        assert_eq!(last_outcome, CycleOutcome::Suspended);
+
+        // A resume-signal must NOT clear Suspended -- confirms the two
+        // statuses really do require distinct signals, not just that
+        // restart-signal happens to work.
+        signal_resume(dir.path(), "sess-1").unwrap();
+        let (outcome_resume_attempt, tracker) =
+            run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
+        assert_eq!(
+            outcome_resume_attempt,
+            CycleOutcome::Suspended,
+            "resume-signal must be a no-op against a Suspended session"
+        );
+
+        signal_restart(dir.path(), "sess-1").unwrap();
+        let new_ta_bin = write_fake_ta_binary(dir.path(), "#!/bin/sh\necho ok\nexit 0\n");
+        let (outcome_after_restart, _tracker) =
+            run_one_cycle(dir.path(), "sess-1", &new_ta_bin, tracker).unwrap();
+        assert_eq!(outcome_after_restart, CycleOutcome::Advanced);
+
+        let restarted_state = TeamSessionState::load(dir.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted_state.status, TeamSessionStatus::Active);
     }
 }
