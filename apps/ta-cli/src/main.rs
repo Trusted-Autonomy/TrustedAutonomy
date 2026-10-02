@@ -240,6 +240,17 @@ enum Commands {
         /// recommendation (logged to .ta/agent-recommendations.jsonl).
         #[arg(long)]
         agent: Option<String>,
+        /// Model override forwarded to the resolved agent framework's CLI
+        /// (e.g. `claude --model <value>`), independent of --agent.
+        ///
+        /// --agent selects WHICH framework/binary runs (claude-code, codex,
+        /// a custom manifest); --model selects WHICH model that framework
+        /// uses once launched. Only forwarded for frameworks confirmed to
+        /// accept a `--model` flag (currently: claude-code) — ignored with
+        /// a warning for any other framework rather than silently passed
+        /// through to a binary that doesn't understand it.
+        #[arg(long)]
+        model: Option<String>,
         /// Source directory to overlay (defaults to project root).
         #[arg(long)]
         source: Option<PathBuf>,
@@ -1637,6 +1648,7 @@ fn dispatch_raw(
         Commands::Run {
             title,
             agent,
+            model,
             source,
             objective,
             phase,
@@ -1807,6 +1819,7 @@ fn dispatch_raw(
                 team_session_id.as_deref(),
                 workflow_tag.as_deref(),
                 shadow_experiment.as_ref(),
+                model.as_deref(),
             )
         }
         Commands::Events { command } => {

@@ -461,11 +461,27 @@ pub fn build_ta_run_args(
             args.push("--persona".to_string());
             args.push(persona.clone());
         }
-        args.push("--agent".to_string());
-        // Resolves `member.model_tier` against `team_config.model_tiers`
-        // when set, falling back to `member.agent_id` otherwise
-        // (v0.17.11.6) — this is the one place model_tier actually
-        // affects which model launches a role.
+        // `team.toml`'s `member.agent_id`/`model_tier` name a MODEL (e.g.
+        // "claude-opus-5"), not a framework -- `ta run`'s `--agent` flag
+        // means framework (claude-code, codex, a custom manifest) and
+        // resolves the value against `AgentFrameworkManifest`. Passing a
+        // model id there always failed to resolve, silently fell back to
+        // the hardcoded "claude-code" default, and discarded the
+        // originally-requested model entirely -- every team-session/
+        // wake-on-demand launch silently ran whatever model `claude`'s own
+        // local default happened to be, never what team.toml configured.
+        // Found live, 2026-10-01, investigating a dogfood test failure.
+        //
+        // Fix: route the resolved model through `--model` (forwarded to the
+        // underlying agent binary once the framework is already chosen --
+        // see run.rs's `execute()`), and leave `--agent` unset so `ta run`'s
+        // own framework-resolution chain (persona binding → workflow.toml →
+        // daemon.toml → "claude-code") decides the framework, same as any
+        // other goal. This also fixes a second latent bug for free: passing
+        // the model id into `--agent` previously won tier 1 of that
+        // resolution chain and silently overrode any persona-level
+        // framework binding at tier 2.
+        args.push("--model".to_string());
         args.push(team_config.resolve_agent_id(member).to_string());
     }
     // A role with no `.ta/team.toml` assignment yet falls through to
@@ -1125,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn build_args_with_assigned_role_includes_security_persona_and_agent() {
+    fn build_args_with_assigned_role_includes_security_persona_and_model() {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
@@ -1159,7 +1175,13 @@ mod tests {
         assert!(args.contains(&"auto".to_string()));
         assert!(args.contains(&"--persona".to_string()));
         assert!(args.contains(&"careful-analyst".to_string()));
-        assert!(args.contains(&"--agent".to_string()));
+        // Model id goes through --model, not --agent: --agent means
+        // "framework" to `ta run` (claude-code/codex/a manifest), not
+        // "which model" -- passing a model id there always failed to
+        // resolve and silently fell back to a hardcoded default (the bug
+        // this test now guards against regressing).
+        assert!(!args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
 
@@ -1194,7 +1216,7 @@ mod tests {
             None,
         );
 
-        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
         assert!(!args.contains(&"claude-sonnet-4-6".to_string()));
     }
@@ -1227,7 +1249,7 @@ mod tests {
             None,
         );
 
-        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
 
@@ -1253,6 +1275,7 @@ mod tests {
         assert!(!args.contains(&"--security".to_string()));
         assert!(!args.contains(&"--persona".to_string()));
         assert!(!args.contains(&"--agent".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
         // Still fires the goal — just without an assignment-derived override.
         assert!(args.contains(&"--team".to_string()));
     }

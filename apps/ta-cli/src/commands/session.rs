@@ -198,6 +198,7 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
                 None,  // team_session_id = None (v0.17.11.8)
                 None,  // workflow_tag = None (v0.17.x cost-experiment framework)
                 None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+                None,  // model override = None (no explicit --model request)
             )
         }
         SessionCommands::Pause { id } => pause_session(config, id),

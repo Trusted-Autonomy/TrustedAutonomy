@@ -324,6 +324,55 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
     }
 }
 
+/// Apply a `--model` override onto an already-resolved `AgentLaunchConfig`,
+/// mutating its `args_template` in place.
+///
+/// `--agent`/`framework` picks WHICH framework/binary runs (claude-code,
+/// codex, a custom manifest); `--model` picks WHICH model that framework
+/// uses once launched — two independent questions that `team.toml`'s
+/// `model_tier`/`agent_id` mechanism once conflated by passing a model id
+/// into `--agent` itself (see `team_session::build_ta_run_args`'s doc
+/// comment for the full history of that bug, found live 2026-10-01).
+///
+/// Inserts `["--model", value]` immediately before the first arg template
+/// entry containing `{prompt}` (or at the end, if none does), so it lands
+/// before the prompt in both interactive mode (`args_template` alone) and
+/// headless mode (`args_template` + `headless_args`, see
+/// `launch_agent_via_runtime`). Only the `claude` binary is confirmed to
+/// accept this flag today (mirroring the same pattern already proven for
+/// the supervisor agent dispatch in
+/// `ta_changeset::supervisor_review::invoke_claude_cli_supervisor`) — any
+/// other framework gets a loud warning and the override is dropped rather
+/// than silently forwarded to a binary that doesn't understand it
+/// (Observability Mandate: never a silent no-op).
+fn apply_model_override(agent_config: &mut AgentLaunchConfig, model_value: &str, framework: &str) {
+    if agent_config.command == "claude" {
+        let prompt_pos = agent_config
+            .args_template
+            .iter()
+            .position(|a| a.contains("{prompt}"))
+            .unwrap_or(agent_config.args_template.len());
+        agent_config
+            .args_template
+            .insert(prompt_pos, model_value.to_string());
+        agent_config
+            .args_template
+            .insert(prompt_pos, "--model".to_string());
+    } else {
+        eprintln!(
+            "Warning: --model '{}' requested but agent framework '{}' (command: '{}') \
+             is not known to support model overrides — ignoring --model for this run.",
+            model_value, framework, agent_config.command
+        );
+        tracing::warn!(
+            model = %model_value,
+            framework = %framework,
+            command = %agent_config.command,
+            "Ignoring --model: framework not known to support model overrides"
+        );
+    }
+}
+
 /// Build an `AgentLaunchConfig` from a resolved `AgentFrameworkManifest` (v0.13.8 item 4).
 ///
 /// Used when the framework is a non-built-in TOML manifest — provides the
@@ -2291,6 +2340,7 @@ pub fn execute(
     team_session_id: Option<&str>,
     workflow_tag: Option<&str>,
     shadow_experiment: Option<&ShadowExperimentFlags>,
+    model: Option<&str>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -2678,6 +2728,15 @@ pub fn execute(
     };
     // agent_config is mutable so we can extend its env with framework-specific vars.
     let mut agent_config = agent_config;
+
+    // ── Model override (--model, independent of --agent/framework) ─────────
+    //
+    // --agent picks WHICH framework/binary runs; --model picks WHICH model
+    // that framework uses once launched. See `apply_model_override`'s doc
+    // comment for the full rationale.
+    if let Some(model_value) = model {
+        apply_model_override(&mut agent_config, model_value, agent);
+    }
 
     // Disk space pre-flight (v0.11.3 item 28).
     {
@@ -9409,6 +9468,44 @@ context_inject = "{mode_toml}"
         );
     }
 
+    // ── apply_model_override tests ──────────────────────────────────────────
+    //
+    // Regression coverage for the team.toml model_tier bug found live
+    // 2026-10-01: team_session::build_ta_run_args used to pass a model id
+    // into `--agent` (which `ta run` resolves as a FRAMEWORK name), always
+    // failed to resolve, and silently fell back to a hardcoded default that
+    // discarded the originally-requested model. These tests cover the
+    // replacement mechanism (`--model`, forwarded to the framework binary
+    // once it's already chosen) directly, without needing to run all of
+    // `execute()`.
+
+    #[test]
+    fn apply_model_override_inserts_model_flag_before_prompt_for_claude() {
+        let mut config = builtin_agent_config("claude-code");
+        assert_eq!(config.args_template, vec!["{prompt}".to_string()]);
+
+        apply_model_override(&mut config, "claude-opus-5", "claude-code");
+
+        assert_eq!(
+            config.args_template,
+            vec!["--model", "claude-opus-5", "{prompt}"]
+        );
+    }
+
+    #[test]
+    fn apply_model_override_ignores_unsupported_framework() {
+        let mut config = builtin_agent_config("codex");
+        let original = config.args_template.clone();
+
+        apply_model_override(&mut config, "claude-opus-5", "codex");
+
+        assert_eq!(
+            config.args_template, original,
+            "codex is not confirmed to support --model -- the override must be \
+             dropped, not silently forwarded to a binary that doesn't understand it"
+        );
+    }
+
     #[test]
     fn framework_to_launch_config_keeps_prompt_arg_for_none_mode() {
         let manifest = manifest_with_context_inject("none");
@@ -9820,6 +9917,7 @@ context_inject = "{mode_toml}"
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -9880,6 +9978,7 @@ context_inject = "{mode_toml}"
             None,                      // team_session_id = None (v0.17.11.8)
             Some("brain-maintenance"), // workflow_tag
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -9927,6 +10026,7 @@ context_inject = "{mode_toml}"
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (omitted)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -9992,6 +10092,7 @@ context_inject = "{mode_toml}"
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10056,6 +10157,7 @@ context_inject = "{mode_toml}"
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10144,6 +10246,7 @@ context_inject = "{mode_toml}"
             None,                       // team_session_id = None (v0.17.11.8)
             None,                       // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10223,6 +10326,7 @@ context_inject = "{mode_toml}"
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10292,6 +10396,7 @@ context_inject = "{mode_toml}"
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             Some(&flags),
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -12303,6 +12408,7 @@ plan_pending_window = 7
             None, // team_session_id = None (v0.17.11.8)
             None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -12341,6 +12447,7 @@ plan_pending_window = 7
             None, // team_session_id = None (v0.17.11.8)
             None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
