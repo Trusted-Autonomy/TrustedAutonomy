@@ -9,6 +9,24 @@
 # After running, either:
 #   1. Restart your shell, or
 #   2. Run: export PATH="$HOME/.local/bin:$PATH"
+#
+# macOS code signing (Keychain permission prompts on every rebuild):
+#   Local builds were previously unsigned, so every `cargo build` produced a
+#   binary with no stable signing identity. macOS Keychain's "Always Allow"
+#   grants are keyed to that identity, not the file path -- so even though
+#   `ta`/`ta-daemon` never change name or location, a fresh identity every
+#   build meant a fresh Keychain prompt every build.
+#
+#   One-time setup to stop this: Keychain Access -> Certificate Assistant ->
+#   Create a Certificate -> name it "Trusted Autonomy Local Dev", Identity
+#   Type "Self Signed Root", Certificate Type "Code Signing". (There's no
+#   "Always Trust" toggle to find for this -- that setting only governs
+#   trusting OTHER people's binaries signed by your cert; it has no bearing
+#   on whether this Mac remembers a Keychain grant for your own app.) Once
+#   the cert exists, this script signs with it automatically on every build
+#   using a stable --identifier, so the Keychain grant carries over across
+#   rebuilds. Override the cert name with TA_CODESIGN_IDENTITY if yours
+#   differs.
 
 set -euo pipefail
 
@@ -27,6 +45,55 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# ── Code signing (macOS only) ────────────────────────────────────────────
+#
+# See this script's header comment for why a stable identity (not just a
+# stable binary name) is what actually stops repeat Keychain prompts.
+TA_CODESIGN_IDENTITY="${TA_CODESIGN_IDENTITY:-Trusted Autonomy Local Dev}"
+_TA_CODESIGN_WARNED=""
+
+# ta_codesign BINARY_PATH IDENTIFIER -- signs BINARY_PATH with
+# TA_CODESIGN_IDENTITY and a stable bundle identifier so Keychain ACL
+# grants survive rebuilds. No-op on non-macOS or when codesign isn't
+# available. Falls back to ad-hoc signing (with a one-time note) when the
+# named identity isn't found in Keychain, so a fresh checkout without the
+# local dev cert still builds and runs -- it just keeps re-prompting until
+# the cert is created, same as before this change.
+ta_codesign() {
+    local binary_path="$1"
+    local identifier="$2"
+
+    if [[ "$(uname -s)" != "Darwin" ]] || ! command -v codesign &>/dev/null; then
+        return 0
+    fi
+
+    if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "$TA_CODESIGN_IDENTITY"; then
+        if [[ -z "$_TA_CODESIGN_WARNED" ]]; then
+            echo "Note: code-signing identity '$TA_CODESIGN_IDENTITY' not found in Keychain —" \
+                 "signing ad-hoc instead. Keychain permission prompts will recur on every" \
+                 "rebuild until it exists. See this script's header comment for one-time setup."
+            _TA_CODESIGN_WARNED=1
+        fi
+        codesign --force --sign - --identifier "$identifier" "$binary_path" 2>/dev/null || true
+        return 0
+    fi
+
+    # Deliberately no --options runtime (hardened runtime): it enforces
+    # strict library validation requiring every dynamically-loaded library
+    # to share this binary's Team ID. TA's Nix-built binaries link against
+    # Nix-store libs (e.g. libiconv) signed under their own, different
+    # identities -- hardened runtime made dyld refuse to load them at all
+    # ("different Team IDs"), found live testing this change. Plain signing
+    # still gives a stable identity, which is the only thing Keychain ACL
+    # grants actually key off of.
+    if codesign --force --sign "$TA_CODESIGN_IDENTITY" --identifier "$identifier" \
+        "$binary_path" 2>/dev/null; then
+        echo "Signed: $binary_path (identity: $TA_CODESIGN_IDENTITY, id: $identifier)"
+    else
+        echo "Warning: codesign failed for $binary_path — continuing with an unsigned binary."
+    fi
+}
 
 # Auto-clean target/ if it exceeds 150GB to prevent disk exhaustion.
 # The build that follows will repopulate only what is needed.
@@ -105,6 +172,7 @@ mkdir -p "$INSTALL_DIR"
 # syspolicyd caches provenance decisions per-inode — `cp` overwrites
 # can inherit a stale "kill" decision, causing SIGKILL on launch.
 install -m 755 "$TA_BINARY" "$INSTALL_DIR/ta"
+ta_codesign "$INSTALL_DIR/ta" "com.trustedautonomy.ta"
 echo "Installed: $INSTALL_DIR/ta"
 "$INSTALL_DIR/ta" --version
 
@@ -114,6 +182,7 @@ if [[ "$BUILD_DAEMON" == true ]]; then
         exit 1
     fi
     install -m 755 "$DAEMON_BINARY" "$INSTALL_DIR/ta-daemon"
+    ta_codesign "$INSTALL_DIR/ta-daemon" "com.trustedautonomy.ta-daemon"
     echo "Installed: $INSTALL_DIR/ta-daemon"
 
     # Build and install channel plugins so the plugin binary version always

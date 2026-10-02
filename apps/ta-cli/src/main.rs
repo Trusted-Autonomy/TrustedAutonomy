@@ -240,6 +240,17 @@ enum Commands {
         /// recommendation (logged to .ta/agent-recommendations.jsonl).
         #[arg(long)]
         agent: Option<String>,
+        /// Model override forwarded to the resolved agent framework's CLI
+        /// (e.g. `claude --model <value>`), independent of --agent.
+        ///
+        /// --agent selects WHICH framework/binary runs (claude-code, codex,
+        /// a custom manifest); --model selects WHICH model that framework
+        /// uses once launched. Only forwarded for frameworks confirmed to
+        /// accept a `--model` flag (currently: claude-code) — ignored with
+        /// a warning for any other framework rather than silently passed
+        /// through to a binary that doesn't understand it.
+        #[arg(long)]
+        model: Option<String>,
         /// Source directory to overlay (defaults to project root).
         #[arg(long)]
         source: Option<PathBuf>,
@@ -1637,6 +1648,7 @@ fn dispatch_raw(
         Commands::Run {
             title,
             agent,
+            model,
             source,
             objective,
             phase,
@@ -1745,6 +1757,17 @@ fn dispatch_raw(
             if workflow.as_deref() == Some("serial-phases") || phases.is_some() {
                 if let Some(phase_list) = phases {
                     if !phase_list.is_empty() {
+                        // --model has no effect on this path yet -- neither
+                        // execute_serial_phases nor its per-phase subprocess
+                        // launches accept a model override today. Warn
+                        // rather than silently drop it (Observability
+                        // Mandate), found in code review, 2026-10-02.
+                        if model.is_some() {
+                            eprintln!(
+                                "Warning: --model is not yet supported for --phases/serial-phases runs \
+                                 -- ignoring --model for this run."
+                            );
+                        }
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
                         let gate_failure_mode =
                             ta_workflow::GateFailureMode::parse(on_gate_failure)
@@ -1766,6 +1789,14 @@ fn dispatch_raw(
 
             // swarm: dispatch to execute_swarm when --sub-goals is provided.
             if !sub_goals.is_empty() {
+                // --model has no effect on this path yet, same gap and
+                // same rationale as the serial-phases warning above.
+                if model.is_some() {
+                    eprintln!(
+                        "Warning: --model is not yet supported for --sub-goals/swarm runs -- \
+                         ignoring --model for this run."
+                    );
+                }
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
                 return commands::run::execute_swarm(
                     config,
@@ -1807,6 +1838,7 @@ fn dispatch_raw(
                 team_session_id.as_deref(),
                 workflow_tag.as_deref(),
                 shadow_experiment.as_ref(),
+                model.as_deref(),
             )
         }
         Commands::Events { command } => {

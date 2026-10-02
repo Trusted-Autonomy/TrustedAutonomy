@@ -2291,6 +2291,7 @@ fn plan_add(
         None,  // team_session_id = None (v0.17.11.8)
         None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        None,  // model override = None (no explicit --model request)
     )
 }
 
@@ -2549,6 +2550,7 @@ fn plan_from(
         None,  // team_session_id = None (v0.17.11.8)
         None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        None,  // model override = None (no explicit --model request)
     )
 }
 
@@ -2664,6 +2666,7 @@ fn plan_new(
         None,  // team_session_id = None (v0.17.11.8)
         None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        None,  // model override = None (no explicit --model request)
     )
 }
 
@@ -5025,6 +5028,7 @@ fn plan_build(
             None,  // team_session_id = None (v0.17.11.8)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )?;
 
         phases_built += 1;
@@ -5786,6 +5790,7 @@ fn plan_build_autonomous(
                     None, // team_session_id = None (v0.17.11.8)
                     None, // workflow_tag = None (v0.17.x cost-experiment framework)
                     None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+                    None, // model override = None (no explicit --model request)
                 ) {
                     let msg = format!("Goal launch failed for phase {}: {}", phase_id, e);
                     eprintln!("[escalate] {}", msg);
@@ -7785,6 +7790,7 @@ fn plan_pragma(config: &GatewayConfig, no_scan: bool) -> anyhow::Result<()> {
                     None, // team_session_id = None (v0.17.11.8)
                     None, // workflow_tag = None (v0.17.x cost-experiment framework)
                     None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+                    None, // model override = None (no explicit --model request)
                 )?;
             }
         } else {

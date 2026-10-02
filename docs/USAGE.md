@@ -1609,6 +1609,21 @@ ta run "Fix the bug" --agent codex
 ta run "Write tests" --agent claude-flow
 ```
 
+#### Overriding the model
+
+`--agent` selects WHICH framework/binary runs; `--model` selects WHICH model that
+framework uses once launched -- two independent questions. `--model` is forwarded
+to the underlying agent CLI (currently supported for Claude Code only; any other
+framework logs a warning and ignores it rather than passing an unsupported flag):
+
+```bash
+ta run "Fix the bug" --model claude-opus-5
+```
+
+This is also what `.ta/team.toml`'s `agent_id`/`model_tier` fields resolve to for
+team-session and wake-on-demand role launches -- they name a model, not a
+framework, and are forwarded via `--model` under the hood.
+
 #### List available frameworks
 
 ```bash

@@ -461,12 +461,44 @@ pub fn build_ta_run_args(
             args.push("--persona".to_string());
             args.push(persona.clone());
         }
-        args.push("--agent".to_string());
-        // Resolves `member.model_tier` against `team_config.model_tiers`
-        // when set, falling back to `member.agent_id` otherwise
-        // (v0.17.11.6) — this is the one place model_tier actually
-        // affects which model launches a role.
-        args.push(team_config.resolve_agent_id(member).to_string());
+        // `team.toml`'s `member.agent_id`/`model_tier` name a MODEL (e.g.
+        // "claude-opus-5"), not a framework -- `ta run`'s `--agent` flag
+        // means framework (claude-code, codex, a custom manifest) and
+        // resolves the value against `AgentFrameworkManifest`. Passing a
+        // model id there always failed to resolve, silently fell back to
+        // the hardcoded "claude-code" default, and discarded the
+        // originally-requested model entirely -- every team-session/
+        // wake-on-demand launch silently ran whatever model `claude`'s own
+        // local default happened to be, never what team.toml configured.
+        // Found live, 2026-10-01, investigating a dogfood test failure.
+        //
+        // Fix: route the resolved model through `--model` (forwarded to the
+        // underlying agent binary once the framework is already chosen --
+        // see run.rs's `execute()`), and leave `--agent` unset so `ta run`'s
+        // own framework-resolution chain (persona binding → workflow.toml →
+        // daemon.toml → "claude-code") decides the framework, same as any
+        // other goal. This also fixes a second latent bug for free: passing
+        // the model id into `--agent` previously won tier 1 of that
+        // resolution chain and silently overrode any persona-level
+        // framework binding at tier 2.
+        let resolved = team_config.resolve_agent_id(member);
+        if resolved.eq_ignore_ascii_case("auto") {
+            // `agent_id = "auto"` (`ta team assign <role> auto`) is a
+            // documented sentinel, not a real model name: it hands the
+            // choice to the supervisor's recommendation via `ta run`'s
+            // dedicated `--agent auto` tier (see resolve_effective_agent_full
+            // / recommend_agent in run.rs), which --model has no equivalent
+            // for. Routing it through --model instead (as the general case
+            // below does) would forward a literal `--model auto` to the
+            // `claude` binary, silently breaking supervisor auto-pick for
+            // any team member assigned "auto" -- found in code review of
+            // this very fix, 2026-10-02.
+            args.push("--agent".to_string());
+            args.push("auto".to_string());
+        } else {
+            args.push("--model".to_string());
+            args.push(resolved.to_string());
+        }
     }
     // A role with no `.ta/team.toml` assignment yet falls through to
     // `ta run`'s own default resolution chain (workflow.toml, daemon.toml,
@@ -1125,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn build_args_with_assigned_role_includes_security_persona_and_agent() {
+    fn build_args_with_assigned_role_includes_security_persona_and_model() {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
@@ -1159,7 +1191,13 @@ mod tests {
         assert!(args.contains(&"auto".to_string()));
         assert!(args.contains(&"--persona".to_string()));
         assert!(args.contains(&"careful-analyst".to_string()));
-        assert!(args.contains(&"--agent".to_string()));
+        // Model id goes through --model, not --agent: --agent means
+        // "framework" to `ta run` (claude-code/codex/a manifest), not
+        // "which model" -- passing a model id there always failed to
+        // resolve and silently fell back to a hardcoded default (the bug
+        // this test now guards against regressing).
+        assert!(!args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
 
@@ -1194,9 +1232,46 @@ mod tests {
             None,
         );
 
-        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
         assert!(!args.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn build_args_agent_id_literal_auto_routes_through_agent_flag_not_model() {
+        // `ta team assign <role> auto` (documented in USAGE.md's "agent =
+        // auto -- supervisor auto-pick") is a sentinel, not a real model
+        // name -- it must keep going through `--agent auto` (which `ta
+        // run` gives dedicated supervisor-recommendation handling), not
+        // `--model auto`, which would forward a literal, meaningless
+        // "auto" straight to the `claude` binary. Found in code review of
+        // the --model fix itself, 2026-10-02.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "auto".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
+
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"auto".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
     }
 
     #[test]
@@ -1227,7 +1302,7 @@ mod tests {
             None,
         );
 
-        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
 
@@ -1253,6 +1328,7 @@ mod tests {
         assert!(!args.contains(&"--security".to_string()));
         assert!(!args.contains(&"--persona".to_string()));
         assert!(!args.contains(&"--agent".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
         // Still fires the goal — just without an assignment-derived override.
         assert!(args.contains(&"--team".to_string()));
     }
