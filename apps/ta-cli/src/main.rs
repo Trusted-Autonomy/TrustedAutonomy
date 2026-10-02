@@ -1757,6 +1757,17 @@ fn dispatch_raw(
             if workflow.as_deref() == Some("serial-phases") || phases.is_some() {
                 if let Some(phase_list) = phases {
                     if !phase_list.is_empty() {
+                        // --model has no effect on this path yet -- neither
+                        // execute_serial_phases nor its per-phase subprocess
+                        // launches accept a model override today. Warn
+                        // rather than silently drop it (Observability
+                        // Mandate), found in code review, 2026-10-02.
+                        if model.is_some() {
+                            eprintln!(
+                                "Warning: --model is not yet supported for --phases/serial-phases runs \
+                                 -- ignoring --model for this run."
+                            );
+                        }
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
                         let gate_failure_mode =
                             ta_workflow::GateFailureMode::parse(on_gate_failure)
@@ -1778,6 +1789,14 @@ fn dispatch_raw(
 
             // swarm: dispatch to execute_swarm when --sub-goals is provided.
             if !sub_goals.is_empty() {
+                // --model has no effect on this path yet, same gap and
+                // same rationale as the serial-phases warning above.
+                if model.is_some() {
+                    eprintln!(
+                        "Warning: --model is not yet supported for --sub-goals/swarm runs -- \
+                         ignoring --model for this run."
+                    );
+                }
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
                 return commands::run::execute_swarm(
                     config,

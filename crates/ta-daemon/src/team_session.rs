@@ -481,8 +481,24 @@ pub fn build_ta_run_args(
         // the model id into `--agent` previously won tier 1 of that
         // resolution chain and silently overrode any persona-level
         // framework binding at tier 2.
-        args.push("--model".to_string());
-        args.push(team_config.resolve_agent_id(member).to_string());
+        let resolved = team_config.resolve_agent_id(member);
+        if resolved.eq_ignore_ascii_case("auto") {
+            // `agent_id = "auto"` (`ta team assign <role> auto`) is a
+            // documented sentinel, not a real model name: it hands the
+            // choice to the supervisor's recommendation via `ta run`'s
+            // dedicated `--agent auto` tier (see resolve_effective_agent_full
+            // / recommend_agent in run.rs), which --model has no equivalent
+            // for. Routing it through --model instead (as the general case
+            // below does) would forward a literal `--model auto` to the
+            // `claude` binary, silently breaking supervisor auto-pick for
+            // any team member assigned "auto" -- found in code review of
+            // this very fix, 2026-10-02.
+            args.push("--agent".to_string());
+            args.push("auto".to_string());
+        } else {
+            args.push("--model".to_string());
+            args.push(resolved.to_string());
+        }
     }
     // A role with no `.ta/team.toml` assignment yet falls through to
     // `ta run`'s own default resolution chain (workflow.toml, daemon.toml,
@@ -1219,6 +1235,43 @@ mod tests {
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
         assert!(!args.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn build_args_agent_id_literal_auto_routes_through_agent_flag_not_model() {
+        // `ta team assign <role> auto` (documented in USAGE.md's "agent =
+        // auto -- supervisor auto-pick") is a sentinel, not a real model
+        // name -- it must keep going through `--agent auto` (which `ta
+        // run` gives dedicated supervisor-recommendation handling), not
+        // `--model auto`, which would forward a literal, meaningless
+        // "auto" straight to the `claude` binary. Found in code review of
+        // the --model fix itself, 2026-10-02.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "auto".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+
+        let args = build_ta_run_args(
+            &state,
+            &stage.name,
+            "analyst",
+            &team_config,
+            &context_path,
+            None,
+        );
+
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"auto".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
     }
 
     #[test]
