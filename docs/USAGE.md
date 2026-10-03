@@ -16185,9 +16185,14 @@ failures within 5 minutes, the session is marked `suspended` and the supervisor 
 attempting new goal-runs until you clear it:
 
 ```bash
-# write a restart-signal the same way `ta connector restart` does for connectors
-touch .ta/team-sessions/trading-desk/restart-signal
+ta team-session restart trading-desk
 ```
+
+`restart` and `resume` clear different statuses and are not interchangeable:
+`resume` only clears `paused` (a human-initiated pause); it has no effect on a
+`suspended` session (reached via the backoff/crash-recovery path above) since the
+supervisor checks a distinct signal for each status. Use `restart` for `suspended`,
+`resume` for `paused`.
 
 **Context carry-forward**: each completed role's stdout summary is appended to the
 session's findings list and rendered as markdown context
