@@ -7027,6 +7027,8 @@ Use `--validate-version` to make version mismatches fail fast with a non-zero ex
 ta draft apply <draft-id> --validate-version
 ```
 
+**Workspace-only Cargo projects are exempt.** A root `Cargo.toml` that is a pure `[workspace]` manifest with no `[package]` section (every member crate versions itself independently), or one using `[package] version.workspace = true`, has no single top-level `version = "..."` line for TA to read or patch. Apply treats this the same as a project with no `Cargo.toml` at all: nothing to validate, nothing blocks.
+
 This exits non-zero if `Cargo.toml` doesn't match the phase semver after apply. Combine with `--phase` when the goal was not started with a linked phase:
 
 ```bash

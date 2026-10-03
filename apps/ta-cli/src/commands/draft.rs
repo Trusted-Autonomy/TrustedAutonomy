@@ -5427,13 +5427,21 @@ pub fn validate_staging_version(
                 });
             }
             None => {
-                // Cargo.toml exists but no version line — treat as mismatch.
-                return Err(DraftVersionError {
-                    draft_ver: "(unreadable)".to_string(),
-                    expected_ver: expected_version.to_string(),
-                    staging_path: staging_path.to_path_buf(),
-                    field: "Cargo.toml",
-                });
+                // Cargo.toml exists but has no top-level `version = "..."`
+                // line -- a pure `[workspace]` manifest with no root
+                // `[package]` (every member crate versions itself
+                // independently), or a `[package] version.workspace = true`
+                // inherited version, are both common, valid Cargo project
+                // shapes with nothing here to check or patch. Previously
+                // treated as a hard mismatch (draft_ver: "(unreadable)"),
+                // which made every goal/apply on such a project fail
+                // outright with a misleading "version does not match"
+                // error -- found live, 2026-10-02, against a real
+                // workspace-only downstream project. Skip instead, matching
+                // the CLAUDE.md check just below (also "no version line —
+                // skip, not all projects use it") and
+                // validate_cargo_version/validate_cargo_version_as_fallback's
+                // existing non-fatal treatment of the identical case.
             }
         }
 
@@ -5556,12 +5564,17 @@ pub fn validate_cargo_version_as_fallback(
             Ok(false)
         }
         None => {
-            eprintln!(
-                "[version] Warning: could not read Cargo.toml to validate version \
-                 (expected {}). Check that Cargo.toml has a top-level `version = \"...\"` line.",
-                expected_version
-            );
-            Ok(false)
+            // No top-level `version = "..."` line at all -- a pure
+            // `[workspace]` manifest with no root `[package]`, or
+            // `[package] version.workspace = true`, both have nothing here
+            // for TA to check. Previously treated this identically to a
+            // real mismatch (Ok(false), which `--validate-version` turns
+            // into a hard CI failure) -- fixed alongside
+            // validate_staging_version's identical bug, found live,
+            // 2026-10-02, against a real workspace-only downstream
+            // project. Trivially satisfied: there's nothing to validate,
+            // not a failure to report.
+            Ok(true)
         }
     }
 }
@@ -18033,6 +18046,31 @@ fn run() {
     }
 
     #[test]
+    fn validate_staging_version_passes_for_workspace_only_manifest_with_no_root_version() {
+        // A pure `[workspace]` manifest (no root `[package]`, every member
+        // crate versions itself independently) or a `[package]
+        // version.workspace = true` inherited version both have no literal
+        // `version = "..."` line for TA to check or patch -- there's
+        // nothing here to validate, not a mismatch. Previously this
+        // returned a hard error with draft_ver "(unreadable)", which made
+        // every `ta draft apply` on such a project fail outright. Found
+        // live, 2026-10-02, against a real workspace-only downstream
+        // project (ta-virtual-team's Wayfinder pairing dogfood test).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"lib\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(
+            result.is_ok(),
+            "a workspace-only Cargo.toml with no root version line must not block apply: {:?}",
+            result
+        );
+    }
+
+    #[test]
     fn validate_staging_version_passes_when_claude_md_absent() {
         // CLAUDE.md absent — only Cargo.toml checked, no error for missing CLAUDE.md.
         let dir = tempfile::tempdir().unwrap();
@@ -19267,6 +19305,22 @@ fn run() {
         // Mismatch returns false (caller decides whether to warn or bail).
         let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
         assert!(!ok);
+    }
+
+    #[test]
+    fn validate_cargo_version_as_fallback_ok_for_workspace_only_manifest() {
+        // A workspace-only Cargo.toml has no version line to check --
+        // trivially satisfied, not a mismatch. Before this fix, --validate-version
+        // (which bails on `false`) would hard-fail CI for any workspace-only
+        // downstream project. Found live, 2026-10-02.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        )
+        .unwrap();
+        let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
+        assert!(ok);
     }
 
     // ── v0.15.19.4.2 tests ────────────────────────────────────────────────────
