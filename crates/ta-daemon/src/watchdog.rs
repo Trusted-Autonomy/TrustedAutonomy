@@ -1184,7 +1184,7 @@ fn is_process_alive(pid: u32) -> bool {
 }
 
 /// Truncate a string for display in events/logs.
-fn truncate_preview(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate_preview(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {

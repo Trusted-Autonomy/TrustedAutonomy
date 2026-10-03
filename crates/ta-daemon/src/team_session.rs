@@ -693,7 +693,43 @@ pub fn run_one_cycle(
             )?;
             Ok((CycleOutcome::Advanced, tracker))
         }
-        _ => {
+        other => {
+            // Found live, 2026-10-02: this branch used to discard the
+            // failed subprocess's exit status and stdout/stderr (or the
+            // spawn error, if `ta_bin` couldn't even be launched) entirely,
+            // just incrementing restart_count -- so when a session hit
+            // Suspended after 5 failures, there was no way, anywhere
+            // (daemon.log included), to find out what the actual goal-run
+            // failure even was. Log it at warn, truncated to a reasonable
+            // preview -- a full agent transcript can be large, and this is
+            // a diagnostic breadcrumb, not the artifact of record (that's
+            // whatever `ta run` itself already wrote to .ta/goals/).
+            const PREVIEW_LEN: usize = 2000;
+            match &other {
+                Ok(out) => {
+                    let stdout_preview = String::from_utf8_lossy(&out.stdout);
+                    let stderr_preview = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        session_id = %id,
+                        role = %role,
+                        stage = %stage.name,
+                        exit_code = ?out.status.code(),
+                        stdout = %crate::watchdog::truncate_preview(&stdout_preview, PREVIEW_LEN),
+                        stderr = %crate::watchdog::truncate_preview(&stderr_preview, PREVIEW_LEN),
+                        "team session goal-run failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        role = %role,
+                        stage = %stage.name,
+                        error = %e,
+                        ta_bin = %ta_bin.display(),
+                        "team session goal-run failed to spawn"
+                    );
+                }
+            }
             state.restart_count += 1;
             state.save(project_root)?;
             let decision = tracker.record_failure(now);
