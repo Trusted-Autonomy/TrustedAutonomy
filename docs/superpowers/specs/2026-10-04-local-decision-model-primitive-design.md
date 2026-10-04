@@ -116,10 +116,17 @@ numbers:
 See `2026-10-04-local-decision-model-evaluation.md` for the full, continuously-updated model
 landscape and hardware-tier recommendations. Summary as of this writing: two real, verified,
 purpose-built, Apache-2.0 candidates (Intern-Decision-4B, Decider-4b) are undergoing a direct
-head-to-head comparison on this machine (same labeled set, same hardware) before either becomes
-the crate's default local backend — this design deliberately does not pick a winner itself,
-since both models' available benchmark claims come from sources (self-reported, or a one-person
-hobby leaderboard with a since-revised ranking) that don't settle the question on their own.
+head-to-head comparison on this machine (same labeled set, same hardware).
+
+**Provisional default while that comparison runs: Intern-Decision-4B.** Because
+`DecisionBackend` is pluggable (§2), committing to a provisional default costs nothing — it's
+swappable with no caller-visible change once the head-to-head concludes. Shipping with no default
+at all has a real cost (nothing to point callers at today), so this design picks one now rather
+than waiting on a comparison that's already in flight, not an open-ended one. Intern-Decision-4B
+is the provisional pick specifically because its calibration evidence (Brier score, ECE) is
+self-reported by its own creator but real and measured; Decider-4b's cited benchmark edge came
+from a third-party hobby leaderboard whose own later version reversed the ranking — weaker
+grounds to default to it ahead of the real comparison's results.
 
 ## 7. Where it lives / who builds what
 
