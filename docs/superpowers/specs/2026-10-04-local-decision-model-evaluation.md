@@ -1,8 +1,10 @@
 # Local Decision-Model Evaluation and Hardware Install Profiles
 
-**Status:** two real, viable, purpose-built candidates identified and verified from primary
-sources (Intern-Decision-4B, Decider-4b). Not yet narrowed to one — see §3 for why, and §6 for
-what's needed before this is final.
+**Status:** resolved to a default, empirically, 2026-10-04. A real head-to-head ran on this
+machine (M1 Max, MPS) — see §3. **Decider-4b is the recommended default** (passes the <400ms p50
+latency target; Intern-Decision-4B fails it ~3.4x due to missing MPS kernels), with both scoring
+identically on accuracy/stability. Open items remain (CPU-only latency, full Brier/ECE
+recomputation) — see §7.
 
 **Why this is its own document, not a section of the main decision-primitive design spec:**
 this is a living reference (model landscape changes, new hardware tiers get added) rather than a
@@ -89,27 +91,52 @@ with two caveats below worth being precise about.
 - One source (`jev-ai.pro/compare/jev-vs-decider`) could not be independently reached — not
   confirmed beyond a search snippet.
 
-## 3. Intern-Decision-4B vs. Decider-4b — not yet resolved to one
+## 3. Intern-Decision-4B vs. Decider-4b — resolved via a real head-to-head run
 
 Both are real, both are purpose-built and calibrated (not general chat models repurposed via
-prompting), both are Apache 2.0, both are ~4-5B with GGUF builds available. Neither should be
-treated as the settled winner yet:
+prompting), both are Apache 2.0, both are ~4-5B with GGUF builds available. Rather than deciding
+from either model's own benchmark claims (§1, §2 — one self-reported, one from a volatile
+third-party leaderboard), **both were actually downloaded, loaded, and run on this machine**
+(Apple M1 Max, 32GB, MPS) against the real shared `f5_cheap_signal` labeled set (10 cases, 2 runs
+each), using each model's own documented native inference path — **not** Ollama/GGUF (see the
+note at the end of this section on why that changed).
 
-- Intern-Decision-4B's benchmark numbers come from its own model card (self-reported by InternLM).
-  Decider-4b's come from a third-party hobby benchmark whose own maintainer isn't affiliated with
-  either model's creator or with TypeSafe AI — arguably more independent, but also less rigorous
-  (one maintainer, donation-funded) and, per the versioning issue above, apparently volatile across
-  leaderboard revisions.
-- Decider-4b's GGUF repo claims *stronger* quantization-calibration preservation (Q8_0 "same
-  quality as bf16") than Intern-Decision-4B's own GGUF repo claims for itself (Q8_0 "can change
-  calibration quality") — but neither claim has been independently re-measured by us (see §6).
-  Take this as a reason to verify both, not as a reason to prefer one yet.
-- Decider-4b's documented 0.8B-35B range gives more install-profile flexibility across hardware
-  tiers from one family; Intern-Decision has a narrower 0.8B/2B/4B range.
+| | Decider-4b | Intern-Decision-4B |
+|---|---|---|
+| Accuracy | 20/20 (100%) | 20/20 (100%) |
+| Stability (identical result across 2 runs) | 10/10 | 10/10 |
+| Mean latency | **342.9ms** | 1619.2ms |
+| p50 latency | **310.7ms** | 1371.1ms |
+| vs. Untollable's <400ms p50 target | **Passes** | **Fails, ~3.4x over** |
+| Load time | ~13-19s | ~16-21s |
 
-**Recommendation: evaluate both directly, same labeled set, same hardware, before picking one** —
-not a judgment call to make from secondhand benchmark claims alone, especially given how much the
-Decider/Jev comparison apparently moved between leaderboard versions.
+Both models are equally accurate and equally stable on this task — the latency gap is the whole
+story, and it's architectural, not incidental. Running Intern-Decision-4B, `transformers` itself
+logged, unprompted: `causal_conv1d_fn falling back to reference PyTorch implementation... much
+slower`, and the same for `chunk_gated_delta_rule` (needs `flash-linear-attention`, which is
+Triton-based with no real Apple GPU path). **Intern-Decision-4B has no MPS-optimized kernels and
+no path to get them** — its speed-critical ops are CUDA/Triton-only. Decider-4b shipped dedicated
+`mps_ops.py`/`mps_moe.py` patches that are real and working, with no fallback-kernel warnings.
+
+**Recommendation: Decider-4b is the default.** Not because its earlier-cited benchmark edge over
+Jev holds up (§2 already flagged that as a possibly-superseded snapshot) — because it's the only
+one of the two that meets the actual latency requirement on the actual target hardware, measured
+directly, with identical accuracy to the alternative.
+
+**Methodology note — invocation path changed from what §1/§2 assumed.** Neither model is in
+Ollama's official library, and the original plan (manual `ollama create` + Modelfile GGUF import)
+turned out not to be how this comparison was actually run: both models were invoked through their
+own documented native Python packages instead — Decider-4b via `decider.infer.Decider` (which
+auto-selects `device="mps"` on its own), Intern-Decision-4B via its `inference.py`/`DecisionEngine`
+(which required manually forcing `device="mps"` — it has no auto-detection). This is a real,
+load-bearing difference in deployment shape from what §7's "Ollama-import friction" line
+originally assumed — worth re-reading before building install-profile tooling around an
+Ollama-centric assumption that didn't hold up in practice.
+
+**Not yet measured, even after this real run** (ran out of scope for the time spent, not
+skipped by oversight): CPU-only latency for either model, and a full Brier-score/ECE
+recomputation (this run checked 10-case accuracy/stability, not the larger eval sets each
+model's own published calibration numbers were computed from).
 
 ## 4. Other real candidates checked, and why most don't qualify
 
@@ -139,30 +166,36 @@ The most honest read: whatever was already pulled locally on 2026-09-07, not a d
 
 ## 6. Hardware-tier recommendations
 
-**Primary targets: Intern-Decision-4B and Decider-4b**, for every tier that can run a ~4-5B model
-— both purpose-built and calibrated, pending the direct head-to-head comparison in §3.
+**Primary target: Decider-4b**, confirmed by real measurement on the Apple Silicon tier (§3) — the
+only candidate that met the latency target on the hardware actually tested. Other tiers are not
+yet empirically confirmed; recommendations below are reasoned from spec sheets, not measured, and
+should get the same real-run treatment §3 gave the 32GB Apple Silicon tier before being trusted.
 
 | Tier | Recommendation | Why |
 |---|---|---|
-| Apple Silicon, 32GB (this machine, M1 Max) | **Intern-Decision-4B or Decider-4b** (Q8_0, ~4.5GB either way) | Both fit trivially. Gemma 4 26B-A4B (Q4_K_M, ~15.4GB) also fits as a general-purpose comparison point, not a primary recommendation. Metal-specific calibration is unverified for both (Decider's card says so explicitly; Intern-Decision's Metal performance isn't independently sourced either) — needs real measurement before trusting either on this machine's GPU path. |
-| Apple Silicon, 8-16GB | **Intern-Decision-4B or Decider-4b** (Q8_0, ~4.5GB) | Still fits; Gemma 4 does not. SmolLM3-3B/Qwen3.5-0.8B as lighter fallbacks; Decider's smaller family members (down to 0.8B) are a same-family fallback option Intern-Decision also has at 0.8B/2B. |
-| Consumer NVIDIA, 8-24GB VRAM | **Intern-Decision-4B or Decider-4b** | Both fit any card in range; Gemma 4 needs 16GB+. Decider's documented range up to 35B gives more headroom on higher-VRAM cards if more accuracy is wanted at the cost of speed. |
-| CPU-only / no accelerator | **Unresolved — needs real benchmarking for both.** Intern-Decision-4B's only published latency figure is GPU-measured (RTX 4090); Decider-4b's repo documents a CPU fallback path but doesn't publish CPU latency either. Intern-Decision-0.8B, Decider's own smaller variants, or Qwen3.5-0.8B are the realistic fallback candidates pending an actual CPU benchmark against the <400ms p50 target from Untollable's own spec. |
+| Apple Silicon, 32GB (this machine, M1 Max) | **Decider-4b** — confirmed, measured | 310.7ms p50, passes target; Intern-Decision-4B measured 1371.1ms p50 on identical hardware, fails. Not a spec-sheet estimate — both were actually run. |
+| Apple Silicon, 8-16GB | **Decider-4b (Q8_0, ~4.5GB), not yet measured on this tier specifically** | Same model recommended by extension, but this tier's actual latency hasn't been separately measured — lower unified memory may affect swap/paging behavior differently than on 32GB. Decider's smaller family members (down to 0.8B) are a same-family fallback if 4.5GB is too tight. |
+| Consumer NVIDIA, 8-24GB VRAM | **Unconfirmed — needs its own real run.** Decider's MPS-specific kernel advantage (§3) is an Apple Silicon finding; on CUDA hardware Intern-Decision-4B's Triton-based ops may perform differently (better, even) since Triton targets CUDA natively. Do not assume the Apple Silicon result transfers to this tier. | 
+| CPU-only / no accelerator | **Still unresolved** — neither model's CPU latency was measured in the real run (§3), only MPS. Intern-Decision-0.8B, Decider's own smaller variants, or Qwen3.5-0.8B remain the realistic fallback candidates pending an actual CPU benchmark against the <400ms p50 target. |
 
 ## 7. Before this is final
 
-- **Run a direct head-to-head**: Intern-Decision-4B vs. Decider-4b, same labeled eval set, same
-  hardware (this M1 Max), before picking a default — don't inherit either model's self-reported or
-  third-party-leaderboard numbers as the deciding factor given §3's findings.
-- Empirically re-verify Brier/ECE (or an equivalent calibration check) at whatever quantization is
-  actually deployed, for whichever model is chosen — both GGUF repos make quantization-calibration
-  claims that haven't been independently re-measured.
-- Benchmark CPU-only latency directly for both candidates rather than assuming either fails or
-  passes the <400ms target.
-- Benchmark Metal specifically on this hardware — neither model's card documents this despite
-  Metal being the real acceleration path on an M1 Max.
+- **CPU-only latency, both models** — not measured even after the real §3 run; still needed before
+  that tier's recommendation is anything more than a guess.
+- **A real run on the consumer-NVIDIA tier specifically** — don't assume the Apple Silicon
+  MPS-kernel result transfers to CUDA hardware; Intern-Decision-4B's Triton-based ops are built for
+  CUDA, so the latency gap found on this machine may not hold, or may reverse.
+- Empirically re-verify Brier/ECE (or an equivalent full calibration check) for Decider-4b at
+  whatever quantization is actually deployed — the real run checked 10-case accuracy/stability,
+  not the larger eval set Decider-4b's own published numbers would need to be recomputed against.
 - Confirm which JevBench leaderboard version is current before citing any Decider-vs-Jev
-  comparison again — v1.4.2.2 and v1.5.0 disagree on the ranking.
-- The Ollama-import friction (manual Modelfile, not a plain `pull`) applies to both
-  Intern-Decision-4B and Decider-4b — needs to be a documented, scripted step in whatever "local
-  install profile" tooling gets built.
+  comparison again — v1.4.2.2 and v1.5.0 disagree on the ranking, and the real empirical result in
+  §3 settled the latency question independent of that benchmark either way.
+- **Deployment path needs updating from the original plan**: neither model is in Ollama's official
+  library, and the real comparison in §3 used each model's own native Python inference package
+  directly, not an Ollama/GGUF import — install-profile tooling should be built around that
+  reality, not the originally-assumed Ollama-import path.
+- `/tmp/decision-model-eval/` on this machine still holds both models' full BF16 weights (~17GB
+  total) plus the eval scripts/venv from the real run — not committed anywhere, not yet cleaned
+  up. Delete once nobody needs to re-run this comparison, or keep temporarily for the CPU-latency
+  and Brier/ECE follow-ups above, which could reuse the same setup.
