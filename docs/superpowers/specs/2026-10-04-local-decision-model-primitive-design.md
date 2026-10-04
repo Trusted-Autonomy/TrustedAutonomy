@@ -73,12 +73,15 @@ pub trait DecisionBackend {
 }
 ```
 
-Backends: `LocalOllamaBackend` (talks to any Ollama-compatible local server), a cloud backend for
-the "Jev" option if ever wanted as a fallback/comparison point, and a `FixtureBackend` for
-deterministic tests. Which local model(s) back `LocalOllamaBackend` by default is governed by the
-evaluation doc, not fixed here — as of this writing, two real candidates (Intern-Decision-4B,
-Decider-4b) are undergoing direct head-to-head comparison on this hardware before either becomes
-the default (see that doc's §3/§7).
+Backends: a native-process backend that shells out to or embeds the chosen model's own inference
+package (not an `LocalOllamaBackend` — the real head-to-head run found neither candidate is in
+Ollama's official library, and the actual validated path for the resolved default, Decider-4b, is
+its own native Python package (`decider.infer.Decider`), not an Ollama-mediated one; naming and
+exact process boundary TBD when this gets built), a cloud backend for the "Jev" option if ever
+wanted as a fallback/comparison point, and a `FixtureBackend` for deterministic tests.
+**Default local backend: Decider-4b**, resolved empirically via a real run on target hardware, not
+a spec-sheet pick — see `2026-10-04-local-decision-model-evaluation.md` §3 for the full
+methodology and numbers.
 
 ## 3. Arbitration is composition, not a bigger call
 
