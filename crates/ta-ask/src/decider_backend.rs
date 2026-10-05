@@ -10,24 +10,60 @@ use crate::{
     DecisionSchema,
 };
 
+// NOTE on wire shape (corrected 2026-10-04 against a genuinely running
+// decider-4b server -- see crates/ta-ask/README.md / this task's report):
+//
+// The real `/decide` endpoint (decider's own `decider/serve.py`) does NOT
+// take `{"context": ..., "questions": [{"question": ..., "options": [...]}]}`
+// and does NOT return a bare `Vec<{choice, confidence, probs}>`. The real
+// wire format is:
+//
+//   request:  {"context": str, "schema": {<question text>: {"type": "bool"}
+//                                          | {"type": "choice", "options": [...]}
+//                                          | {"type": "scale", "legend": [...]}}}
+//   response: {<question text>: {"noul": <0..1>, "type": "noul"}                          -- bool
+//                               | {"choice": str, "confidence": <0..1>, "type": "choice",
+//                                  "probabilities": {...}}                                 -- choice
+//                               | {"score": num, "confidence": <0..1>, "type": "scale",
+//                                  "legend": ..., "probabilities": {...}}}                  -- scale (unused here)
+//
+// i.e. a JSON *object* keyed by the question's own text, not a bare array,
+// and a "bool" question's answer carries no "confidence" field at all --
+// only a `noul` probability-of-yes. `Score` is rejected before any HTTP
+// call is made (see `decide()` below), so the "scale" shape is parsed for
+// completeness but never actually exercised.
 #[derive(serde::Serialize)]
 struct DecideRequestBody {
     context: String,
-    questions: Vec<QuestionBody>,
+    schema: std::collections::HashMap<String, QuestionSchema>,
 }
 
 #[derive(serde::Serialize)]
-struct QuestionBody {
-    question: String,
-    options: Vec<String>,
+#[serde(tag = "type", rename_all = "lowercase")]
+enum QuestionSchema {
+    Bool,
+    Choice { options: Vec<String> },
 }
 
 #[derive(serde::Deserialize, Debug)]
-struct DecideResponseItem {
-    choice: String,
-    confidence: f64,
+#[serde(tag = "type", rename_all = "lowercase")]
+enum DecideAnswer {
+    Noul {
+        noul: f64,
+    },
+    Choice {
+        choice: String,
+        confidence: f64,
+        #[allow(dead_code)]
+        probabilities: std::collections::HashMap<String, f64>,
+    },
     #[allow(dead_code)]
-    probs: std::collections::HashMap<String, f64>,
+    Scale {
+        score: f64,
+        confidence: f64,
+        legend: serde_json::Value,
+        probabilities: std::collections::HashMap<String, f64>,
+    },
 }
 
 /// Owns the spawned `scripts/serve.sh` child process, if any. `None` when
@@ -136,20 +172,21 @@ impl DeciderBackend {
 
 impl DecisionBackend for DeciderBackend {
     fn decide(&self, req: &DecisionRequest) -> Result<DecisionResponse, DecisionError> {
-        let options = match &req.schema {
-            DecisionSchema::YesNo => vec!["yes".to_string(), "no".to_string()],
-            DecisionSchema::Choice(options) => options.clone(),
+        let question_schema = match &req.schema {
+            DecisionSchema::YesNo => QuestionSchema::Bool,
+            DecisionSchema::Choice(options) => QuestionSchema::Choice {
+                options: options.clone(),
+            },
             DecisionSchema::Score { .. } => {
                 return Err(DecisionError::UnsupportedSchema(req.schema.clone()));
             }
         };
 
+        let mut schema = std::collections::HashMap::with_capacity(1);
+        schema.insert(req.question.clone(), question_schema);
         let body = DecideRequestBody {
             context: req.context.clone(),
-            questions: vec![QuestionBody {
-                question: req.question.clone(),
-                options,
-            }],
+            schema,
         };
 
         let start = Instant::now();
@@ -168,32 +205,48 @@ impl DecisionBackend for DeciderBackend {
             )));
         }
 
-        let items: Vec<DecideResponseItem> = response
+        // The server answers with a JSON *object* keyed by the question's
+        // own text (see the wire-shape note above `DecideRequestBody`), not
+        // a bare array -- we sent exactly one question, so take its one
+        // entry.
+        let mut answers: std::collections::HashMap<String, DecideAnswer> = response
             .json()
             .map_err(|e| DecisionError::MalformedResponse(e.to_string()))?;
 
-        let item = items.into_iter().next().ok_or_else(|| {
-            DecisionError::MalformedResponse("server returned an empty result array".to_string())
+        let answer = answers.remove(&req.question).or_else(|| answers.into_values().next()).ok_or_else(|| {
+            DecisionError::MalformedResponse(
+                "server returned an empty response object (expected one answer keyed by the question text)"
+                    .to_string(),
+            )
         })?;
 
-        let result = match &req.schema {
-            DecisionSchema::YesNo => match item.choice.as_str() {
-                "yes" => DecisionResult::Bool(true),
-                "no" => DecisionResult::Bool(false),
-                other => {
-                    return Err(DecisionError::MalformedResponse(format!(
-                        "expected 'yes' or 'no' for a YesNo schema, got '{}'",
-                        other
-                    )));
-                }
-            },
-            DecisionSchema::Choice(_) => DecisionResult::Choice(item.choice),
-            DecisionSchema::Score { .. } => unreachable!("Score schema already rejected above"),
+        let (result, confidence) = match answer {
+            // A Noul answer carries no `confidence` field of its own (per
+            // decider's README: "A Noul answer has no confidence; its noul
+            // value is the probability of yes"). We derive one as the
+            // probability of whichever outcome we chose, which is always in
+            // (0.5, 1.0] and matches this crate's confidence contract.
+            DecideAnswer::Noul { noul } => {
+                let is_yes = noul > 0.5;
+                let confidence = if is_yes { noul } else { 1.0 - noul };
+                (DecisionResult::Bool(is_yes), confidence)
+            }
+            DecideAnswer::Choice {
+                choice, confidence, ..
+            } => (DecisionResult::Choice(choice), confidence),
+            DecideAnswer::Scale { .. } => {
+                return Err(DecisionError::MalformedResponse(
+                    "server returned a 'scale' answer, but this backend never sends a Score \
+                     schema (Score is rejected before any HTTP call) -- this indicates a \
+                     request/response mismatch"
+                        .to_string(),
+                ));
+            }
         };
 
         Ok(DecisionResponse {
             result,
-            confidence: item.confidence,
+            confidence,
             model_id: self.model_id.clone(),
             latency_ms,
         })
@@ -233,11 +286,15 @@ mod tests {
     #[tokio::test]
     async fn decide_maps_yes_no_schema_and_parses_response() {
         let server = MockServer::start().await;
+        // Real wire shape (verified against a genuinely running decider-4b
+        // server): a JSON object keyed by the question text, and a bool
+        // question's answer is a bare `noul` probability-of-yes, not a
+        // "choice"/"confidence"/"probs" item.
         Mock::given(method("POST"))
             .and(path("/decide"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"choice": "yes", "confidence": 0.93, "probs": {"yes": 0.93, "no": 0.07}}
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Does this diff look safe to commit?": {"noul": 0.93, "type": "noul"}
+            })))
             .mount(&server)
             .await;
 
@@ -263,9 +320,12 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/decide"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"choice": "billing", "confidence": 0.97, "probs": {"billing": 0.97, "technical": 0.02, "sales": 0.01}}
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Which department should handle this?": {
+                    "choice": "billing", "confidence": 0.97, "type": "choice",
+                    "probabilities": {"billing": 0.97, "technical": 0.02, "sales": 0.01}
+                }
+            })))
             .mount(&server)
             .await;
 
@@ -335,11 +395,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decide_errors_clearly_on_empty_result_array() {
+    async fn decide_errors_clearly_on_empty_result_object() {
         let server = MockServer::start().await;
+        // The real server returns `{}` (an empty object) when it has
+        // nothing to score -- not `[]` (see decider/serve.py's /decide
+        // route: `if not qs: return {}`).
         Mock::given(method("POST"))
             .and(path("/decide"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .mount(&server)
             .await;
 
@@ -392,5 +455,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DecisionError::BackendUnavailable { .. }));
+    }
+
+    #[test]
+    #[ignore = "requires a running decider-4b server at 127.0.0.1:8700 -- see crates/ta-ask/README.md"]
+    fn real_decider_backend_answers_a_real_question() {
+        let backend = DeciderBackend::connect("http://127.0.0.1:8700", "decider-4b");
+        let response = backend
+            .decide(&DecisionRequest {
+                question: "Does this draft clearly recommend one specific option over the \
+                            others, rather than just listing them neutrally?"
+                    .to_string(),
+                context: "We should use PostgreSQL for this project because it has the best \
+                           support for our use case among the three options we considered."
+                    .to_string(),
+                schema: DecisionSchema::YesNo,
+            })
+            .expect("real decider-4b server should answer this question");
+
+        println!("REAL DECIDER RESPONSE: {:?}", response);
+        assert!(response.confidence > 0.0 && response.confidence <= 1.0);
+        assert!(matches!(response.result, DecisionResult::Bool(_)));
     }
 }
