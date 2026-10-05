@@ -21,3 +21,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ta-ask = { path = "../ta-ask", version = "0.17.11-alpha.8" }
