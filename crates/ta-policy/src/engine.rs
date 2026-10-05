@@ -83,6 +83,31 @@ pub struct EvaluationTrace {
 /// VCS commit).
 const APPROVAL_REQUIRED_VERBS: &[&str] = &["apply", "commit", "send", "post"];
 
+/// Workspace-relative glob patterns that are always denied, regardless of
+/// any grant in any manifest. This is a hard backstop for secret-bearing
+/// paths (credentials, private keys, `.env` files) — a manifest with an
+/// intentionally broad `fs_read` grant (e.g. chat mode's read-anywhere
+/// profile, see `ta_policy::chat_manifest::chat_read_profile`) must not be
+/// able to expose these, even by accident. Checked before any grant is
+/// considered, so no manifest can override it.
+const SECRET_PATH_PATTERNS: &[&str] = &[
+    "**/.env",
+    "**/.env.*",
+    "**/credentials.json",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa*",
+    "**/.ta/credentials/**",
+    "**/.ta/keychain/**",
+];
+
+/// Whether `target_uri` matches any of the hardcoded secret-path patterns.
+fn matches_secret_path(target: &str) -> bool {
+    SECRET_PATH_PATTERNS
+        .iter()
+        .any(|pattern| matches_resource_pattern(pattern, target))
+}
+
 /// The policy engine — evaluates requests against capability manifests.
 ///
 /// `HashMap` is Rust's hash map type. We map agent_id → manifest.
@@ -140,6 +165,17 @@ impl PolicyEngine {
             return PolicyDecision::Deny {
                 reason: format!(
                     "path traversal detected in target URI: '{}'",
+                    request.target_uri
+                ),
+            };
+        }
+
+        // Step 1b: Secrets backstop — denied unconditionally, before any
+        // grant is even considered. See SECRET_PATH_PATTERNS' doc comment.
+        if matches_secret_path(&request.target_uri) {
+            return PolicyDecision::Deny {
+                reason: format!(
+                    "target '{}' matches a protected secrets path — no grant can override this",
                     request.target_uri
                 ),
             };
@@ -224,6 +260,34 @@ impl PolicyEngine {
         }
         steps.push(EvaluationStep {
             check: "path_traversal".to_string(),
+            outcome: "passed".to_string(),
+            terminal: false,
+        });
+
+        // Step 1b: Secrets backstop (mirrors evaluate()'s check above).
+        if matches_secret_path(&request.target_uri) {
+            steps.push(EvaluationStep {
+                check: "secrets_backstop".to_string(),
+                outcome: format!(
+                    "failed: '{}' matches a protected secrets path",
+                    request.target_uri
+                ),
+                terminal: true,
+            });
+            return EvaluationTrace {
+                decision: PolicyDecision::Deny {
+                    reason: format!(
+                        "target '{}' matches a protected secrets path — no grant can override this",
+                        request.target_uri
+                    ),
+                },
+                steps,
+                grants_checked,
+                matching_grant,
+            };
+        }
+        steps.push(EvaluationStep {
+            check: "secrets_backstop".to_string(),
             outcome: "passed".to_string(),
             terminal: false,
         });
@@ -995,8 +1059,8 @@ mod tests {
             PolicyDecision::Deny { reason } => assert!(reason.contains("no capability manifest")),
             other => panic!("expected Deny, got {:?}", other),
         }
-        assert_eq!(trace.steps.len(), 2); // path_traversal + manifest_lookup
-        assert!(trace.steps[1].terminal);
+        assert_eq!(trace.steps.len(), 3); // path_traversal + secrets_backstop + manifest_lookup
+        assert!(trace.steps[2].terminal);
     }
 
     #[test]
@@ -1257,5 +1321,94 @@ mod tests {
             }
             other => panic!("expected RequireApproval, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn deny_secret_env_file_even_with_broadest_possible_grant() {
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+
+        let decision = engine.evaluate(&PolicyRequest {
+            agent_id: "agent-1".to_string(),
+            tool: "fs".to_string(),
+            verb: "read".to_string(),
+            target_uri: "fs://workspace/.env".to_string(),
+        });
+
+        match decision {
+            PolicyDecision::Deny { reason } => {
+                assert!(reason.contains("secrets path"));
+            }
+            other => panic!("expected Deny, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn deny_credentials_directory_even_with_broadest_possible_grant() {
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+
+        let decision = engine.evaluate(&PolicyRequest {
+            agent_id: "agent-1".to_string(),
+            tool: "fs".to_string(),
+            verb: "read".to_string(),
+            target_uri: "fs://workspace/.ta/credentials/secret.json".to_string(),
+        });
+
+        match decision {
+            PolicyDecision::Deny { reason } => {
+                assert!(reason.contains("secrets path"));
+            }
+            other => panic!("expected Deny, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trace_records_secrets_backstop_denial() {
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+
+        let trace = engine.evaluate_with_trace(&PolicyRequest {
+            agent_id: "agent-1".to_string(),
+            tool: "fs".to_string(),
+            verb: "read".to_string(),
+            target_uri: "fs://workspace/.env".to_string(),
+        });
+
+        match &trace.decision {
+            PolicyDecision::Deny { reason } => assert!(reason.contains("secrets path")),
+            other => panic!("expected Deny, got {:?}", other),
+        }
+        assert!(trace.steps.iter().any(|s| s.check == "secrets_backstop"));
+        assert!(trace.steps.last().unwrap().terminal);
+    }
+
+    #[test]
+    fn normal_workspace_file_is_unaffected_by_secrets_backstop() {
+        // Regression guard: the backstop must not over-match ordinary files.
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+
+        assert_eq!(
+            engine.evaluate(&PolicyRequest {
+                agent_id: "agent-1".to_string(),
+                tool: "fs".to_string(),
+                verb: "read".to_string(),
+                target_uri: "fs://workspace/src/main.rs".to_string(),
+            }),
+            PolicyDecision::Allow
+        );
     }
 }
