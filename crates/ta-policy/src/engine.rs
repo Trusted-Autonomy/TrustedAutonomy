@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use glob::Pattern;
+use glob::{MatchOptions, Pattern};
 use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilityManifest;
@@ -102,10 +102,25 @@ const SECRET_PATH_PATTERNS: &[&str] = &[
 ];
 
 /// Whether `target_uri` matches any of the hardcoded secret-path patterns.
+///
+/// Matching is deliberately case-insensitive: on case-insensitive
+/// filesystems (macOS APFS default, Windows) `fs://workspace/.ENV` and
+/// `fs://workspace/.env` resolve to the same real file, so a case-sensitive
+/// glob match here would let `.ENV`/`.Env`/etc. bypass the backstop entirely.
+/// This is scoped to the secrets backstop only: `matches_resource_pattern`
+/// (grant matching) stays case-sensitive, which is a separate, deliberate
+/// decision out of scope for this fix.
 fn matches_secret_path(target: &str) -> bool {
-    SECRET_PATH_PATTERNS
-        .iter()
-        .any(|pattern| matches_resource_pattern(pattern, target))
+    let options = MatchOptions {
+        case_sensitive: false,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+    SECRET_PATH_PATTERNS.iter().any(|pattern| {
+        Pattern::new(pattern)
+            .map(|p| p.matches_with(target, options))
+            .unwrap_or(false) // invalid patterns never match (fail-closed)
+    })
 }
 
 /// The policy engine — evaluates requests against capability manifests.
@@ -1390,6 +1405,39 @@ mod tests {
         }
         assert!(trace.steps.iter().any(|s| s.check == "secrets_backstop"));
         assert!(trace.steps.last().unwrap().terminal);
+    }
+
+    #[test]
+    fn deny_secret_env_file_regardless_of_case() {
+        // On case-insensitive filesystems (macOS APFS default, Windows),
+        // `.ENV` and `.env` are the same real file. The secrets backstop
+        // must deny both, not just the lowercase spelling.
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+
+        for variant in [".ENV", ".Env"] {
+            let decision = engine.evaluate(&PolicyRequest {
+                agent_id: "agent-1".to_string(),
+                tool: "fs".to_string(),
+                verb: "read".to_string(),
+                target_uri: format!("fs://workspace/{}", variant),
+            });
+
+            match decision {
+                PolicyDecision::Deny { reason } => {
+                    assert!(
+                        reason.contains("secrets path"),
+                        "expected a secrets-path denial for '{}', got reason: {}",
+                        variant,
+                        reason
+                    );
+                }
+                other => panic!("expected Deny for '{}', got {:?}", variant, other),
+            }
+        }
     }
 
     #[test]
