@@ -17,6 +17,7 @@ Status values: **blocked** (a real test proves the attack fails today),
 | H3 | A chat-mode session cannot perform `git`/`email` actions. There is no grant for either tool in the chat-mode profile, so these are denied before any approval-gating logic is even reached. | blocked | `crates/ta-policy/tests/chat_classifier_security_e2e.rs::prompt_injection_cannot_escalate_past_the_compiled_manifest`, `::prompt_injection_cannot_change_what_a_real_work_routing_decision_grants` |
 | H4 | A classifier's answer (even a fully compromised one that agrees with an injected "grant full access" payload) has no path into what a chat session's compiled manifest actually grants. | blocked | `crates/ta-policy/tests/chat_classifier_security_e2e.rs::prompt_injection_cannot_escalate_past_the_compiled_manifest` |
 | H5 | The "read anywhere in the workspace" grant (`fs://workspace/**`) cannot reach files outside the workspace via an absolute path. | open | none yet |
+| H6 | A caller cannot defeat a chat session's manifest isolation by deliberately choosing an agent_id containing the reserved ':chat:' marker used for chat-session policy identities. | blocked | `crates/ta-mcp-gateway/src/server.rs::start_goal_rejects_agent_id_containing_chat_marker`, `::start_goal_with_profile_rejects_agent_id_containing_chat_marker` |
 
 ## Not yet covered (open, tracked for future work)
 

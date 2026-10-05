@@ -664,6 +664,18 @@ impl GatewayState {
         objective: &str,
         agent_id: &str,
     ) -> Result<GoalRun, GatewayError> {
+        // Guard against caller-supplied agent_id containing the reserved ":chat:"
+        // marker. This prevents deliberately colliding with a live chat session's
+        // derived policy identity and overwriting its narrow manifest.
+        if agent_id.contains(":chat:") {
+            return Err(GatewayError::Other(
+                format!(
+                    "agent_id '{}' is not permitted to contain ':chat:' - that substring is reserved for chat-session-derived policy identities and using it here could overwrite a live chat session's manifest",
+                    agent_id
+                )
+            ));
+        }
+
         let goal_run_id = Uuid::new_v4();
         let staging_path = self.config.staging_dir.join(goal_run_id.to_string());
         let store_path = self.config.store_dir.join(goal_run_id.to_string());
@@ -702,6 +714,18 @@ impl GatewayState {
         profile: &AlignmentProfile,
         resource_scope: Option<Vec<String>>,
     ) -> Result<GoalRun, GatewayError> {
+        // Guard against caller-supplied agent_id containing the reserved ":chat:"
+        // marker. This prevents deliberately colliding with a live chat session's
+        // derived policy identity and overwriting its narrow manifest.
+        if agent_id.contains(":chat:") {
+            return Err(GatewayError::Other(
+                format!(
+                    "agent_id '{}' is not permitted to contain ':chat:' - that substring is reserved for chat-session-derived policy identities and using it here could overwrite a live chat session's manifest",
+                    agent_id
+                )
+            ));
+        }
+
         let goal_run_id = Uuid::new_v4();
         let staging_path = self.config.staging_dir.join(goal_run_id.to_string());
         let store_path = self.config.store_dir.join(goal_run_id.to_string());
@@ -1973,6 +1997,51 @@ mod tests {
 
         let state = server.state.lock().unwrap();
         assert!(state.connectors.contains_key(&goal_id));
+    }
+
+    #[test]
+    fn start_goal_rejects_agent_id_containing_chat_marker() {
+        let (server, _dir) = test_server();
+        let mut state = server.state.lock().unwrap();
+
+        // start_goal should reject agent_id containing ":chat:"
+        let result = state.start_goal("Test Goal", "Testing the system", "someagent:chat:deadbeef");
+        assert!(
+            result.is_err(),
+            "start_goal should reject agent_id with ':chat:' marker"
+        );
+        if let Err(GatewayError::Other(msg)) = result {
+            assert!(
+                msg.contains(":chat:"),
+                "error message should mention ':chat:' marker"
+            );
+        }
+    }
+
+    #[test]
+    fn start_goal_with_profile_rejects_agent_id_containing_chat_marker() {
+        let (server, _dir) = test_server();
+        let mut state = server.state.lock().unwrap();
+
+        // start_goal_with_profile should reject agent_id containing ":chat:"
+        let profile = AlignmentProfile::default_developer();
+        let result = state.start_goal_with_profile(
+            "Test Goal",
+            "Testing the system",
+            "someagent:chat:deadbeef",
+            &profile,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "start_goal_with_profile should reject agent_id with ':chat:' marker"
+        );
+        if let Err(GatewayError::Other(msg)) = result {
+            assert!(
+                msg.contains(":chat:"),
+                "error message should mention ':chat:' marker"
+            );
+        }
     }
 
     #[test]
