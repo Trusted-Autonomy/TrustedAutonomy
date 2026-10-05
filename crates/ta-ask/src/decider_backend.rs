@@ -1,8 +1,10 @@
 // crates/ta-ask/src/decider_backend.rs
 
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -66,13 +68,31 @@ enum DecideAnswer {
     },
 }
 
+/// Maximum number of stderr lines retained for diagnostics if the server
+/// process exits early. Bounded so a chatty server can't grow this
+/// unboundedly over a long-lived process's lifetime.
+const STDERR_TAIL_CAPACITY: usize = 64;
+
 /// Owns the spawned `scripts/serve.sh` child process, if any. `None` when
 /// this backend was built via `connect()` against a server it doesn't own
 /// (tests, or a caller managing the process itself) -- `Drop` then has
 /// nothing to kill.
+///
+/// Also owns the background threads draining the child's stdout/stderr
+/// pipes. Without a reader, a `Stdio::piped()` pipe fills its OS buffer and
+/// blocks the child the first time it writes enough output -- fatal for a
+/// long-lived server. stdout's drainer discards everything; stderr's
+/// drainer retains a bounded tail (`stderr_tail`) so a diagnostic survives
+/// if the child exits before becoming healthy.
 #[derive(Debug)]
 struct ServerProcess {
     child: Child,
+    /// Held so the draining thread's `Arc` stays alive for the process's
+    /// lifetime; not read again after `spawn()` returns successfully (it's
+    /// only consulted on the early-exit error path, before a `ServerProcess`
+    /// is constructed).
+    #[allow(dead_code)]
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Drop for ServerProcess {
@@ -116,11 +136,13 @@ impl DeciderBackend {
         serve_script: &Path,
         model_id: &str,
         port: u16,
+        env: &[(&str, &str)],
         health_timeout: Duration,
     ) -> Result<Self, DecisionError> {
-        let child = Command::new(serve_script)
+        let mut child = Command::new(serve_script)
             .arg(model_id)
             .arg(port.to_string())
+            .envs(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -129,11 +151,61 @@ impl DeciderBackend {
                 source: e,
             })?;
 
+        // Drain both pipes on background threads so neither's OS buffer can
+        // fill and block the child (Fix 2) -- stdout's content is discarded,
+        // stderr's is retained as a bounded tail for diagnostics (Fix 1).
+        if let Some(stdout) = child.stdout.take() {
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    if line.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_CAPACITY)));
+        if let Some(stderr) = child.stderr.take() {
+            let tail = Arc::clone(&stderr_tail);
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    let mut tail = tail
+                        .lock()
+                        .expect("stderr_tail mutex should not be poisoned");
+                    if tail.len() >= STDERR_TAIL_CAPACITY {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+            });
+        }
+
         let base_url = format!("http://127.0.0.1:{port}");
         let client = Self::new_client();
         let health_url = format!("{base_url}/health");
         let deadline = Instant::now() + health_timeout;
         loop {
+            // Check whether the child has already died before (or instead
+            // of) polling /health -- otherwise a dead process just burns
+            // the full timeout before failing with a generic message, when
+            // the child's own stderr already says exactly what went wrong.
+            if let Ok(Some(status)) = child.try_wait() {
+                let stderr_tail = stderr_tail
+                    .lock()
+                    .expect("stderr_tail mutex should not be poisoned")
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(DecisionError::ServerExitedEarly {
+                    exit_status: status.to_string(),
+                    stderr_tail,
+                });
+            }
+
             if let Ok(resp) = client.get(&health_url).send() {
                 if resp.status().is_success() {
                     break;
@@ -152,7 +224,7 @@ impl DeciderBackend {
             base_url,
             client,
             model_id: model_id.to_string(),
-            server: Mutex::new(Some(ServerProcess { child })),
+            server: Mutex::new(Some(ServerProcess { child, stderr_tail })),
         })
     }
 
@@ -225,7 +297,9 @@ impl DecisionBackend for DeciderBackend {
             // decider's README: "A Noul answer has no confidence; its noul
             // value is the probability of yes"). We derive one as the
             // probability of whichever outcome we chose, which is always in
-            // (0.5, 1.0] and matches this crate's confidence contract.
+            // [0.5, 1.0] and matches this crate's confidence contract (a
+            // `noul` of exactly 0.5 is a defensible tie-break: it still
+            // yields confidence == 0.5, not something outside that range).
             DecideAnswer::Noul { noul } => {
                 let is_yes = noul > 0.5;
                 let confidence = if is_yes { noul } else { 1.0 - noul };
@@ -257,7 +331,7 @@ impl DecisionBackend for DeciderBackend {
 mod tests {
     use super::*;
     use crate::{DecisionError, DecisionRequest, DecisionResponse, DecisionResult, DecisionSchema};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Builds the `DeciderBackend` and calls `decide()` entirely on a
@@ -292,6 +366,10 @@ mod tests {
         // "choice"/"confidence"/"probs" item.
         Mock::given(method("POST"))
             .and(path("/decide"))
+            .and(body_json(serde_json::json!({
+                "context": "3 files changed, 12 lines",
+                "schema": {"Does this diff look safe to commit?": {"type": "bool"}}
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "Does this diff look safe to commit?": {"noul": 0.93, "type": "noul"}
             })))
@@ -320,6 +398,15 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/decide"))
+            .and(body_json(serde_json::json!({
+                "context": "customer was charged twice",
+                "schema": {
+                    "Which department should handle this?": {
+                        "type": "choice",
+                        "options": ["billing", "technical", "sales"]
+                    }
+                }
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "Which department should handle this?": {
                     "choice": "billing", "confidence": 0.97, "type": "choice",
@@ -369,6 +456,18 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, DecisionError::UnsupportedSchema(_)));
+
+        // Verify "no HTTP call happened" directly, rather than relying only
+        // on the absence of a registered Mock to fail the test implicitly.
+        let received = server
+            .received_requests()
+            .await
+            .expect("MockServer should have request recording enabled by default");
+        assert!(
+            received.is_empty(),
+            "expected zero requests to reach the mock server, got {}",
+            received.len()
+        );
     }
 
     #[tokio::test]
@@ -426,6 +525,7 @@ mod tests {
             std::path::Path::new("/definitely/not/a/real/script.sh"),
             "decider-4b",
             18237,
+            &[],
             std::time::Duration::from_secs(1),
         )
         .unwrap_err();
@@ -451,6 +551,7 @@ mod tests {
             &script_path,
             "decider-4b",
             18238,
+            &[],
             std::time::Duration::from_millis(800),
         )
         .unwrap_err();
@@ -476,5 +577,35 @@ mod tests {
         println!("REAL DECIDER RESPONSE: {:?}", response);
         assert!(response.confidence > 0.0 && response.confidence <= 1.0);
         assert!(matches!(response.result, DecisionResult::Bool(_)));
+    }
+
+    #[test]
+    #[ignore = "requires the Python env at /tmp/ta-ask-decider-env and the cloned decider repo at /tmp/decider-repo -- see crates/ta-ask/README.md"]
+    fn real_spawn_starts_the_server_and_answers_a_real_question() {
+        let backend = DeciderBackend::spawn(
+            std::path::Path::new("/tmp/decider-repo/scripts/serve.sh"),
+            "Mapika/decider-4b",
+            8701,
+            &[("UVICORN", "/tmp/ta-ask-decider-env/bin/uvicorn")],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("spawn should successfully start and health-check the real server");
+
+        let response = backend
+            .decide(&DecisionRequest {
+                question: "Does this draft clearly recommend one specific option over the \
+                            others, rather than just listing them neutrally?"
+                    .to_string(),
+                context: "We should use PostgreSQL for this project because it has the best \
+                           support for our use case among the three options we considered."
+                    .to_string(),
+                schema: DecisionSchema::YesNo,
+            })
+            .expect("real decider-4b server should answer this question");
+
+        println!("REAL SPAWN()-BACKED RESPONSE: {:?}", response);
+        assert!(response.confidence > 0.0 && response.confidence <= 1.0);
+        assert!(matches!(response.result, DecisionResult::Bool(_)));
+        // backend drops here -- Drop should kill the child it spawned.
     }
 }

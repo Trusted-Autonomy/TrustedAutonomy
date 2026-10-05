@@ -40,6 +40,20 @@ bash scripts/serve.sh Mapika/decider-4b 8700
 
 Then `DeciderBackend::connect("http://127.0.0.1:8700", "decider-4b")`, or `DeciderBackend::spawn(...)` to have Rust own the process lifecycle itself.
 
+**`model_id` is load-bearing for `spawn()`, not just a label.** `connect()`'s `model_id` is a free-text label only (it never leaves the process -- it's just copied into `DecisionResponse::model_id`). `spawn()`'s `model_id`, by contrast, is forwarded directly as an argument to `scripts/serve.sh`, which passes it straight to `decider.serve` as `DECIDER_MODEL` -- it must be the full Hugging Face repo id (e.g. `"Mapika/decider-4b"`, not `"decider-4b"`), or the server fails to load the model.
+
+**`spawn()` takes an `env` parameter** (`&[(&str, &str)]`) that's passed straight through to the child process's environment. The typical use is `UVICORN`, which `scripts/serve.sh` reads to locate the `uvicorn` binary (it defaults to a repo-relative `.venv312/bin/uvicorn`, which won't exist outside the original authors' own checkout):
+
+```rust
+DeciderBackend::spawn(
+    Path::new("/tmp/decider-repo/scripts/serve.sh"),
+    "Mapika/decider-4b",
+    8700,
+    &[("UVICORN", "/tmp/ta-ask-decider-env/bin/uvicorn")],
+    Duration::from_secs(60),
+)?;
+```
+
 **Wire format:** The real `/decide` endpoint takes and returns JSON objects, not arrays:
 - Request: `{"context": "<str>", "schema": {"<question text>": {"type": "bool"} | {"type": "choice", "options": [...]}}}`
 - Response (bool question): `{"<question text>": {"noul": <0..1 prob-of-yes>, "type": "noul"}}`

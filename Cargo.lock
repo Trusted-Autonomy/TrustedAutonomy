@@ -5927,6 +5927,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "ta-ask",
  "ta-changeset",
  "ta-policy",
  "task-graph",

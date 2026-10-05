@@ -10,13 +10,24 @@
 use crate::graph::types::{GraphContext, GraphError, ReviewInput, ReviewerNode, ReviewerVote};
 
 /// Asks a decision-model backend "does this diff look safe to commit?",
-/// framed with the changed-paths/lines-changed/agent-id already carried on
-/// `ReviewInput`, and converts the yes/no answer plus its calibrated
-/// confidence into a `ReviewerVote`. `score` is the confidence in the
-/// direction of the answer actually given: a confident "yes" scores near
-/// 1.0, a confident "no" scores near 0.0 (i.e. `1.0 - confidence`), so
-/// `WeightedDecisionNode`'s existing threshold logic can treat this vote
-/// identically to any other reviewer's without new special-casing.
+/// framed with the changed-paths/lines-changed/agent-id/risk-score/verdict/
+/// confidence/plan-phase already carried on `ReviewInput`, and converts the
+/// yes/no answer plus its calibrated confidence into a `ReviewerVote`.
+/// `score` is the confidence in the direction of the answer actually given:
+/// a confident "yes" scores near 1.0, a confident "no" scores near 0.0
+/// (i.e. `1.0 - confidence`), so `WeightedDecisionNode`'s existing threshold
+/// logic can treat this vote identically to any other reviewer's without
+/// new special-casing.
+///
+/// KNOWN LIMITATION, not yet resolved: the one real-server validation this
+/// backend has (see crates/ta-ask's tests) judged a prose recommendation
+/// question with the relevant evidence fully present in its context. This
+/// node asks a code-safety question instead, and still never includes the
+/// actual diff content -- only summary fields. Whatever calibration the
+/// backend's confidence carries for the validated question shape has not
+/// been shown to transfer to this one. Treat this reviewer's vote as
+/// low-confidence/exploratory until it's been validated on real code-safety
+/// questions with real diff text, not production-weighted as-is.
 pub struct DecisionReviewerNode {
     backend: std::sync::Arc<dyn ta_ask::DecisionBackend>,
 }
@@ -30,11 +41,16 @@ impl DecisionReviewerNode {
 impl ReviewerNode for DecisionReviewerNode {
     fn review(&self, input: &ReviewInput, _ctx: &GraphContext) -> Result<ReviewerVote, GraphError> {
         let context = format!(
-            "agent: {}\nchanged paths ({}): {}\nlines changed: {}",
+            "agent: {}\nchanged paths ({}): {}\nlines changed: {}\nrisk score: {}/100\n\
+             existing verdict: {:?}\nexisting confidence: {:.2}\nplan phase: {}",
             input.agent_id,
             input.changed_paths.len(),
             input.changed_paths.join(", "),
             input.lines_changed,
+            input.risk_score,
+            input.verdict,
+            input.confidence,
+            input.plan_phase.as_deref().unwrap_or("none"),
         );
 
         let response = ta_ask::ask(

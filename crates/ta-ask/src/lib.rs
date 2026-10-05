@@ -60,6 +60,14 @@ pub enum DecisionError {
          Python environment set up and the model downloaded? see crates/ta-ask/README.md"
     )]
     BackendUnavailable { url: String, timeout_secs: u64 },
+    #[error(
+        "backend server process exited early (status: {exit_status}) before becoming healthy -- \
+         recent stderr: {stderr_tail}"
+    )]
+    ServerExitedEarly {
+        exit_status: String,
+        stderr_tail: String,
+    },
     #[error("request to backend failed: {0}")]
     RequestFailed(#[source] reqwest::Error),
     #[error("backend returned a malformed response: {0}")]
