@@ -6,9 +6,11 @@
 // `graph/registry.rs`'s module doc comment for why.
 
 mod advisor_confidence_reviewer;
+mod decision_reviewer;
 mod policy_reviewer;
 mod weighted_decision;
 
 pub use advisor_confidence_reviewer::AdvisorConfidenceReviewer;
+pub use decision_reviewer::DecisionReviewerNode;
 pub use policy_reviewer::PolicyReviewer;
 pub use weighted_decision::WeightedDecisionNode;
