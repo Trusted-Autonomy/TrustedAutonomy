@@ -583,6 +583,7 @@ mod tests {
     ) -> std::path::PathBuf {
         #[cfg(windows)]
         {
+            let _ = unix_body; // only used on non-Windows; silence unused-param warning here
             let script_path = dir.join(format!("{stem}.bat"));
             std::fs::write(&script_path, windows_body).unwrap();
             script_path
