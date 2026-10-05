@@ -5818,6 +5818,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "ta-ask",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
