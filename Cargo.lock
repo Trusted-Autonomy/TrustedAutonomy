@@ -5163,6 +5163,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-ask"
+version = "0.17.11-alpha.8"
+dependencies = [
+ "reqwest",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "ta-audit"
 version = "0.17.11-alpha.8"
 dependencies = [

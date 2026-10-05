@@ -1,0 +1,9 @@
+[package]
+name = "ta-ask"
+version.workspace = true
+edition = "2021"
+description = "A narrow, bounded-question decision primitive: ask(question, context, schema) -> {result, confidence}. Private, in-tree for now — not extracted to a public repo."
+
+[dependencies]
+thiserror = { workspace = true }
+reqwest = { workspace = true }
