@@ -744,7 +744,7 @@ impl GatewayState {
     /// `goal_run_id` with zero changes to that file.
     ///
     /// A chat session's `GoalRun` is transitioned to `Running` and left
-    /// there permanently — no draft/PR lifecycle (`PrReady`/`Approved`/
+    /// there permanently: no draft/PR lifecycle (`PrReady`/`Approved`/
     /// `Applied`) is ever invoked against it, since chat mode's intended
     /// tool surface never includes `ta_pr_build`. This is a deliberate
     /// design choice (see
@@ -770,7 +770,7 @@ impl GatewayState {
         goal_run.goal_run_id = goal_run_id;
 
         // Unlike compile_with_id, compile_chat_manifest generates its own
-        // manifest_id internally — keep GoalRun's own manifest_id field
+        // manifest_id internally: keep GoalRun's own manifest_id field
         // consistent with what's actually loaded, rather than leaving it
         // at the placeholder value GoalRun::new() assigned.
         let manifest = ta_policy::compile_chat_manifest(agent_id, resource_scope, validity_hours)

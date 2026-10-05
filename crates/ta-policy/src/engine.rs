@@ -85,7 +85,7 @@ const APPROVAL_REQUIRED_VERBS: &[&str] = &["apply", "commit", "send", "post"];
 
 /// Workspace-relative glob patterns that are always denied, regardless of
 /// any grant in any manifest. This is a hard backstop for secret-bearing
-/// paths (credentials, private keys, `.env` files) — a manifest with an
+/// paths (credentials, private keys, `.env` files). A manifest with an
 /// intentionally broad `fs_read` grant (e.g. chat mode's read-anywhere
 /// profile, see `ta_policy::chat_manifest::chat_read_profile`) must not be
 /// able to expose these, even by accident. Checked before any grant is
@@ -170,12 +170,12 @@ impl PolicyEngine {
             };
         }
 
-        // Step 1b: Secrets backstop — denied unconditionally, before any
+        // Step 1b: Secrets backstop, denied unconditionally, before any
         // grant is even considered. See SECRET_PATH_PATTERNS' doc comment.
         if matches_secret_path(&request.target_uri) {
             return PolicyDecision::Deny {
                 reason: format!(
-                    "target '{}' matches a protected secrets path — no grant can override this",
+                    "target '{}' matches a protected secrets path: no grant can override this",
                     request.target_uri
                 ),
             };
@@ -277,7 +277,7 @@ impl PolicyEngine {
             return EvaluationTrace {
                 decision: PolicyDecision::Deny {
                     reason: format!(
-                        "target '{}' matches a protected secrets path — no grant can override this",
+                        "target '{}' matches a protected secrets path: no grant can override this",
                         request.target_uri
                     ),
                 },
