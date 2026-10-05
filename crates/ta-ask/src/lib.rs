@@ -8,6 +8,9 @@
 //! (on branch `docs/local-decision-model-primitive-design`, not yet merged
 //! to `main` as of this writing) for the full design rationale.
 
+pub mod decider_backend;
+pub use decider_backend::DeciderBackend;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRequest {
     pub question: String,
@@ -142,8 +145,13 @@ mod tests {
     #[test]
     fn fixture_backend_returns_configured_response() {
         let backend = FixtureBackend::yes_no(true, 0.9);
-        let response =
-            ask(&backend, "is this safe?", "some context", DecisionSchema::YesNo).unwrap();
+        let response = ask(
+            &backend,
+            "is this safe?",
+            "some context",
+            DecisionSchema::YesNo,
+        )
+        .unwrap();
         assert_eq!(response.result, DecisionResult::Bool(true));
         assert_eq!(response.confidence, 0.9);
     }

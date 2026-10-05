@@ -5167,7 +5167,12 @@ name = "ta-ask"
 version = "0.17.11-alpha.8"
 dependencies = [
  "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]
