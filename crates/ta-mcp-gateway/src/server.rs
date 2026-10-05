@@ -775,7 +775,10 @@ impl GatewayState {
         // at the placeholder value GoalRun::new() assigned.
         let manifest = ta_policy::compile_chat_manifest(agent_id, resource_scope, validity_hours)
             .map_err(|e| {
-            GatewayError::Other(format!("chat manifest compilation failed: {}", e))
+            GatewayError::Other(format!(
+                "chat manifest compilation failed for agent '{}' with resource scope '{}': {}",
+                agent_id, resource_scope, e
+            ))
         })?;
         goal_run.manifest_id = manifest.manifest_id;
         self.policy_engine.load_manifest(manifest);
