@@ -73,6 +73,42 @@ enum DecideAnswer {
 /// unboundedly over a long-lived process's lifetime.
 const STDERR_TAIL_CAPACITY: usize = 64;
 
+/// Build the `Command` to run `script` with `args`.
+///
+/// On Windows, `Command::new(path)` cannot execute a `.bat`/`.cmd` script
+/// directly -- it must be wrapped in `cmd.exe /c`. This mirrors the same
+/// real fix already applied in `ta-runtime::bare_process::build_command`
+/// for the identical reason (there, resolving a bare command name via
+/// `which`; here, `script` is already a concrete path, so no resolution
+/// step is needed, just the same extension check and wrapping). Decider's
+/// own `scripts/serve.sh` is Unix-only (shebang-based) and this crate makes
+/// no claim of Windows support for the real backend -- this exists so
+/// test fixtures (and any future `.bat`/`.cmd`-based script) run correctly
+/// on every platform this workspace's CI actually builds for.
+fn build_script_command(script: &Path, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        let ext = script
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext == "cmd" || ext == "bat" {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/c").arg(script);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            return cmd;
+        }
+    }
+    let mut cmd = Command::new(script);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
 /// Owns the spawned `scripts/serve.sh` child process, if any. `None` when
 /// this backend was built via `connect()` against a server it doesn't own
 /// (tests, or a caller managing the process itself) -- `Drop` then has
@@ -139,17 +175,16 @@ impl DeciderBackend {
         env: &[(&str, &str)],
         health_timeout: Duration,
     ) -> Result<Self, DecisionError> {
-        let mut child = Command::new(serve_script)
-            .arg(model_id)
-            .arg(port.to_string())
-            .envs(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| DecisionError::SpawnFailed {
-                command: format!("{} {} {}", serve_script.display(), model_id, port),
-                source: e,
-            })?;
+        let mut child =
+            build_script_command(serve_script, &[model_id.to_string(), port.to_string()])
+                .envs(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| DecisionError::SpawnFailed {
+                    command: format!("{} {} {}", serve_script.display(), model_id, port),
+                    source: e,
+                })?;
 
         // Drain both pipes on background threads so neither's OS buffer can
         // fill and block the child (Fix 2) -- stdout's content is discarded,
@@ -534,20 +569,50 @@ mod tests {
         assert!(matches!(err, DecisionError::SpawnFailed { .. }));
     }
 
-    #[test]
-    fn spawn_errors_clearly_when_health_check_never_succeeds() {
-        // A script that starts but never serves /health -- exercises the
-        // timeout path without needing the real model or a real server.
-        let dir = tempfile::tempdir().unwrap();
-        let script_path = dir.path().join("never_healthy.sh");
-        std::fs::write(&script_path, "#!/bin/sh\nsleep 30\n").unwrap();
-        #[cfg(unix)]
+    /// Write a cross-platform test fixture script and return its path.
+    /// `unix_body` is the full shell script body (shebang included);
+    /// `windows_body` is the full batch-file body. The two platforms need
+    /// genuinely different syntax (no `sleep`/`>&2`-equivalent that works
+    /// identically in both `/bin/sh` and `cmd.exe`), so the caller supplies
+    /// both rather than this helper translating one into the other.
+    fn write_fixture_script(
+        dir: &std::path::Path,
+        stem: &str,
+        unix_body: &str,
+        windows_body: &str,
+    ) -> std::path::PathBuf {
+        #[cfg(windows)]
         {
+            let script_path = dir.join(format!("{stem}.bat"));
+            std::fs::write(&script_path, windows_body).unwrap();
+            script_path
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = windows_body; // only used on Windows; silence unused-param warning elsewhere
+            let script_path = dir.join(format!("{stem}.sh"));
+            std::fs::write(&script_path, unix_body).unwrap();
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&script_path, perms).unwrap();
+            script_path
         }
+    }
+
+    #[test]
+    fn spawn_errors_clearly_when_health_check_never_succeeds() {
+        // A script that starts but never serves /health -- exercises the
+        // timeout path without needing the real model or a real server.
+        // `ping -n 31 127.0.0.1 >nul` is the standard portable "sleep ~30s"
+        // idiom in cmd.exe batch files (no built-in `sleep` on Windows).
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = write_fixture_script(
+            dir.path(),
+            "never_healthy",
+            "#!/bin/sh\nsleep 30\n",
+            "@echo off\r\nping -n 31 127.0.0.1 >nul\r\n",
+        );
 
         let err = DeciderBackend::spawn(
             &script_path,
@@ -563,19 +628,12 @@ mod tests {
     #[test]
     fn spawn_errors_clearly_when_the_server_exits_early() {
         let dir = tempfile::tempdir().unwrap();
-        let script_path = dir.path().join("exits_early.sh");
-        std::fs::write(
-            &script_path,
+        let script_path = write_fixture_script(
+            dir.path(),
+            "exits_early",
             "#!/bin/sh\necho 'ModuleNotFoundError: no such module' >&2\nexit 3\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms).unwrap();
-        }
+            "@echo off\r\necho ModuleNotFoundError: no such module 1>&2\r\nexit /b 3\r\n",
+        );
 
         let err = DeciderBackend::spawn(
             &script_path,
