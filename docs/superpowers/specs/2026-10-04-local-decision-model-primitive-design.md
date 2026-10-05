@@ -95,6 +95,16 @@ arbiter is architecturally closer to that less-stable holistic-judge shape than 
 pattern already validated — so arbitration should stay built from the same narrow primitive, used
 in a loop with deterministic combination logic, not elevated into a different, bigger kind of call.
 
+**Confirmed in Decider-4b's own real source (2026-10-04)**, not assumed: its `decide()` call
+already takes a *list* of narrow questions against one shared context and answers all of them in
+one real forward pass — "all from one forward pass," per its own module docstring. An arbitration
+sequence that needs several narrow questions about the same state (not several different states)
+can issue them as one batched call to the backend instead of N separate round trips, at the
+`DecisionBackend` implementation level — `DecisionRequest`/`DecisionResponse` stay single-question
+at the crate's public interface (§2), but a backend is free to batch multiple in-flight requests
+against it under the hood. This is an implementation optimization, not a change to the interface
+or to §3's "narrow questions, not one holistic call" principle.
+
 ## 4. Semantic overlap, and why task-graph never depends on this crate
 
 Resolved by `trustedautonomy-46`'s red-team (2026-10-04), confirmed directly against
