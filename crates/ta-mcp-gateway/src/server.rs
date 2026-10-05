@@ -733,6 +733,71 @@ impl GatewayState {
         Ok(goal_run)
     }
 
+    /// Start a chat-mode session: a `GoalRun` whose capability manifest
+    /// comes from `ta_policy::compile_chat_manifest()` (broad `fs_read`,
+    /// `fs_write_patch` scoped only to `ta_policy::CHAT_SCRATCH_DIR`)
+    /// instead of a developer profile. This deliberately reuses the exact
+    /// same `GoalRun`/`StagingWorkspace`/`FsConnector` machinery as
+    /// `start_goal`/`start_goal_with_profile` so that `tools/fs.rs`'s
+    /// already-tested, already-enforced `ta_fs_read`/`ta_fs_write`/
+    /// `ta_fs_diff`/`ta_fs_list` handlers work against a chat session's
+    /// `goal_run_id` with zero changes to that file.
+    ///
+    /// A chat session's `GoalRun` is transitioned to `Running` and left
+    /// there permanently — no draft/PR lifecycle (`PrReady`/`Approved`/
+    /// `Applied`) is ever invoked against it, since chat mode's intended
+    /// tool surface never includes `ta_pr_build`. This is a deliberate
+    /// design choice (see
+    /// `docs/superpowers/specs/2026-10-05-chat-mode-secure-launch-design.md`),
+    /// not a bug or an unfinished state machine.
+    pub fn start_chat_session(
+        &mut self,
+        agent_id: &str,
+        resource_scope: &str,
+        validity_hours: i64,
+    ) -> Result<GoalRun, GatewayError> {
+        let goal_run_id = Uuid::new_v4();
+        let staging_path = self.config.staging_dir.join(goal_run_id.to_string());
+        let store_path = self.config.store_dir.join(goal_run_id.to_string());
+
+        let mut goal_run = GoalRun::new(
+            "chat session",
+            "answer a chat-mode question using project context",
+            agent_id,
+            staging_path,
+            store_path,
+        );
+        goal_run.goal_run_id = goal_run_id;
+
+        // Unlike compile_with_id, compile_chat_manifest generates its own
+        // manifest_id internally — keep GoalRun's own manifest_id field
+        // consistent with what's actually loaded, rather than leaving it
+        // at the placeholder value GoalRun::new() assigned.
+        let manifest = ta_policy::compile_chat_manifest(agent_id, resource_scope, validity_hours)
+            .map_err(|e| {
+            GatewayError::Other(format!("chat manifest compilation failed: {}", e))
+        })?;
+        goal_run.manifest_id = manifest.manifest_id;
+        self.policy_engine.load_manifest(manifest);
+
+        let staging = StagingWorkspace::new(goal_run_id.to_string(), &self.config.staging_dir)?;
+        let store = JsonFileStore::new(self.config.store_dir.join(goal_run_id.to_string()))?;
+        let connector = FsConnector::new(goal_run_id.to_string(), staging, store, agent_id);
+        self.connectors.insert(goal_run_id, connector);
+
+        goal_run.transition(GoalRunState::Configured)?;
+        goal_run.transition(GoalRunState::Running)?;
+        self.goal_store.save(&goal_run)?;
+
+        self.event_dispatcher.dispatch(&TaEvent::goal_created(
+            goal_run_id,
+            &goal_run.title,
+            agent_id,
+        ));
+
+        Ok(goal_run)
+    }
+
     /// Check policy for a filesystem operation.
     pub fn check_policy(
         &self,
@@ -1939,6 +2004,84 @@ mod tests {
 
         let content = connector.read_source(&source_dir, "existing.txt").unwrap();
         assert_eq!(content, b"original content");
+    }
+
+    #[test]
+    fn chat_session_fs_access_is_enforced_through_the_real_mcp_tool_handlers() {
+        use crate::server::{FsReadParams, FsWriteParams};
+        use crate::tools::fs::{handle_fs_read, handle_fs_write};
+
+        let (server, _dir) =
+            test_server_with_source(&[("notes.txt", b"hello from the real workspace\n")]);
+        let goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+
+        // Read anywhere in the workspace: the real handler succeeds.
+        let read_result = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: goal_run_id.clone(),
+                path: "notes.txt".to_string(),
+            },
+        );
+        assert!(
+            read_result.is_ok(),
+            "expected chat session to read workspace files, got {:?}",
+            read_result.err()
+        );
+
+        // Write inside the chat scratch dir: the real handler succeeds.
+        let scratch_path = format!("{}/notes.md", ta_policy::CHAT_SCRATCH_DIR);
+        let write_ok = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: goal_run_id.clone(),
+                path: scratch_path,
+                content: "scratch notes".to_string(),
+            },
+        );
+        assert!(
+            write_ok.is_ok(),
+            "expected chat session to write inside chat-scratch, got {:?}",
+            write_ok.err()
+        );
+
+        // Write outside the scratch dir: the real handler rejects it,
+        // propagated from PolicyDecision::Deny through enforce_policy()
+        // into a real McpError.
+        let write_denied = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: goal_run_id.clone(),
+                path: "src/main.rs".to_string(),
+                content: "malicious".to_string(),
+            },
+        );
+        assert!(
+            write_denied.is_err(),
+            "expected chat session write outside scratch to be denied"
+        );
+
+        // Reading a secrets-path file: denied the same way, proving Task 1's
+        // backstop applies to chat sessions too (chat mode's broad fs_read
+        // grant does not bypass it).
+        let secret_read_denied = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id,
+                path: ".env".to_string(),
+            },
+        );
+        assert!(
+            secret_read_denied.is_err(),
+            "expected chat session to be denied reading .env"
+        );
     }
 
     #[test]
