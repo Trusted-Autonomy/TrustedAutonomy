@@ -635,12 +635,20 @@ mod tests {
             "@echo off\r\necho ModuleNotFoundError: no such module 1>&2\r\nexit /b 3\r\n",
         );
 
+        // A generous timeout, not a tight one: this test's assertion is
+        // "the early exit gets noticed and reported," not "it gets noticed
+        // within N milliseconds" -- try_wait() still returns as soon as the
+        // (near-instant) script actually exits, regardless of how far off
+        // the deadline is. A tight deadline here raced against Windows CI's
+        // slower cmd.exe/.bat process-startup overhead and lost, returning
+        // BackendUnavailable (timeout) instead of ServerExitedEarly before
+        // the child had even finished starting.
         let err = DeciderBackend::spawn(
             &script_path,
             "decider-4b",
             18239,
             &[],
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(10),
         )
         .unwrap_err();
         match err {
