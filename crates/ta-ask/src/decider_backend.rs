@@ -212,6 +212,8 @@ impl DeciderBackend {
                 }
             }
             if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
                 return Err(DecisionError::BackendUnavailable {
                     url: health_url,
                     timeout_secs: health_timeout.as_secs(),
@@ -556,6 +558,43 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DecisionError::BackendUnavailable { .. }));
+    }
+
+    #[test]
+    fn spawn_errors_clearly_when_the_server_exits_early() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("exits_early.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'ModuleNotFoundError: no such module' >&2\nexit 3\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let err = DeciderBackend::spawn(
+            &script_path,
+            "decider-4b",
+            18239,
+            &[],
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap_err();
+        match err {
+            DecisionError::ServerExitedEarly {
+                exit_status,
+                stderr_tail,
+            } => {
+                assert!(exit_status.contains('3') || exit_status.to_lowercase().contains("exit"));
+                assert!(stderr_tail.contains("ModuleNotFoundError"));
+            }
+            other => panic!("expected DecisionError::ServerExitedEarly, got {:?}", other),
+        }
     }
 
     #[test]
