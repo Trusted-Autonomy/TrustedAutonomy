@@ -67,11 +67,21 @@ pub struct DecisionResponse {
     pub latency_ms: u64,
 }
 
-#[async_trait]
 pub trait DecisionBackend {
-    async fn decide(&self, req: &DecisionRequest) -> Result<DecisionResponse, DecisionError>;
+    fn decide(&self, req: &DecisionRequest) -> Result<DecisionResponse, DecisionError>;
 }
 ```
+
+**Synchronous by design, not `async fn`** — decided by `trustedautonomy-46` while writing the
+implementation plan (2026-10-04): `ta-workflow`'s `ReviewerNode::review()`
+(`crates/ta-workflow/src/graph/types.rs:214-216`) is plain sync throughout the graph engine, so an
+async trait here would need runtime-bridging (a fresh tokio runtime per call, or threading a
+`Handle` through) for zero actual benefit today. `reqwest`'s `blocking` feature is already enabled
+workspace-wide, so a sync `ask()` over the HTTP sidecar (§7) costs nothing extra and needs no
+bridging code at all — also consistent with Untollable's own TUI, which has no tokio runtime
+anywhere either. A future async caller isn't blocked by this: wrapping a sync call in
+`tokio::task::spawn_blocking` is the standard, safe direction for calling blocking code from async
+Rust — it's sync-calls-async that's fragile, not this direction.
 
 Backends: a native-process backend that shells out to or embeds the chosen model's own inference
 package (not an `LocalOllamaBackend` — the real head-to-head run found neither candidate is in
@@ -178,6 +188,15 @@ itself); the TA agent also wires it into Untollable (path-dependency, same patte
 `ta-runtime`). Wayfinder's own CoS classifier consumes it only through the TA-backed adapter,
 never directly — VT-agnosticism means a non-TA VT backend simply wouldn't have this capability,
 and that's an acceptable, deliberate gap, not an oversight.
+
+**Registration is caller-opt-in, not a `ta-workflow` default.** `ta-workflow`'s own registry
+(`src/graph/registry.rs`) already distinguishes built-ins needing only what `ta-workflow` depends
+on (`with_builtins()`, auto-included) from anything needing heavier dependencies (registered
+explicitly by the caller, e.g. `apps/ta-cli`, to avoid a dependency cycle). `ta-ask` has no cycle
+risk, but a `register_decision_reviewer()` call stays opt-in regardless — including it in
+`with_builtins()` by default would silently grow every `ta-workflow` consumer's footprint with a
+subprocess-lifecycle dependency (the HTTP sidecar, §7 above) nobody asked for. Easy to flip to
+default-included later if that turns out to be the wrong call.
 
 ## 8. Open questions
 
