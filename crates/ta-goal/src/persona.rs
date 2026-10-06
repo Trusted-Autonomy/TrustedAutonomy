@@ -10,7 +10,14 @@ use std::path::{Path, PathBuf};
 /// Capabilities section of a persona config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PersonaCapabilities {
-    /// Tool names the agent may use. Empty = no restriction.
+    /// Tools the agent may use, as a real tool-surface restriction enforced
+    /// by the Claude Code harness itself (not an informational hint).
+    ///
+    /// Entries use Claude Code's own permission-pattern syntax (e.g.
+    /// `"Bash(*)"`, `"mcp__ta__ta_fs_read"`), the same strings used in
+    /// `.claude/settings.json` -- not bare tool names. Empty = no
+    /// restriction (falls back to the security posture's default
+    /// allow-list).
     #[serde(default)]
     pub allowed_tools: Vec<String>,
     /// Tool names the agent may NOT use.
@@ -184,8 +191,8 @@ mod tests {
                 agent: None,
             },
             capabilities: PersonaCapabilities {
-                allowed_tools: vec!["read".to_string(), "bash".to_string()],
-                forbidden_tools: vec!["write".to_string()],
+                allowed_tools: vec!["mcp__ta__ta_fs_read".to_string(), "Bash(*)".to_string()],
+                forbidden_tools: vec!["Write(*)".to_string()],
             },
             style: PersonaStyle {
                 output_format: "markdown".to_string(),
@@ -203,7 +210,10 @@ mod tests {
 
         let loaded = PersonaConfig::load(dir.path(), "financial-analyst").unwrap();
         assert_eq!(loaded.persona.name, "financial-analyst");
-        assert_eq!(loaded.capabilities.allowed_tools, vec!["read", "bash"]);
+        assert_eq!(
+            loaded.capabilities.allowed_tools,
+            vec!["mcp__ta__ta_fs_read", "Bash(*)"]
+        );
     }
 
     #[test]
