@@ -3451,8 +3451,11 @@ pub fn execute(
                 "security posture's max_allowed_tools ceiling has zero overlap with the \
                  persona/default allow-list -- the resulting tool allow-list is empty. This \
                  is almost certainly a misconfiguration: the agent will get NO native tool \
-                 access for this launch. Check .ta/personas/<name>.toml's allowed_tools \
-                 against workflow.toml's [security] max_allowed_tools."
+                 access for this launch. Compare .ta/personas/<name>.toml's allowed_tools \
+                 (logged above as persona_declared_tools) against the ceiling (logged above \
+                 as ceiling) -- as of this release, max_allowed_tools is set programmatically \
+                 by whatever constructed this SecurityProfile, not yet exposed as a \
+                 workflow.toml setting."
             );
         }
 
@@ -6629,13 +6632,32 @@ fn inject_claude_settings(staging_path: &Path, source_dir: Option<&Path>) -> any
 /// Intersect a base allow-list with a posture-level ceiling, preserving
 /// `base`'s own ordering. Used to apply `SecurityProfile.max_allowed_tools`
 /// as a hard cap on top of whichever allow-list (a persona's own
-/// declaration, or the level's `default_allowed_tools` fallback) was chosen
+/// declaration, or the level's `default_allowed_tools` fallback) was chosen.
 /// Never broader than either input.
 fn intersect_allowed_tools(base: &[String], ceiling: &[String]) -> Vec<String> {
     base.iter()
         .filter(|t| ceiling.contains(t))
         .cloned()
         .collect()
+}
+
+/// The "tool identity" a permission pattern belongs to, for comparing a
+/// specific declared entry against a broader wildcard covering the same
+/// tool/server. Native patterns (`"Bash(*)"`, `"Bash(git *)"`) share the
+/// identity `"Bash"` (the text before the first `(`). MCP entries
+/// (`"mcp__ta__*"`, `"mcp__ta__ta_fs_read"`) share the identity `"mcp__ta__"`
+/// (the `mcp__<server>__` prefix) -- without this, a persona declaring the
+/// specific tool `"mcp__ta__ta_fs_read"` would not be recognized as already
+/// covering the same identity as the broad default's `"mcp__ta__*"`, and the
+/// deny-complement below would deny the server's whole namespace right back
+/// out from under the persona's own declaration.
+fn tool_identity(pattern: &str) -> &str {
+    if let Some(rest) = pattern.strip_prefix("mcp__") {
+        if let Some(idx) = rest.find("__") {
+            return &pattern[..5 + idx + 2];
+        }
+    }
+    pattern.split('(').next().unwrap_or(pattern)
 }
 
 /// Full version of inject_claude_settings with security profile support.
@@ -6772,10 +6794,23 @@ fn inject_claude_settings_with_security(
     // launch, to avoid changing behavior for every existing unrestricted run.
     if let Some(list) = persona_allowed_tools {
         for tool in ta_goal::security::DEFAULT_ALLOWED_TOOLS {
-            if !list.iter().any(|t| t == tool) && !forbidden.iter().any(|f| f == tool) {
+            let default_identity = tool_identity(tool);
+            let persona_declared_this_identity =
+                list.iter().any(|t| tool_identity(t) == default_identity);
+            if !persona_declared_this_identity && !forbidden.iter().any(|f| f == tool) {
                 forbidden.push(tool.to_string());
             }
         }
+    }
+    // A posture-level prohibition must not be defeatable by a persona
+    // declaration: identity-based matching above would otherwise treat a
+    // persona's own "WebSearch(...)" entry as already covering the
+    // "WebSearch(*)" identity and skip denying it, leaving WebSearch neither
+    // allowed (filtered out of `allow` above) nor denied when the security
+    // posture has turned it off entirely. Deny it unconditionally in that
+    // case, regardless of what any persona declared.
+    if !web_search_enabled && !forbidden.iter().any(|f| f == "WebSearch(*)") {
+        forbidden.push("WebSearch(*)".to_string());
     }
     let deny: Vec<String> = forbidden;
 
@@ -11139,6 +11174,95 @@ pre_launch:
             deny.iter().any(|v| v == "Bash(*)"),
             "deny list should contain Bash(*) since the persona only declared \
              mcp__ta__ta_fs_read, got: {:?}",
+            deny
+        );
+    }
+
+    #[test]
+    fn persona_declaring_a_specific_mcp_tool_is_not_contradicted_by_its_own_server_wildcard_deny() {
+        // Regression test (final whole-branch review, round 2): the deny-
+        // complement above must compare by tool identity, not exact pattern
+        // string. DEFAULT_ALLOWED_TOOLS contains "mcp__ta__*" as one entry;
+        // a persona declaring the specific tool "mcp__ta__ta_fs_read" shares
+        // that entry's identity ("mcp__ta__"), so "mcp__ta__*" must NOT be
+        // added to deny, or the persona's own declared tool would be denied
+        // right back out from under it.
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec!["mcp__ta__ta_fs_read".to_string()];
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&persona_tools))
+            .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            !deny.iter().any(|v| v == "mcp__ta__*"),
+            "deny list must not contain mcp__ta__* when the persona declared the specific \
+             tool mcp__ta__ta_fs_read, which shares that wildcard's identity: it would deny \
+             the persona's own declared tool. Got: {:?}",
+            deny
+        );
+        let allow = val["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.iter().any(|v| v == "mcp__ta__ta_fs_read"));
+    }
+
+    #[test]
+    fn persona_declaring_a_narrowed_native_pattern_is_not_contradicted_by_the_broad_default_deny() {
+        // Same identity-comparison regression, for a native tool pattern
+        // instead of an MCP one: a persona declaring "Bash(git *)" shares
+        // its identity ("Bash") with DEFAULT_ALLOWED_TOOLS' "Bash(*)" entry,
+        // so "Bash(*)" must not be added to deny, or the persona's own
+        // narrowed Bash access would be denied right back out.
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec!["Bash(git *)".to_string()];
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&persona_tools))
+            .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            !deny.iter().any(|v| v == "Bash(*)"),
+            "deny list must not contain Bash(*) when the persona declared the narrowed \
+             pattern Bash(git *), which shares that entry's identity: it would deny the \
+             persona's own declared access. Got: {:?}",
+            deny
+        );
+    }
+
+    #[test]
+    fn posture_level_web_search_prohibition_is_not_defeatable_by_a_persona_declaration() {
+        // Regression test: identity-based matching in the deny-complement
+        // means a persona declaring its own "WebSearch(...)" entry shares
+        // identity with DEFAULT_ALLOWED_TOOLS' "WebSearch(*)", so the
+        // complement alone would skip denying it -- even when the security
+        // posture has turned web search off entirely (web_search_enabled =
+        // false). A posture-level prohibition must win regardless of what
+        // any persona declared, so WebSearch(*) must still end up denied.
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec![
+            "WebSearch(*)".to_string(),
+            "mcp__ta__ta_fs_read".to_string(),
+        ];
+        inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            &[],
+            false, // web_search_enabled = false: posture has turned it off
+            Some(&persona_tools),
+        )
+        .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let allow = val["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            !allow.iter().any(|v| v == "WebSearch(*)"),
+            "WebSearch(*) must not be in allow when web_search_enabled is false, got: {:?}",
+            allow
+        );
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            deny.iter().any(|v| v == "WebSearch(*)"),
+            "WebSearch(*) must be in deny when web_search_enabled is false, even though the \
+             persona declared it, since a posture-level prohibition must win. Got: {:?}",
             deny
         );
     }
