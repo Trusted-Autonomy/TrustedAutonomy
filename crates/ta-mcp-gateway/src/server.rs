@@ -1963,8 +1963,9 @@ mod tests {
         //           ta_whiteboard_outcome_send (v0.17.11.11)
         //           ta_wiki_search, ta_wiki_get, ta_wiki_types, ta_wiki_create,
         //           ta_wiki_update (v0.17.11.15)
+        //           ta_propose_task_update (v0.17.11.12)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 53, "expected 53 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 54, "expected 54 tools, got: {:?}", names);
     }
 
     #[test]
