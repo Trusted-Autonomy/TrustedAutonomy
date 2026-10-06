@@ -213,7 +213,7 @@ default-included later if that turns out to be the wrong call.
   MPS-optimized kernels and no path to get them, while Decider-4b's dedicated `mps_ops.py`/
   `mps_moe.py` patches are real and working. **Default backend is now Decider-4b**, reversing the
   earlier provisional pick (§6) — full numbers and methodology in
-  `2026-10-04-local-decision-model-evaluation.md` §8.
+  `2026-10-04-local-decision-model-evaluation.md` §3.
 - Still genuinely open: CPU-only latency (neither model benchmarked), and full Brier/ECE
   recomputation at the deployed quantization level (the real head-to-head measured accuracy/
   stability on a 10-case set, not a full calibration-metric recomputation).
