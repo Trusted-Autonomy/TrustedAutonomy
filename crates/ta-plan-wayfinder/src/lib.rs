@@ -19,6 +19,7 @@ mod store;
 #[cfg(test)]
 mod test_support;
 
+pub use client::{WayfinderClient, WayfinderClientError};
 pub use config::WayfinderPlanConfig;
 pub use select::select_plan_store;
 pub use store::WayfinderPlanStore;

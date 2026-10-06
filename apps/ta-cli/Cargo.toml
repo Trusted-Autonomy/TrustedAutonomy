@@ -72,6 +72,7 @@ ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag =
 ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.11-alpha.8" }
 ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.11-alpha.8" }
 ta-plan = { path = "../../crates/ta-plan", version = "0.17.11-alpha.8" }
+ta-plan-wayfinder = { path = "../../crates/ta-plan-wayfinder", version = "0.17.11-alpha.8" }
 ta-build = { path = "../../crates/ta-build", version = "0.17.11-alpha.8" }
 ta-output-schema = { path = "../../crates/ta-output-schema", version = "0.17.11-alpha.8" }
 ta-runtime = { path = "../../crates/ta-runtime", version = "0.17.11-alpha.8" }
@@ -85,6 +86,8 @@ ta-release = { path = "../../crates/ta-release", version = "0.17.11-alpha.8" }
 ta-credential-broker = { path = "../../crates/ta-credential-broker", version = "0.17.11-alpha.8" }
 ta-agent-whiteboard = { path = "../../crates/ta-agent-whiteboard", version = "0.17.11-alpha.8" }
 
+[dev-dependencies]
+wiremock = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

@@ -1842,6 +1842,26 @@ impl TaGatewayServer {
         );
         tools::action::handle_external_action(&self.state, params)
     }
+
+    // ── CoS read-only chat-mode design, item 4 (v0.17.11.12) ──────
+
+    #[tool(
+        description = "Propose a title/description revision to the Wayfinder task this goal is working on. \
+        Captured for human review alongside this goal's normal draft -- not executed immediately and not a \
+        separate automated report. The actual Wayfinder update happens only if the draft containing this \
+        proposal is approved and applied. At least one of title/description must be set."
+    )]
+    fn ta_propose_task_update(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskUpdateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_update",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_update(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
