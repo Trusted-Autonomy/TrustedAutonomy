@@ -66,6 +66,8 @@ pub mod team;
 pub mod team_session;
 pub mod template;
 pub mod terms;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod token;
 pub mod tools;
 pub mod upgrade;
