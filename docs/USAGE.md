@@ -252,8 +252,13 @@ Never speculate without data.
 agent = "claude-opus-4-8"   # optional — persona-level agent binding, see below
 
 [capabilities]
-allowed_tools   = ["read", "bash"]   # empty = no restriction
-forbidden_tools = ["write"]          # agent may not use these tools
+# Entries use Claude Code's own permission-pattern syntax -- the same
+# strings used in .claude/settings.json -- not bare tool names. This
+# example narrows the agent to read-only TA filesystem access plus diffing;
+# empty = no restriction (falls back to the security posture's default
+# allow-list).
+allowed_tools   = ["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_diff"]
+forbidden_tools = ["Write(*)", "Bash(*rm -rf*)"]   # agent may not use these tools
 
 [style]
 output_format       = "markdown"
