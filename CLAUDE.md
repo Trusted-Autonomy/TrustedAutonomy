@@ -16,6 +16,17 @@ Or use the helper script for one-liners:
 ./dev just verify
 ```
 
+## Testing the Daemon or Poller Locally
+
+**Never run the daemon/poller via a bare `cargo build` + direct `target/debug/ta` invocation.** `ta daemon restart` resolves `ta-daemon` as the sibling of whichever `ta` binary is currently running. A bare `cargo build` produces a fresh, unsigned binary at `target/debug/ta-daemon` on every build, so macOS treats it as a new identity each time and you get a Keychain "Always Allow" prompt on every single iteration, even with the local codesigning cert set up (see `install_local.sh`'s own header comment for the full explanation).
+
+Always use the installed, signed path instead:
+```bash
+./install_local.sh --debug   # same cargo build underneath, plus install + codesign
+ta daemon restart
+```
+This is the same script real installs use (just a faster debug profile), so the signing step can't silently drift out of sync with a separate fast-loop path the way a second, parallel codesign mechanism could.
+
 ## Verification Before Every Commit
 
 Run these four checks (all must pass):
