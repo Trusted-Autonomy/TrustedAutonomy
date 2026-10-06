@@ -10462,6 +10462,10 @@ context_inject = "{mode_toml}"
     #[test]
     fn run_injects_context_for_agent() {
         // Verify that inject + restore roundtrip works for the agent path.
+        // Acquire HOME_ENV_LOCK: this test's inject_claude_settings call reads
+        // $HOME internally, so it must serialize against tests that
+        // temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
@@ -10821,6 +10825,9 @@ pre_launch:
 
     #[test]
     fn inject_and_restore_settings_roundtrip() {
+        // Acquire HOME_ENV_LOCK: inject_claude_settings reads $HOME internally,
+        // so it must serialize against tests that temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
 
         inject_claude_settings(staging.path(), None).unwrap();
@@ -10838,6 +10845,9 @@ pre_launch:
 
     #[test]
     fn inject_settings_preserves_existing() {
+        // Acquire HOME_ENV_LOCK: inject_claude_settings reads $HOME internally,
+        // so it must serialize against tests that temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         let claude_dir = staging.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -10878,6 +10888,9 @@ pre_launch:
 
     #[test]
     fn inject_settings_includes_forbidden_tools() {
+        // Acquire HOME_ENV_LOCK: inject_claude_settings reads $HOME internally,
+        // so it must serialize against tests that temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         let source = TempDir::new().unwrap();
         std::fs::write(
@@ -10942,6 +10955,11 @@ pre_launch:
 
     #[test]
     fn empty_persona_allowed_tools_preserves_existing_default_behavior() {
+        // Acquire HOME_ENV_LOCK: this call reads $HOME internally (the
+        // persona-override-empty branch of inject_claude_settings_with_security),
+        // so it must serialize against persona_allowed_tools_becomes_the_exact_allow_list_with_no_global_merge,
+        // which temporarily swaps $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         inject_claude_settings_with_security(staging.path(), None, &[], true, &[]).unwrap();
         let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
@@ -10952,6 +10970,11 @@ pre_launch:
 
     #[test]
     fn extra_deny_applies_regardless_of_which_allow_list_base_was_used() {
+        // Acquire HOME_ENV_LOCK: the first call below (empty persona override)
+        // reads $HOME internally, so it must serialize against
+        // persona_allowed_tools_becomes_the_exact_allow_list_with_no_global_merge,
+        // which temporarily swaps $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging_default = TempDir::new().unwrap();
         inject_claude_settings_with_security(
             staging_default.path(),
