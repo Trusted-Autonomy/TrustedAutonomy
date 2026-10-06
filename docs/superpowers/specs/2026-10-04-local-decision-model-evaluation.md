@@ -9,8 +9,8 @@ recomputation) — see §7.
 **Why this is its own document, not a section of the main decision-primitive design spec:**
 this is a living reference (model landscape changes, new hardware tiers get added) rather than a
 one-time architecture proposal — it should be updatable independently of the primitive's own
-design doc. See `2026-10-04-local-decision-model-primitive-design.md` (TODO: create once the
-primitive design itself is written up and approved) for the crate this evaluation feeds into.
+design doc. See `2026-10-04-local-decision-model-primitive-design.md` for the crate (`ta-ask`) this
+evaluation feeds into.
 
 **Ground rule for this document:** every specific claim (model name, parameter count, license,
 benchmark number) must be sourced and verifiable, not carried over from a prior conversation
