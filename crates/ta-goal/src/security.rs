@@ -191,7 +191,43 @@ pub struct SecurityProfile {
 
     /// Whether WebSearch is permitted. Disabled for `high` by default.
     pub web_search_enabled: bool,
+
+    /// Fallback tool allow-list used when a launch has no persona-declared
+    /// `allowed_tools` at all. Configurable per security level so a future
+    /// `Mid`/`High` preset can narrow it without touching the `Low` default.
+    pub default_allowed_tools: Vec<String>,
+
+    /// Optional hard ceiling on the tool allow-list, applied as an
+    /// intersection on top of whichever base list (persona's own
+    /// declaration, or `default_allowed_tools`) was chosen. `None` means no
+    /// additional ceiling beyond the existing `forbidden_tool_patterns` deny
+    /// list. Unset by default for every level; set via an explicit
+    /// `SecurityOverrides.max_allowed_tools` override.
+    pub max_allowed_tools: Option<Vec<String>>,
 }
+
+/// Tools allowed in the injected Claude Code settings for the `Low` security
+/// level (today's unrestricted default). This is the single source of truth
+/// for this list. `apps/ta-cli/src/commands/run.rs` reads it via
+/// `SecurityProfile.default_allowed_tools` rather than keeping its own copy,
+/// so the list cannot drift between the two crates.
+pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
+    "Bash(*)",
+    "Read(*)",
+    "Write(*)",
+    "Edit(*)",
+    "MultiEdit(*)",
+    "Glob(*)",
+    "Grep(*)",
+    "WebFetch(*)",
+    "WebSearch(*)",
+    "NotebookEdit(*)",
+    "Task(*)",
+    "Skill(*)",
+    "TodoRead(*)",
+    "TodoWrite(*)",
+    "mcp__ta__*",
+];
 
 /// Sensible forbidden patterns added for `mid` and `high` levels.
 /// These prevent the most common dangerous Bash patterns.
@@ -314,6 +350,19 @@ impl SecurityProfile {
             }
         }
 
+        // default_allowed_tools: same baseline for every level today (YAGNI:
+        // narrowing Mid/High's own default is a future, separate decision;
+        // this plan only requires the field to exist and be configurable).
+        let mut default_allowed_tools: Vec<String> = DEFAULT_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some(ref v) = overrides.default_allowed_tools {
+            default_allowed_tools = v.clone();
+        }
+
+        let max_allowed_tools = overrides.max_allowed_tools.clone();
+
         Self {
             level,
             sandbox_enabled,
@@ -323,6 +372,8 @@ impl SecurityProfile {
             constitution_block_mode,
             secret_scan_mode,
             web_search_enabled,
+            default_allowed_tools,
+            max_allowed_tools,
         }
     }
 
@@ -370,6 +421,16 @@ pub struct SecurityOverrides {
     /// Additional forbidden tool patterns to add on top of the level preset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_forbidden_tools: Vec<String>,
+
+    /// Override the fallback allow-list used when no persona declares its
+    /// own `allowed_tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_allowed_tools: Option<Vec<String>>,
+
+    /// Set a hard intersection ceiling on every launch's tool allow-list,
+    /// regardless of persona declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_allowed_tools: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -498,6 +559,52 @@ mod tests {
         assert_eq!(
             SecurityProfile::from_level(SecurityLevel::High, &no_overrides()).badge(),
             "[high]"
+        );
+    }
+
+    #[test]
+    fn default_allowed_tools_populated_for_every_level() {
+        for level in [SecurityLevel::Low, SecurityLevel::Mid, SecurityLevel::High] {
+            let profile = SecurityProfile::from_level(level, &SecurityOverrides::default());
+            assert!(
+                !profile.default_allowed_tools.is_empty(),
+                "default_allowed_tools must be populated for level {:?}",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn default_allowed_tools_override_replaces_level_preset() {
+        let overrides = SecurityOverrides {
+            default_allowed_tools: Some(vec!["mcp__ta__*".to_string()]),
+            ..Default::default()
+        };
+        let profile = SecurityProfile::from_level(SecurityLevel::Low, &overrides);
+        assert_eq!(
+            profile.default_allowed_tools,
+            vec!["mcp__ta__*".to_string()]
+        );
+    }
+
+    #[test]
+    fn max_allowed_tools_defaults_to_none_for_low_and_mid() {
+        let low = SecurityProfile::from_level(SecurityLevel::Low, &SecurityOverrides::default());
+        assert_eq!(low.max_allowed_tools, None);
+        let mid = SecurityProfile::from_level(SecurityLevel::Mid, &SecurityOverrides::default());
+        assert_eq!(mid.max_allowed_tools, None);
+    }
+
+    #[test]
+    fn max_allowed_tools_override_is_applied_at_any_level() {
+        let overrides = SecurityOverrides {
+            max_allowed_tools: Some(vec!["mcp__ta__*".to_string(), "Read(*)".to_string()]),
+            ..Default::default()
+        };
+        let profile = SecurityProfile::from_level(SecurityLevel::High, &overrides);
+        assert_eq!(
+            profile.max_allowed_tools,
+            Some(vec!["mcp__ta__*".to_string(), "Read(*)".to_string()])
         );
     }
 }
