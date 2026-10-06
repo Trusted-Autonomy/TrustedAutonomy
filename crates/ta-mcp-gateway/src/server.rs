@@ -664,6 +664,18 @@ impl GatewayState {
         objective: &str,
         agent_id: &str,
     ) -> Result<GoalRun, GatewayError> {
+        // Guard against caller-supplied agent_id containing the reserved ":chat:"
+        // marker. This prevents deliberately colliding with a live chat session's
+        // derived policy identity and overwriting its narrow manifest.
+        if agent_id.contains(":chat:") {
+            return Err(GatewayError::Other(
+                format!(
+                    "agent_id '{}' is not permitted to contain ':chat:' - that substring is reserved for chat-session-derived policy identities and using it here could overwrite a live chat session's manifest",
+                    agent_id
+                )
+            ));
+        }
+
         let goal_run_id = Uuid::new_v4();
         let staging_path = self.config.staging_dir.join(goal_run_id.to_string());
         let store_path = self.config.store_dir.join(goal_run_id.to_string());
@@ -702,6 +714,18 @@ impl GatewayState {
         profile: &AlignmentProfile,
         resource_scope: Option<Vec<String>>,
     ) -> Result<GoalRun, GatewayError> {
+        // Guard against caller-supplied agent_id containing the reserved ":chat:"
+        // marker. This prevents deliberately colliding with a live chat session's
+        // derived policy identity and overwriting its narrow manifest.
+        if agent_id.contains(":chat:") {
+            return Err(GatewayError::Other(
+                format!(
+                    "agent_id '{}' is not permitted to contain ':chat:' - that substring is reserved for chat-session-derived policy identities and using it here could overwrite a live chat session's manifest",
+                    agent_id
+                )
+            ));
+        }
+
         let goal_run_id = Uuid::new_v4();
         let staging_path = self.config.staging_dir.join(goal_run_id.to_string());
         let store_path = self.config.store_dir.join(goal_run_id.to_string());
@@ -729,6 +753,99 @@ impl GatewayState {
 
         self.event_dispatcher
             .dispatch(&TaEvent::goal_created(goal_run_id, title, agent_id));
+
+        Ok(goal_run)
+    }
+
+    /// Start a chat-mode session: a `GoalRun` whose capability manifest
+    /// comes from `ta_policy::compile_chat_manifest()` (broad `fs_read`,
+    /// `fs_write_patch` scoped only to `ta_policy::CHAT_SCRATCH_DIR`)
+    /// instead of a developer profile. This deliberately reuses the exact
+    /// same `GoalRun`/`StagingWorkspace`/`FsConnector` machinery as
+    /// `start_goal`/`start_goal_with_profile` so that `tools/fs.rs`'s
+    /// already-tested, already-enforced `ta_fs_read`/`ta_fs_write`/
+    /// `ta_fs_diff`/`ta_fs_list` handlers work against a chat session's
+    /// `goal_run_id` with zero changes to that file.
+    ///
+    /// A chat session's `GoalRun` is transitioned to `Running` and left
+    /// there permanently: no draft/PR lifecycle (`PrReady`/`Approved`/
+    /// `Applied`) is ever invoked against it, since chat mode's intended
+    /// tool surface never includes `ta_pr_build`. This is a deliberate
+    /// design choice (see
+    /// `docs/superpowers/specs/2026-10-05-chat-mode-secure-launch-design.md`),
+    /// not a bug or an unfinished state machine.
+    ///
+    /// The caller-supplied `agent_id` is NOT used directly as the policy
+    /// identity (the manifest map key, and the value stored on the
+    /// `GoalRun`). `PolicyEngine::load_manifest()` keys manifests by a
+    /// plain `agent_id` string in a shared `HashMap`, so if a later
+    /// `start_goal`/`start_goal_with_profile` call reuses the same raw
+    /// `agent_id` (e.g. a poller reusing a stable id like `"cos"` for its
+    /// orchestrator), that call's broad developer-profile manifest would
+    /// silently overwrite this session's narrow chat manifest in the map,
+    /// and this still-live session's `goal_run_id` would resolve back to
+    /// the same `agent_id` via `agent_for_goal()`, inheriting full write
+    /// access. To prevent that collision, each chat session gets its own
+    /// derived policy identity (`agent_id` plus the session's own unique
+    /// `goal_run_id`), used everywhere a policy key is needed: the
+    /// manifest compiled for it, and the `agent_id` stored on its
+    /// `GoalRun`. No other `start_goal*` call can ever produce the same
+    /// derived identity, so it can never be overwritten by one.
+    pub fn start_chat_session(
+        &mut self,
+        agent_id: &str,
+        resource_scope: &str,
+        validity_hours: i64,
+    ) -> Result<GoalRun, GatewayError> {
+        let goal_run_id = Uuid::new_v4();
+        // Each chat session gets its own policy identity, distinct from the
+        // caller-supplied agent_id, so a later start_goal/start_goal_with_profile
+        // call reusing the same agent_id (e.g. a poller's stable "cos" id)
+        // cannot silently overwrite this session's manifest in the shared
+        // agent_id -> manifest map and widen a live chat session's access.
+        let policy_agent_id = format!("{}:chat:{}", agent_id, goal_run_id);
+        let staging_path = self.config.staging_dir.join(goal_run_id.to_string());
+        let store_path = self.config.store_dir.join(goal_run_id.to_string());
+
+        let mut goal_run = GoalRun::new(
+            "chat session",
+            "answer a chat-mode question using project context",
+            &policy_agent_id,
+            staging_path,
+            store_path,
+        );
+        goal_run.goal_run_id = goal_run_id;
+
+        // Unlike compile_with_id, compile_chat_manifest generates its own
+        // manifest_id internally: keep GoalRun's own manifest_id field
+        // consistent with what's actually loaded, rather than leaving it
+        // at the placeholder value GoalRun::new() assigned.
+        let manifest =
+            ta_policy::compile_chat_manifest(&policy_agent_id, resource_scope, validity_hours)
+                .map_err(|e| {
+                    let msg = format!(
+                "chat manifest compilation failed for agent '{}' with resource scope '{}': {}",
+                agent_id, resource_scope, e
+            );
+                    GatewayError::Other(msg)
+                })?;
+        goal_run.manifest_id = manifest.manifest_id;
+        self.policy_engine.load_manifest(manifest);
+
+        let staging = StagingWorkspace::new(goal_run_id.to_string(), &self.config.staging_dir)?;
+        let store = JsonFileStore::new(self.config.store_dir.join(goal_run_id.to_string()))?;
+        let connector = FsConnector::new(goal_run_id.to_string(), staging, store, &policy_agent_id);
+        self.connectors.insert(goal_run_id, connector);
+
+        goal_run.transition(GoalRunState::Configured)?;
+        goal_run.transition(GoalRunState::Running)?;
+        self.goal_store.save(&goal_run)?;
+
+        self.event_dispatcher.dispatch(&TaEvent::goal_created(
+            goal_run_id,
+            &goal_run.title,
+            &policy_agent_id,
+        ));
 
         Ok(goal_run)
     }
@@ -1883,6 +2000,51 @@ mod tests {
     }
 
     #[test]
+    fn start_goal_rejects_agent_id_containing_chat_marker() {
+        let (server, _dir) = test_server();
+        let mut state = server.state.lock().unwrap();
+
+        // start_goal should reject agent_id containing ":chat:"
+        let result = state.start_goal("Test Goal", "Testing the system", "someagent:chat:deadbeef");
+        assert!(
+            result.is_err(),
+            "start_goal should reject agent_id with ':chat:' marker"
+        );
+        if let Err(GatewayError::Other(msg)) = result {
+            assert!(
+                msg.contains(":chat:"),
+                "error message should mention ':chat:' marker"
+            );
+        }
+    }
+
+    #[test]
+    fn start_goal_with_profile_rejects_agent_id_containing_chat_marker() {
+        let (server, _dir) = test_server();
+        let mut state = server.state.lock().unwrap();
+
+        // start_goal_with_profile should reject agent_id containing ":chat:"
+        let profile = AlignmentProfile::default_developer();
+        let result = state.start_goal_with_profile(
+            "Test Goal",
+            "Testing the system",
+            "someagent:chat:deadbeef",
+            &profile,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "start_goal_with_profile should reject agent_id with ':chat:' marker"
+        );
+        if let Err(GatewayError::Other(msg)) = result {
+            assert!(
+                msg.contains(":chat:"),
+                "error message should mention ':chat:' marker"
+            );
+        }
+    }
+
+    #[test]
     fn fs_write_stages_file() {
         let (server, _dir) = test_server();
         let goal_id = start_goal(&server);
@@ -1939,6 +2101,164 @@ mod tests {
 
         let content = connector.read_source(&source_dir, "existing.txt").unwrap();
         assert_eq!(content, b"original content");
+    }
+
+    #[test]
+    fn chat_session_fs_access_is_enforced_through_the_real_mcp_tool_handlers() {
+        use crate::server::{FsReadParams, FsWriteParams};
+        use crate::tools::fs::{handle_fs_read, handle_fs_write};
+
+        let (server, _dir) =
+            test_server_with_source(&[("notes.txt", b"hello from the real workspace\n")]);
+        let goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+
+        // Read anywhere in the workspace: the real handler succeeds.
+        let read_result = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: goal_run_id.clone(),
+                path: "notes.txt".to_string(),
+            },
+        );
+        assert!(
+            read_result.is_ok(),
+            "expected chat session to read workspace files, got {:?}",
+            read_result.err()
+        );
+
+        // Write inside the chat scratch dir: the real handler succeeds.
+        let scratch_path = format!("{}/notes.md", ta_policy::CHAT_SCRATCH_DIR);
+        let write_ok = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: goal_run_id.clone(),
+                path: scratch_path,
+                content: "scratch notes".to_string(),
+            },
+        );
+        assert!(
+            write_ok.is_ok(),
+            "expected chat session to write inside chat-scratch, got {:?}",
+            write_ok.err()
+        );
+
+        // Write outside the scratch dir: the real handler rejects it,
+        // propagated from PolicyDecision::Deny through enforce_policy()
+        // into a real McpError.
+        let write_denied = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: goal_run_id.clone(),
+                path: "src/main.rs".to_string(),
+                content: "malicious".to_string(),
+            },
+        );
+        assert!(
+            write_denied.is_err(),
+            "expected chat session write outside scratch to be denied"
+        );
+
+        // Reading a secrets-path file: denied the same way, proving Task 1's
+        // backstop applies to chat sessions too (chat mode's broad fs_read
+        // grant does not bypass it).
+        let secret_read_denied = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id,
+                path: ".env".to_string(),
+            },
+        );
+        // Assert on the actual error message, not just is_err(): the test
+        // fixture never creates a real `.env` file, so a missing-backstop
+        // read would ALSO fail (with an I/O "file not found" error),
+        // proving nothing about the backstop. Checking for both
+        // "Policy denied" (enforce_policy's wrapping of a Deny decision)
+        // and "secrets path" (the backstop's own deny reason) confirms the
+        // denial actually came from the secrets backstop.
+        let err = secret_read_denied.expect_err("expected chat session to be denied reading .env");
+        assert!(
+            err.message.contains("Policy denied") && err.message.contains("secrets path"),
+            "expected a policy-denial error mentioning the secrets-path backstop, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn chat_session_manifest_is_not_widened_by_a_later_start_goal_sharing_its_raw_agent_id() {
+        // Regression test for the vulnerability in Finding 2 of the final
+        // whole-branch review: PolicyEngine::load_manifest() keys manifests
+        // by a plain agent_id string. If a chat session's manifest were
+        // keyed by the raw, caller-supplied agent_id, a later start_goal
+        // call reusing that SAME agent_id string (e.g. a poller reusing a
+        // stable id like "cos") would silently overwrite the chat
+        // session's narrow manifest with a broad developer-profile one,
+        // widening a still-live chat session's access. start_chat_session
+        // now derives its own internal policy identity, so this must not
+        // happen.
+        use crate::server::{FsReadParams, FsWriteParams};
+        use crate::tools::fs::{handle_fs_read, handle_fs_write};
+
+        let (server, _dir) =
+            test_server_with_source(&[("notes.txt", b"hello from the real workspace\n")]);
+
+        let shared_agent_id = "shared-agent";
+        let chat_goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session(shared_agent_id, "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+
+        // A later call reuses the exact same raw agent_id for a normal,
+        // broad-access goal.
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_goal("Some Goal", "unrelated objective", shared_agent_id)
+                .unwrap();
+        }
+
+        // The original chat session must still be denied a write outside
+        // its chat-scratch directory: its manifest must not have been
+        // widened by the later start_goal call.
+        let write_denied = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: chat_goal_run_id.clone(),
+                path: "src/main.rs".to_string(),
+                content: "malicious".to_string(),
+            },
+        );
+        assert!(
+            write_denied.is_err(),
+            "expected chat session write outside scratch to still be denied after a later \
+             start_goal call reused its raw agent_id, got: {:?}",
+            write_denied
+        );
+
+        // Sanity: the chat session can still read the workspace (its own
+        // manifest is intact, not merely broken).
+        let read_ok = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: chat_goal_run_id,
+                path: "notes.txt".to_string(),
+            },
+        );
+        assert!(
+            read_ok.is_ok(),
+            "expected chat session to still read workspace files, got {:?}",
+            read_ok.err()
+        );
     }
 
     #[test]
