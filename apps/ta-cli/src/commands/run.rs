@@ -9281,6 +9281,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // Rust's test runner executes tests in parallel threads within one process by
+    // default, so without this lock one test's `set_var` or `remove_var` on $HOME
+    // can race with another test's `var("HOME")` call, producing flaky failures
+    // when a HOME-mutating test swaps the value mid-read. This lock ensures
+    // serialization: only one test modifies or reads $HOME at a time.
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ── write_whiteboard_session_file tests (v0.17.11.8) ────────────────────
     //
     // The most important property here: absent `--team-session-id` (the
@@ -10895,6 +10902,8 @@ pre_launch:
 
     #[test]
     fn persona_allowed_tools_becomes_the_exact_allow_list_with_no_global_merge() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+
         let staging = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         // Global settings.json that, if merged, would leak Bash(*) into a
