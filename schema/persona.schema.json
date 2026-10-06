@@ -5,7 +5,7 @@
       "properties": {
         "allowed_tools": {
           "default": [],
-          "description": "Tool names the agent may use. Empty = no restriction.",
+          "description": "Tools the agent may use, as a real tool-surface restriction enforced\nby the Claude Code harness itself (not an informational hint).\n\nEntries use Claude Code's own permission-pattern syntax (e.g.\n`\"Bash(*)\"`, `\"mcp__ta__ta_fs_read\"`), the same strings used in\n`.claude/settings.json` -- not bare tool names. Empty = no\nrestriction (falls back to the security posture's default\nallow-list).",
           "items": {
             "type": "string"
           },

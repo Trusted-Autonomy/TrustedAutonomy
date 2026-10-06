@@ -196,10 +196,14 @@ pub fn view_terms() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Serialize tests that mutate the HOME env var to prevent races under --test-threads > 1.
-    static HOME_MUTEX: Mutex<()> = Mutex::new(());
+    // Finding 4 (final whole-branch review): shared across every
+    // `commands::*` test module (this one and `run.rs`) so HOME-mutating
+    // tests serialize against each other regardless of which module they
+    // live in -- two independently-declared `Mutex` statics in the same test
+    // binary cannot do that, since neither lock knows about the other. See
+    // `crate::commands::test_support` for the full rationale.
+    use crate::commands::test_support::HOME_ENV_LOCK as HOME_MUTEX;
 
     #[test]
     fn terms_hash_is_stable() {
