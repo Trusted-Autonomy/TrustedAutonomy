@@ -18,6 +18,11 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "read_only": {
+          "default": false,
+          "description": "Read-only persona (H7), e.g. the Chief-of-Staff: it must hold no\ntool that mutates anything. When true, `ta run` launches it with\n`allowed_tools` if declared, else\n`tool_surface::READ_ONLY_PERSONA_ALLOWED_TOOLS`, refuses to launch if\nthe list contains any native tool, wildcard, foreign MCP server or\nmutating TA tool (`tool_surface::validate_read_only_tool_surface`),\nand explicitly denies every mutating TA MCP tool. Never falls back\nto the broad default allow-list.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -82,7 +87,8 @@
       "$ref": "#/$defs/PersonaCapabilities",
       "default": {
         "allowed_tools": [],
-        "forbidden_tools": []
+        "forbidden_tools": [],
+        "read_only": false
       }
     },
     "persona": {
