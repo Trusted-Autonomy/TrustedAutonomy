@@ -3420,9 +3420,14 @@ pub fn execute(
             profile
         };
 
+        let mut read_only_extra_deny: Vec<String> = Vec::new();
         let persona_allowed_tools: Vec<String> = match persona_name {
             Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
-                Ok(persona) => persona.capabilities.allowed_tools,
+                Ok(persona) => {
+                    let surface = resolve_persona_tool_surface(&persona)?;
+                    read_only_extra_deny = surface.extra_deny;
+                    surface.allowed
+                }
                 Err(e) => {
                     anyhow::bail!(
                         "Could not load persona '{}' while preparing tool-surface \
@@ -3487,10 +3492,16 @@ pub fn execute(
             None
         };
 
+        let mut extra_deny = security_profile.forbidden_tool_patterns.clone();
+        for pattern in read_only_extra_deny {
+            if !extra_deny.contains(&pattern) {
+                extra_deny.push(pattern);
+            }
+        }
         inject_claude_settings_with_security(
             &staging_path,
             source,
-            &security_profile.forbidden_tool_patterns,
+            &extra_deny,
             security_profile.web_search_enabled,
             effective_persona_tools,
         )?;
@@ -6653,6 +6664,66 @@ fn intersect_allowed_tools(base: &[String], ceiling: &[String]) -> Vec<String> {
         .filter(|t| ceiling.contains(t))
         .cloned()
         .collect()
+}
+
+/// A persona's resolved harness tool surface: the allow-list to write
+/// (empty = no persona declaration, fall back to the posture default) and
+/// extra deny patterns.
+#[derive(Debug)]
+struct PersonaToolSurface {
+    allowed: Vec<String>,
+    extra_deny: Vec<String>,
+}
+
+/// Resolve what a persona may call at launch (H7).
+///
+/// A normal persona's `allowed_tools` is used as declared (unchanged
+/// behavior). A `read_only = true` persona (the Chief-of-Staff) gets its
+/// declared list or, when it declares none, the built-in read-only surface;
+/// never the broad default. The list must pass
+/// `validate_read_only_tool_surface` or the launch is refused, and every
+/// mutating TA MCP tool is denied explicitly.
+fn resolve_persona_tool_surface(
+    persona: &ta_goal::PersonaConfig,
+) -> anyhow::Result<PersonaToolSurface> {
+    use ta_goal::tool_surface;
+
+    let caps = &persona.capabilities;
+    if !caps.read_only {
+        return Ok(PersonaToolSurface {
+            allowed: caps.allowed_tools.clone(),
+            extra_deny: Vec::new(),
+        });
+    }
+    let allowed: Vec<String> = if caps.allowed_tools.is_empty() {
+        tool_surface::READ_ONLY_PERSONA_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        caps.allowed_tools.clone()
+    };
+    if let Err(violations) = tool_surface::validate_read_only_tool_surface(&allowed) {
+        tracing::error!(
+            persona = %persona.persona.name,
+            violations = ?violations,
+            "refusing to launch read-only persona with a mutating or unclassified tool"
+        );
+        anyhow::bail!(
+            "Persona '{}' is declared read_only = true but its allowed_tools would give it \
+             tools that can mutate state:\n  - {}\n\
+             Remove these entries from .ta/personas/{}.toml (or drop allowed_tools entirely \
+             to use the built-in read-only surface). A read-only persona may only hold TA MCP \
+             tools classified read-only in ta_goal::tool_surface.",
+            persona.persona.name,
+            violations.join("\n  - "),
+            persona.persona.name
+        );
+    }
+    Ok(PersonaToolSurface {
+        allowed,
+        extra_deny: tool_surface::mutating_mcp_deny_patterns(),
+    })
 }
 
 /// The "tool identity" a permission pattern belongs to, for comparing a
@@ -11010,6 +11081,186 @@ pre_launch:
         let ceiling = vec!["B".to_string(), "C".to_string(), "D".to_string()];
         let result = intersect_allowed_tools(&base, &ceiling);
         assert_eq!(result, vec!["B".to_string(), "C".to_string()]);
+    }
+
+    // ── H7: a read-only (CoS) persona holds no mutating tool ─────────────
+
+    fn write_persona(project: &Path, name: &str, capabilities_toml: &str) {
+        let dir = project.join(".ta").join("personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.toml", name)),
+            format!(
+                "[persona]\nname = \"{name}\"\ndescription = \"test\"\n\
+                 system_prompt = \"You triage and dispatch.\"\n\n[capabilities]\n{caps}\n",
+                name = name,
+                caps = capabilities_toml
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Writes settings for `persona` through the real launch resolution
+    /// (`resolve_persona_tool_surface` + `inject_claude_settings_with_security`,
+    /// as `execute()` does) and returns (allow, deny).
+    fn launch_settings_for(persona: &ta_goal::PersonaConfig) -> (Vec<String>, Vec<String>) {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        // A global settings file that would widen the surface if merged.
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(*)", "mcp__ta__*"]}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let surface = resolve_persona_tool_surface(persona).unwrap();
+        let result = inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            &surface.extra_deny,
+            true,
+            Some(&surface.allowed),
+        );
+
+        if let Some(h) = original_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        result.unwrap();
+
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let strings = |key: &str| -> Vec<String> {
+            val["permissions"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        (strings("allow"), strings("deny"))
+    }
+
+    /// Every TA MCP tool a CoS must never hold, by capability.
+    const H7_MUTATING_DENYLIST: &[&str] = &[
+        "ta_fs_write",
+        "ta_wiki_create",
+        "ta_wiki_update",
+        "ta_external_action",
+        "ta_propose_task_update",
+        "ta_draft",
+        "ta_pr_build",
+        "ta_goal_start",
+        "ta_goal_inner",
+        "ta_plan",
+        "ta_workflow",
+        "ta_context",
+        "ta_whiteboard_presence_register",
+        "ta_whiteboard_handoff_send",
+        "ta_whiteboard_handoff_receive",
+        "ta_whiteboard_task_claim",
+        "ta_whiteboard_task_complete",
+        "ta_whiteboard_outcome_send",
+        "ta_human_verify",
+        "ta_ask_human",
+    ];
+
+    #[test]
+    fn h7_read_only_persona_launches_with_only_read_only_ta_tools_and_denies_mutating_ones() {
+        let project = TempDir::new().unwrap();
+        write_persona(project.path(), "chief-of-staff", "read_only = true");
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        let (allow, deny) = launch_settings_for(&persona);
+
+        assert!(!allow.is_empty());
+        for entry in &allow {
+            assert!(
+                ta_goal::tool_surface::read_only_violation(entry).is_none(),
+                "read-only persona was granted '{}'",
+                entry
+            );
+        }
+        for native in [
+            "Bash(*)",
+            "Read(*)",
+            "Write(*)",
+            "Edit(*)",
+            "MultiEdit(*)",
+            "Task(*)",
+        ] {
+            assert!(!allow.iter().any(|a| a == native), "{} allowed", native);
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+        assert!(!allow.iter().any(|a| a == "mcp__ta__*"));
+        for tool in H7_MUTATING_DENYLIST {
+            let pattern = format!("mcp__ta__{}", tool);
+            assert!(!allow.contains(&pattern), "{} allowed", pattern);
+            assert!(deny.contains(&pattern), "{} not explicitly denied", pattern);
+        }
+        assert!(deny.contains(&"mcp__ta__ta_propose_*".to_string()));
+    }
+
+    #[test]
+    fn h7_read_only_persona_with_a_mutating_or_broad_declaration_refuses_to_launch() {
+        for bad in [
+            r#"allowed_tools = ["mcp__ta__ta_fs_read", "Bash(*)"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_fs_write"]"#,
+            r#"allowed_tools = ["mcp__ta__*"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_whiteboard_*"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_wiki_update"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_propose_task_update"]"#,
+            r#"allowed_tools = ["Read(*)"]"#,
+        ] {
+            let project = TempDir::new().unwrap();
+            write_persona(
+                project.path(),
+                "chief-of-staff",
+                &format!("read_only = true\n{}", bad),
+            );
+            let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+            let err = resolve_persona_tool_surface(&persona).expect_err(bad);
+            assert!(err.to_string().contains("read_only = true"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn h7_read_only_persona_may_narrow_but_keeps_explicit_mutating_denies() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "chief-of-staff",
+            "read_only = true\nallowed_tools = [\"mcp__ta__ta_fs_read\", \"mcp__ta__ta_wiki_search\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        let (allow, deny) = launch_settings_for(&persona);
+        assert_eq!(
+            allow,
+            vec![
+                "mcp__ta__ta_fs_read".to_string(),
+                "mcp__ta__ta_wiki_search".to_string()
+            ]
+        );
+        assert!(deny.contains(&"mcp__ta__ta_fs_write".to_string()));
+    }
+
+    #[test]
+    fn h7_non_read_only_persona_surface_is_unchanged() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "implementer",
+            "allowed_tools = [\"Bash(*)\", \"mcp__ta__ta_fs_write\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "implementer").unwrap();
+        let surface = resolve_persona_tool_surface(&persona).unwrap();
+        assert_eq!(surface.allowed, vec!["Bash(*)", "mcp__ta__ta_fs_write"]);
+        assert!(surface.extra_deny.is_empty());
     }
 
     #[test]

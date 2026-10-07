@@ -23,6 +23,16 @@ pub struct PersonaCapabilities {
     /// Tool names the agent may NOT use.
     #[serde(default)]
     pub forbidden_tools: Vec<String>,
+    /// Read-only persona (H7), e.g. the Chief-of-Staff: it must hold no
+    /// tool that mutates anything. When true, `ta run` launches it with
+    /// `allowed_tools` if declared, else
+    /// `tool_surface::READ_ONLY_PERSONA_ALLOWED_TOOLS`, refuses to launch if
+    /// the list contains any native tool, wildcard, foreign MCP server or
+    /// mutating TA tool (`tool_surface::validate_read_only_tool_surface`),
+    /// and explicitly denies every mutating TA MCP tool. Never falls back
+    /// to the broad default allow-list.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// Style/output preferences for a persona.
@@ -193,6 +203,7 @@ mod tests {
             capabilities: PersonaCapabilities {
                 allowed_tools: vec!["mcp__ta__ta_fs_read".to_string(), "Bash(*)".to_string()],
                 forbidden_tools: vec!["Write(*)".to_string()],
+                read_only: false,
             },
             style: PersonaStyle {
                 output_format: "markdown".to_string(),

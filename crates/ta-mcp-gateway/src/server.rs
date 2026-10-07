@@ -2010,6 +2010,130 @@ mod tests {
         assert_eq!(tools.len(), 54, "expected 54 tools, got: {:?}", names);
     }
 
+    // ── H7: every registered tool is classified; CoS surface is read-only ──
+
+    /// Fails when a NEW tool is added to the MCP registry without being
+    /// classified read-only or mutating in `ta_goal::tool_surface`, so a
+    /// future tool can never silently enter a read-only (CoS) surface.
+    #[test]
+    fn h7_every_registered_mcp_tool_is_classified() {
+        let (server, _dir) = test_server();
+        let unclassified: Vec<String> = server
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .filter(|name| ta_goal::tool_surface::classify_mcp_tool(name).is_none())
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "MCP tools registered without a read-only/mutating classification: {:?}. Add each \
+             to ta_goal::tool_surface::MCP_TOOL_EFFECTS (mutating unless it provably only reads).",
+            unclassified
+        );
+    }
+
+    /// The classification table must not list tools that no longer exist
+    /// (a stale "read-only" entry could later be reused by a different,
+    /// mutating tool of the same name).
+    #[test]
+    fn h7_classification_table_has_no_stale_entries() {
+        let (server, _dir) = test_server();
+        let registered: std::collections::HashSet<String> = server
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for (name, _) in ta_goal::tool_surface::MCP_TOOL_EFFECTS {
+            assert!(
+                registered.contains(*name),
+                "classified tool '{}' is not registered",
+                name
+            );
+        }
+    }
+
+    /// The default read-only (CoS) surface only names real, registered,
+    /// read-only tools, and none of the tools a CoS must never hold.
+    #[test]
+    fn h7_read_only_surface_contains_no_mutating_registered_tool() {
+        use ta_goal::tool_surface::{
+            classify_mcp_tool, ToolEffect, READ_ONLY_PERSONA_ALLOWED_TOOLS,
+        };
+        let (server, _dir) = test_server();
+        let registered: std::collections::HashSet<String> = server
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for entry in READ_ONLY_PERSONA_ALLOWED_TOOLS {
+            let tool = entry.strip_prefix("mcp__ta__").expect("TA MCP tool");
+            assert!(registered.contains(tool), "{} is not registered", tool);
+            assert_eq!(
+                classify_mcp_tool(tool),
+                Some(ToolEffect::ReadOnly),
+                "{}",
+                tool
+            );
+        }
+        for must_be_mutating in [
+            "ta_fs_write",
+            "ta_wiki_create",
+            "ta_wiki_update",
+            "ta_external_action",
+            "ta_propose_task_update",
+            "ta_draft",
+            "ta_pr_build",
+            "ta_goal_start",
+            "ta_goal_inner",
+            "ta_plan",
+            "ta_workflow",
+            "ta_whiteboard_presence_register",
+            "ta_whiteboard_handoff_send",
+            "ta_whiteboard_handoff_receive",
+            "ta_whiteboard_task_claim",
+            "ta_whiteboard_task_complete",
+            "ta_whiteboard_outcome_send",
+        ] {
+            assert_eq!(
+                classify_mcp_tool(must_be_mutating),
+                Some(ToolEffect::Mutating),
+                "{} must be classified mutating",
+                must_be_mutating
+            );
+            assert!(
+                !READ_ONLY_PERSONA_ALLOWED_TOOLS
+                    .contains(&format!("mcp__ta__{}", must_be_mutating).as_str()),
+                "{} is in the read-only surface",
+                must_be_mutating
+            );
+        }
+    }
+
+    /// The chat manifest's policy grants (the other half of the chat
+    /// surface) contain only fs reads and scratch-only writes: no git,
+    /// email, external, or other tool grants.
+    #[test]
+    fn h7_chat_manifest_grants_only_fs_read_and_scratch_write() {
+        let manifest =
+            ta_policy::compile_chat_manifest("cos:chat:x", "fs://workspace/**", 1).unwrap();
+        assert!(!manifest.grants.is_empty());
+        for grant in &manifest.grants {
+            assert_eq!(grant.tool, "fs", "unexpected tool grant: {:?}", grant);
+            match grant.verb.as_str() {
+                "read" => {}
+                "write_patch" => assert!(
+                    grant.resource_pattern.contains(ta_policy::CHAT_SCRATCH_DIR),
+                    "write grant outside scratch: {:?}",
+                    grant
+                ),
+                other => panic!("unexpected verb '{}' in chat manifest: {:?}", other, grant),
+            }
+        }
+    }
+
     #[test]
     fn tool_names_are_prefixed() {
         let (server, _dir) = test_server();

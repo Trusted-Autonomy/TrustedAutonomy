@@ -35,6 +35,7 @@ pub mod security;
 pub mod social_audit;
 pub mod store;
 pub mod token_cost;
+pub mod tool_surface;
 pub mod velocity;
 
 pub use analysis::{

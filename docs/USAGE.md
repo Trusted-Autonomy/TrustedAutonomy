@@ -298,6 +298,37 @@ ta run "Analyze Q3 financials" --persona financial-analyst
 
 The persona's system prompt and tool restrictions are appended to CLAUDE.md in the staging workspace, after the plan context injection.
 
+### Read-Only Personas (Chief-of-Staff)
+
+A persona that must never change anything (for example a Chief-of-Staff that answers questions, triages input, and dispatches work to other personas) declares `read_only = true`:
+
+```toml
+[capabilities]
+read_only = true
+# Optional: narrow further. Omit to get the built-in read-only set
+# (ta_fs_read/diff/list, wiki search/get/types, whiteboard presence list,
+# goal/plan/draft status).
+allowed_tools = ["mcp__ta__ta_fs_read", "mcp__ta__ta_wiki_search"]
+```
+
+For a read-only persona, `ta run --persona <name>`:
+
+- gives the agent only TA MCP tools classified read-only, never native tools such as `Bash`, `Read`, or `Write`, and never the broad default allow-list;
+- explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
+- refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
+
+### Goal Origin and Auto-Approve
+
+`ta run --origin <name>` records which component asked for a goal (for example `--origin cos` when the Chief-of-Staff dispatched it). `TA_GOAL_ORIGIN` is used when the flag is absent. Names are 1-32 characters of lowercase letters, digits, `-` and `_`.
+
+Goals with origin `cos` or `chat` (chat-mode sessions are stamped `chat` automatically) are never auto-approved, by any path: policy auto-approve, constitution `approve` rules, workflow-graph decisions, advisor `auto` security, and `ta draft apply`'s "apply implies approval". Their drafts always wait for a human:
+
+```bash
+ta draft view <id>      # first line: auto-approve refused: origin=cos (...)
+ta draft approve <id>   # explicit human approval
+ta draft apply <id>
+```
+
 ### Persona-Level Agent Binding
 
 A persona can also pin which agent it runs on, so `--persona <name>` alone is enough to select both the identity and the runtime:
