@@ -421,6 +421,10 @@ pub struct GatewayState {
     pub projects: HashMap<String, ProjectState>,
     /// v0.10.18: Currently active project name for this session.
     pub active_project: Option<String>,
+    /// When set, this MCP server process was started for a chat-mode launch
+    /// and every `ta_fs_*` call must target exactly this chat session.
+    /// See `lock_to_chat_session`.
+    pub chat_lock: Option<Uuid>,
 }
 
 /// Caller mode determines what operations the MCP gateway allows.
@@ -573,6 +577,7 @@ impl GatewayState {
             active_agents: HashMap::new(),
             projects: HashMap::new(),
             active_project: None,
+            chat_lock: None,
         })
     }
 
@@ -797,7 +802,46 @@ impl GatewayState {
         resource_scope: &str,
         validity_hours: i64,
     ) -> Result<GoalRun, GatewayError> {
-        let goal_run_id = Uuid::new_v4();
+        self.start_chat_session_with_id(agent_id, Uuid::new_v4(), resource_scope, validity_hours)
+    }
+
+    /// `start_chat_session` with a caller-chosen session id. Used by the
+    /// `ta run` chat-mode launch path, which pre-generates the id so it can
+    /// tell the agent which `goal_run_id` to pass to the `ta_fs_*` tools
+    /// before the agent's MCP server process even starts.
+    ///
+    /// Rejects (H6) an `agent_id` containing the reserved `:chat:` marker,
+    /// and refuses to reuse a `session_id` that already belongs to a
+    /// different goal/session in the goal store, so this can never
+    /// overwrite a real goal's record or another session's identity.
+    pub fn start_chat_session_with_id(
+        &mut self,
+        agent_id: &str,
+        goal_run_id: Uuid,
+        resource_scope: &str,
+        validity_hours: i64,
+    ) -> Result<GoalRun, GatewayError> {
+        ta_goal::chat_mode::validate_chat_agent_id(agent_id)
+            .map_err(|msg| GatewayError::Other(format!("cannot start chat session: {}", msg)))?;
+        let expected_policy_id = format!(
+            "{}{}{}",
+            agent_id,
+            ta_goal::chat_mode::CHAT_POLICY_ID_MARKER,
+            goal_run_id
+        );
+        if let Some(existing) = self.goal_store.get(goal_run_id)? {
+            if existing.agent_id != expected_policy_id {
+                return Err(GatewayError::Other(format!(
+                    "cannot start chat session {}: that id already belongs to goal '{}' \
+                     (agent '{}') in {}. Chat sessions never reuse another goal's id. \
+                     Re-launch without a fixed session id so a fresh one is generated.",
+                    goal_run_id,
+                    existing.title,
+                    existing.agent_id,
+                    self.config.goals_dir.display()
+                )));
+            }
+        }
         // Each chat session gets its own policy identity, distinct from the
         // caller-supplied agent_id, so a later start_goal/start_goal_with_profile
         // call reusing the same agent_id (e.g. a poller's stable "cos" id)
@@ -851,6 +895,55 @@ impl GatewayState {
         ));
 
         Ok(goal_run)
+    }
+
+    /// Start the chat session described by `launch` and lock this gateway
+    /// to it: from then on every `ta_fs_*` call must name exactly this
+    /// session's `goal_run_id` (see `check_chat_lock`), so a chat-mode agent
+    /// cannot reach any other goal's broader manifest through this server.
+    pub fn lock_to_chat_session(
+        &mut self,
+        launch: &crate::chat_launch::ChatLaunch,
+    ) -> Result<GoalRun, GatewayError> {
+        if let Some(existing) = self.chat_lock {
+            return Err(GatewayError::Other(format!(
+                "this TA MCP server is already locked to chat session {}; a server is locked \
+                 to exactly one chat session for its lifetime",
+                existing
+            )));
+        }
+        let goal = self.start_chat_session_with_id(
+            &launch.agent_id,
+            launch.session_id,
+            crate::chat_launch::CHAT_RESOURCE_SCOPE,
+            crate::chat_launch::CHAT_VALIDITY_HOURS,
+        )?;
+        self.chat_lock = Some(goal.goal_run_id);
+        tracing::info!(
+            session_id = %goal.goal_run_id,
+            agent_id = %launch.agent_id,
+            policy_agent_id = %goal.agent_id,
+            workspace_root = %self.config.workspace_root.display(),
+            "TA MCP server locked to chat-mode session (read-only manifest, scratch-only writes)"
+        );
+        Ok(goal)
+    }
+
+    /// When this server is chat-locked, reject any `goal_run_id` other than
+    /// the locked chat session's. No-op for a normal (unlocked) server.
+    pub fn check_chat_lock(&self, goal_run_id: Uuid) -> Result<(), GatewayError> {
+        match self.chat_lock {
+            Some(locked) if locked != goal_run_id => Err(GatewayError::PolicyDenied(format!(
+                "this TA MCP server runs in chat mode and is locked to chat session {}; \
+                 goal_run_id {} was rejected. Pass goal_run_id \"{}\" to the ta_fs_* tools. \
+                 Chat mode can read the workspace and write only under {}/.",
+                locked,
+                goal_run_id,
+                locked,
+                ta_policy::CHAT_SCRATCH_DIR
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// Check policy for a filesystem operation.
@@ -1067,6 +1160,49 @@ impl TaGatewayServer {
             state: Arc::new(Mutex::new(state)),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Build an MCP server for a chat-mode launch: the gateway is locked to
+    /// one chat session whose manifest is the compiled chat manifest, and
+    /// every tool outside `ta_goal::chat_mode::CHAT_MODE_MCP_TOOLS` is
+    /// removed from the router, so it is neither listed to the agent nor
+    /// callable, independently of whatever the agent harness's own settings
+    /// allow.
+    pub fn new_chat_mode(
+        config: GatewayConfig,
+        launch: &crate::chat_launch::ChatLaunch,
+    ) -> Result<Self, GatewayError> {
+        let mut state = GatewayState::new(config)?;
+        state.lock_to_chat_session(launch)?;
+        let mut tool_router = Self::tool_router();
+        let removed: Vec<String> = tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .filter(|name| !ta_goal::chat_mode::is_chat_mode_mcp_tool(name))
+            .collect();
+        for name in &removed {
+            tool_router.remove_route(name);
+        }
+        tracing::info!(
+            session_id = %launch.session_id,
+            removed_tools = removed.len(),
+            remaining_tools = tool_router.list_all().len(),
+            "chat mode: removed every non-chat-mode tool from the TA MCP server's tool router"
+        );
+        Ok(Self {
+            state: Arc::new(Mutex::new(state)),
+            tool_router,
+        })
+    }
+
+    /// Names of the tools this server exposes (and will dispatch).
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
 
     pub fn state(&self) -> &Arc<Mutex<GatewayState>> {
@@ -1980,6 +2116,28 @@ impl TaGatewayServer {
 #[tool_handler]
 impl ServerHandler for TaGatewayServer {
     fn get_info(&self) -> ServerInfo {
+        let chat_lock = self.state.lock().ok().and_then(|s| s.chat_lock);
+        if let Some(session_id) = chat_lock {
+            return ServerInfo {
+                protocol_version: ProtocolVersion::V_2024_11_05,
+                capabilities: ServerCapabilities::builder().enable_tools().build(),
+                server_info: Implementation {
+                    name: "trusted-autonomy".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    title: Some("Trusted Autonomy (chat mode)".into()),
+                    icons: None,
+                    website_url: None,
+                },
+                instructions: Some(format!(
+                    "Trusted Autonomy MCP server in read-only chat mode. Pass goal_run_id \
+                     \"{}\" to ta_fs_read/ta_fs_list/ta_fs_diff/ta_fs_write. You can read the \
+                     workspace; writes are allowed only under {}/ and are discarded. No goal, \
+                     draft, plan, wiki-write, task or external-action tools are available.",
+                    session_id,
+                    ta_policy::CHAT_SCRATCH_DIR
+                )),
+            };
+        }
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -3325,5 +3483,271 @@ mod tests {
         );
 
         std::env::remove_var("TA_AGENT_ID");
+    }
+
+    // ── Chat-mode launch (persona chat_mode = true / ta run --chat-mode) ──
+
+    fn chat_launch(agent_id: &str) -> crate::chat_launch::ChatLaunch {
+        crate::chat_launch::ChatLaunch {
+            agent_id: agent_id.to_string(),
+            session_id: Uuid::new_v4(),
+            workspace_root: None,
+        }
+    }
+
+    fn chat_mode_server(
+        source_content: &[(&str, &[u8])],
+        launch: &crate::chat_launch::ChatLaunch,
+    ) -> (TaGatewayServer, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        for (path, content) in source_content {
+            let full_path = dir.path().join(path);
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full_path, content).unwrap();
+        }
+        let config = GatewayConfig::for_project(dir.path());
+        let server = TaGatewayServer::new_chat_mode(config, launch).unwrap();
+        (server, dir)
+    }
+
+    /// H10: the manifest a chat-mode launch actually loads (looked up from
+    /// the live PolicyEngine by the session's real policy identity, not
+    /// recompiled in the test) grants fs read across the workspace and fs
+    /// write_patch only under chat scratch, and nothing for git, email, or
+    /// any other tool.
+    #[test]
+    fn chat_mode_launch_loads_compiled_chat_manifest_with_no_write_git_or_email_grants() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[], &launch);
+        let state = server.state.lock().unwrap();
+
+        assert_eq!(state.chat_lock, Some(launch.session_id));
+        let policy_id = state.agent_for_goal(launch.session_id).unwrap();
+        assert_eq!(
+            policy_id,
+            format!("chief-of-staff:chat:{}", launch.session_id)
+        );
+        let manifest = state
+            .policy_engine
+            .manifest_for(&policy_id)
+            .expect("chat-mode launch must load a manifest for its policy identity");
+
+        assert!(!manifest.grants.is_empty());
+        for grant in &manifest.grants {
+            assert_eq!(grant.tool, "fs", "unexpected non-fs grant: {:?}", grant);
+            match grant.verb.as_str() {
+                "read" => assert_eq!(grant.resource_pattern, "fs://workspace/**"),
+                "write_patch" => assert_eq!(
+                    grant.resource_pattern,
+                    format!("fs://workspace/{}/**", ta_policy::CHAT_SCRATCH_DIR)
+                ),
+                other => panic!("unexpected verb '{}' in chat manifest: {:?}", other, grant),
+            }
+        }
+        for (tool, verb, target) in [
+            ("git", "commit", "git://workspace/main"),
+            ("git", "push", "git://workspace/main"),
+            ("email", "send", "email://someone@example.com"),
+            ("fs", "write_patch", "fs://workspace/src/main.rs"),
+            ("fs", "apply", "fs://workspace/src/main.rs"),
+        ] {
+            let decision = state.policy_engine.evaluate(&ta_policy::PolicyRequest {
+                agent_id: policy_id.clone(),
+                tool: tool.to_string(),
+                verb: verb.to_string(),
+                target_uri: target.to_string(),
+            });
+            assert!(
+                matches!(decision, ta_policy::PolicyDecision::Deny { .. }),
+                "chat manifest must deny {} {} {}, got {:?}",
+                tool,
+                verb,
+                target,
+                decision
+            );
+        }
+    }
+
+    /// H11: a chat-mode server exposes only the chat-mode tool profile.
+    /// Mutating tools are gone from the router entirely (not listed, not
+    /// dispatchable), however the agent harness is configured.
+    #[test]
+    fn chat_mode_server_router_exposes_only_chat_mode_tools() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[], &launch);
+        let names = server.tool_names();
+        assert!(!names.is_empty());
+        for name in &names {
+            assert!(
+                ta_goal::chat_mode::is_chat_mode_mcp_tool(name),
+                "non-chat tool '{}' still routed in chat mode",
+                name
+            );
+        }
+        for mutating in [
+            "ta_goal_start",
+            "ta_goal_inner",
+            "ta_pr_build",
+            "ta_draft",
+            "ta_plan",
+            "ta_workflow",
+            "ta_external_action",
+            "ta_wiki_create",
+            "ta_wiki_update",
+            "ta_propose_task_update",
+            "ta_whiteboard_task_claim",
+            "ta_context",
+            "ta_human_verify",
+        ] {
+            assert!(
+                !server.tool_router.has_route(mutating),
+                "{} must not be routable in chat mode",
+                mutating
+            );
+        }
+        assert!(server.tool_router.has_route("ta_fs_read"));
+        // The Chief-of-Staff's outbound channel and its human-question tool
+        // are deliberately routable (see the profile's comments).
+        assert!(server.tool_router.has_route("ta_whiteboard_outcome_send"));
+        assert!(server.tool_router.has_route("ta_ask_human"));
+
+        // Regression: a normal server still exposes the full surface and
+        // is not chat-locked.
+        let (normal, _d2) = test_server();
+        assert!(normal.tool_router.has_route("ta_goal_start"));
+        assert!(normal.state.lock().unwrap().chat_lock.is_none());
+
+        // Typo guard: every profile entry names a real tool, so the chat
+        // profile and the router cannot silently drift apart.
+        for name in ta_goal::chat_mode::CHAT_MODE_MCP_TOOLS {
+            assert!(
+                server.tool_router.has_route(name),
+                "chat-mode profile lists '{}' but the gateway has no such tool",
+                name
+            );
+        }
+    }
+
+    /// H12: through the real MCP tool handlers, a launched chat-mode
+    /// session can write only under chat scratch, cannot point the fs tools
+    /// at any other goal (even a broad developer-profile goal living in the
+    /// same gateway), and cannot read secrets.
+    #[test]
+    fn chat_mode_launch_cannot_write_outside_scratch_or_reach_another_goal() {
+        use crate::server::{FsReadParams, FsWriteParams};
+        use crate::tools::fs::{handle_fs_read, handle_fs_write};
+
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[("notes.txt", b"project notes\n")], &launch);
+        let chat_id = launch.session_id.to_string();
+
+        let read = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: chat_id.clone(),
+                path: "notes.txt".to_string(),
+            },
+        );
+        assert!(read.is_ok(), "chat read failed: {:?}", read.err());
+
+        let scratch = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: chat_id.clone(),
+                path: format!("{}/answer.md", ta_policy::CHAT_SCRATCH_DIR),
+                content: "draft answer".to_string(),
+            },
+        );
+        assert!(scratch.is_ok(), "scratch write failed: {:?}", scratch.err());
+
+        for path in [
+            "src/main.rs",
+            "PLAN.md",
+            ".ta/chat-scratch-evil/x",
+            "../escape.txt",
+        ] {
+            let denied = handle_fs_write(
+                &server.state,
+                FsWriteParams {
+                    goal_run_id: chat_id.clone(),
+                    path: path.to_string(),
+                    content: "malicious".to_string(),
+                },
+            );
+            assert!(denied.is_err(), "write to '{}' must be denied", path);
+        }
+
+        // A broad developer-profile goal exists in this same process. The
+        // chat lock must stop the agent from borrowing its manifest by
+        // passing its goal_run_id.
+        let other_goal = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_goal("dev goal", "broad access", "implementer")
+                .unwrap()
+                .goal_run_id
+        };
+        let borrowed = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: other_goal.to_string(),
+                path: "src/main.rs".to_string(),
+                content: "malicious".to_string(),
+            },
+        );
+        let err = borrowed.expect_err("chat-locked server must reject another goal's id");
+        assert!(
+            err.message.contains("locked to chat session") && err.message.contains(&chat_id),
+            "lock error must tell the agent which id to use: {}",
+            err.message
+        );
+
+        let secret = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: chat_id,
+                path: ".env".to_string(),
+            },
+        );
+        assert!(secret
+            .expect_err("secrets must stay denied")
+            .message
+            .contains("secrets path"));
+    }
+
+    /// H6 applies to the launch path too: the reserved ':chat:' marker is
+    /// rejected for chat sessions, and a chat session can never take over
+    /// an existing goal's id.
+    #[test]
+    fn chat_session_rejects_reserved_marker_and_existing_goal_ids() {
+        let (server, _dir) = test_server();
+        let mut state = server.state.lock().unwrap();
+        let err = state
+            .start_chat_session("cos:chat:deadbeef", "fs://workspace/**", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(":chat:"), "{}", err);
+
+        let real_goal = state
+            .start_goal("real goal", "objective", "implementer")
+            .unwrap()
+            .goal_run_id;
+        let err = state
+            .start_chat_session_with_id("chief-of-staff", real_goal, "fs://workspace/**", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already belongs to goal"), "{}", err);
+        assert_eq!(state.agent_for_goal(real_goal).unwrap(), "implementer");
+    }
+
+    #[test]
+    fn chat_mode_server_instructions_name_the_session_id() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[], &launch);
+        let text = server.get_info().instructions.unwrap_or_default();
+        assert!(text.contains(&launch.session_id.to_string()), "{}", text);
+        assert!(text.contains("chat mode"), "{}", text);
     }
 }

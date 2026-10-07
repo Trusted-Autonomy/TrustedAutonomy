@@ -11,6 +11,11 @@
           },
           "type": "array"
         },
+        "chat_mode": {
+          "default": false,
+          "description": "Launch this persona as a read-only chat-mode session (equivalent to\n`ta run --chat-mode`). The agent's capability manifest becomes the\ncompiled chat manifest (read anywhere in the workspace, write only to\n`.ta/chat-scratch/`, no git/email/external grants), its TA MCP server\nruns locked to that chat session, and its effective tool surface is\n`allowed_tools` intersected with the chat-mode profile: any mutating\ntool listed in `allowed_tools` is stripped with a warning, and every\nnative tool (Bash, Read, Write, Edit, ...) is denied.",
+          "type": "boolean"
+        },
         "forbidden_tools": {
           "default": [],
           "description": "Tool names the agent may NOT use.",
@@ -87,6 +92,7 @@
       "$ref": "#/$defs/PersonaCapabilities",
       "default": {
         "allowed_tools": [],
+        "chat_mode": false,
         "forbidden_tools": [],
         "read_only": false
       }

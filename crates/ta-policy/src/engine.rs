@@ -198,6 +198,13 @@ impl PolicyEngine {
         self.manifests.insert(manifest.agent_id.clone(), manifest);
     }
 
+    /// The manifest currently loaded for `agent_id`, if any. Read-only:
+    /// lets callers (and security tests) inspect exactly what a live
+    /// session is bound to instead of recompiling it.
+    pub fn manifest_for(&self, agent_id: &str) -> Option<&CapabilityManifest> {
+        self.manifests.get(agent_id)
+    }
+
     /// Evaluate a policy request and return a decision.
     ///
     /// This is the single chokepoint — every tool call flows through here.
