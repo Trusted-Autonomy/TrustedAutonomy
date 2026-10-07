@@ -27,6 +27,8 @@ ta daemon restart
 ```
 This is the same script real installs use (just a faster debug profile), so the signing step can't silently drift out of sync with a separate fast-loop path the way a second, parallel codesign mechanism could.
 
+**Test binaries are signed too.** `.cargo/config.toml` routes every macOS test and `cargo run` binary through `scripts/codesign-runner.sh`, which signs it with the same local identity (identifier `com.trustedautonomy.ta-test`), so tests that touch the Keychain do not re-prompt on every build. It is a no-op on Linux, CI, and any Mac without the "Trusted Autonomy Local Dev" certificate.
+
 ## Verification Before Every Commit
 
 Run these four checks (all must pass):
