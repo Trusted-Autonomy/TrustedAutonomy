@@ -5289,6 +5289,7 @@ dependencies = [
  "ta-memory",
  "ta-output-schema",
  "ta-plan",
+ "ta-plan-wayfinder",
  "ta-plugin",
  "ta-policy",
  "ta-release",
@@ -5305,6 +5306,7 @@ dependencies = [
  "uuid",
  "which",
  "winres",
+ "wiremock",
 ]
 
 [[package]]

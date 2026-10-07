@@ -15,6 +15,7 @@ pub mod plan;
 pub mod sync_bridge;
 pub mod unity;
 pub mod unreal;
+pub mod wayfinder_task;
 pub mod whiteboard;
 pub mod wiki;
 pub mod workflow;

@@ -1842,6 +1842,26 @@ impl TaGatewayServer {
         );
         tools::action::handle_external_action(&self.state, params)
     }
+
+    // ── CoS read-only chat-mode design, item 4 (v0.17.11.12) ──────
+
+    #[tool(
+        description = "Propose a title/description revision to the Wayfinder task this goal is working on. \
+        Captured for human review alongside this goal's normal draft -- not executed immediately and not a \
+        separate automated report. The actual Wayfinder update happens only if the draft containing this \
+        proposal is approved and applied. At least one of title/description must be set."
+    )]
+    fn ta_propose_task_update(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskUpdateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_update",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_update(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -1943,8 +1963,9 @@ mod tests {
         //           ta_whiteboard_outcome_send (v0.17.11.11)
         //           ta_wiki_search, ta_wiki_get, ta_wiki_types, ta_wiki_create,
         //           ta_wiki_update (v0.17.11.15)
+        //           ta_propose_task_update (v0.17.11.12)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 53, "expected 53 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 54, "expected 54 tools, got: {:?}", names);
     }
 
     #[test]
