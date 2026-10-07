@@ -1887,6 +1887,92 @@ impl TaGatewayServer {
         );
         tools::wayfinder_task::handle_propose_task_update(&self.state, params)
     }
+
+    #[tool(
+        description = "Propose creating a new Wayfinder task. Captured for human review in this goal's draft, \
+        never executed immediately; the task is created only if the draft is approved and applied. `verb` is \
+        required by Wayfinder. If `external_id` is omitted a deterministic one is derived so re-applying the \
+        draft can never create a duplicate."
+    )]
+    fn ta_propose_task_create(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_create",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_create(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose reassigning a Wayfinder task. `assignee_id` is required: a Wayfinder roster/team-role \
+        id (not a name), or null to clear. Captured for human review in this goal's draft; applied only if \
+        the draft is approved and applied."
+    )]
+    fn ta_propose_task_reassign(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskReassignParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_reassign",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_reassign(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose that a Wayfinder task needs revision: the delivered work is incorrect and the task \
+        goes back to `open` in the work queue. Distinct from on-hold (blocked). Captured for human review in \
+        this goal's draft; applied only if the draft is approved and applied."
+    )]
+    fn ta_propose_task_needs_revision(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskNeedsRevisionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_needs_revision",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_needs_revision(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose putting a Wayfinder task on hold because it is blocked (business reason or a \
+        dependency). `hold_reason` is required. Optionally pass `blocking_task` {title, verb, description?} to \
+        create a precursor task the held task depends on. Distinct from needs-revision. Captured for human \
+        review in this goal's draft; applied only if the draft is approved and applied."
+    )]
+    fn ta_propose_task_on_hold(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskOnHoldParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_on_hold",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_on_hold(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose marking a Wayfinder task done. Captured for human review in this goal's draft; \
+        the status changes only if the draft is approved and applied."
+    )]
+    fn ta_propose_task_complete(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeTaskCompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_task_complete",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_task_complete(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -2006,8 +2092,18 @@ mod tests {
         //           ta_wiki_search, ta_wiki_get, ta_wiki_types, ta_wiki_create,
         //           ta_wiki_update (v0.17.11.15)
         //           ta_propose_task_update (v0.17.11.12)
+        //           ta_propose_task_create, ta_propose_task_reassign,
+        //           ta_propose_task_needs_revision, ta_propose_task_on_hold,
+        //           ta_propose_task_complete
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 54, "expected 54 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 59, "expected 59 tools, got: {:?}", names);
+        for kind in crate::tools::wayfinder_task::ProposeKind::ALL {
+            assert!(
+                names.iter().any(|n| n == kind.tool_name()),
+                "{} is not registered",
+                kind.tool_name()
+            );
+        }
     }
 
     // ── H7: every registered tool is classified; CoS surface is read-only ──

@@ -18,6 +18,7 @@ pub mod daemon;
 pub mod dev;
 pub mod doctor;
 pub mod draft;
+pub mod draft_task_replay;
 pub mod email_manager;
 pub mod events;
 pub mod experiment;

@@ -2947,6 +2947,30 @@ Once enabled, every `ta plan claim`/status transition and every goal-run state c
 
 If a human changes a synced task's status directly in the Wayfinder UI, TA logs it as an override (`tracing::warn!`) and keeps its own local value authoritative on the next push — Wayfinder sync is one-directional for status (TA → Wayfinder), not a live two-way editor.
 
+#### Proposing Wayfinder Task Changes in a Draft
+
+Agents never change a Wayfinder task directly. Instead, a worker proposes the change with one of the `ta_propose_task_*` MCP tools, and the proposal is reviewed as part of that goal's draft, next to the code it describes. Nothing reaches Wayfinder until the draft is approved and applied.
+
+| Tool | What it proposes | Applied as |
+|---|---|---|
+| `ta_propose_task_update` | New title and/or description | `PATCH tasks/:id/content` |
+| `ta_propose_task_create` | A new task (`title`, `verb` required; `description`, `external_id`, `assignee_id` optional) | `POST tasks` (upsert by `external_id`) |
+| `ta_propose_task_reassign` | A new assignee (`assignee_id` is a roster/team-role id, or `null` to clear) | `PATCH tasks/:id/assignee` |
+| `ta_propose_task_needs_revision` | The delivered work is wrong and must be redone | status `open` |
+| `ta_propose_task_on_hold` | The task is blocked (`hold_reason` required; optional `blocking_task` creates a precursor task the held task depends on) | status `on_hold` + `hold_reason` |
+| `ta_propose_task_complete` | The task is done | status `done` |
+
+Needs-revision and on-hold are deliberately different: needs-revision puts the task straight back in the work queue, on-hold marks it blocked.
+
+To review and apply:
+
+```bash
+ta draft view <draft-id>     # proposals appear under pending actions, with a one-line summary each
+ta draft apply <draft-id>    # applies the files, then sends each approved proposal to Wayfinder
+```
+
+On apply, TA prints one `[applied]` or `[failed]` line per proposal. A failed proposal never blocks the others or the file changes; fix the cause and re-run `ta draft apply`. Re-applying is safe: replayed proposals are recorded in `.ta/wayfinder-task-replay.log` and skipped next time, and created tasks always carry an `external_id` (derived from the goal and proposal ids when the agent did not supply one), so a task is never created twice. A project without `[plan] backend = "wayfinder"` simply skips the proposals with a log line. The Wayfinder service account needs only `member` role for these calls.
+
 #### Plan Lint
 
 `ta plan lint` detects four classes of structural problems in PLAN.md:
