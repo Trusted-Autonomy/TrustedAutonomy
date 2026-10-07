@@ -6236,6 +6236,49 @@ fn replay_advisor_patches(target_dir: &Path, config: &GatewayConfig, goal_run_id
     }
 }
 
+/// Refuse a draft whose filesystem artifacts target protected infrastructure
+/// paths (CR-06). Returns an actionable error naming every offending artifact.
+fn refuse_infrastructure_artifacts(pkg: &DraftPackage) -> anyhow::Result<()> {
+    let offending: Vec<(String, String)> = pkg
+        .changes
+        .artifacts
+        .iter()
+        .filter_map(|a| a.resource_uri.strip_prefix("fs://workspace/"))
+        .filter_map(|path| {
+            ta_workspace::path_safety::check_relative_path(path)
+                .err()
+                .map(|issue| (path.to_string(), issue.describe()))
+        })
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    for (path, reason) in &offending {
+        tracing::error!(
+            package_id = %pkg.package_id,
+            path = %path,
+            reason = %reason,
+            "draft apply refused: artifact targets a protected infrastructure path"
+        );
+    }
+    let list = offending
+        .iter()
+        .map(|(p, r)| format!("  - {}: {}", p, r))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "Refusing to apply draft {id}: {n} artifact(s) target protected infrastructure paths \
+         (TA or VCS metadata such as .git/ or .ta/, in any case or Windows spelling) or \
+         unsafe locations:\n{list}\n\
+         Nothing was written to the project. Draft artifacts may never modify these \
+         directories. Deny the draft with `ta draft deny {id}` and inspect the goal's \
+         staging directory to see how the path was produced.",
+        id = pkg.package_id,
+        n = offending.len(),
+        list = list,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_package(
     config: &GatewayConfig,
@@ -6269,6 +6312,14 @@ fn apply_package(
         pkg.goal.title,
         pkg.changes.artifacts.len()
     );
+
+    // CR-06: refuse, before anything is written, any artifact whose path is
+    // (or aliases, via case folding / trailing dots / 8.3 names / NTFS
+    // streams) a protected infrastructure directory such as `.git/` or `.ta/`.
+    // TA never legitimately updates infrastructure through a draft artifact;
+    // its own `.ta/` state is written by TA-owned code paths. The workspace
+    // layer re-checks every destination (including symlink resolution) too.
+    refuse_infrastructure_artifacts(&pkg)?;
 
     // Check if selective review is enabled.
     let selective_review = patterns.is_enabled();
@@ -13548,6 +13599,104 @@ fn run() {
         // Verify goal state.
         let updated = goal_store.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(updated.state, GoalRunState::Applied);
+    }
+
+    /// CR-06 end to end: a built draft package that carries an artifact
+    /// `.GIT/hooks/pre-commit` must be refused by `ta draft apply`, and the
+    /// real `.git/` must be left untouched (on case-insensitive and
+    /// case-sensitive hosts alike).
+    #[test]
+    fn apply_refuses_case_variant_git_hook_artifact_end_to_end() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::create_dir_all(project.path().join(".git/hooks")).unwrap();
+        std::fs::write(project.path().join(".git/config"), "[core]\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "CR-06 apply refusal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Attempt to plant a git hook via case folding".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent writes a legit change plus the hook under a case variant.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        let hook = goal.workspace_path.join(".GIT/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\ntouch /tmp/cr06-pwned\n").unwrap();
+
+        build_package(&config, &goal_id, "CR-06 attempt", false).unwrap();
+
+        // Draft build itself must not list the hook as an artifact.
+        let mut pkg = load_all_packages(&config).unwrap().remove(0);
+        assert!(
+            !pkg.changes
+                .artifacts
+                .iter()
+                .any(|a| a.resource_uri.to_lowercase().contains(".git/")),
+            "draft build must exclude case-variant .git paths: {:?}",
+            pkg.changes
+                .artifacts
+                .iter()
+                .map(|a| &a.resource_uri)
+                .collect::<Vec<_>>()
+        );
+
+        // Simulate a tampered or older package that does carry it.
+        let mut evil = pkg.changes.artifacts[0].clone();
+        evil.resource_uri = "fs://workspace/.GIT/hooks/pre-commit".to_string();
+        pkg.changes.artifacts.push(evil);
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let err = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(".GIT/hooks/pre-commit"), "{}", msg);
+        assert!(msg.contains("Nothing was written"), "{}", msg);
+        assert!(msg.contains("ta draft deny"), "{}", msg);
+
+        // Real .git untouched, and nothing at all was applied.
+        assert!(!project.path().join(".git/hooks/pre-commit").exists());
+        assert!(!project.path().join(".GIT/hooks/pre-commit").exists());
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".git/config")).unwrap(),
+            "[core]\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("README.md")).unwrap(),
+            "# Original\n"
+        );
     }
 
     #[test]

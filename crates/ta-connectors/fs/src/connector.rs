@@ -341,6 +341,23 @@ impl<S: ChangeStore> FsConnector<S> {
         let staged_files = self.staging.list_files()?;
         let mut applied = Vec::new();
 
+        // CR-06: refuse the whole apply, before any write, if any staged file
+        // targets a protected infrastructure path (`.git/`, `.ta/`, in any
+        // case or Windows spelling) or resolves outside `target_dir`.
+        for relative_path in &staged_files {
+            if let Err(issue) =
+                ta_workspace::path_safety::resolve_for_write(target_dir, relative_path)
+            {
+                return Err(FsConnectorError::WorkspaceError(
+                    ta_workspace::WorkspaceError::ProtectedPathRefused {
+                        path: relative_path.clone(),
+                        reason: issue.describe(),
+                        target_dir: target_dir.to_path_buf(),
+                    },
+                ));
+            }
+        }
+
         for relative_path in &staged_files {
             let content = self.staging.read_file(relative_path)?;
             let target_path = target_dir.join(relative_path);
@@ -562,6 +579,33 @@ mod tests {
 
         let content2 = fs::read(target.path().join("sub/nested.txt")).unwrap();
         assert_eq!(content2, b"Nested content");
+    }
+
+    #[test]
+    fn apply_refuses_case_variant_infra_paths_before_writing_anything() {
+        let (mut connector, _, _) = setup();
+        connector.write_patch("hello.txt", b"Hello!").unwrap();
+        connector
+            .write_patch(".GIT/hooks/pre-commit", b"#!/bin/sh\necho pwned\n")
+            .unwrap();
+
+        let target = tempdir().unwrap();
+        fs::create_dir_all(target.path().join(".git/hooks")).unwrap();
+        let err = connector.apply(target.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(
+                err,
+                FsConnectorError::WorkspaceError(
+                    ta_workspace::WorkspaceError::ProtectedPathRefused { .. }
+                )
+            ),
+            "{}",
+            msg
+        );
+        assert!(msg.contains(".GIT/hooks/pre-commit"), "{}", msg);
+        assert!(!target.path().join(".git/hooks/pre-commit").exists());
+        assert!(!target.path().join("hello.txt").exists());
     }
 
     #[test]
