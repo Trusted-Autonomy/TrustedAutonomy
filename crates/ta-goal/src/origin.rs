@@ -1,4 +1,4 @@
-// origin.rs — Goal origin: which component asked for a goal (H9).
+// origin.rs: goal origin, which component asked for a goal (H9).
 //
 // A goal's `origin` names the component that originated it (e.g. `cos` when
 // the Chief-of-Staff classified and dispatched it, `chat` for a chat-mode

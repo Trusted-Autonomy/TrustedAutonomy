@@ -1,4 +1,4 @@
-// path_safety.rs — Validation of agent-supplied, workspace-relative paths.
+// path_safety.rs: Validation of agent-supplied, workspace-relative paths.
 //
 // Security hypothesis H5 (docs/superpowers/specs/security-hypotheses.md):
 // a path an agent hands to a TA tool (`ta_fs_read`, `ta_fs_write`, ...)

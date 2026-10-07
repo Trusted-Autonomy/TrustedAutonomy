@@ -1,4 +1,4 @@
-// tool_surface.rs — Read-only vs mutating classification of every TA MCP
+// tool_surface.rs: Read-only vs mutating classification of every TA MCP
 // tool, and the read-only (chat/Chief-of-Staff) tool surface (H7).
 //
 // Security hypothesis H7 (docs/superpowers/specs/security-hypotheses.md):
