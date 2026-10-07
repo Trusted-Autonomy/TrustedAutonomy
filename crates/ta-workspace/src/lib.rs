@@ -22,6 +22,7 @@ pub mod copy_strategy;
 pub mod error;
 pub mod link_cache;
 pub mod links;
+pub mod local_dev;
 pub mod log_rotation;
 pub mod merge_tool;
 pub mod overlay;

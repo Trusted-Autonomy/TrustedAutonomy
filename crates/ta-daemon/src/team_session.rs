@@ -536,12 +536,11 @@ pub fn build_ta_run_args(
 // Best-effort and bounded: never blocks a cycle on a signing failure or a
 // slow/locked Keychain -- each attempt is capped at a short timeout.
 #[cfg(target_os = "macos")]
-pub(crate) fn ensure_stable_codesign(binary_path: &Path) {
+pub(crate) fn ensure_stable_codesign(binary_path: &Path, project_root: &Path) {
     const IDENTIFIER: &str = "com.trustedautonomy.ta";
     const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let identity = std::env::var("TA_CODESIGN_IDENTITY")
-        .unwrap_or_else(|_| "Trusted Autonomy Local Dev".to_string());
+    let identity = ta_workspace::local_dev::codesign_identity(project_root);
 
     // Local-dev only. Sign when the named identity exists in this user's
     // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
@@ -554,7 +553,7 @@ pub(crate) fn ensure_stable_codesign(binary_path: &Path) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn ensure_stable_codesign(_binary_path: &Path) {}
+pub(crate) fn ensure_stable_codesign(_binary_path: &Path, _project_root: &Path) {}
 
 #[cfg(target_os = "macos")]
 fn run_codesign_with_timeout(
@@ -731,7 +730,7 @@ pub fn run_one_cycle(
         None,
     );
 
-    ensure_stable_codesign(ta_bin);
+    ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
         .current_dir(project_root)
@@ -1012,7 +1011,7 @@ mod tests {
         std::fs::copy("/usr/bin/true", &bin).unwrap();
         let before = std::fs::read(&bin).unwrap();
         std::env::set_var("TA_CODESIGN_IDENTITY", "ta-test-nonexistent-identity-xyz");
-        ensure_stable_codesign(&bin);
+        ensure_stable_codesign(&bin, dir.path());
         std::env::remove_var("TA_CODESIGN_IDENTITY");
         assert_eq!(
             std::fs::read(&bin).unwrap(),

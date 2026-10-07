@@ -13,14 +13,15 @@
 # or any Mac without that cert it does nothing and just runs the binary.
 # Never ad-hoc signs. Never fails the run because signing failed.
 #
-# Override the identity with TA_CODESIGN_IDENTITY (same variable as
-# install_local.sh).
+# Override the identity with TA_CODESIGN_IDENTITY, as an environment variable
+# or a line in the gitignored .env.local (same setting as install_local.sh).
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/local-env.sh"
 bin="$1"
 shift
 
 if [[ "$(uname -s)" == "Darwin" ]] && [[ -x /usr/bin/codesign ]]; then
-    identity="${TA_CODESIGN_IDENTITY:-Trusted Autonomy Local Dev}"
+    identity="$(ta_local_env TA_CODESIGN_IDENTITY 'Trusted Autonomy Local Dev')"
     # Cheap check first: skip if already signed by this identity.
     if ! /usr/bin/codesign -dv --verbose=4 "$bin" 2>&1 | grep -qF "Authority=${identity}"; then
         # Fails fast, without touching the file, when the identity is absent.

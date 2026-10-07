@@ -40,12 +40,11 @@ use clap::Subcommand;
 // -- each attempt is capped at a short timeout and failures are silently
 // ignored, exactly like `install_local.sh`'s own `|| true` fallback.
 #[cfg(target_os = "macos")]
-fn ensure_stable_codesign(binary_path: &Path) {
+fn ensure_stable_codesign(binary_path: &Path, project_root: &Path) {
     const IDENTIFIER: &str = "com.trustedautonomy.ta-daemon";
     const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let identity = std::env::var("TA_CODESIGN_IDENTITY")
-        .unwrap_or_else(|_| "Trusted Autonomy Local Dev".to_string());
+    let identity = ta_workspace::local_dev::codesign_identity(project_root);
 
     // Local-dev only. Sign when the named identity exists in this user's
     // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
@@ -58,7 +57,7 @@ fn ensure_stable_codesign(binary_path: &Path) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn ensure_stable_codesign(_binary_path: &Path) {}
+fn ensure_stable_codesign(_binary_path: &Path, _project_root: &Path) {}
 
 /// Run `codesign --force --sign <identity> --identifier <identifier>
 /// <binary_path>`, killing it if it doesn't finish within `timeout`.
@@ -349,7 +348,7 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
     }
 
     let daemon_bin = super::version_guard::find_daemon_binary()?;
-    ensure_stable_codesign(&daemon_bin);
+    ensure_stable_codesign(&daemon_bin, project_root);
 
     // Ensure .ta directory exists.
     let ta_dir = project_root.join(".ta");
@@ -1562,7 +1561,7 @@ mod tests {
         std::fs::copy("/usr/bin/true", &bin).unwrap();
         let before = std::fs::read(&bin).unwrap();
         std::env::set_var("TA_CODESIGN_IDENTITY", "ta-test-nonexistent-identity-xyz");
-        ensure_stable_codesign(&bin);
+        ensure_stable_codesign(&bin, dir.path());
         std::env::remove_var("TA_CODESIGN_IDENTITY");
         assert_eq!(
             std::fs::read(&bin).unwrap(),
