@@ -11257,9 +11257,7 @@ pre_launch:
         "ta_whiteboard_handoff_receive",
         "ta_whiteboard_task_claim",
         "ta_whiteboard_task_complete",
-        "ta_whiteboard_outcome_send",
         "ta_human_verify",
-        "ta_ask_human",
     ];
 
     #[test]
@@ -11295,6 +11293,14 @@ pre_launch:
             assert!(deny.contains(&pattern), "{} not explicitly denied", pattern);
         }
         assert!(deny.contains(&"mcp__ta__ta_propose_*".to_string()));
+        // Read-only by classification (they change no project state), so a
+        // read-only persona may hold them and they are not in the deny list.
+        for tool in ["ta_ask_human", "ta_whiteboard_outcome_send"] {
+            assert!(
+                ta_goal::tool_surface::read_only_violation(&format!("mcp__ta__{tool}")).is_none(),
+                "{tool} should be allowed for a read-only persona"
+            );
+        }
     }
 
     #[test]
