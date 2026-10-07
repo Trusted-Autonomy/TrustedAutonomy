@@ -298,6 +298,37 @@ ta run "Analyze Q3 financials" --persona financial-analyst
 
 The persona's system prompt and tool restrictions are appended to CLAUDE.md in the staging workspace, after the plan context injection.
 
+### Read-Only Personas (Chief-of-Staff)
+
+A persona that must never change anything (for example a Chief-of-Staff that answers questions, triages input, and dispatches work to other personas) declares `read_only = true`:
+
+```toml
+[capabilities]
+read_only = true
+# Optional: narrow further. Omit to get the built-in read-only set
+# (ta_fs_read/diff/list, wiki search/get/types, whiteboard presence list,
+# goal/plan/draft status).
+allowed_tools = ["mcp__ta__ta_fs_read", "mcp__ta__ta_wiki_search"]
+```
+
+For a read-only persona, `ta run --persona <name>`:
+
+- gives the agent only TA MCP tools classified read-only, never native tools such as `Bash`, `Read`, or `Write`, and never the broad default allow-list;
+- explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
+- refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
+
+### Goal Origin and Auto-Approve
+
+`ta run --origin <name>` records which component asked for a goal (for example `--origin cos` when the Chief-of-Staff dispatched it). `TA_GOAL_ORIGIN` is used when the flag is absent. Names are 1-32 characters of lowercase letters, digits, `-` and `_`.
+
+Goals with origin `cos` or `chat` (chat-mode sessions are stamped `chat` automatically) are never auto-approved, by any path: policy auto-approve, constitution `approve` rules, workflow-graph decisions, advisor `auto` security, and `ta draft apply`'s "apply implies approval". Their drafts always wait for a human:
+
+```bash
+ta draft view <id>      # first line: auto-approve refused: origin=cos (...)
+ta draft approve <id>   # explicit human approval
+ta draft apply <id>
+```
+
 ### Persona-Level Agent Binding
 
 A persona can also pin which agent it runs on, so `--persona <name>` alone is enough to select both the identity and the runtime:
@@ -308,6 +339,44 @@ ta persona set-agent financial-analyst auto   # hand the choice to the superviso
 ```
 
 This is the second-highest tier in the full agent resolution order — see [Full agent and model switching](#full-agent-and-model-switching-workload-workflow-and-persona-tiers) for the complete hierarchy and `"auto"` behavior.
+
+### Read-Only Chat-Mode Personas
+
+Some personas (for example a chief-of-staff that answers questions, triages input and reviews other agents' work) should never be able to change anything. Mark them `chat_mode = true`:
+
+```toml
+# .ta/personas/chief-of-staff.toml
+[persona]
+name = "chief-of-staff"
+description = "Answers questions and triages work; never writes"
+
+[capabilities]
+chat_mode = true
+# Optional. Narrows the chat-mode profile further; leave empty for the full profile.
+allowed_tools = ["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_diff", "mcp__ta__ta_wiki_search", "mcp__ta__ta_wiki_get", "mcp__ta__ta_whiteboard_*"]
+```
+
+Or turn it on for a single launch without editing the persona:
+
+```bash
+ta run "What changed in the auth module?" --headless --chat-mode --persona chief-of-staff
+```
+
+What a chat-mode launch gets:
+
+- **Capability manifest**: the compiled chat manifest. It can read anywhere in the workspace (secret files such as `.env` and keys stay blocked), write only under `.ta/chat-scratch/` (discarded with the staging copy), and has no git, email or other external-action grants.
+- **A chat-locked TA MCP server**: the agent's `ta serve` process is started from `.ta/mcp-agent-chat.json` and locked to one chat session. Only chat-safe tools are registered (workspace reads, scratch writes, status queries, wiki reads, community reads, whiteboard presence and handoff). Goal, draft, plan, wiki-write, task and external-action tools do not exist on that server, and the `ta_fs_*` tools reject any `goal_run_id` other than the session's own. The session id is written into the agent's CLAUDE.md and the server's instructions.
+- **Tool surface = allowed_tools intersected with the chat-mode profile**, never the union. Mutating entries (for example `Bash(*)`, `mcp__ta__ta_goal_start`, `mcp__ta__ta_wiki_update`) are stripped and reported as a `[warn]` line plus a `tracing` warning. A wildcard such as `mcp__ta__*` is narrowed to the chat-safe tools it covers. A security-posture `max_allowed_tools` ceiling, when set, narrows the result again.
+- **No native-tool bypass**: `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task` and `Skill` are denied in the injected `.claude/settings.local.json`.
+
+`ta run` refuses chat mode, with an explanation of what to change, when:
+
+- the agent framework is not `claude-code` (TA cannot restrict its native tools),
+- the launch is `--macro`, interactive PTY (`--interactive` without `--headless`), or a multi-goal workflow (`--phases`, `--sub-goals`),
+- none of the persona's `allowed_tools` are chat-safe, or the posture ceiling leaves no tools,
+- the persona or agent name contains the reserved `:chat:` marker.
+
+The daemon launches team personas with `ta run --headless --team <team> --persona <persona>`, so setting `chat_mode = true` in the persona file is all a team needs to run that role in chat mode.
 
 ---
 

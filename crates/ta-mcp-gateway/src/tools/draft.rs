@@ -439,6 +439,7 @@ fn handle_draft_submit(
                                 lines_changed: 0, // approximate — not available from artifacts
                                 plan_phase: goal.plan_phase.clone(),
                                 agent_id: goal.agent_id.clone(),
+                                origin: goal.origin.clone(),
                             };
                             Some(auto_approve::should_auto_approve_draft(&draft_info, &doc))
                         } else {
@@ -717,7 +718,7 @@ fn handle_draft_submit(
                 Err(_) => ("submitted".to_string(), "pending".to_string()),
             };
 
-            let response = serde_json::json!({
+            let mut response = serde_json::json!({
                 "draft_id": pkg_id.to_string(),
                 "goal_run_id": goal_run_id.to_string(),
                 "status": review_status,
@@ -728,6 +729,13 @@ fn handle_draft_submit(
                     "Draft reviewed through ReviewChannel."
                 },
             });
+            // Observability: say why auto-approve did not apply (e.g. H9's
+            // "auto-approve refused: origin=cos"), not only that it didn't.
+            if let Some(auto_approve::AutoApproveDecision::Denied { ref blockers }) =
+                auto_approve_decision
+            {
+                response["auto_approve_blockers"] = serde_json::json!(blockers);
+            }
             Ok(CallToolResult::success(vec![Content::json(response)
                 .map_err(|e| {
                     McpError::internal_error(e.to_string(), None)

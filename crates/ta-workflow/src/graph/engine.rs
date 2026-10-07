@@ -78,9 +78,31 @@ pub fn run_graph(
                 .cloned()
                 .collect()
         };
-        let decision = decision_node
+        let mut decision = decision_node
             .decide(&inputs, ctx)
             .map_err(|e| wrap(&decision_def.id, e))?;
+        // H9: a goal from an untrusted-ingress origin (CoS, chat) never gets
+        // an automatic `proceed`, whatever the reviewers voted and whatever
+        // decision node (or `override_reason`) produced it. Enforced here,
+        // once, so every graph (the `ta draft apply` gate, review panels,
+        // custom graphs) inherits it before any action node can run.
+        if decision.proceed
+            && ta_goal::origin::origin_blocks_auto_approve(review_input.origin.as_deref())
+        {
+            let origin = review_input.origin.as_deref().unwrap_or_default();
+            let refusal = ta_goal::origin::auto_approve_refusal(origin);
+            tracing::warn!(
+                node_id = %decision_def.id,
+                origin = %origin,
+                draft_id = ?review_input.draft_id,
+                score = decision.score,
+                "{}",
+                refusal
+            );
+            decision.proceed = false;
+            decision.override_active = false;
+            decision.summary = format!("{} [{}]", refusal, decision.summary);
+        }
         info!(
             node_id = %decision_def.id,
             score = decision.score,
@@ -194,6 +216,123 @@ decision = "panel_verdict"
         let action_outcome = outcome.action_outcome.unwrap();
         assert_eq!(action_outcome.kind, "recommend");
         assert!(!action_outcome.applied, "recommend must never apply");
+    }
+
+    /// Graph whose single policy reviewer has auto-approve enabled, so
+    /// without an origin it always proceeds.
+    fn approving_graph() -> (GraphDefinition, NodeRegistry) {
+        let toml = r#"
+[[reviewer]]
+id = "policy_check"
+kind = "policy"
+
+[decision]
+id = "panel_verdict"
+kind = "weighted"
+threshold = 0.5
+inputs = ["policy_check"]
+
+[action]
+id = "outcome"
+kind = "recommend"
+decision = "panel_verdict"
+"#;
+        let def = GraphDefinition::from_toml_str(toml).unwrap();
+        let mut registry = NodeRegistry::new();
+        registry.register_reviewer("policy", |_def| {
+            let mut doc = ta_policy::PolicyDocument::default();
+            doc.defaults.auto_approve.drafts.enabled = true;
+            Ok(
+                Box::new(crate::graph::nodes::PolicyReviewer::with_document(doc))
+                    as Box<dyn super::super::types::ReviewerNode>,
+            )
+        });
+        // An always-proceed decision node: proves the origin check does not
+        // depend on any particular reviewer voting no.
+        registry.register_decision("weighted", |_def| {
+            Ok(Box::new(AlwaysProceed) as Box<dyn super::super::types::DecisionNode>)
+        });
+        registry.register_action("recommend", |_def| {
+            Ok(Box::new(RecordingRecommend) as Box<dyn super::super::types::ActionNode>)
+        });
+        (def, registry)
+    }
+
+    struct AlwaysProceed;
+    impl super::super::types::DecisionNode for AlwaysProceed {
+        fn decide(
+            &self,
+            _votes: &[ReviewerVote],
+            _ctx: &GraphContext,
+        ) -> Result<Decision, GraphError> {
+            Ok(Decision {
+                score: 1.0,
+                proceed: true,
+                algorithm_used: crate::consensus::ConsensusAlgorithm::Weighted,
+                scores_by_role: Default::default(),
+                findings_by_role: Default::default(),
+                timed_out_roles: vec![],
+                override_active: true,
+                summary: "always proceed".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn h9_cos_and_chat_origin_never_proceed_through_any_graph_decision() {
+        let (def, registry) = approving_graph();
+        for origin in ["cos", "chat"] {
+            let (_dir, mut context) = ctx();
+            let review_input = ReviewInput {
+                changed_paths: vec!["src/main.rs".to_string()],
+                agent_id: "claude-code".to_string(),
+                origin: Some(origin.to_string()),
+                ..Default::default()
+            };
+            let outcome = run_graph(
+                &def,
+                &registry,
+                &WorkItem::default(),
+                &review_input,
+                &mut context,
+            )
+            .unwrap();
+            let decision = outcome.decision.unwrap();
+            assert!(!decision.proceed, "origin {} must not proceed", origin);
+            assert!(!decision.override_active);
+            assert!(
+                decision
+                    .summary
+                    .contains(&format!("auto-approve refused: origin={}", origin)),
+                "summary: {}",
+                decision.summary
+            );
+        }
+    }
+
+    #[test]
+    fn h9_none_and_other_origins_proceed_exactly_as_before() {
+        let (def, registry) = approving_graph();
+        for origin in [None, Some("cli".to_string())] {
+            let (_dir, mut context) = ctx();
+            let review_input = ReviewInput {
+                changed_paths: vec!["src/main.rs".to_string()],
+                agent_id: "claude-code".to_string(),
+                origin: origin.clone(),
+                ..Default::default()
+            };
+            let outcome = run_graph(
+                &def,
+                &registry,
+                &WorkItem::default(),
+                &review_input,
+                &mut context,
+            )
+            .unwrap();
+            let decision = outcome.decision.unwrap();
+            assert!(decision.proceed, "origin {:?} must still proceed", origin);
+            assert_eq!(decision.summary, "always proceed");
+        }
     }
 
     #[test]

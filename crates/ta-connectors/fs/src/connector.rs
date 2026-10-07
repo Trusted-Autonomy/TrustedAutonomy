@@ -86,14 +86,23 @@ impl<S: ChangeStore> FsConnector<S> {
         source_dir: &Path,
         relative_path: &str,
     ) -> Result<Vec<u8>, FsConnectorError> {
-        // Reject path traversal attempts.
-        if relative_path.contains("..") {
-            return Err(FsConnectorError::PathTraversal {
+        // Reject absolute paths (POSIX and Windows forms, on any host),
+        // `..` components, and symlinks resolving outside `source_dir`
+        // (H5). Done here, not only in the gateway's check_policy(), so a
+        // caller that skips the policy check still cannot escape the root.
+        let full_path = ta_workspace::path_safety::resolve_within_root(source_dir, relative_path)
+            .map_err(|reason| {
+            tracing::warn!(
+                path = %relative_path,
+                source_dir = %source_dir.display(),
+                reason = %reason,
+                "fs connector rejected read outside the source root"
+            );
+            FsConnectorError::PathTraversal {
                 path: relative_path.to_string(),
-            });
-        }
-
-        let full_path = source_dir.join(relative_path);
+                reason,
+            }
+        })?;
         let content = fs::read(&full_path).map_err(|source| FsConnectorError::IoError {
             path: full_path,
             source,
@@ -626,6 +635,123 @@ mod tests {
             }
             other => panic!("expected UnifiedDiff, got {:?}", other),
         }
+    }
+
+    // ── H5: workspace escape at the connector layer (defense in depth) ──
+    //
+    // The policy layer rejects these too, but the connector must not rely
+    // on that: a future caller that forgets to call check_policy() must
+    // still be unable to read outside the source root.
+
+    #[test]
+    fn read_source_rejects_absolute_path_outside_source_root() {
+        let (mut connector, _, _) = setup();
+        let source = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, b"TOP-SECRET").unwrap();
+
+        let result = connector.read_source(source.path(), &secret.to_string_lossy());
+        assert!(
+            matches!(result, Err(FsConnectorError::PathTraversal { .. })),
+            "absolute path must be rejected, got {:?}",
+            result.map(|b| String::from_utf8_lossy(&b).to_string())
+        );
+    }
+
+    #[test]
+    fn read_source_rejects_windows_style_absolute_paths_on_any_host() {
+        let (mut connector, _, _) = setup();
+        let source = tempdir().unwrap();
+        for p in [
+            "C:\\Users\\me\\.aws\\credentials",
+            "c:/Windows/system32/config/SAM",
+            "\\\\server\\share\\x",
+            "\\rooted\\x",
+        ] {
+            let result = connector.read_source(source.path(), p);
+            assert!(
+                matches!(result, Err(FsConnectorError::PathTraversal { .. })),
+                "expected rejection for {:?}",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn read_source_allows_dots_inside_a_file_name() {
+        let (mut connector, _, _) = setup();
+        let source = tempdir().unwrap();
+        fs::create_dir_all(source.path().join("docs")).unwrap();
+        fs::write(source.path().join("docs/v1..v2.md"), b"migration").unwrap();
+        let content = connector
+            .read_source(source.path(), "docs/v1..v2.md")
+            .unwrap();
+        assert_eq!(content, b"migration");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_rejects_symlink_that_escapes_source_root() {
+        use std::os::unix::fs::symlink;
+
+        let (mut connector, _, _) = setup();
+        let source = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("credentials"), b"TOP-SECRET").unwrap();
+        // e.g. a malicious repo committing `config -> ~/.aws`.
+        symlink(outside.path(), source.path().join("config")).unwrap();
+
+        let result = connector.read_source(source.path(), "config/credentials");
+        assert!(
+            matches!(result, Err(FsConnectorError::PathTraversal { .. })),
+            "symlink escape must be rejected, got {:?}",
+            result.map(|b| String::from_utf8_lossy(&b).to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_allows_symlink_that_stays_inside_source_root() {
+        use std::os::unix::fs::symlink;
+
+        let (mut connector, _, _) = setup();
+        let source = tempdir().unwrap();
+        fs::create_dir_all(source.path().join("real")).unwrap();
+        fs::write(source.path().join("real/file.txt"), b"inside").unwrap();
+        symlink(source.path().join("real"), source.path().join("alias")).unwrap();
+
+        let content = connector
+            .read_source(source.path(), "alias/file.txt")
+            .unwrap();
+        assert_eq!(content, b"inside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_patch_rejects_symlink_that_escapes_staging_root() {
+        use std::os::unix::fs::symlink;
+
+        let (mut connector, _, _) = setup();
+        let outside = tempdir().unwrap();
+        symlink(outside.path(), connector.staging_path().join("escape")).unwrap();
+
+        let result = connector.write_patch("escape/pwned.txt", b"pwned");
+        assert!(result.is_err(), "write through escaping symlink must fail");
+        assert!(
+            !outside.path().join("pwned.txt").exists(),
+            "nothing may be written outside the staging root"
+        );
+    }
+
+    #[test]
+    fn write_patch_rejects_absolute_path() {
+        let (mut connector, _, _) = setup();
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("pwned.txt");
+        let result = connector.write_patch(&target.to_string_lossy(), b"pwned");
+        assert!(result.is_err());
+        assert!(!target.exists());
     }
 
     #[test]

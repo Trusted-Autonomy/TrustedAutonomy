@@ -59,7 +59,20 @@ fn check_draft(config: &GatewayConfig, draft_id_prefix: &str) -> anyhow::Result<
         lines_changed: 0,
         plan_phase: None, // We don't have phase info from the draft
         agent_id: pkg.agent_identity.agent_id.clone(),
+        origin: crate::commands::draft::goal_origin_for_draft(config, &pkg.goal.goal_id),
     };
+
+    // H9: a CoS/chat-originated goal is never auto-approved; say so first.
+    if ta_goal::origin::origin_blocks_auto_approve(draft_info.origin.as_deref()) {
+        let origin = draft_info.origin.as_deref().unwrap_or_default();
+        println!("  ❌ {}", ta_goal::origin::auto_approve_refusal(origin));
+        println!();
+        println!(
+            "Result: WOULD NOT AUTO-APPROVE (auto-approve refused: origin={})",
+            origin
+        );
+        return Ok(());
+    }
 
     // Show each condition evaluation.
     let drafts_cfg = &doc.defaults.auto_approve.drafts;
