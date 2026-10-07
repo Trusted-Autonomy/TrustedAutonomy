@@ -99,6 +99,7 @@ impl WayfinderPlanStore {
             description: None,
             verb: "gate".to_string(),
             external_id: Some(external_id.clone()),
+            assignee_id: None,
         })?;
 
         self.cache
@@ -192,6 +193,7 @@ impl WayfinderPlanStore {
             description: Some(goal.objective.clone()),
             verb: "implement".to_string(),
             external_id: Some(external_id.clone()),
+            assignee_id: None,
         }) {
             Ok(t) => t,
             Err(e) => {
