@@ -6692,6 +6692,59 @@ Every action attempt — regardless of outcome — is appended to `.ta/action-lo
 
 Actions with `policy = "review"` appear in `ta draft view` alongside file changes. Approve or deny them as part of the normal draft review flow.
 
+#### Executing approved actions
+
+When you apply a draft, TA executes its approved external actions right after the files are applied, and prints one line per action:
+
+```bash
+ta draft apply <draft-id>
+# ...
+# [actions] Replaying 2 approved pending action(s) from draft 3f2a9c1e:
+#   [executed] email (a1b2c3d4) Send email to alice@example.com: Weekly report
+#   [blocked] social_post (e5f6a7b8) Post to twitter :: action type 'social_post' is now blocked by policy ...
+# [actions] 1 executed, 1 blocked, 0 failed, 0 no-executor, 0 skipped, 0 already replayed, ...
+#   Ledger: .ta/action-replay-ledger.jsonl
+```
+
+Each action ends in one of these outcomes:
+
+| Outcome | Meaning |
+|---------|---------|
+| `executed` | The action's executor ran and reported success. |
+| `blocked` | Your current policy refuses it, so nothing was executed (see below). |
+| `failed` | The executor returned an error. It may have partly taken effect, so check the destination. |
+| `no-executor` | Only the built-in schema stub is installed for that type, so nothing was sent. Install a plugin that implements it. |
+| `skipped` | Not attempted: the reviewer rejected it, it is an unknown action type, or it is a raw intercepted MCP call that TA cannot replay. |
+| `already-replayed` | The ledger shows it already ran. It is never sent again. |
+| `previously-failed` | An earlier attempt failed or was blocked. It is not retried automatically. |
+| `outcome-unknown` | An earlier run was interrupted while the action was executing. It is never re-sent automatically. Check the destination. |
+
+**Policy is checked again at execution time.** Before an action runs, TA re-reads `.ta/workflow.toml` and `.ta/constitution.toml` and re-applies the same gates the capture step uses: `policy = "block"`, constitution block rules, `allowed_recipients` (both `to` and `cc` for email), `allowed_domains`, the schema-drop rule for `db_query`, `rate_limit`, and `max_per_hour`/`max_per_day`. If you tighten your policy after the agent ran, the stricter policy wins.
+
+**Each action runs at most once.** TA writes an entry to `.ta/action-replay-ledger.jsonl` before it calls the executor, and another entry once the executor returns. Before running an action, TA checks this ledger, so retries and repeat runs never send anything twice. If the process dies while an action is executing, the action shows as `outcome-unknown` and TA does not re-send it. TA prefers skipping an action and telling you over sending it twice. If the ledger file is corrupted, TA refuses to replay anything until you repair it.
+
+**Defer or retry execution deliberately:**
+
+```bash
+# Apply files now, but do not execute external actions yet
+ta draft apply <draft-id> --no-replay-actions
+
+# Later: execute the approved actions of an applied draft
+ta draft replay-actions <draft-id>
+
+# Retry actions that failed, were blocked, or had no executor (after fixing the cause)
+ta draft replay-actions <draft-id> --retry-failed
+```
+
+`--retry-failed` never re-runs an action that already executed or whose outcome is unknown.
+
+**When actions are not executed automatically:**
+
+- `ta draft apply --dry-run` lists what would run and executes nothing. Because a dry run still marks the draft applied, run `ta draft replay-actions <draft-id>` afterwards to execute the actions.
+- Applies triggered by automation (governed workflows and the workflow-graph auto-approve step) never execute external actions. Run `ta draft replay-actions <draft-id>` yourself once you have reviewed them. Automated callers can opt out the same way by setting `TA_NO_REPLAY_ACTIONS=1`.
+- When you apply with selective review (`--approve`/`--reject` patterns) and leave some files unapproved, only actions explicitly marked approved are executed.
+- `ta_propose_*` actions, such as task updates, run through their own dedicated replay. This list does not cover them.
+
 ### Selective Approval
 
 Approve, reject, or discuss individual files using glob patterns:
@@ -10199,6 +10252,8 @@ ta draft view <draft-id>
 ```
 
 Pending actions appear alongside file artifacts in the draft. You can approve the file changes but reject the external actions, or vice versa.
+
+Actions captured through `ta_external_action` are executed on apply (see "Executing approved actions" under External Action Governance). TA cannot replay raw intercepted MCP tool calls (for example `gmail_send` above). They are listed as `skipped` on apply, and you re-run them by hand if you still need them.
 
 ### Claude Flow Optimization
 

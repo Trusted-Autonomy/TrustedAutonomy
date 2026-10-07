@@ -1922,6 +1922,8 @@ fn stage_apply_draft_branch(
             branch,
             "--no-version-check",
         ]);
+        // Automated apply: never execute captured external actions here.
+        cmd.env(super::draft::draft_action_replay::NO_REPLAY_ENV, "1");
         if let Some(phase) = opts.plan_phase {
             cmd.args(["--phase", phase]);
         }
@@ -2330,6 +2332,8 @@ fn stage_static_analysis(
                 &draft_id,
                 "--no-version-check",
             ])
+            // Automated apply: never execute captured external actions here.
+            .env(super::draft::draft_action_replay::NO_REPLAY_ENV, "1")
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta draft apply': {}", e))?;
 
@@ -3431,6 +3435,9 @@ fn stage_apply_draft(
         "--git-commit",
         "--no-version-check",
     ]);
+    // Automated apply (the human_gate may have been auto-approved): never
+    // execute captured external actions here; `ta draft replay-actions` does.
+    cmd.env(super::draft::draft_action_replay::NO_REPLAY_ENV, "1");
     if let Some(phase) = opts.plan_phase {
         cmd.args(["--phase", phase]);
     }

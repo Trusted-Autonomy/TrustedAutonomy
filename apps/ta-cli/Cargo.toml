@@ -63,6 +63,7 @@ ta-connector-comfyui = { path = "../../crates/ta-connectors/comfyui", version = 
 ta-connector-unity = { path = "../../crates/ta-connectors/unity", version = "0.17.11-alpha.8" }
 ta-goal = { path = "../../crates/ta-goal", version = "0.17.11-alpha.8" }
 ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway", version = "0.17.11-alpha.8" }
+ta-actions = { path = "../../crates/ta-actions", version = "0.17.11-alpha.8" }
 ta-policy = { path = "../../crates/ta-policy", version = "0.17.11-alpha.8" }
 ta-mediation = { path = "../../crates/ta-mediation", version = "0.17.11-alpha.8" }
 ta-session = { path = "../../crates/ta-session", version = "0.17.11-alpha.8" }

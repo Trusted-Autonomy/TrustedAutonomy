@@ -36,6 +36,10 @@ use ta_workspace::{
 };
 use uuid::Uuid;
 
+// trustedautonomy-46: replay approved `ta_external_action` captures on apply.
+#[path = "draft_action_replay.rs"]
+pub(crate) mod draft_action_replay;
+
 /// Load exclude patterns for a source directory, merging VCS adapter patterns
 /// (e.g. ".git/" for Git) so that VCS metadata never appears in staging diffs.
 ///
@@ -256,6 +260,23 @@ pub enum DraftCommands {
         /// Skipping is recorded in the audit trail with a warning.
         #[arg(long)]
         skip_plan_merge: bool,
+        /// Do not execute the draft's approved external actions (email, API calls, ...)
+        /// after applying. Run `ta draft replay-actions <id>` later to execute them.
+        #[arg(long)]
+        no_replay_actions: bool,
+    },
+    /// Execute the approved external actions captured in an applied draft.
+    ///
+    /// `ta draft apply` does this automatically; use this command after
+    /// `--no-replay-actions`, or with `--retry-failed` to deliberately retry
+    /// actions that previously failed, were blocked, or had no executor.
+    /// Actions already executed are never re-sent (see .ta/action-replay-ledger.jsonl).
+    ReplayActions {
+        /// Draft package ID, goal title, or phase. Omit to auto-select if only one draft.
+        id: Option<String>,
+        /// Retry actions previously recorded as failed, blocked, or no-executor.
+        #[arg(long)]
+        retry_failed: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -728,6 +749,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             status,
             auto_repair,
             skip_plan_merge,
+            no_replay_actions,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -806,7 +828,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 ),
             };
 
-            apply_package(
+            apply_package_with_replay(
                 config,
                 &resolved,
                 target.as_deref(),
@@ -826,6 +848,9 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 *validate_version,
                 *auto_repair,
                 *skip_plan_merge,
+                // Automated callers (governed workflows) set TA_NO_REPLAY_ACTIONS=1 so
+                // irreversible external actions only ever run on a human-invoked apply.
+                !*no_replay_actions && !draft_action_replay::replay_disabled_by_env(),
             )?;
 
             // --watch: poll until merged, then auto-sync.
@@ -835,6 +860,10 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             }
 
             Ok(())
+        }
+        DraftCommands::ReplayActions { id, retry_failed } => {
+            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+            draft_action_replay::replay_actions_command(config, &resolved, *retry_failed)
         }
         DraftCommands::Amend {
             id,
@@ -6224,6 +6253,47 @@ fn apply_package(
     auto_repair: bool,
     skip_plan_merge: bool,
 ) -> anyhow::Result<()> {
+    apply_package_with_replay(
+        config,
+        id,
+        target,
+        git_commit,
+        git_push,
+        git_review,
+        skip_verify,
+        dry_run,
+        conflict_resolution,
+        patterns,
+        phase_override,
+        force_apply,
+        validate_version,
+        auto_repair,
+        skip_plan_merge,
+        true,
+    )
+}
+
+/// `apply_package` plus control over replaying the draft's approved
+/// `ta_external_action` captures (see `draft_action_replay.rs`).
+#[allow(clippy::too_many_arguments)]
+fn apply_package_with_replay(
+    config: &GatewayConfig,
+    id: &str,
+    target: Option<&str>,
+    git_commit: bool,
+    git_push: bool,
+    git_review: bool,
+    skip_verify: bool,
+    dry_run: bool,
+    conflict_resolution: ta_workspace::ConflictResolution,
+    patterns: SelectiveReviewPatterns,
+    phase_override: Option<&str>,
+    force_apply: bool,
+    validate_version: bool,
+    auto_repair: bool,
+    skip_plan_merge: bool,
+    replay_actions: bool,
+) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
 
     // Acquire the apply lock before doing any work. Prevents concurrent applies
@@ -9417,6 +9487,11 @@ fn apply_package(
             replay_propose_task_update_actions(config, &applied_pkg);
         }
     }
+
+    // trustedautonomy-46: execute approved ta_external_action captures
+    // (at-most-once, policy re-checked; dry run only previews). Runs while
+    // the apply lock is still held. Never fails the already-applied draft.
+    draft_action_replay::post_apply_hook(config, package_id, dry_run, replay_actions);
 
     Ok(())
 }
