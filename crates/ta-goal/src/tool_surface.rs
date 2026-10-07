@@ -61,7 +61,7 @@ pub const MCP_TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     // Memory store (store/recall).
     ("ta_context", ToolEffect::Mutating),
     // Human interaction: outbound message to a human channel.
-    ("ta_ask_human", ToolEffect::Mutating),
+    ("ta_ask_human", ToolEffect::ReadOnly),
     ("ta_human_verify", ToolEffect::Mutating),
     // Whiteboard. presence_register publishes, handoff_receive consumes a
     // pending handoff, the rest write.
@@ -71,7 +71,7 @@ pub const MCP_TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("ta_whiteboard_handoff_receive", ToolEffect::Mutating),
     ("ta_whiteboard_task_claim", ToolEffect::Mutating),
     ("ta_whiteboard_task_complete", ToolEffect::Mutating),
-    ("ta_whiteboard_outcome_send", ToolEffect::Mutating),
+    ("ta_whiteboard_outcome_send", ToolEffect::ReadOnly),
     // Wiki (Wayfinder; not policy-gated on the TA side).
     ("ta_wiki_search", ToolEffect::ReadOnly),
     ("ta_wiki_get", ToolEffect::ReadOnly),
@@ -107,6 +107,23 @@ pub const MCP_TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("unity_addressables_build", ToolEffect::Mutating),
     ("unity_render_capture", ToolEffect::Mutating),
 ];
+
+/// Tools that are read-only (they change no project state) but whose OUTPUT is
+/// a message that another component acts on. Whatever such a tool sends is
+/// untrusted-origin data: an agent that ingests untrusted input (the
+/// Chief-of-Staff) can be prompt-injected into sending anything. Consumers
+/// (for the Chief-of-Staff, the `ta-virtual-team` poller) must therefore
+/// validate every message and must never treat it as trusted instructions.
+/// Any tool served by a third-party extension is likewise untrusted by
+/// default (it is not in `MCP_TOOL_EFFECTS`, so `classify_mcp_tool` returns
+/// `None` and a read-only surface refuses it).
+pub const UNTRUSTED_SINK_TOOLS: &[&str] = &["ta_whiteboard_outcome_send"];
+
+/// True when the named tool's output must be treated as untrusted by whoever
+/// consumes it.
+pub fn is_untrusted_sink(name: &str) -> bool {
+    UNTRUSTED_SINK_TOOLS.contains(&name)
+}
 
 /// Name prefixes that are mutating by construction, so a future tool in
 /// the family is fail-closed even before it is added to the table.
@@ -239,6 +256,24 @@ mod tests {
         .collect();
         let errs = validate_read_only_tool_surface(&list).unwrap_err();
         assert_eq!(errs.len(), list.len(), "{:?}", errs);
+    }
+
+    #[test]
+    fn ask_human_and_outcome_send_are_read_only_and_outcome_send_is_an_untrusted_sink() {
+        assert_eq!(
+            classify_mcp_tool("ta_ask_human"),
+            Some(ToolEffect::ReadOnly)
+        );
+        assert_eq!(
+            classify_mcp_tool("ta_whiteboard_outcome_send"),
+            Some(ToolEffect::ReadOnly)
+        );
+        assert!(is_untrusted_sink("ta_whiteboard_outcome_send"));
+        assert!(!is_untrusted_sink("ta_fs_read"));
+        // Every untrusted sink must itself be a classified tool.
+        for t in UNTRUSTED_SINK_TOOLS {
+            assert!(classify_mcp_tool(t).is_some(), "{t} is unclassified");
+        }
     }
 
     #[test]

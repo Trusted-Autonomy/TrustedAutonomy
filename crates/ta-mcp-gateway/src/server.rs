@@ -2349,7 +2349,6 @@ mod tests {
             "ta_whiteboard_handoff_receive",
             "ta_whiteboard_task_claim",
             "ta_whiteboard_task_complete",
-            "ta_whiteboard_outcome_send",
         ] {
             assert_eq!(
                 classify_mcp_tool(must_be_mutating),
