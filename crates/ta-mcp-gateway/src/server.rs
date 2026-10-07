@@ -2961,8 +2961,9 @@ mod tests {
             "ta_wiki_create",
             "ta_wiki_update",
             "ta_propose_task_update",
-            "ta_whiteboard_outcome_send",
             "ta_whiteboard_task_claim",
+            "ta_context",
+            "ta_human_verify",
         ] {
             assert!(
                 !server.tool_router.has_route(mutating),
@@ -2971,6 +2972,10 @@ mod tests {
             );
         }
         assert!(server.tool_router.has_route("ta_fs_read"));
+        // The Chief-of-Staff's outbound channel and its human-question tool
+        // are deliberately routable (see the profile's comments).
+        assert!(server.tool_router.has_route("ta_whiteboard_outcome_send"));
+        assert!(server.tool_router.has_route("ta_ask_human"));
 
         // Regression: a normal server still exposes the full surface and
         // is not chat-locked.

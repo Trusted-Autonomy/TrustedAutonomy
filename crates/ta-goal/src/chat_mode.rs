@@ -69,6 +69,19 @@ pub const CHAT_MODE_MCP_TOOLS: &[&str] = &[
     "ta_whiteboard_presence_list",
     "ta_whiteboard_handoff_send",
     "ta_whiteboard_handoff_receive",
+    // The Chief-of-Staff's ONLY outbound channel (ratified CoS design): it
+    // appends an opaque `reply`/`delegate` outcome to the report-back
+    // stream. It cannot touch files, tasks, wiki, goals or drafts itself;
+    // a deterministic poller authenticates and validates every outcome
+    // (bound to in-flight candidates, capped, tag-checked, launched with
+    // `--origin cos` and no auto-approve) before anything happens. Without
+    // it the CoS could neither reply nor delegate.
+    "ta_whiteboard_outcome_send",
+    // A question to a human (blocking, no mutation). NOT `ta_human_verify`,
+    // which spawns synthetic headless agents. NOT `ta_context`, whose
+    // `store`/`forget` actions write cross-agent persistent memory (a
+    // prompt-injection persistence channel into later workers).
+    "ta_ask_human",
 ];
 
 /// Native Claude Code tools denied outright in a chat-mode launch. Bare
@@ -230,7 +243,8 @@ mod tests {
             "ta_wiki_update",
             "ta_whiteboard_task_claim",
             "ta_whiteboard_task_complete",
-            "ta_whiteboard_outcome_send",
+            "ta_context",
+            "ta_human_verify",
             "community_annotate",
             "community_feedback",
             "community_suggest",
@@ -304,6 +318,7 @@ mod tests {
                 "mcp__ta__ta_whiteboard_presence_list",
                 "mcp__ta__ta_whiteboard_handoff_send",
                 "mcp__ta__ta_whiteboard_handoff_receive",
+                "mcp__ta__ta_whiteboard_outcome_send",
             ])
         );
     }
