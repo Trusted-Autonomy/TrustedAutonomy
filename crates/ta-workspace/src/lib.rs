@@ -26,6 +26,7 @@ pub mod log_rotation;
 pub mod merge_tool;
 pub mod overlay;
 pub mod partitioning;
+pub mod path_safety;
 pub mod projfs_strategy;
 pub mod shared_files;
 pub mod staging;

@@ -13,9 +13,14 @@ pub enum WorkspaceError {
         source: std::io::Error,
     },
 
-    /// A path traversal attempt was detected (security violation).
-    #[error("path traversal detected: '{path}' resolves outside staging directory")]
-    PathTraversal { path: String },
+    /// A path traversal attempt was detected (security violation): an
+    /// absolute path, a `..` component, or a symlink that resolves outside
+    /// the staging directory (see `path_safety`).
+    #[error(
+        "path traversal detected: '{path}' resolves outside staging directory ({reason}). \
+         Use a path relative to the workspace root with no '..' components."
+    )]
+    PathTraversal { path: String, reason: String },
 
     /// The requested file was not found in the staging workspace.
     #[error("file not found in staging: '{path}'")]

@@ -99,6 +99,26 @@ const SECRET_PATH_PATTERNS: &[&str] = &[
     "**/id_rsa*",
     "**/.ta/credentials/**",
     "**/.ta/keychain/**",
+    // H5 backstop: well-known secret locations in a user's home directory.
+    // The gateway and the fs connector both reject absolute paths before
+    // policy is consulted, but if an absolute or `~`-relative path ever
+    // reaches this layer (a new caller, a future connector), these are
+    // still denied. Patterns are anchored on the directory name, not on a
+    // home prefix, so they also cover a project that vendors e.g. a `.ssh/`
+    // directory by mistake.
+    "**/.aws/credentials",
+    "**/.aws/config",
+    "**/.ssh/**",
+    "**/.config/gcloud/**",
+    "**/.netrc",
+    "**/_netrc",
+    "**/.docker/config.json",
+    "**/.kube/config",
+    "**/.git-credentials",
+    "**/.gnupg/**",
+    "**/Library/Keychains/**",
+    "**/*.keychain",
+    "**/*.keychain-db",
 ];
 
 /// Whether `target_uri` matches any of the hardcoded secret-path patterns.
@@ -116,10 +136,18 @@ fn matches_secret_path(target: &str) -> bool {
         require_literal_separator: false,
         require_literal_leading_dot: false,
     };
-    SECRET_PATH_PATTERNS.iter().any(|pattern| {
-        Pattern::new(pattern)
-            .map(|p| p.matches_with(target, options))
-            .unwrap_or(false) // invalid patterns never match (fail-closed)
+    // Windows-style separators: `sub\.ssh\id_ed25519` names the same file
+    // as `sub/.ssh/id_ed25519` on Windows, so also test a `/`-normalized
+    // form. Normalizing only ever adds matches here (deny-side), never
+    // removes them, so this cannot weaken the backstop on any host.
+    let normalized = target.replace('\\', "/");
+    let candidates: [&str; 2] = [target, &normalized];
+    candidates.iter().any(|candidate| {
+        SECRET_PATH_PATTERNS.iter().any(|pattern| {
+            Pattern::new(pattern)
+                .map(|p| p.matches_with(candidate, options))
+                .unwrap_or(false) // invalid patterns never match (fail-closed)
+        })
     })
 }
 
@@ -1358,6 +1386,91 @@ mod tests {
                 assert!(reason.contains("secrets path"));
             }
             other => panic!("expected Deny, got {:?}", other),
+        }
+    }
+
+    /// H5 backstop: even if an absolute or home-relative path somehow
+    /// reaches the policy layer (the gateway and connector both reject
+    /// absolute paths first), well-known secret locations outside any
+    /// workspace are still denied unconditionally.
+    #[test]
+    fn deny_absolute_and_home_secret_locations_even_with_broadest_possible_grant() {
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+
+        for target in [
+            "fs://workspace//Users/me/.aws/credentials",
+            "fs://workspace/~/.aws/credentials",
+            "fs://workspace//home/me/.aws/config",
+            "fs://workspace//home/me/.ssh/id_ed25519",
+            "fs://workspace//home/me/.ssh/authorized_keys",
+            "fs://workspace//home/me/.ssh/config",
+            "fs://workspace//home/me/.config/gcloud/application_default_credentials.json",
+            "fs://workspace//home/me/.config/gcloud/credentials.db",
+            "fs://workspace//home/me/.netrc",
+            "fs://workspace//home/me/_netrc",
+            "fs://workspace//home/me/.docker/config.json",
+            "fs://workspace//Users/me/Library/Keychains/login.keychain-db",
+            "fs://workspace//Users/me/old.keychain",
+            "fs://workspace//home/me/.kube/config",
+            "fs://workspace//home/me/.git-credentials",
+            "fs://workspace//home/me/.gnupg/private-keys-v1.d/abc.key",
+            "fs://workspace/C:\\Users\\me\\.aws\\credentials",
+            "fs://workspace/sub\\.ssh\\id_ed25519",
+            "fs://workspace/.SSH/ID_ED25519",
+        ] {
+            let decision = engine.evaluate(&PolicyRequest {
+                agent_id: "agent-1".to_string(),
+                tool: "fs".to_string(),
+                verb: "read".to_string(),
+                target_uri: target.to_string(),
+            });
+            match decision {
+                PolicyDecision::Deny { reason } => {
+                    assert!(
+                        reason.contains("secrets path"),
+                        "{} denied for the wrong reason: {}",
+                        target,
+                        reason
+                    );
+                }
+                other => panic!("expected Deny for {}, got {:?}", target, other),
+            }
+        }
+    }
+
+    /// The new home-secret patterns must not over-match ordinary
+    /// workspace files with similar-looking names.
+    #[test]
+    fn home_secret_patterns_do_not_block_ordinary_workspace_files() {
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("fs", "read", "fs://workspace/**")],
+        ));
+        for target in [
+            "fs://workspace/docs/ssh-setup.md",
+            "fs://workspace/src/aws/client.rs",
+            "fs://workspace/docker/Dockerfile",
+            "fs://workspace/config.json",
+            "fs://workspace/src/netrc_parser.rs",
+            "fs://workspace/src/keychain.rs",
+        ] {
+            let decision = engine.evaluate(&PolicyRequest {
+                agent_id: "agent-1".to_string(),
+                tool: "fs".to_string(),
+                verb: "read".to_string(),
+                target_uri: target.to_string(),
+            });
+            assert!(
+                matches!(decision, PolicyDecision::Allow),
+                "expected Allow for {}, got {:?}",
+                target,
+                decision
+            );
         }
     }
 

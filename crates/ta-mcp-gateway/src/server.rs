@@ -857,11 +857,33 @@ impl GatewayState {
         verb: &str,
         path: &str,
     ) -> Result<PolicyDecision, GatewayError> {
+        // H5: `format!("fs://workspace/{}", path)` with an absolute `path`
+        // yields `fs://workspace//abs/...`, which still matches a
+        // `fs://workspace/**` grant. Reject anything that is not a plain
+        // workspace-relative path (absolute in POSIX or Windows form on any
+        // host, `~`, or with a `..` component) before building the URI, so
+        // no grant can ever be matched by an out-of-workspace target.
+        if let Err(reason) = ta_workspace::path_safety::validate_relative_path(path) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                verb = %verb,
+                path = %path,
+                reason = %reason,
+                "fs policy check rejected a non-workspace-relative path"
+            );
+            return Ok(PolicyDecision::Deny {
+                reason: format!(
+                    "path '{}' is not a workspace-relative path ({}). Pass a path relative \
+                     to the workspace root, e.g. 'src/main.rs'.",
+                    path, reason
+                ),
+            });
+        }
         let request = PolicyRequest {
             agent_id: agent_id.to_string(),
             tool: "fs".to_string(),
             verb: verb.to_string(),
-            target_uri: format!("fs://workspace/{}", path),
+            target_uri: format!("fs://workspace/{}", normalize_workspace_relative(path)),
         };
         Ok(self.policy_engine.evaluate(&request))
     }
@@ -1890,6 +1912,23 @@ impl ServerHandler for TaGatewayServer {
     }
 }
 
+/// Canonical form of an already-validated workspace-relative path for the
+/// policy target URI: drops empty and `.` components so `./a//b` and `a/b`
+/// evaluate identically (they name the same file on every host).
+///
+/// Backslashes are deliberately NOT treated as separators here: on POSIX a
+/// backslash is an ordinary file-name byte, so rewriting `scratch\x` to
+/// `scratch/x` could let a write grant scoped to `scratch/**` match a file
+/// that actually lands at the workspace root. Leaving them alone fails
+/// closed (no grant matches). `..` under either separator is rejected
+/// earlier by `validate_relative_path`.
+fn normalize_workspace_relative(path: &str) -> String {
+    path.split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2209,6 +2248,266 @@ mod tests {
             "expected a policy-denial error mentioning the secrets-path backstop, got: {}",
             err.message
         );
+    }
+
+    // ── H5: absolute-path / traversal workspace escape ──────────────────
+    //
+    // These go through the real MCP tool handlers (handle_fs_read /
+    // handle_fs_write), the real PolicyEngine, the real FsConnector and the
+    // real StagingWorkspace: nothing under test is mocked.
+
+    /// A file that lives OUTSIDE the gateway's workspace root, standing in
+    /// for something like `~/.aws/credentials`. Returns the guard (keeps the
+    /// tempdir alive) and the absolute path as a string.
+    fn outside_workspace_file(content: &[u8]) -> (tempfile::TempDir, String) {
+        let outside = tempdir().unwrap();
+        let path = outside.path().join("outside-secret.txt");
+        std::fs::write(&path, content).unwrap();
+        let abs = path.to_string_lossy().to_string();
+        (outside, abs)
+    }
+
+    #[test]
+    fn h5_chat_session_cannot_read_outside_workspace_via_absolute_path() {
+        use crate::server::FsReadParams;
+        use crate::tools::fs::handle_fs_read;
+
+        let (server, _dir) = test_server_with_source(&[("notes.txt", b"in workspace\n")]);
+        let (_outside, abs_path) = outside_workspace_file(b"TOP-SECRET-OUTSIDE-WORKSPACE");
+        let goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+
+        let result = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id,
+                path: abs_path.clone(),
+            },
+        );
+        match result {
+            Ok(ok) => panic!(
+                "H5 regression: absolute path '{}' outside the workspace was readable \
+                 through ta_fs_read: {:?}",
+                abs_path, ok
+            ),
+            Err(err) => {
+                assert!(
+                    !err.message.contains("TOP-SECRET"),
+                    "error must not leak file content: {}",
+                    err.message
+                );
+                assert!(
+                    err.message.contains("Policy denied"),
+                    "expected the policy layer to deny the absolute path before any I/O, got: {}",
+                    err.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn h5_normal_goal_cannot_read_outside_workspace_via_absolute_path() {
+        use crate::server::FsReadParams;
+        use crate::tools::fs::handle_fs_read;
+
+        let (server, _dir) = test_server();
+        let (_outside, abs_path) = outside_workspace_file(b"TOP-SECRET-OUTSIDE-WORKSPACE");
+        let goal_run_id = start_goal(&server).to_string();
+
+        let result = handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id,
+                path: abs_path,
+            },
+        );
+        let err = result.expect_err("absolute path outside workspace must be rejected");
+        assert!(!err.message.contains("TOP-SECRET"));
+    }
+
+    #[test]
+    fn h5_chat_session_cannot_read_via_parent_traversal() {
+        use crate::server::FsReadParams;
+        use crate::tools::fs::handle_fs_read;
+
+        let (server, _dir) = test_server_with_source(&[("notes.txt", b"in workspace\n")]);
+        let goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+        for path in [
+            "../outside.txt",
+            "sub/../../outside.txt",
+            "sub\\..\\..\\outside.txt",
+        ] {
+            let result = handle_fs_read(
+                &server.state,
+                FsReadParams {
+                    goal_run_id: goal_run_id.clone(),
+                    path: path.to_string(),
+                },
+            );
+            let err = result.expect_err("parent traversal must be rejected");
+            assert!(
+                err.message.contains("Policy denied"),
+                "expected policy denial for '{}', got: {}",
+                path,
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn h5_chat_session_cannot_write_outside_workspace_via_absolute_path() {
+        use crate::server::FsWriteParams;
+        use crate::tools::fs::handle_fs_write;
+
+        let (server, _dir) = test_server();
+        let outside = tempdir().unwrap();
+        // An absolute path whose tail even looks like the chat scratch dir:
+        // the scratch-only write grant must not be satisfiable by an
+        // absolute path anywhere on disk.
+        let target = outside
+            .path()
+            .join(ta_policy::CHAT_SCRATCH_DIR)
+            .join("pwned.txt");
+        let goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+        let result = handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id,
+                path: target.to_string_lossy().to_string(),
+                content: "pwned".to_string(),
+            },
+        );
+        assert!(result.is_err(), "absolute-path write must be rejected");
+        assert!(
+            !target.exists(),
+            "nothing may be written outside the workspace"
+        );
+    }
+
+    #[test]
+    fn h5_check_policy_denies_absolute_and_traversal_paths_in_every_os_form() {
+        let (server, _dir) = test_server();
+        let goal_id = start_goal(&server);
+        let state = server.state.lock().unwrap();
+        let agent_id = state.agent_for_goal(goal_id).unwrap();
+        for path in [
+            "/etc/passwd",
+            "//etc/passwd",
+            "\\etc\\passwd",
+            "C:\\Users\\me\\.aws\\credentials",
+            "c:/Users/me/.aws/credentials",
+            "\\\\server\\share\\secret.txt",
+            "../x",
+            "a/../../x",
+            "a\\..\\x",
+            "",
+        ] {
+            let decision = state.check_policy(&agent_id, "read", path).unwrap();
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "expected Deny for {:?}, got {:?}",
+                path,
+                decision
+            );
+        }
+    }
+
+    #[test]
+    fn h5_legitimate_workspace_relative_reads_and_writes_still_work() {
+        use crate::server::{FsReadParams, FsWriteParams};
+        use crate::tools::fs::{handle_fs_read, handle_fs_write};
+
+        let (server, _dir) = test_server_with_source(&[
+            ("notes.txt", b"top level\n"),
+            ("src/deep/nested/mod.rs", b"nested\n"),
+        ]);
+        let goal_run_id = start_goal(&server).to_string();
+
+        for (path, expected) in [
+            ("notes.txt", "top level\n"),
+            ("./notes.txt", "top level\n"),
+            ("src/deep/nested/mod.rs", "nested\n"),
+            ("src//deep/./nested/mod.rs", "nested\n"),
+        ] {
+            let result = handle_fs_read(
+                &server.state,
+                FsReadParams {
+                    goal_run_id: goal_run_id.clone(),
+                    path: path.to_string(),
+                },
+            )
+            .unwrap_or_else(|e| panic!("legit read of '{}' failed: {}", path, e.message));
+            let text = format!("{:?}", result.content);
+            assert!(
+                text.contains(expected.trim_end()),
+                "read of '{}' returned unexpected content: {}",
+                path,
+                text
+            );
+        }
+
+        handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: goal_run_id.clone(),
+                path: "src/deep/new_file.rs".to_string(),
+                content: "pub fn f() {}".to_string(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("legit staged write failed: {}", e.message));
+    }
+
+    #[test]
+    fn h5_chat_session_scratch_write_still_works_and_reads_inside_workspace_still_work() {
+        use crate::server::{FsReadParams, FsWriteParams};
+        use crate::tools::fs::{handle_fs_read, handle_fs_write};
+
+        let (server, _dir) = test_server_with_source(&[("a/b.txt", b"hello\n")]);
+        let goal_run_id = {
+            let mut state = server.state.lock().unwrap();
+            state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap()
+                .goal_run_id
+                .to_string()
+        };
+        handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: goal_run_id.clone(),
+                path: "a/b.txt".to_string(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("chat read failed: {}", e.message));
+        handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id,
+                path: format!("./{}/scratch.md", ta_policy::CHAT_SCRATCH_DIR),
+                content: "notes".to_string(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("chat scratch write failed: {}", e.message));
     }
 
     #[test]
