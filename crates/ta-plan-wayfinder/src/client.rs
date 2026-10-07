@@ -70,6 +70,17 @@ struct AddDependencyRequest<'a> {
     depends_on_id: &'a str,
 }
 
+/// Both fields are PATCH-optional, matching `wayfinder-api`'s
+/// `UpdateTaskContentRequest`: an omitted field leaves the stored value
+/// unchanged.
+#[derive(Debug, Clone, Serialize)]
+struct UpdateTaskContentRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+}
+
 /// Wayfinder's real export response carries goals/team_roles/kpis too;
 /// `bootstrap_export` (the only caller) only needs the tasks, so only
 /// `tasks` is declared here — same "extra JSON fields are ignored"
@@ -223,6 +234,31 @@ impl WayfinderClient {
                 source,
             })?;
         expect_success(response, "updating task status")
+    }
+
+    /// `PATCH /api/projects/:id/tasks/:task_id/content`. Each of
+    /// `title`/`description` of `None` leaves the stored value unchanged
+    /// (see `wayfinder-api::UpdateTaskContentRequest`). Used by `ta draft
+    /// apply`'s replay step for an approved `ta_propose_task_update`
+    /// pending action (v0.17.11.12) -- see
+    /// `apps/ta-cli/src/commands/draft.rs`.
+    pub fn update_task_content(
+        &self,
+        task_id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<(), WayfinderClientError> {
+        let response = self
+            .http
+            .patch(self.project_url(&["tasks", task_id, "content"]))
+            .bearer_auth(self.secret.expose_secret())
+            .json(&UpdateTaskContentRequest { title, description })
+            .send()
+            .map_err(|source| WayfinderClientError::Request {
+                context: "updating task content",
+                source,
+            })?;
+        expect_success(response, "updating task content")
     }
 
     /// `POST /api/projects/:id/tasks/:task_id/dependencies` — declares that
@@ -424,6 +460,59 @@ mod tests {
         let client = client_for(&mock);
         client
             .update_task_status("task-1", STATUS_IN_PROGRESS, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn update_task_content_patches_the_content_endpoint() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("PATCH"))
+                .and(path("/api/projects/proj-1/tasks/task-1/content"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "task-1",
+                    "title": "Revised title",
+                    "description": null,
+                    "verb": "implement",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": null,
+                    "updated_at": "1000000000"
+                })))
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        client
+            .update_task_content("task-1", Some("Revised title"), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn update_task_content_omits_unset_fields_from_the_request_body() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("PATCH"))
+                .and(path("/api/projects/proj-1/tasks/task-1/content"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "description": "New description"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "task-1",
+                    "title": "t",
+                    "description": "New description",
+                    "verb": "implement",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": null,
+                    "updated_at": "1000000000"
+                })))
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        client
+            .update_task_content("task-1", None, Some("New description"))
             .unwrap();
     }
 
