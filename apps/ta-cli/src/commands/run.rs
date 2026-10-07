@@ -8615,11 +8615,9 @@ fn count_changed_recursive(staging_root: &Path, dir: &Path, source_root: &Path) 
             Err(_) => continue,
         };
         // Skip .ta/ directory — it's TA metadata, not agent work.
-        if rel
-            .components()
-            .next()
-            .is_some_and(|c| c.as_os_str() == ".ta")
-        {
+        if rel.components().next().is_some_and(|c| {
+            ta_workspace::path_safety::is_agent_infra_component(&c.as_os_str().to_string_lossy())
+        }) {
             continue;
         }
         let ft = match entry.file_type() {

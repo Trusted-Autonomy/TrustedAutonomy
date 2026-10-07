@@ -50,6 +50,23 @@ pub enum WorkspaceError {
     )]
     SharedFileConflicts { conflicts: Vec<SharedFileConflict> },
 
+    /// An artifact targets a protected infrastructure path (`.git/`, `.ta/`,
+    /// and so on, in any case or Windows spelling), escapes the project root,
+    /// or would be written through a symlink into one of those (CR-06).
+    /// Refused before any file is written.
+    #[error(
+        "refused to write '{path}' into {}: {reason}. Nothing was applied. \
+         Draft artifacts may never modify TA or VCS infrastructure directories; \
+         deny this draft (`ta draft deny <id>`) and inspect the goal's staging \
+         directory for how the path was produced",
+        .target_dir.display()
+    )]
+    ProtectedPathRefused {
+        path: String,
+        reason: String,
+        target_dir: PathBuf,
+    },
+
     /// A staging path is not a properly isolated, goal-scoped overlay
     /// directory (v0.17.10.2). Either it resolves to the same location as
     /// the source directory, or it isn't a well-formed `.ta/staging/<goal_id>`

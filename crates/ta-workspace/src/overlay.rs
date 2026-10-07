@@ -147,18 +147,26 @@ impl ExcludePatterns {
 
     /// V1 TEMPORARY: Check if a file/directory name should be excluded during copy.
     /// Only checks against the immediate name (single path component).
-    /// Agent infrastructure directories — always excluded (not work product).
-    const INFRA_DIRS: &'static [&'static str] = &[".ta", ".claude-flow", ".hive-mind", ".swarm"];
-
+    ///
+    /// Agent infrastructure directories (`path_safety::AGENT_INFRA_DIRS`) are
+    /// always excluded, compared case-insensitively and Windows-tolerantly
+    /// (CR-06). Directory patterns that name a protected VCS directory (the
+    /// adapter's `.git/`) are folded the same way; other user patterns stay
+    /// exact.
     pub fn should_exclude(&self, name: &str) -> bool {
         // Infrastructure dirs are always excluded (hardcoded, separate from user patterns).
-        if Self::INFRA_DIRS.contains(&name) {
+        if crate::path_safety::is_agent_infra_component(name) {
             return true;
         }
         for pattern in &self.patterns {
             if let Some(dir_name) = pattern.strip_suffix('/') {
                 // Directory pattern: "target/" matches entry named "target".
                 if name == dir_name {
+                    return true;
+                }
+                if crate::path_safety::is_infrastructure_component(dir_name)
+                    && crate::path_safety::component_aliases(name, dir_name)
+                {
                     return true;
                 }
             } else if let Some(suffix) = pattern.strip_prefix('*') {
@@ -744,6 +752,10 @@ impl OverlayWorkspace {
         let changes = self.diff_all()?;
         let mut applied = Vec::new();
 
+        // CR-06: refuse the whole apply, before any write, if any change
+        // targets infrastructure or escapes the target root.
+        guard_apply_targets(target_dir, changes.iter().map(change_path))?;
+
         // Write the apply journal before any file copies (v0.17.0.9).
         let journal_path = target_dir.join(".ta").join("apply.journal");
         write_apply_journal(&journal_path, &changes);
@@ -819,6 +831,11 @@ impl OverlayWorkspace {
             .map(|s| s.to_string())
             .collect();
 
+        // CR-06: refuse the whole apply, before any write, if any approved
+        // artifact (whether or not the diff still lists it) or any change it
+        // selects targets infrastructure or escapes the target root.
+        guard_apply_targets(target_dir, approved_paths.iter().map(String::as_str))?;
+
         for change in &changes {
             let path = match change {
                 OverlayChange::Modified { path, .. } => path,
@@ -882,6 +899,9 @@ impl OverlayWorkspace {
             .filter_map(|uri| uri.strip_prefix("fs://workspace/"))
             .map(|s| s.to_string())
             .collect();
+
+        // CR-06: refuse before any merge writes or copies happen.
+        guard_apply_targets(target_dir, artifact_paths.iter().map(String::as_str))?;
 
         let mut filtered_uris = artifact_uris.to_vec();
 
@@ -1549,7 +1569,7 @@ fn copy_dir_recursive_smart(
         let name = file_name.to_string_lossy();
 
         // Always skip infra dirs (hardcoded, never symlinked).
-        if ExcludePatterns::INFRA_DIRS.contains(&name.as_ref()) {
+        if crate::path_safety::is_agent_infra_component(&name) {
             continue;
         }
 
@@ -1864,29 +1884,63 @@ pub fn verify_staging_isolation(
     Ok(())
 }
 
+fn change_path(change: &OverlayChange) -> &str {
+    match change {
+        OverlayChange::Modified { path, .. }
+        | OverlayChange::Created { path, .. }
+        | OverlayChange::Deleted { path } => path,
+    }
+}
+
+/// Apply-time defense in depth (CR-06): every path about to be written into
+/// (or deleted from) `target_dir` must pass
+/// [`crate::path_safety::resolve_for_write`]. Checked for ALL paths before
+/// the first write so a refused artifact never leaves a half-applied tree.
+fn guard_apply_targets<'a>(
+    target_dir: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<(), WorkspaceError> {
+    for path in paths {
+        if let Err(issue) = crate::path_safety::resolve_for_write(target_dir, path) {
+            tracing::error!(
+                path = %path,
+                target_dir = %target_dir.display(),
+                reason = %issue,
+                "apply refused: artifact targets a protected or out-of-root path"
+            );
+            return Err(WorkspaceError::ProtectedPathRefused {
+                path: path.to_string(),
+                reason: issue.describe(),
+                target_dir: target_dir.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Check if a path should be skipped when diffing.
 /// We skip infrastructure directories — these are internal state, not agent work product.
 /// V1 TEMPORARY: Also checks exclude patterns for build artifacts that
 /// agents may generate in staging (e.g., `cargo build` creates `target/`).
 fn should_skip_for_diff(path: &str, excludes: &ExcludePatterns) -> bool {
-    // Agent infrastructure directories (created at runtime, not work product).
-    // Note: VCS metadata dirs (e.g., .git/, .svn/) are excluded via adapter-contributed
-    // patterns merged into ExcludePatterns, not hardcoded here.
-    const INFRA_DIRS: &[&str] = &[
-        ".ta",
-        ".claude-flow",
-        ".hive-mind",
-        ".swarm",
-        ".projfs-scratch", // ProjFS scratch directory — v0.15.8
-    ];
-
-    for dir in INFRA_DIRS {
-        if path == *dir
-            || path.starts_with(&format!("{}/", dir))
-            || path.starts_with(&format!("{}\\", dir))
-        {
-            return true;
+    // Agent infrastructure and VCS metadata directories, at any depth and in
+    // any case / Windows spelling (CR-06). VCS metadata is never work product
+    // regardless of which adapter is active, so it is skipped here too.
+    if crate::path_safety::is_infrastructure_path(path) {
+        let exact = path.split(['/', '\\']).any(|c| {
+            crate::path_safety::AGENT_INFRA_DIRS.contains(&c)
+                || crate::path_safety::VCS_METADATA_DIRS.contains(&c)
+        });
+        if !exact {
+            tracing::warn!(
+                path = %path,
+                reason = ?crate::path_safety::check_relative_path(path).err(),
+                "staging file aliases a protected infrastructure path (case, trailing dot, \
+                 8.3 short name or stream syntax); excluded from the draft. Inspect the \
+                 agent's output if this was not expected"
+            );
         }
+        return true;
     }
 
     // TA-managed files are injected/restored by TA infrastructure — exclude
@@ -3787,5 +3841,178 @@ mod tests {
             sha.is_none(),
             "non-git directory should return None for SHA"
         );
+    }
+
+    // ── CR-06: case-folded infrastructure paths ──────────────────────
+
+    /// Source project with a real `.git/hooks` dir and a git-style exclude
+    /// pattern, as the git adapter would configure it.
+    fn source_with_git_dir() -> (TempDir, ExcludePatterns) {
+        let source = create_source_project();
+        fs::create_dir_all(source.path().join(".git/hooks")).unwrap();
+        fs::write(source.path().join(".git/config"), "[core]\n").unwrap();
+        let mut excludes = ExcludePatterns::none();
+        excludes.merge(&[".git/".to_string()]);
+        (source, excludes)
+    }
+
+    #[test]
+    fn diff_never_lists_case_variant_infra_paths() {
+        let (source, excludes) = source_with_git_dir();
+        let staging_root = TempDir::new().unwrap();
+        let overlay =
+            OverlayWorkspace::create("goal-cr06", source.path(), staging_root.path(), excludes)
+                .unwrap();
+
+        // On a case-insensitive host these land in a fresh `.GIT` / `.TA`
+        // (staging has no `.git` or `.ta`); on a case-sensitive host they are
+        // distinct directories. Either way they must never become artifacts.
+        for rel in [
+            ".GIT/hooks/pre-commit",
+            ".TA/personas/chief-of-staff.toml",
+            ".Git./x",
+            "sub/.GIT/config",
+        ] {
+            let p = overlay.staging_dir().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "#!/bin/sh\necho pwned\n").unwrap();
+        }
+        fs::write(overlay.staging_dir().join("src/main.rs"), "fn main() { }\n").unwrap();
+
+        let changes = overlay.diff_all().unwrap();
+        let paths: Vec<String> = changes
+            .iter()
+            .map(|c| match c {
+                OverlayChange::Modified { path, .. }
+                | OverlayChange::Created { path, .. }
+                | OverlayChange::Deleted { path } => path.clone(),
+            })
+            .collect();
+        assert_eq!(paths, vec!["src/main.rs".to_string()], "got {:?}", paths);
+    }
+
+    #[test]
+    fn apply_selective_refuses_case_variant_git_hook_and_leaves_git_untouched() {
+        let (source, excludes) = source_with_git_dir();
+        let staging_root = TempDir::new().unwrap();
+        let overlay =
+            OverlayWorkspace::create("goal-cr06b", source.path(), staging_root.path(), excludes)
+                .unwrap();
+
+        let hook = overlay.staging_dir().join(".GIT/hooks/pre-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, "#!/bin/sh\necho pwned\n").unwrap();
+        fs::write(overlay.staging_dir().join("README.md"), "# changed\n").unwrap();
+
+        let err = overlay
+            .apply_selective(
+                source.path(),
+                &[
+                    "fs://workspace/README.md".to_string(),
+                    "fs://workspace/.GIT/hooks/pre-commit".to_string(),
+                ],
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, WorkspaceError::ProtectedPathRefused { .. }),
+            "expected ProtectedPathRefused, got: {}",
+            msg
+        );
+        assert!(msg.contains(".GIT/hooks/pre-commit"), "{}", msg);
+        assert!(msg.contains(".git"), "{}", msg);
+
+        assert!(!source.path().join(".git/hooks/pre-commit").exists());
+        assert!(!source.path().join(".GIT/hooks/pre-commit").exists());
+        // Refusal happens before ANY write: the legit artifact was not applied either.
+        assert_eq!(
+            fs::read_to_string(source.path().join("README.md")).unwrap(),
+            "# My Project\n"
+        );
+    }
+
+    #[test]
+    fn apply_with_conflict_check_refuses_infra_artifacts() {
+        let (source, excludes) = source_with_git_dir();
+        let staging_root = TempDir::new().unwrap();
+        let overlay =
+            OverlayWorkspace::create("goal-cr06c", source.path(), staging_root.path(), excludes)
+                .unwrap();
+        for uri in [
+            "fs://workspace/.TA/personas/chief-of-staff.toml",
+            "fs://workspace/GIT~1/hooks/pre-commit",
+            "fs://workspace/.git::$INDEX_ALLOCATION/hooks/pre-commit",
+            "fs://workspace/../escape.txt",
+        ] {
+            let err = overlay
+                .apply_with_conflict_check(
+                    source.path(),
+                    ConflictResolution::Abort,
+                    &[uri.to_string()],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, WorkspaceError::ProtectedPathRefused { .. }),
+                "{}: {}",
+                uri,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn should_exclude_case_folds_infra_and_vcs_patterns() {
+        let mut excludes = ExcludePatterns::none();
+        excludes.merge(&[".git/".to_string(), "target/".to_string()]);
+        for name in [
+            ".ta",
+            ".TA",
+            ".Ta.",
+            ".git",
+            ".GIT",
+            "GIT~1",
+            ".Claude-Flow",
+        ] {
+            assert!(excludes.should_exclude(name), "{}", name);
+        }
+        for name in [".github", ".gitignore", "src", ".tablet"] {
+            assert!(!excludes.should_exclude(name), "{}", name);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_selective_refuses_write_through_symlink_into_git() {
+        let (source, excludes) = source_with_git_dir();
+        let staging_root = TempDir::new().unwrap();
+        let overlay =
+            OverlayWorkspace::create("goal-cr06d", source.path(), staging_root.path(), excludes)
+                .unwrap();
+        // Staging has a normal directory `hooks/`; the real project has a
+        // symlink `hooks -> .git/hooks` created after staging began.
+        fs::create_dir_all(overlay.staging_dir().join("hooks")).unwrap();
+        fs::write(
+            overlay.staging_dir().join("hooks/pre-commit"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            source.path().join(".git/hooks"),
+            source.path().join("hooks"),
+        )
+        .unwrap();
+
+        let err = overlay
+            .apply_selective(
+                source.path(),
+                &["fs://workspace/hooks/pre-commit".to_string()],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, WorkspaceError::ProtectedPathRefused { .. }),
+            "{}",
+            err
+        );
+        assert!(!source.path().join(".git/hooks/pre-commit").exists());
     }
 }
