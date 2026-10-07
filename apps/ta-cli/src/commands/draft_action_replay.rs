@@ -1,49 +1,55 @@
-// draft_action_replay.rs: replay approved `ta_external_action` captures on apply.
+// draft_action_replay.rs: carry out a draft's approved external actions on
+// `ta draft apply`.
 //
 // Tracked as trustedautonomy-46. When an agent calls `ta_external_action` and
 // the action type's policy is `review`, the gateway captures a `PendingAction`
 // (tool_name `ta_external_action:<type>`) into the goal's draft package instead
-// of executing it. Before this module, `ta draft apply` never executed any of
-// those captures, so approving a draft that contained an email/social/api/db
-// action had no real-world effect at all.
+// of executing it. This module is what makes those captures actually happen
+// once a human applies the draft.
 //
-// This module closes that gap, with safety as the primary design constraint
-// (these are irreversible real-world effects such as sending email):
+// There is one user-facing verb: `ta draft apply <id>`. It is safe to re-run.
+// On a draft that is already applied it does not copy files again; it only
+// works through the external actions that are still outstanding.
 //
-// 1. Only a genuinely applied draft (`DraftStatus::Applied`) is replayed, and
-//    never from a dry run (a dry run only previews). The hook is called from
-//    the tail of `apply_package` and from `ta draft replay-actions`; it is not
-//    reachable from view/build/deny.
+// Safety properties (these are irreversible real-world effects such as email):
+//
+// 1. Only a genuinely applied draft (`DraftStatus::Applied`) has its actions
+//    carried out. `--dry-run` only previews. Not reachable from view/build/deny.
 // 2. At-most-once: a durable, append-only ledger at
 //    `.ta/action-replay-ledger.jsonl` (keyed by draft_id + action_id) is
 //    checked before every execution. An `intent` record is written and fsynced
-//    BEFORE calling the executor, and a terminal record after. A crash between
-//    the two leaves only the intent, which is reported as "outcome unknown" and
-//    is never re-sent automatically. The trade-off is deliberate: we would
-//    rather drop an action (and tell the human) than send it twice.
-//    Failed/blocked/no-executor outcomes are recorded and NOT auto-retried; the
-//    human retries deliberately with `ta draft replay-actions <id> --retry-failed`.
-// 3. Policy is re-evaluated at replay time with the same inputs the capture
-//    path uses (`.ta/workflow.toml` `[actions.<type>]`, `EmailDispatchGuard`,
-//    `.ta/constitution.toml` rules, `allowed_recipients`, `allowed_domains`,
-//    per-draft `rate_limit`, cross-session `max_per_hour`/`max_per_day`). An
-//    action that would now be blocked is not executed and is reported. If
-//    either policy file exists but does not parse, nothing is replayed (the
-//    loaders would otherwise silently fall back to permissive defaults).
+//    BEFORE calling the executor, and an outcome record after. A crash between
+//    the two leaves only the intent: that action's outcome is unknown, and it
+//    is never re-sent automatically. The human checks whether it went out and,
+//    only if it did not, runs `ta draft apply <id> --resend <action-id>`. The
+//    trade-off is deliberate: we would rather hold an action (and say so) than
+//    send it twice.
+//    Re-running `ta draft apply <id>` retries actions whose last outcome was
+//    failed, blocked, or no-executor (re-checking policy first), and never
+//    touches actions that already went out.
+// 3. Policy is re-evaluated right before sending with the same inputs the
+//    capture path uses (`.ta/workflow.toml` `[actions.<type>]`,
+//    `EmailDispatchGuard`, `.ta/constitution.toml` rules,
+//    `allowed_recipients`, `allowed_domains`, per-draft `rate_limit`,
+//    cross-session `max_per_hour`/`max_per_day`). If either policy file exists
+//    but does not parse, nothing is sent (the loaders would otherwise silently
+//    fall back to permissive defaults).
 // 4. Execution goes only through `ActionRegistry` (built-in stubs plus
-//    discovered adapter plugins, exactly like the gateway). Unknown action
-//    types and raw intercepted MCP tool calls are skipped with a clear message.
+//    discovered adapter plugins, exactly like the gateway).
 // 5. Per-action failure (including a panicking plugin) never blocks the other
-//    actions and never rolls back the already-applied draft. Every outcome is
-//    printed and logged with structured tracing fields.
+//    actions and never rolls back the applied draft. Every outcome is printed
+//    in plain words with the single next command, and logged with structured
+//    tracing fields.
+// 6. Automated applies (workflow-graph auto-approve, governed workflows) go
+//    through the named rule `automation_actions` via
+//    [`automated_apply_may_run`], which today denies every action.
 //
 // `ta_propose_*` pending actions are owned by their own dedicated replay
-// (see `replay_propose_task_update_actions` / `draft_task_replay.rs`) and are
-// always excluded here so the two paths can never double-execute.
+// (`draft_task_replay.rs`) and are always excluded here so the two paths can
+// never double-execute.
 //
-// Concurrency: both entry points run while holding the `.ta/apply.lock`
-// (`ApplyLock`), so two processes can never interleave ledger writes for the
-// same workspace.
+// Concurrency: everything here runs while holding `.ta/apply.lock`
+// (`ApplyLock`), so two processes can never interleave ledger writes.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -63,12 +69,17 @@ use ta_changeset::draft_package::{
 use ta_mcp_gateway::GatewayConfig;
 use uuid::Uuid;
 
-/// File name of the replay ledger under `.ta/`.
+/// File name of the actions ledger under `.ta/`.
 pub(crate) const LEDGER_FILE: &str = "action-replay-ledger.jsonl";
 /// `tool_name` prefix the gateway uses for `ta_external_action` captures.
 pub(crate) const EXTERNAL_ACTION_PREFIX: &str = "ta_external_action:";
 /// `tool_name` prefix owned by the dedicated `ta_propose_*` replay paths.
 pub(crate) const PROPOSE_PREFIX: &str = "ta_propose_";
+/// Env equivalent of `ta draft apply --skip-actions`.
+pub(crate) const SKIP_ACTIONS_ENV: &str = "TA_SKIP_ACTIONS";
+/// Set by automated callers that spawn `ta draft apply` as a subprocess, so
+/// the apply is subject to the `automation_actions` rule.
+pub(crate) const AUTOMATED_APPLY_ENV: &str = "TA_APPLY_AUTOMATED";
 
 /// Separate rate-limit bucket for real sends, so that limits configured with
 /// `max_per_hour`/`max_per_day` govern how many actions actually execute,
@@ -78,9 +89,44 @@ fn replay_rate_bucket(action_type: &str) -> String {
     format!("replay:{action_type}")
 }
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
+// ── Automation rule ─────────────────────────────────────────────────────────
+
+/// The `automation_actions` rule's current value. Today automated applies may
+/// not carry out external actions at all. A compiled constitution can replace
+/// [`automated_apply_may_run`] later without touching any caller.
+pub(crate) const AUTOMATION_ACTIONS_RULE: &str = "deny";
+
+/// Outcome of the `automation_actions` rule for one action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AutomationDecision {
+    Allow,
+    Deny(String),
+}
+
+/// Rule `automation_actions = "deny"`: may an automated (non-human) apply carry
+/// out this external action? Today: never.
+pub(crate) fn automated_apply_may_run(
+    draft_id: Uuid,
+    _action: &PendingAction,
+) -> AutomationDecision {
+    match AUTOMATION_ACTIONS_RULE {
+        "allow" => AutomationDecision::Allow,
+        _ => AutomationDecision::Deny(format!(
+            "automated apply: external actions need a human; run: ta draft apply {}",
+            short(draft_id)
+        )),
+    }
+}
+
 // ── Ledger ───────────────────────────────────────────────────────────────────
 
-/// State recorded in the replay ledger for one (draft_id, action_id).
+/// State recorded in the ledger for one (draft_id, action_id).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LedgerState {
@@ -90,7 +136,7 @@ pub(crate) enum LedgerState {
     Executed,
     /// Executor returned an error (or panicked). Side effects are unknown.
     Failed,
-    /// Replay-time policy refused the action. Nothing was executed.
+    /// Policy refused the action. Nothing was executed.
     Blocked,
     /// Only a schema stub is registered for this type. Nothing was executed.
     NoExecutor,
@@ -108,7 +154,7 @@ pub(crate) struct LedgerEntry {
     pub timestamp: DateTime<Utc>,
 }
 
-/// Durable at-most-once ledger of replayed actions.
+/// Durable at-most-once ledger of carried-out actions.
 pub(crate) struct ReplayLedger {
     path: PathBuf,
     latest: HashMap<(Uuid, Uuid), LedgerEntry>,
@@ -118,12 +164,12 @@ pub(crate) struct ReplayLedger {
 impl ReplayLedger {
     /// Open (or lazily create) the ledger under `ta_dir`.
     ///
-    /// Fails closed: an unparseable line anywhere except the final line means
-    /// the ledger can no longer be trusted to prevent double execution, so the
-    /// caller must not replay anything. A torn final line (crash mid-append) is
-    /// tolerated with a warning: intents are fsynced before any execution, so a
-    /// torn line can only be a record whose action had not yet been executed
-    /// (torn intent) or one whose intent is already durable (torn terminal).
+    /// Fails closed: an unparseable line means the ledger can no longer be
+    /// trusted to prevent double execution, so nothing may be sent. The only
+    /// exception is a torn final line with no trailing newline (a crash
+    /// mid-append), tolerated with a warning: intents are fsynced before any
+    /// execution, so a torn line is either an intent whose action never ran, or
+    /// an outcome whose durable intent remains (outcome unknown).
     pub(crate) fn open(ta_dir: &Path) -> anyhow::Result<Self> {
         let path = ta_dir.join(LEDGER_FILE);
         let mut ledger = Self {
@@ -136,9 +182,9 @@ impl ReplayLedger {
         }
         let content = std::fs::read_to_string(&path).map_err(|e| {
             anyhow::anyhow!(
-                "Could not read the action replay ledger at {}: {}. No pending actions were \
-                 replayed (the ledger is what prevents double execution). Fix the file's \
-                 permissions and run `ta draft replay-actions <draft-id>`.",
+                "Could not read the actions ledger at {} ({}), so no external actions were \
+                 carried out (the ledger is what prevents sending anything twice). Fix the \
+                 file's permissions, then run: ta draft apply <draft-id>",
                 path.display(),
                 e
             )
@@ -157,17 +203,16 @@ impl ReplayLedger {
                         path = %path.display(),
                         line = idx + 1,
                         error = %e,
-                        "ignoring torn final line in action replay ledger (an interrupted \
+                        "ignoring torn final line in actions ledger (an interrupted \
                          append); it will be truncated on the next write"
                     );
                 }
                 Err(e) => {
                     anyhow::bail!(
-                        "The action replay ledger at {} is corrupted at line {} ({}). \
-                         No pending actions were replayed, because the ledger is what \
-                         prevents an email or other external action from being sent twice. \
-                         Inspect the file, repair or remove the bad line, then run \
-                         `ta draft replay-actions <draft-id>`.",
+                        "The actions ledger at {} is corrupted at line {} ({}), so no external \
+                         actions were carried out (the ledger is what prevents sending an email \
+                         or other action twice). Repair or remove that line, then run: \
+                         ta draft apply <draft-id>",
                         path.display(),
                         idx + 1,
                         e
@@ -219,7 +264,7 @@ impl ReplayLedger {
         // A torn tail (an append interrupted before its newline) is dropped
         // before writing. That is always safe: intents are fsynced before any
         // execution, so a torn line is either an intent whose action never ran,
-        // or a terminal record whose durable intent remains (outcome-unknown).
+        // or an outcome record whose durable intent remains (outcome unknown).
         let mut existing = Vec::new();
         file.read_to_end(&mut existing)?;
         if !existing.is_empty() && existing.last() != Some(&b'\n') {
@@ -242,7 +287,7 @@ impl ReplayLedger {
 
 // ── Inputs / outputs ─────────────────────────────────────────────────────────
 
-/// The parts of a draft package the replay needs.
+/// The parts of a draft package the actions step needs.
 #[derive(Debug, Clone)]
 pub(crate) struct DraftReplayInput {
     pub draft_id: Uuid,
@@ -250,7 +295,7 @@ pub(crate) struct DraftReplayInput {
     pub pending_actions: Vec<PendingAction>,
     /// True when the draft was applied with partial selective review (some
     /// artifacts rejected/discussed/left pending while others were approved).
-    /// In that case only actions explicitly marked `approved` are replayed.
+    /// In that case only actions explicitly marked `approved` are carried out.
     pub partial_review: bool,
 }
 
@@ -277,37 +322,82 @@ impl DraftReplayInput {
     }
 }
 
-/// Knobs for one replay run.
-#[derive(Debug, Clone, Copy, Default)]
+/// Knobs for one run over a draft's actions.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ReplayOptions {
-    /// Preview only: report what would run, execute nothing, write no ledger.
+    /// Preview only: report what would happen, execute nothing, write no ledger.
     pub dry_run: bool,
-    /// Deliberately retry actions previously recorded as failed, blocked, or
-    /// lacking an executor. Never retries an action whose outcome is unknown.
-    pub retry_failed: bool,
+    /// The apply was triggered by automation, not a human: every action goes
+    /// through the `automation_actions` rule first.
+    pub automated: bool,
+    /// Action ids (full UUID or a prefix of at least 8 characters) the human
+    /// has checked and wants sent again. Only valid for actions whose outcome
+    /// is unknown (intent recorded, no outcome).
+    pub resend: Vec<String>,
 }
 
-/// What happened to one pending action during replay.
+/// How `ta draft apply` should treat a draft's external actions.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ApplyActions {
+    /// `--skip-actions` (or `TA_SKIP_ACTIONS=1`): do not carry out any.
+    pub skip: bool,
+    /// Apply triggered by automation (`TA_APPLY_AUTOMATED=1` or the in-process
+    /// workflow-graph auto-approve).
+    pub automated: bool,
+    /// `--resend <action-id>` values.
+    pub resend: Vec<String>,
+}
+
+impl ApplyActions {
+    /// Build from CLI flags, folding in the env equivalents.
+    pub(crate) fn from_cli(skip: bool, automated: bool, resend: &[String]) -> Self {
+        Self {
+            skip: skip || env_flag(SKIP_ACTIONS_ENV),
+            automated: automated || env_flag(AUTOMATED_APPLY_ENV),
+            resend: resend.to_vec(),
+        }
+    }
+}
+
+/// Why an action was refused before sending, plus what the human can change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub reason: String,
+    /// What to fix before re-running `ta draft apply <id>`. `None` means
+    /// re-running will not help.
+    pub fix: Option<String>,
+}
+
+fn refusal(reason: impl Into<String>, fix: Option<&str>) -> Refusal {
+    Refusal {
+        reason: reason.into(),
+        fix: fix.map(String::from),
+    }
+}
+
+const FIX_WORKFLOW: &str = "Edit .ta/workflow.toml";
+const FIX_CONSTITUTION: &str = "Edit .ta/constitution.toml";
+
+/// What happened to one pending action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReplayOutcome {
     /// The executor ran and returned success.
     Executed,
-    /// Dry run: this action would be executed.
+    /// Dry run: this action would be carried out.
     WouldExecute,
-    /// The ledger shows this action already executed. Not re-run.
+    /// The ledger shows this action already went out. Not sent again.
     AlreadyReplayed,
-    /// The ledger has an intent but no outcome (a previous run was interrupted
-    /// mid-execution). Never re-run automatically.
+    /// The ledger has an intent but no outcome (an earlier apply stopped while
+    /// sending it). Never re-sent without an explicit `--resend`.
     OutcomeUnknown,
-    /// A previous attempt was recorded as failed/blocked/no-executor and
-    /// `--retry-failed` was not given.
-    PreviouslyFailed { state: LedgerState, detail: String },
-    /// Not attempted (unknown type, rejected disposition, ...).
-    Skipped { reason: String },
-    /// Replay-time policy refused it. Nothing executed.
-    Blocked { reason: String },
+    /// The `automation_actions` rule refused it. Nothing executed.
+    AutomationDenied { reason: String },
+    /// Not attempted (rejected by reviewer, raw MCP call, ...).
+    Skipped { reason: String, fix: Option<String> },
+    /// Policy refused it. Nothing executed.
+    Blocked(Refusal),
     /// Only a schema stub is registered; nothing executed.
-    NoExecutor { reason: String },
+    NoExecutor,
     /// The executor returned an error or panicked.
     Failed { error: String },
 }
@@ -317,25 +407,38 @@ impl ReplayOutcome {
         match self {
             ReplayOutcome::Executed => "executed",
             ReplayOutcome::WouldExecute => "would-execute",
-            ReplayOutcome::AlreadyReplayed => "already-replayed",
+            ReplayOutcome::AlreadyReplayed => "already-done",
             ReplayOutcome::OutcomeUnknown => "outcome-unknown",
-            ReplayOutcome::PreviouslyFailed { .. } => "previously-failed",
+            ReplayOutcome::AutomationDenied { .. } => "automation-denied",
             ReplayOutcome::Skipped { .. } => "skipped",
-            ReplayOutcome::Blocked { .. } => "blocked",
-            ReplayOutcome::NoExecutor { .. } => "no-executor",
+            ReplayOutcome::Blocked(_) => "blocked",
+            ReplayOutcome::NoExecutor => "no-executor",
             ReplayOutcome::Failed { .. } => "failed",
         }
     }
 
-    fn detail(&self) -> Option<&str> {
+    fn detail(&self) -> String {
         match self {
-            ReplayOutcome::PreviouslyFailed { detail, .. } => Some(detail),
-            ReplayOutcome::Skipped { reason }
-            | ReplayOutcome::Blocked { reason }
-            | ReplayOutcome::NoExecutor { reason } => Some(reason),
-            ReplayOutcome::Failed { error } => Some(error),
-            _ => None,
+            ReplayOutcome::AutomationDenied { reason } | ReplayOutcome::Skipped { reason, .. } => {
+                reason.clone()
+            }
+            ReplayOutcome::Blocked(r) => r.reason.clone(),
+            ReplayOutcome::Failed { error } => error.clone(),
+            _ => String::new(),
         }
+    }
+
+    /// Still outstanding: a later `ta draft apply <id>` may carry it out.
+    fn outstanding(&self) -> bool {
+        matches!(
+            self,
+            ReplayOutcome::Blocked(Refusal { fix: Some(_), .. })
+                | ReplayOutcome::Failed { .. }
+                | ReplayOutcome::NoExecutor
+                | ReplayOutcome::AutomationDenied { .. }
+                | ReplayOutcome::WouldExecute
+                | ReplayOutcome::Skipped { fix: Some(_), .. }
+        )
     }
 }
 
@@ -343,7 +446,7 @@ impl ReplayOutcome {
 pub(crate) struct ActionReplayResult {
     pub action_id: Uuid,
     pub action_type: String,
-    pub description: String,
+    pub summary: String,
     pub outcome: ReplayOutcome,
 }
 
@@ -361,30 +464,53 @@ impl ReplayReport {
     }
 }
 
+/// Plain one-phrase description of an action, e.g. "Email to bob@x.com".
+fn describe(action_type: &str, payload: &serde_json::Value) -> String {
+    let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match action_type {
+        "email" => format!("Email to {}", s("to")),
+        "social_post" => format!("Post to {}", s("platform")),
+        "api_call" => format!("{} request to {}", s("method").to_uppercase(), s("url")),
+        "db_query" => "Database query".to_string(),
+        other => format!("'{other}' action"),
+    }
+}
+
+/// Past-tense verb for a successful action of this type.
+fn done_verb(action_type: &str) -> &'static str {
+    match action_type {
+        "email" | "social_post" => "sent",
+        _ => "carried out",
+    }
+}
+
 // ── Policy re-evaluation ─────────────────────────────────────────────────────
 
 /// Re-run the capture-time policy gates for one action. Returns warnings to
-/// surface on success, or the reason the action must not execute.
+/// surface on success, or why the action must not be sent.
 fn check_replay_policy(
     action_type: &str,
     payload: &serde_json::Value,
     policies: &ActionPolicies,
     constitution: &PolicyConstitution,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, Refusal> {
     let cfg = policies.policy_for(action_type);
     let mut warnings = Vec::new();
 
     if cfg.policy == ActionPolicy::Block {
-        return Err(format!(
-            "action type '{action_type}' is now blocked by policy \
-             ([actions.{action_type}] policy = \"block\" in .ta/workflow.toml)"
+        return Err(refusal(
+            format!(
+                "'{action_type}' actions are set to policy = \"block\" \
+                 ([actions.{action_type}])"
+            ),
+            Some(FIX_WORKFLOW),
         ));
     }
 
     // A human approved this capture, so the effective policy is `review`
     // whenever the dispatch guard would have forced it there.
     let effective = match EmailDispatchGuard::new().enforce(action_type, &cfg.policy) {
-        DispatchResult::Blocked { message } => return Err(message),
+        DispatchResult::Blocked { message } => return Err(refusal(message, Some(FIX_WORKFLOW))),
         DispatchResult::ForcedReview { .. } => ActionPolicy::Review,
         DispatchResult::Allowed => cfg.policy.clone(),
     };
@@ -392,7 +518,12 @@ fn check_replay_policy(
     match constitution.check_action_policy(action_type, &effective) {
         Ok(()) => {}
         Err(v) if v.is_warn => warnings.push(v.message),
-        Err(v) => return Err(format!("constitution rule: {}", v.message)),
+        Err(v) => {
+            return Err(refusal(
+                format!("constitution rule: {}", v.message),
+                Some(FIX_CONSTITUTION),
+            ))
+        }
     }
 
     if action_type == "email" && !cfg.allowed_recipients.is_empty() {
@@ -405,9 +536,9 @@ fn check_replay_policy(
         }
         for r in &recipients {
             if !cfg.allowed_recipients.iter().any(|a| a == r) {
-                return Err(format!(
-                    "recipient '{r}' is not in allowed_recipients \
-                     ([actions.email].allowed_recipients in .ta/workflow.toml)"
+                return Err(refusal(
+                    format!("recipient {r} not in allowed_recipients"),
+                    Some(FIX_WORKFLOW),
                 ));
             }
         }
@@ -417,9 +548,9 @@ fn check_replay_policy(
         if let Some(url) = payload.get("url").and_then(|v| v.as_str()) {
             let host = url_host(url).unwrap_or_default();
             if !cfg.allowed_domains.iter().any(|d| domain_matches(d, &host)) {
-                return Err(format!(
-                    "host '{host}' is not in allowed_domains \
-                     ([actions.{action_type}].allowed_domains in .ta/workflow.toml)"
+                return Err(refusal(
+                    format!("host {host} not in allowed_domains"),
+                    Some(FIX_WORKFLOW),
                 ));
             }
         }
@@ -433,7 +564,12 @@ fn check_replay_policy(
         match constitution.check_db_mutation(0, schema_altering, cfg.allow_schema_drops) {
             Ok(()) => {}
             Err(v) if v.is_warn => warnings.push(v.message),
-            Err(v) => return Err(format!("constitution rule: {}", v.message)),
+            Err(v) => {
+                return Err(refusal(
+                    format!("constitution rule: {}", v.message),
+                    Some(FIX_WORKFLOW),
+                ))
+            }
         }
     }
 
@@ -468,10 +604,9 @@ fn domain_matches(pattern: &str, host: &str) -> bool {
 ///
 /// `ActionPolicies::load` and `PolicyConstitution::load` fall back to defaults
 /// (with a warning) when their file cannot be parsed. For capture that is fine,
-/// because a capture only queues an action for review. For replay it would fail
-/// open: a typo in `workflow.toml` would silently drop a `policy = "block"` or
-/// an `allowed_recipients` list right before an irreversible send. So replay
-/// refuses to run until both files parse.
+/// because a capture only queues an action for review. Before sending it would
+/// fail open: a typo in `workflow.toml` would silently drop a `policy = "block"`
+/// or an `allowed_recipients` list right before an irreversible send.
 fn ensure_policy_files_parse(ta_dir: &Path) -> anyhow::Result<()> {
     use std::collections::HashMap as Map;
     use ta_actions::constitution_rules::ConstitutionRule;
@@ -505,18 +640,18 @@ fn ensure_policy_files_parse(ta_dir: &Path) -> anyhow::Result<()> {
         }
         let content = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!(
-                "Could not read {} ({}). No pending actions were replayed, because the \
-                 policy in this file must be re-checked before any external action runs. \
-                 Fix the file, then run `ta draft replay-actions <draft-id>`.",
+                "Could not read {} ({}), so no external actions were carried out: their \
+                 policy must be checked before anything is sent. Fix the file, then run: \
+                 ta draft apply <draft-id>",
                 path.display(),
                 e
             )
         })?;
         toml::from_str::<T>(&content).map_err(|e| {
             anyhow::anyhow!(
-                "{} does not parse ({}). No pending actions were replayed, because the \
-                 policy in this file must be re-checked before any external action runs. \
-                 Fix the file, then run `ta draft replay-actions <draft-id>`.",
+                "{} does not parse ({}), so no external actions were carried out: their \
+                 policy must be checked before anything is sent. Fix the file, then run: \
+                 ta draft apply <draft-id>",
                 path.display(),
                 e
             )
@@ -529,20 +664,27 @@ fn ensure_policy_files_parse(ta_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Core replay ──────────────────────────────────────────────────────────────
+// ── Core ─────────────────────────────────────────────────────────────────────
 
-/// Replay the eligible pending actions of one draft through `registry`.
+fn matches_resend(action_id: Uuid, wanted: &str) -> bool {
+    let wanted = wanted.trim().to_ascii_lowercase();
+    wanted.len() >= 8 && action_id.to_string().starts_with(&wanted)
+}
+
+/// Carry out the eligible pending actions of one draft through `registry`.
 ///
 /// Returns `Err` only when nothing could safely be attempted at all (draft not
-/// applied, ledger unreadable/corrupted). Per-action problems are reported in
-/// the returned [`ReplayReport`] and never abort the other actions.
+/// applied, ledger or policy file unreadable, invalid `--resend`). Per-action
+/// problems are reported in the returned [`ReplayReport`] and never abort the
+/// other actions.
 pub(crate) fn replay_pending_actions(
     workspace_root: &Path,
     input: &DraftReplayInput,
     registry: &ActionRegistry,
-    opts: ReplayOptions,
+    opts: &ReplayOptions,
 ) -> anyhow::Result<ReplayReport> {
     let ta_dir = workspace_root.join(".ta");
+    let draft = short(input.draft_id);
     let candidates: Vec<&PendingAction> = input
         .pending_actions
         .iter()
@@ -553,7 +695,7 @@ pub(crate) fn replay_pending_actions(
                     draft_id = %input.draft_id,
                     action_id = %a.action_id,
                     tool_name = %a.tool_name,
-                    "action replay: leaving ta_propose_* action to its dedicated replay"
+                    "external actions: leaving ta_propose_* action to its dedicated replay"
                 );
             }
             !owned_elsewhere
@@ -567,20 +709,54 @@ pub(crate) fn replay_pending_actions(
         results: Vec::new(),
     };
     if candidates.is_empty() {
+        if let Some(r) = opts.resend.first() {
+            anyhow::bail!("--resend {r}: draft {draft} has no external actions. Nothing was sent.");
+        }
         return Ok(report);
     }
 
     if !opts.dry_run && !matches!(input.status, DraftStatus::Applied { .. }) {
         anyhow::bail!(
-            "Refusing to replay {} pending action(s) for draft {}: the draft is '{}', not \
-             applied. Pending actions only execute after a real (non dry-run) `ta draft apply`.",
+            "Not carrying out {} external action(s) for draft {}: the draft is '{}', not \
+             applied. Run: ta draft apply {}",
             candidates.len(),
-            input.draft_id,
-            input.status
+            draft,
+            input.status,
+            draft
         );
     }
 
     let mut ledger = ReplayLedger::open(&ta_dir)?;
+
+    // --resend is only for actions whose outcome is unknown. Validate every
+    // value up front so a typo can never send something unintended.
+    for wanted in &opts.resend {
+        let Some(action) = candidates
+            .iter()
+            .find(|a| matches_resend(a.action_id, wanted))
+        else {
+            anyhow::bail!(
+                "--resend {wanted}: no external action in draft {draft} has that id (use the \
+                 8-character id shown by ta draft apply). Nothing was sent."
+            );
+        };
+        let state = ledger
+            .latest(input.draft_id, action.action_id)
+            .map(|e| e.state);
+        if state != Some(LedgerState::Intent) {
+            anyhow::bail!(
+                "--resend {wanted}: that action is not waiting on a check (its last result: \
+                 {}). --resend is only for actions whose outcome is unknown. Nothing was \
+                 sent. To carry out outstanding actions, run: ta draft apply {draft}",
+                match state {
+                    None => "not attempted yet".to_string(),
+                    Some(LedgerState::Executed) => "already went out".to_string(),
+                    Some(s) => format!("{s:?}").to_lowercase(),
+                }
+            );
+        }
+    }
+
     ensure_policy_files_parse(&ta_dir)?;
     let policies = ActionPolicies::load(&ta_dir.join("workflow.toml"));
     let constitution = PolicyConstitution::load(workspace_root);
@@ -594,162 +770,187 @@ pub(crate) fn replay_pending_actions(
             .strip_prefix(EXTERNAL_ACTION_PREFIX)
             .unwrap_or(&action.tool_name)
             .to_string();
-        let outcome = replay_one(
+        let mut ctx = Ctx {
             input,
-            action,
-            &action_type,
             registry,
-            &policies,
-            &constitution,
-            &mut ledger,
-            &mut session_limiter,
-            &mut dry_run_counts,
-            &ta_dir,
+            policies: &policies,
+            constitution: &constitution,
+            ledger: &mut ledger,
+            session_limiter: &mut session_limiter,
+            dry_run_counts: &mut dry_run_counts,
+            ta_dir: &ta_dir,
             opts,
-        );
+        };
+        let outcome = replay_one(&mut ctx, action, &action_type);
         log_outcome(input.draft_id, action, &action_type, &outcome);
         report.results.push(ActionReplayResult {
             action_id: action.action_id,
+            summary: if action.tool_name.starts_with(EXTERNAL_ACTION_PREFIX) {
+                describe(&action_type, &action.parameters)
+            } else {
+                format!("'{}' tool call", action.tool_name)
+            },
             action_type,
-            description: action.description.clone(),
             outcome,
         });
     }
     Ok(report)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn replay_one(
-    input: &DraftReplayInput,
-    action: &PendingAction,
-    action_type: &str,
-    registry: &ActionRegistry,
-    policies: &ActionPolicies,
-    constitution: &PolicyConstitution,
-    ledger: &mut ReplayLedger,
-    session_limiter: &mut Option<SessionRateLimiter>,
-    dry_run_counts: &mut HashMap<String, u32>,
-    ta_dir: &Path,
-    opts: ReplayOptions,
-) -> ReplayOutcome {
-    let draft_id = input.draft_id;
+struct Ctx<'a> {
+    input: &'a DraftReplayInput,
+    registry: &'a ActionRegistry,
+    policies: &'a ActionPolicies,
+    constitution: &'a PolicyConstitution,
+    ledger: &'a mut ReplayLedger,
+    session_limiter: &'a mut Option<SessionRateLimiter>,
+    dry_run_counts: &'a mut HashMap<String, u32>,
+    ta_dir: &'a Path,
+    opts: &'a ReplayOptions,
+}
+
+fn replay_one(ctx: &mut Ctx<'_>, action: &PendingAction, action_type: &str) -> ReplayOutcome {
+    let draft_id = ctx.input.draft_id;
 
     if !action.tool_name.starts_with(EXTERNAL_ACTION_PREFIX) {
         return ReplayOutcome::Skipped {
-            reason: format!(
-                "'{}' is an intercepted MCP tool call, not a ta_external_action capture; TA \
-                 has no executor to replay it. Re-run it by hand if it is still needed.",
-                action.tool_name
-            ),
+            reason: "TA cannot re-run intercepted tool calls; run it by hand if you still \
+                     need it"
+                .into(),
+            fix: None,
         };
     }
     match action.disposition {
         ArtifactDisposition::Rejected => {
             return ReplayOutcome::Skipped {
-                reason: "rejected by the reviewer".into(),
+                reason: "the reviewer rejected it".into(),
+                fix: None,
             }
         }
         ArtifactDisposition::Discuss => {
             return ReplayOutcome::Skipped {
-                reason: "marked for discussion, not approved".into(),
+                reason: "it is marked for discussion, not approved".into(),
+                fix: None,
             }
         }
-        ArtifactDisposition::Pending if input.partial_review => {
+        ArtifactDisposition::Pending if ctx.input.partial_review => {
             return ReplayOutcome::Skipped {
-                reason: "draft was applied with partial selective review and this action \
-                         was not explicitly approved"
+                reason: "the draft was applied with selective review and this action was \
+                         not explicitly approved"
                     .into(),
+                fix: None,
             }
         }
         _ => {}
     }
     if action.kind == ActionKind::ReadOnly {
         return ReplayOutcome::Skipped {
-            reason: "read-only call; it already passed through at capture time".into(),
+            reason: "it is read-only and already ran when the agent called it".into(),
+            fix: None,
         };
     }
 
-    if let Some(prev) = ledger.latest(draft_id, action.action_id) {
+    if let Some(prev) = ctx.ledger.latest(draft_id, action.action_id) {
         match prev.state {
             LedgerState::Executed => return ReplayOutcome::AlreadyReplayed,
-            LedgerState::Intent => return ReplayOutcome::OutcomeUnknown,
-            state @ (LedgerState::Failed | LedgerState::Blocked | LedgerState::NoExecutor) => {
-                if !opts.retry_failed {
-                    return ReplayOutcome::PreviouslyFailed {
-                        state,
-                        detail: prev.detail.clone().unwrap_or_default(),
-                    };
+            LedgerState::Intent => {
+                let explicitly_resent = ctx
+                    .opts
+                    .resend
+                    .iter()
+                    .any(|w| matches_resend(action.action_id, w));
+                if !explicitly_resent {
+                    return ReplayOutcome::OutcomeUnknown;
                 }
             }
+            // A human re-ran `ta draft apply`: retry, re-checking policy below.
+            LedgerState::Failed | LedgerState::Blocked | LedgerState::NoExecutor => {}
         }
     }
 
-    let Some(executor) = registry.get(action_type) else {
-        let registered: Vec<String> = registry.list().into_iter().map(|t| t.action_type).collect();
+    if ctx.opts.automated {
+        if let AutomationDecision::Deny(reason) = automated_apply_may_run(draft_id, action) {
+            return ReplayOutcome::AutomationDenied { reason };
+        }
+    }
+
+    let Some(executor) = ctx.registry.get(action_type) else {
         return ReplayOutcome::Skipped {
-            reason: format!(
-                "unknown action type '{action_type}' (registered: {}). Install an adapter \
-                 plugin declaring `verb:{action_type}` under .ta/plugins/adapter/, then run \
-                 `ta draft replay-actions <draft-id>`.",
-                registered.join(", ")
-            ),
+            reason: format!("no plugin handles '{action_type}' actions"),
+            fix: Some(format!(
+                "Install an adapter plugin declaring verb:{action_type} under \
+                 .ta/plugins/adapter/"
+            )),
         };
     };
 
-    let blocked = |ledger: &mut ReplayLedger, reason: String| -> ReplayOutcome {
-        if !opts.dry_run {
+    let dry_run = ctx.opts.dry_run;
+    let blocked = |ledger: &mut ReplayLedger, r: Refusal| -> ReplayOutcome {
+        if !dry_run {
             record_or_warn(
                 ledger,
                 draft_id,
                 action,
                 action_type,
                 LedgerState::Blocked,
-                &reason,
+                &r.reason,
             );
         }
-        ReplayOutcome::Blocked { reason }
+        ReplayOutcome::Blocked(r)
     };
 
     if let Err(e) = executor.validate(&action.parameters) {
-        return blocked(ledger, format!("payload no longer validates: {e}"));
+        return blocked(
+            ctx.ledger,
+            refusal(format!("the captured request is invalid ({e})"), None),
+        );
     }
 
-    match check_replay_policy(action_type, &action.parameters, policies, constitution) {
+    match check_replay_policy(
+        action_type,
+        &action.parameters,
+        ctx.policies,
+        ctx.constitution,
+    ) {
         Ok(warnings) => {
             for w in warnings {
-                println!(
-                    "  [warn] {} ({}): {}",
-                    action_type,
-                    short(action.action_id),
-                    w
-                );
+                println!("  Warning for action {}: {}", short(action.action_id), w);
             }
         }
-        Err(reason) => return blocked(ledger, reason),
+        Err(r) => return blocked(ctx.ledger, r),
     }
 
-    let cfg = policies.policy_for(action_type);
+    let cfg = ctx.policies.policy_for(action_type);
     if let Some(limit) = cfg.rate_limit {
-        let already = ledger.executed_count(draft_id, action_type)
-            + dry_run_counts.get(action_type).copied().unwrap_or(0);
+        let already = ctx.ledger.executed_count(draft_id, action_type)
+            + ctx.dry_run_counts.get(action_type).copied().unwrap_or(0);
         if already >= limit {
             return blocked(
-                ledger,
-                format!(
-                    "rate_limit reached: {already} of {limit} '{action_type}' action(s) already \
-                     executed for this draft ([actions.{action_type}].rate_limit)"
+                ctx.ledger,
+                refusal(
+                    format!(
+                        "rate_limit reached ({already} of {limit} '{action_type}' actions \
+                         already done for this draft)"
+                    ),
+                    Some(FIX_WORKFLOW),
                 ),
             );
         }
     }
 
-    if opts.dry_run {
-        *dry_run_counts.entry(action_type.to_string()).or_insert(0) += 1;
+    if dry_run {
+        *ctx.dry_run_counts
+            .entry(action_type.to_string())
+            .or_insert(0) += 1;
         return ReplayOutcome::WouldExecute;
     }
 
     if cfg.max_per_hour.is_some() || cfg.max_per_day.is_some() {
-        let limiter = session_limiter.get_or_insert_with(|| SessionRateLimiter::new(ta_dir));
+        let ta_dir = ctx.ta_dir;
+        let limiter = ctx
+            .session_limiter
+            .get_or_insert_with(|| SessionRateLimiter::new(ta_dir));
+        let wait = "Wait for the limit window to pass (or raise it in .ta/workflow.toml)";
         match limiter.check_and_record(
             &replay_rate_bucket(action_type),
             cfg.max_per_hour,
@@ -758,19 +959,19 @@ fn replay_one(
             SessionRateLimitResult::Allowed => {}
             SessionRateLimitResult::HourlyExceeded { limit, count } => {
                 return blocked(
-                    ledger,
-                    format!(
-                        "max_per_hour reached ({count} of {limit} '{action_type}' sends in the \
-                         last hour)"
+                    ctx.ledger,
+                    refusal(
+                        format!("max_per_hour reached ({count} of {limit} in the last hour)"),
+                        Some(wait),
                     ),
                 )
             }
             SessionRateLimitResult::DailyExceeded { limit, count } => {
                 return blocked(
-                    ledger,
-                    format!(
-                        "max_per_day reached ({count} of {limit} '{action_type}' sends in the \
-                         last 24 hours)"
+                    ctx.ledger,
+                    refusal(
+                        format!("max_per_day reached ({count} of {limit} in the last 24 hours)"),
+                        Some(wait),
                     ),
                 )
             }
@@ -778,7 +979,7 @@ fn replay_one(
     }
 
     // At-most-once: the intent must be durable before anything can happen.
-    if let Err(e) = ledger.record(entry(
+    if let Err(e) = ctx.ledger.record(entry(
         draft_id,
         action,
         action_type,
@@ -787,9 +988,9 @@ fn replay_one(
     )) {
         return ReplayOutcome::Failed {
             error: format!(
-                "not executed: could not record intent in {} ({e}); executing without a \
-                 durable record could cause a double send",
-                ledger.path().display()
+                "not attempted: could not write to {} ({e}), and sending without that \
+                 record could send it twice",
+                ctx.ledger.path().display()
             ),
         };
     }
@@ -797,7 +998,7 @@ fn replay_one(
     let exec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         executor.execute(&action.parameters)
     }));
-    let (state, outcome) = match exec {
+    let (state, detail, outcome) = match exec {
         Ok(Ok(result)) => {
             let mut detail = result.to_string();
             if detail.len() > 500 {
@@ -808,26 +1009,18 @@ fn replay_one(
                 detail.truncate(cut);
                 detail.push_str("...");
             }
-            (
-                (LedgerState::Executed, Some(detail)),
-                ReplayOutcome::Executed,
-            )
+            (LedgerState::Executed, Some(detail), ReplayOutcome::Executed)
         }
-        Ok(Err(ActionError::StubOnly(t))) => {
-            let reason = format!(
-                "no executor installed for '{t}' (only the built-in schema stub is \
-                 registered), so nothing was sent. Install a plugin that implements it, then \
-                 run `ta draft replay-actions <draft-id> --retry-failed`."
-            );
-            (
-                (LedgerState::NoExecutor, Some(reason.clone())),
-                ReplayOutcome::NoExecutor { reason },
-            )
-        }
+        Ok(Err(ActionError::StubOnly(t))) => (
+            LedgerState::NoExecutor,
+            Some(format!("no executor installed for '{t}'")),
+            ReplayOutcome::NoExecutor,
+        ),
         Ok(Err(e)) => {
             let error = e.to_string();
             (
-                (LedgerState::Failed, Some(error.clone())),
+                LedgerState::Failed,
+                Some(error.clone()),
                 ReplayOutcome::Failed { error },
             )
         }
@@ -837,15 +1030,18 @@ fn replay_one(
                 .cloned()
                 .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "unknown panic".into());
-            let error = format!("executor panicked: {msg}");
+            let error = format!("the plugin crashed: {msg}");
             (
-                (LedgerState::Failed, Some(error.clone())),
+                LedgerState::Failed,
+                Some(error.clone()),
                 ReplayOutcome::Failed { error },
             )
         }
     };
-    let (state, detail) = state;
-    if let Err(e) = ledger.record(entry(draft_id, action, action_type, state, detail)) {
+    if let Err(e) = ctx
+        .ledger
+        .record(entry(draft_id, action, action_type, state, detail))
+    {
         // The intent is durable, so this action will be reported as
         // outcome-unknown next time and never re-sent automatically.
         tracing::warn!(
@@ -853,9 +1049,9 @@ fn replay_one(
             action_id = %action.action_id,
             action_type = %action_type,
             error = %e,
-            path = %ledger.path().display(),
-            "action replay: executed but could not record the outcome in the ledger; it \
-             will show as outcome-unknown and will not be re-sent"
+            path = %ctx.ledger.path().display(),
+            "external action ran but its outcome could not be recorded; it will show as \
+             outcome-unknown and will not be re-sent automatically"
         );
     }
     outcome
@@ -899,25 +1095,26 @@ fn record_or_warn(
             action_type = %action_type,
             error = %e,
             path = %ledger.path().display(),
-            "action replay: could not record outcome in the ledger"
+            "could not record external action outcome in the ledger"
         );
     }
 }
 
 fn log_outcome(draft_id: Uuid, action: &PendingAction, action_type: &str, outcome: &ReplayOutcome) {
     let label = outcome.label();
-    let detail = outcome.detail().unwrap_or("");
+    let detail = outcome.detail();
     match outcome {
         ReplayOutcome::Failed { .. }
-        | ReplayOutcome::Blocked { .. }
+        | ReplayOutcome::Blocked(_)
         | ReplayOutcome::OutcomeUnknown
-        | ReplayOutcome::NoExecutor { .. } => tracing::warn!(
+        | ReplayOutcome::NoExecutor
+        | ReplayOutcome::AutomationDenied { .. } => tracing::warn!(
             draft_id = %draft_id,
             action_id = %action.action_id,
             action_type = %action_type,
             outcome = label,
             detail = %detail,
-            "pending action replay"
+            "external action"
         ),
         _ => tracing::info!(
             draft_id = %draft_id,
@@ -925,7 +1122,7 @@ fn log_outcome(draft_id: Uuid, action: &PendingAction, action_type: &str, outcom
             action_type = %action_type,
             outcome = label,
             detail = %detail,
-            "pending action replay"
+            "external action"
         ),
     }
 }
@@ -936,7 +1133,49 @@ fn short(id: Uuid) -> String {
 
 // ── Output ───────────────────────────────────────────────────────────────────
 
-/// Print the per-action lines, a summary, and next steps.
+/// One plain sentence per action: what happened, or why not, and the single
+/// next command if there is one.
+pub(crate) fn describe_result(draft_id: Uuid, r: &ActionReplayResult) -> String {
+    let draft = short(draft_id);
+    let id = short(r.action_id);
+    let what = &r.summary;
+    let rerun = format!("ta draft apply {draft}");
+    match &r.outcome {
+        ReplayOutcome::Executed => format!("{what} was {}.", done_verb(&r.action_type)),
+        ReplayOutcome::WouldExecute => format!(
+            "{what} would be {} (dry run, nothing done). To do it, run: {rerun}",
+            done_verb(&r.action_type)
+        ),
+        ReplayOutcome::AlreadyReplayed => format!(
+            "{what} was already {} earlier; not doing it again.",
+            done_verb(&r.action_type)
+        ),
+        ReplayOutcome::OutcomeUnknown => format!(
+            "{what} may or may not have gone out: an earlier apply stopped while doing it \
+             (action {id}). Check whether it went out. Only if it did not, run: \
+             {rerun} --resend {id}"
+        ),
+        ReplayOutcome::AutomationDenied { reason } => format!("{what} was not done: {reason}"),
+        ReplayOutcome::Skipped { reason, fix } => match fix {
+            Some(fix) => format!("{what} was not done: {reason}. {fix}, then run: {rerun}"),
+            None => format!("{what} was not done: {reason}."),
+        },
+        ReplayOutcome::Blocked(Refusal { reason, fix }) => match fix {
+            Some(fix) => format!("{what} was blocked: {reason}. {fix}, then run: {rerun}"),
+            None => format!("{what} was blocked: {reason}."),
+        },
+        ReplayOutcome::NoExecutor => format!(
+            "{what} was not done: no plugin is installed that can carry out '{}' actions. \
+             Install one, then run: {rerun}",
+            r.action_type
+        ),
+        ReplayOutcome::Failed { error } => format!(
+            "{what} failed: {error}. It may have partly gone through; check, then run: {rerun}"
+        ),
+    }
+}
+
+/// Print the per-action lines and a one-line summary.
 pub(crate) fn print_report(report: &ReplayReport) {
     if report.results.is_empty() {
         return;
@@ -945,97 +1184,45 @@ pub(crate) fn print_report(report: &ReplayReport) {
     println!();
     if report.dry_run {
         println!(
-            "[actions] Dry run: {} pending action(s) in draft {} (nothing executed):",
-            report.results.len(),
-            draft
+            "External actions in draft {} ({}; dry run, nothing done):",
+            draft,
+            report.results.len()
         );
     } else {
         println!(
-            "[actions] Replaying {} approved pending action(s) from draft {}:",
-            report.results.len(),
-            draft
+            "External actions in draft {} ({}):",
+            draft,
+            report.results.len()
         );
     }
     for r in &report.results {
-        let mut line = format!(
-            "  [{}] {} ({}) {}",
-            r.outcome.label(),
-            r.action_type,
-            short(r.action_id),
-            r.description
-        );
-        if let Some(d) = r.outcome.detail() {
-            if !d.is_empty() {
-                line.push_str(&format!(" :: {d}"));
-            }
-        }
-        println!("{line}");
+        println!("  {}", describe_result(report.draft_id, r));
     }
-
-    let c = |p: fn(&ReplayOutcome) -> bool| report.count(p);
-    let executed = c(|o| matches!(o, ReplayOutcome::Executed | ReplayOutcome::WouldExecute));
-    let blocked = c(|o| matches!(o, ReplayOutcome::Blocked { .. }));
-    let failed = c(|o| matches!(o, ReplayOutcome::Failed { .. }));
-    let no_exec = c(|o| matches!(o, ReplayOutcome::NoExecutor { .. }));
-    let skipped = c(|o| matches!(o, ReplayOutcome::Skipped { .. }));
-    let already = c(|o| matches!(o, ReplayOutcome::AlreadyReplayed));
-    let unknown = c(|o| matches!(o, ReplayOutcome::OutcomeUnknown));
-    let prev_failed = c(|o| matches!(o, ReplayOutcome::PreviouslyFailed { .. }));
-    println!(
-        "[actions] {} {}, {} blocked, {} failed, {} no-executor, {} skipped, {} already \
-         replayed, {} previously failed, {} outcome unknown.",
-        executed,
-        if report.dry_run {
-            "would execute"
-        } else {
-            "executed"
-        },
-        blocked,
-        failed,
-        no_exec,
-        skipped,
-        already,
-        prev_failed,
-        unknown
-    );
+    let done = report.count(|o| matches!(o, ReplayOutcome::Executed));
+    let already = report.count(|o| matches!(o, ReplayOutcome::AlreadyReplayed));
+    let unknown = report.count(|o| matches!(o, ReplayOutcome::OutcomeUnknown));
+    let outstanding = report.count(|o| o.outstanding());
     if report.dry_run {
         println!(
-            "  Next: run `ta draft replay-actions {}` to execute them for real.",
-            draft
+            "  {} would be done, {} already done, {} need a check.",
+            report.count(|o| matches!(o, ReplayOutcome::WouldExecute)),
+            already,
+            unknown
         );
     } else {
-        println!("  Ledger: {}", report.ledger_path.display());
-    }
-    if failed + blocked + no_exec + prev_failed > 0 {
         println!(
-            "  Next: fix the cause above, then retry deliberately with \
-             `ta draft replay-actions {} --retry-failed` (failed actions may have partially \
-             taken effect; check the destination first).",
-            draft
-        );
-    }
-    if unknown > 0 {
-        println!(
-            "  Next: {} action(s) were interrupted mid-execution in an earlier run. Check the \
-             destination to see whether they took effect. TA will not re-send them \
-             automatically (at-most-once).",
-            unknown
+            "  {} done now, {} already done, {} still outstanding, {} need a check. \
+             Record: {}",
+            done,
+            already,
+            outstanding,
+            unknown,
+            report.ledger_path.display()
         );
     }
 }
 
 // ── Entry points used by draft.rs ────────────────────────────────────────────
-
-/// Environment variable automated callers set so that an apply they trigger
-/// never executes external actions (equivalent to `--no-replay-actions`).
-pub(crate) const NO_REPLAY_ENV: &str = "TA_NO_REPLAY_ACTIONS";
-
-/// True when `TA_NO_REPLAY_ACTIONS` is set to anything other than empty/"0".
-pub(crate) fn replay_disabled_by_env() -> bool {
-    std::env::var(NO_REPLAY_ENV)
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
-}
 
 /// Build the same registry the gateway uses: built-in stubs plus every
 /// discovered adapter-plugin verb.
@@ -1047,7 +1234,8 @@ fn build_registry(workspace_root: &Path) -> ActionRegistry {
     registry
 }
 
-fn replayable_count(pkg: &DraftPackage) -> usize {
+/// Number of pending actions this module is responsible for.
+pub(crate) fn external_action_count(pkg: &DraftPackage) -> usize {
     pkg.changes
         .pending_actions
         .iter()
@@ -1055,22 +1243,58 @@ fn replayable_count(pkg: &DraftPackage) -> usize {
         .count()
 }
 
-/// Called at the tail of `apply_package` (the apply lock is still held).
-///
-/// Never returns an error: the draft is already applied, so a replay problem
-/// is reported, not propagated.
+fn run_for_package(
+    config: &GatewayConfig,
+    pkg: &DraftPackage,
+    dry_run: bool,
+    actions: &ApplyActions,
+) -> anyhow::Result<()> {
+    let n = external_action_count(pkg);
+    if n == 0 {
+        if let Some(r) = actions.resend.first() {
+            anyhow::bail!(
+                "--resend {r}: draft {} has no external actions. Nothing was sent.",
+                short(pkg.package_id)
+            );
+        }
+        return Ok(());
+    }
+    if actions.skip && !dry_run {
+        println!();
+        println!(
+            "External actions: {} not done (--skip-actions). To do them, run: ta draft apply {}",
+            n,
+            short(pkg.package_id)
+        );
+        return Ok(());
+    }
+    let registry = build_registry(&config.workspace_root);
+    let input = DraftReplayInput::from_package(pkg);
+    let opts = ReplayOptions {
+        dry_run,
+        automated: actions.automated,
+        resend: actions.resend.clone(),
+    };
+    let report = replay_pending_actions(&config.workspace_root, &input, &registry, &opts)?;
+    print_report(&report);
+    Ok(())
+}
+
+/// Called at the tail of a first `ta draft apply` (the apply lock is still
+/// held). Never returns an error: the files are already applied, so a problem
+/// with the actions is reported, not propagated.
 pub(crate) fn post_apply_hook(
     config: &GatewayConfig,
     package_id: Uuid,
     dry_run: bool,
-    replay_enabled: bool,
+    actions: &ApplyActions,
 ) {
     let pkg = match super::load_package(config, package_id) {
         Ok(p) => p,
         Err(e) => {
             eprintln!(
-                "  [actions] Could not reload draft {} to replay its pending actions: {}. \
-                 Run `ta draft replay-actions {}` once the draft is readable.",
+                "Could not reload draft {} to carry out its external actions ({}). Run: \
+                 ta draft apply {}",
                 short(package_id),
                 e,
                 short(package_id)
@@ -1078,74 +1302,28 @@ pub(crate) fn post_apply_hook(
             return;
         }
     };
-    let n = replayable_count(&pkg);
-    if n == 0 {
-        return;
-    }
-    if !replay_enabled && !dry_run {
-        println!();
-        println!(
-            "[actions] {} pending action(s) were NOT executed (--no-replay-actions). Run \
-             `ta draft replay-actions {}` when you are ready to execute them.",
-            n,
-            short(package_id)
-        );
-        return;
-    }
-    let registry = build_registry(&config.workspace_root);
-    let input = DraftReplayInput::from_package(&pkg);
-    let opts = ReplayOptions {
-        dry_run,
-        retry_failed: false,
-    };
-    match replay_pending_actions(&config.workspace_root, &input, &registry, opts) {
-        Ok(report) => print_report(&report),
-        Err(e) => {
-            tracing::error!(draft_id = %package_id, error = %e, "pending action replay aborted");
-            eprintln!("  [actions] {e}");
-        }
+    if let Err(e) = run_for_package(config, &pkg, dry_run, actions) {
+        tracing::error!(draft_id = %package_id, error = %e, "external actions not carried out");
+        eprintln!("{e}");
     }
 }
 
-/// `ta draft replay-actions <id> [--retry-failed]`: replay (or deliberately
-/// retry) the pending actions of an already-applied draft.
-pub(crate) fn replay_actions_command(
+/// `ta draft apply <id>` on a draft that is already applied and has external
+/// actions: files are not copied again; only outstanding actions are worked
+/// through. Called with the apply lock held.
+pub(crate) fn apply_actions_for_applied_draft(
     config: &GatewayConfig,
-    id: &str,
-    retry_failed: bool,
+    pkg: &DraftPackage,
+    dry_run: bool,
+    actions: &ApplyActions,
 ) -> anyhow::Result<()> {
-    let package_id = super::resolve_draft_id(id, config)?;
-    let _lock = super::ApplyLock::acquire(&config.workspace_root, &package_id.to_string())?;
-    let pkg = super::load_package(config, package_id)?;
-    if !matches!(pkg.status, DraftStatus::Applied { .. }) {
-        anyhow::bail!(
-            "Draft {} is '{}', not applied. Pending actions only execute for applied drafts: \
-             run `ta draft apply {}` first.",
-            short(package_id),
-            pkg.status,
-            short(package_id)
-        );
-    }
-    if replayable_count(&pkg) == 0 {
-        println!(
-            "[actions] Draft {} has no ta_external_action pending actions to replay.",
-            short(package_id)
-        );
-        return Ok(());
-    }
-    let registry = build_registry(&config.workspace_root);
-    let input = DraftReplayInput::from_package(&pkg);
-    let report = replay_pending_actions(
-        &config.workspace_root,
-        &input,
-        &registry,
-        ReplayOptions {
-            dry_run: false,
-            retry_failed,
-        },
-    )?;
-    print_report(&report);
-    Ok(())
+    println!(
+        "Draft {} (\"{}\") is already applied; its files are not copied again. Checking its \
+         external actions.",
+        short(pkg.package_id),
+        pkg.goal.title
+    );
+    run_for_package(config, pkg, dry_run, actions)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1237,10 +1415,16 @@ mod tests {
         std::fs::write(root.join(".ta/workflow.toml"), toml).unwrap();
     }
 
-    const LIVE: ReplayOptions = ReplayOptions {
-        dry_run: false,
-        retry_failed: false,
-    };
+    fn live() -> ReplayOptions {
+        ReplayOptions::default()
+    }
+
+    fn resend(id: Uuid) -> ReplayOptions {
+        ReplayOptions {
+            resend: vec![short(id)],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn executes_once_on_apply_and_records_ledger() {
@@ -1249,10 +1433,14 @@ mod tests {
         let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
         let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
 
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(report.results[0].outcome, ReplayOutcome::Executed);
+        assert_eq!(
+            describe_result(input.draft_id, &report.results[0]),
+            "Email to a@x.com was sent."
+        );
         let ledger = ReplayLedger::open(&dir.path().join(".ta")).unwrap();
         let e = ledger
             .latest(input.draft_id, input.pending_actions[0].action_id)
@@ -1267,19 +1455,9 @@ mod tests {
         let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
         let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
 
-        replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
-        let second = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
-        // Even a deliberate --retry-failed never re-sends an executed action.
-        let third = replay_pending_actions(
-            dir.path(),
-            &input,
-            &reg,
-            ReplayOptions {
-                dry_run: false,
-                retry_failed: true,
-            },
-        )
-        .unwrap();
+        replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
+        let second = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
+        let third = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(second.results[0].outcome, ReplayOutcome::AlreadyReplayed);
@@ -1293,13 +1471,13 @@ mod tests {
         {
             let calls = Arc::new(AtomicUsize::new(0));
             let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
-            replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+            replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
         // Fresh registry + fresh ledger read from disk, as a new process would.
         let calls = Arc::new(AtomicUsize::new(0));
         let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(report.results[0].outcome, ReplayOutcome::AlreadyReplayed);
     }
@@ -1310,16 +1488,15 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
         let mut input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
-        // A dry-run apply never transitions the draft to Applied.
         input.status = DraftStatus::PendingReview;
 
         let report = replay_pending_actions(
             dir.path(),
             &input,
             &reg,
-            ReplayOptions {
+            &ReplayOptions {
                 dry_run: true,
-                retry_failed: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1330,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_replay_a_draft_that_is_not_applied() {
+    fn refuses_a_draft_that_is_not_applied() {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
@@ -1348,13 +1525,13 @@ mod tests {
             let mut input =
                 applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
             input.status = status;
-            assert!(replay_pending_actions(dir.path(), &input, &reg, LIVE).is_err());
+            assert!(replay_pending_actions(dir.path(), &input, &reg, &live()).is_err());
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn blocked_by_policy_at_replay_does_not_execute() {
+    fn blocked_by_policy_does_not_execute_and_is_retried_after_fix() {
         let dir = tempfile::tempdir().unwrap();
         write_workflow(
             dir.path(),
@@ -1367,7 +1544,7 @@ mod tests {
             ("social_post", FakeMode::Ok, calls.clone()),
         ]);
         let input = applied_input(vec![
-            pending("ta_external_action:email", email("evil@x.com")),
+            pending("ta_external_action:email", email("bob@x.com")),
             pending(
                 "ta_external_action:social_post",
                 json!({"platform": "x", "content": "hi"}),
@@ -1375,15 +1552,20 @@ mod tests {
             pending("ta_external_action:email", email("ok@x.com")),
         ]);
 
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
 
-        assert!(matches!(
-            &report.results[0].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("allowed_recipients")
-        ));
+        let line = describe_result(input.draft_id, &report.results[0]);
+        assert_eq!(
+            line,
+            format!(
+                "Email to bob@x.com was blocked: recipient bob@x.com not in allowed_recipients. \
+                 Edit .ta/workflow.toml, then run: ta draft apply {}",
+                short(input.draft_id)
+            )
+        );
         assert!(matches!(
             &report.results[1].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("block")
+            ReplayOutcome::Blocked(r) if r.reason.contains("block")
         ));
         assert_eq!(report.results[2].outcome, ReplayOutcome::Executed);
         assert_eq!(
@@ -1392,20 +1574,26 @@ mod tests {
             "only the allowed email ran"
         );
 
-        // Blocked is recorded and not auto-retried.
-        let again = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        // Re-run with the same policy: re-checked, still blocked, nothing sent.
+        let again = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(matches!(
             again.results[0].outcome,
-            ReplayOutcome::PreviouslyFailed {
-                state: LedgerState::Blocked,
-                ..
-            }
+            ReplayOutcome::Blocked(_)
         ));
+        assert_eq!(again.results[2].outcome, ReplayOutcome::AlreadyReplayed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // After the human fixes the policy, re-running sends only the blocked ones.
+        write_workflow(dir.path(), "[actions.email]\npolicy = \"review\"\n");
+        let fixed = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
+        assert_eq!(fixed.results[0].outcome, ReplayOutcome::Executed);
+        assert_eq!(fixed.results[1].outcome, ReplayOutcome::Executed);
+        assert_eq!(fixed.results[2].outcome, ReplayOutcome::AlreadyReplayed);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
-    fn constitution_block_rule_and_schema_drop_block_at_replay() {
+    fn constitution_block_rule_and_schema_drop_block() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
         std::fs::write(
@@ -1429,20 +1617,21 @@ mod tests {
                 json!({"query": "DROP TABLE users"}),
             ),
         ]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(matches!(
             &report.results[0].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("no api calls")
+            ReplayOutcome::Blocked(r) if r.reason.contains("no api calls")
+                && r.fix.as_deref() == Some(FIX_CONSTITUTION)
         ));
         assert!(matches!(
             &report.results[1].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("Schema-altering")
+            ReplayOutcome::Blocked(r) if r.reason.contains("Schema-altering")
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn allowed_domains_and_rate_limit_enforced_at_replay() {
+    fn allowed_domains_and_rate_limit_enforced() {
         let dir = tempfile::tempdir().unwrap();
         write_workflow(
             dir.path(),
@@ -1465,15 +1654,15 @@ mod tests {
                 json!({"method": "GET", "url": "https://api.example.com/b"}),
             ),
         ]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(matches!(
             &report.results[0].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("allowed_domains")
+            ReplayOutcome::Blocked(r) if r.reason.contains("allowed_domains")
         ));
         assert_eq!(report.results[1].outcome, ReplayOutcome::Executed);
         assert!(matches!(
             &report.results[2].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("rate_limit")
+            ReplayOutcome::Blocked(r) if r.reason.contains("rate_limit")
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -1491,17 +1680,17 @@ mod tests {
             pending("ta_external_action:email", email("a@x.com")),
             pending("ta_external_action:email", email("b@x.com")),
         ]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert_eq!(report.results[0].outcome, ReplayOutcome::Executed);
         assert!(matches!(
             &report.results[1].outcome,
-            ReplayOutcome::Blocked { reason } if reason.contains("max_per_hour")
+            ReplayOutcome::Blocked(r) if r.reason.contains("max_per_hour")
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn failure_is_recorded_and_others_continue() {
+    fn failure_is_recorded_others_continue_and_rerun_retries_only_failed() {
         let dir = tempfile::tempdir().unwrap();
         let ok_calls = Arc::new(AtomicUsize::new(0));
         let bad_calls = Arc::new(AtomicUsize::new(0));
@@ -1522,80 +1711,160 @@ mod tests {
             ),
         ]);
 
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
 
         assert!(matches!(
             &report.results[0].outcome,
             ReplayOutcome::Failed { error } if error.contains("smtp 550")
         ));
+        assert!(
+            describe_result(input.draft_id, &report.results[0]).ends_with(&format!(
+                "check, then run: ta draft apply {}",
+                short(input.draft_id)
+            ))
+        );
         assert!(matches!(
             &report.results[1].outcome,
-            ReplayOutcome::Failed { error } if error.contains("panicked")
+            ReplayOutcome::Failed { error } if error.contains("crashed")
         ));
         assert_eq!(report.results[2].outcome, ReplayOutcome::Executed);
         assert_eq!(ok_calls.load(Ordering::SeqCst), 1);
         assert_eq!(bad_calls.load(Ordering::SeqCst), 2);
 
-        // Not auto-retried...
-        let again = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
-        assert!(matches!(
-            again.results[0].outcome,
-            ReplayOutcome::PreviouslyFailed {
-                state: LedgerState::Failed,
-                ..
-            }
-        ));
-        assert_eq!(bad_calls.load(Ordering::SeqCst), 2);
-
-        // ...but a deliberate --retry-failed does retry (and only the failed ones).
-        let retry = replay_pending_actions(
-            dir.path(),
-            &input,
-            &reg,
-            ReplayOptions {
-                dry_run: false,
-                retry_failed: true,
-            },
-        )
-        .unwrap();
+        // A human re-running `ta draft apply` retries only the failed ones.
+        let retry = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert_eq!(bad_calls.load(Ordering::SeqCst), 4);
         assert_eq!(ok_calls.load(Ordering::SeqCst), 1);
         assert_eq!(retry.results[2].outcome, ReplayOutcome::AlreadyReplayed);
     }
 
+    fn record_interrupted_intent(dir: &Path, input: &DraftReplayInput, idx: usize) {
+        let mut ledger = ReplayLedger::open(&dir.join(".ta")).unwrap();
+        ledger
+            .record(entry(
+                input.draft_id,
+                &input.pending_actions[idx],
+                "email",
+                LedgerState::Intent,
+                None,
+            ))
+            .unwrap();
+    }
+
     #[test]
-    fn interrupted_intent_is_never_resent() {
+    fn outcome_unknown_is_never_auto_resent() {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
         let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
         // Simulate a crash after the intent was made durable but before the
         // outcome was recorded.
-        let mut ledger = ReplayLedger::open(&dir.path().join(".ta")).unwrap();
-        ledger
-            .record(entry(
-                input.draft_id,
-                &input.pending_actions[0],
-                "email",
-                LedgerState::Intent,
-                None,
-            ))
-            .unwrap();
+        record_interrupted_intent(dir.path(), &input, 0);
 
-        for retry_failed in [false, true] {
-            let report = replay_pending_actions(
-                dir.path(),
-                &input,
-                &reg,
-                ReplayOptions {
-                    dry_run: false,
-                    retry_failed,
-                },
-            )
-            .unwrap();
+        for _ in 0..3 {
+            let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
             assert_eq!(report.results[0].outcome, ReplayOutcome::OutcomeUnknown);
+            let line = describe_result(input.draft_id, &report.results[0]);
+            assert!(
+                line.contains(&format!(
+                    "run: ta draft apply {} --resend {}",
+                    short(input.draft_id),
+                    short(input.pending_actions[0].action_id)
+                )),
+                "{line}"
+            );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn resend_works_only_for_outcome_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
+        let input = applied_input(vec![
+            pending("ta_external_action:email", email("a@x.com")),
+            pending("ta_external_action:email", email("b@x.com")),
+        ]);
+        let unknown_id = input.pending_actions[0].action_id;
+        let fresh_id = input.pending_actions[1].action_id;
+        record_interrupted_intent(dir.path(), &input, 0);
+
+        // --resend on an action that was never attempted: refused, nothing sent.
+        assert!(replay_pending_actions(dir.path(), &input, &reg, &resend(fresh_id)).is_err());
+        // --resend with an id that matches nothing: refused, nothing sent.
+        assert!(replay_pending_actions(dir.path(), &input, &reg, &resend(Uuid::new_v4())).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // --resend for the outcome-unknown one: sent once (other one runs normally).
+        let report = replay_pending_actions(dir.path(), &input, &reg, &resend(unknown_id)).unwrap();
+        assert_eq!(report.results[0].outcome, ReplayOutcome::Executed);
+        assert_eq!(report.results[1].outcome, ReplayOutcome::Executed);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Now it went out: --resend for it is refused, and plain re-runs skip it.
+        assert!(replay_pending_actions(dir.path(), &input, &reg, &resend(unknown_id)).is_err());
+        let again = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
+        assert_eq!(again.results[0].outcome, ReplayOutcome::AlreadyReplayed);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn resend_still_rechecks_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        write_workflow(dir.path(), "[actions.email]\npolicy = \"block\"\n");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
+        let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
+        record_interrupted_intent(dir.path(), &input, 0);
+        let report = replay_pending_actions(
+            dir.path(),
+            &input,
+            &reg,
+            &resend(input.pending_actions[0].action_id),
+        )
+        .unwrap();
+        assert!(matches!(
+            report.results[0].outcome,
+            ReplayOutcome::Blocked(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn automated_apply_is_denied_by_the_automation_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reg = registry_with(vec![("email", FakeMode::Ok, calls.clone())]);
+        let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
+        assert_eq!(AUTOMATION_ACTIONS_RULE, "deny");
+
+        let report = replay_pending_actions(
+            dir.path(),
+            &input,
+            &reg,
+            &ReplayOptions {
+                automated: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = format!(
+            "automated apply: external actions need a human; run: ta draft apply {}",
+            short(input.draft_id)
+        );
+        assert_eq!(
+            report.results[0].outcome,
+            ReplayOutcome::AutomationDenied {
+                reason: expected.clone()
+            }
+        );
+        assert!(describe_result(input.draft_id, &report.results[0]).ends_with(&expected));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Nothing recorded, so the human's own apply carries it out.
+        assert!(!dir.path().join(".ta").join(LEDGER_FILE).exists());
+        replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1608,19 +1877,19 @@ mod tests {
         let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
 
         std::fs::write(ta.join(LEDGER_FILE), "garbage\n{\"also\":\"bad\"}\n").unwrap();
-        assert!(replay_pending_actions(dir.path(), &input, &reg, LIVE).is_err());
+        assert!(replay_pending_actions(dir.path(), &input, &reg, &live()).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         // A complete-but-unparseable final line (ends in a newline) is
         // corruption, not a torn append: fail closed.
         std::fs::write(ta.join(LEDGER_FILE), "{\"draft_id\":\"bad\"}\n").unwrap();
-        assert!(replay_pending_actions(dir.path(), &input, &reg, LIVE).is_err());
+        assert!(replay_pending_actions(dir.path(), &input, &reg, &live()).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         // A torn final line (no newline) is tolerated, and truncated on the
         // next write so the ledger stays fully parseable afterwards.
         std::fs::write(ta.join(LEDGER_FILE), "{\"draft_id\":\"torn").unwrap();
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert_eq!(report.results[0].outcome, ReplayOutcome::Executed);
         let reopened = ReplayLedger::open(&ta).unwrap();
         assert_eq!(
@@ -1646,7 +1915,7 @@ mod tests {
             pending("ta_propose_task_update", json!({"task_id": "t1"})),
             pending("ta_propose_task_create", json!({"title": "x"})),
         ]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(report.results.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(!dir.path().join(".ta").join(LEDGER_FILE).exists());
@@ -1661,14 +1930,14 @@ mod tests {
             pending("ta_external_action:teleport", json!({})),
             pending("gmail_send", json!({"to": "a@x.com"})),
         ]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(matches!(
             &report.results[0].outcome,
-            ReplayOutcome::Skipped { reason } if reason.contains("unknown action type 'teleport'")
+            ReplayOutcome::Skipped { reason, fix: Some(_) } if reason.contains("'teleport'")
         ));
         assert!(matches!(
             &report.results[1].outcome,
-            ReplayOutcome::Skipped { reason } if reason.contains("intercepted MCP tool call")
+            ReplayOutcome::Skipped { reason, fix: None } if reason.contains("intercepted")
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
@@ -1679,11 +1948,8 @@ mod tests {
         // Plain registry: email is the built-in schema stub.
         let reg = ActionRegistry::new();
         let input = applied_input(vec![pending("ta_external_action:email", email("a@x.com"))]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
-        assert!(matches!(
-            report.results[0].outcome,
-            ReplayOutcome::NoExecutor { .. }
-        ));
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
+        assert_eq!(report.results[0].outcome, ReplayOutcome::NoExecutor);
         let ledger = ReplayLedger::open(&dir.path().join(".ta")).unwrap();
         assert_eq!(
             ledger
@@ -1704,7 +1970,7 @@ mod tests {
         let mut discuss = pending("ta_external_action:email", email("a@x.com"));
         discuss.disposition = ArtifactDisposition::Discuss;
         let input = applied_input(vec![rejected, discuss]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(report
             .results
             .iter()
@@ -1717,7 +1983,7 @@ mod tests {
             approved,
         ]);
         partial.partial_review = true;
-        let report = replay_pending_actions(dir.path(), &partial, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &partial, &reg, &live()).unwrap();
         assert!(matches!(
             report.results[0].outcome,
             ReplayOutcome::Skipped { .. }
@@ -1734,13 +2000,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         write_workflow(dir.path(), "[actions.email]\npolicy = \"sometimes\"\n");
-        let err = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap_err();
+        let err = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap_err();
         assert!(err.to_string().contains("workflow.toml"), "{err}");
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
         std::fs::write(dir.path().join(".ta/constitution.toml"), "[[rules.block]\n").unwrap();
-        let err = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap_err();
+        let err = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap_err();
         assert!(err.to_string().contains("constitution.toml"), "{err}");
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1755,18 +2021,19 @@ mod tests {
             "ta_external_action:email",
             json!({"invalid": true}),
         )]);
-        let report = replay_pending_actions(dir.path(), &input, &reg, LIVE).unwrap();
+        let report = replay_pending_actions(dir.path(), &input, &reg, &live()).unwrap();
         assert!(matches!(
             report.results[0].outcome,
-            ReplayOutcome::Blocked { .. }
+            ReplayOutcome::Blocked(Refusal { fix: None, .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    /// End-to-end fixture through the real `apply_package` hook and the real
-    /// registry/plugin discovery path. The "external action" is a local
-    /// adapter plugin that only appends a line to a file in the temp dir, so
-    /// no email/HTTP is ever sent. Unix-only because it shells out to python3.
+    /// End-to-end fixture through the real `ta draft apply` code path and the
+    /// real registry/plugin discovery path. The "external actions" are a local
+    /// adapter plugin that only appends a line to a file in the temp dir (or
+    /// fails while a "fail" flag file exists), so no email/HTTP is ever sent.
+    /// Unix-only because it shells out to python3.
     #[cfg(unix)]
     fn e2e_fixture() -> E2e {
         use super::super::{
@@ -1781,9 +2048,9 @@ mod tests {
 
         crate::commands::goal::execute(
             &crate::commands::goal::GoalCommands::Start {
-                title: "Replay e2e".to_string(),
+                title: "Actions e2e".to_string(),
                 source: Some(project.path().to_path_buf()),
-                objective: "Replay approved pending actions".to_string(),
+                objective: "Carry out approved external actions".to_string(),
                 agent: "test-agent".to_string(),
                 phase: None,
                 follow_up: None,
@@ -1797,21 +2064,23 @@ mod tests {
         std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
         build_package(&config, &goal.goal_run_id.to_string(), "Test", false).unwrap();
 
-        // Adapter plugin implementing verb `notify.send`: appends to a marker file.
-        let marker = project.path().join("sent.log");
+        // Adapter plugin implementing verb `notify.send`.
         let plugin_dir = project.path().join(".ta/plugins/adapter/notify");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let script = plugin_dir.join("notify.py");
         std::fs::write(
             &script,
             r#"
-import json, sys
+import json, os, sys
 req = json.loads(sys.stdin.readline())
 payload = req["params"]["payload"]
 if req["method"] == "execute":
-    with open(payload["marker"], "a") as f:
-        f.write("sent\n")
-    print(json.dumps({"ok": True, "result": {"status": "sent"}}))
+    if os.path.exists(payload["fail_flag"]):
+        print(json.dumps({"ok": False, "error": "destination unavailable"}))
+    else:
+        with open(payload["marker"], "a") as f:
+            f.write("sent\n")
+        print(json.dumps({"ok": True, "result": {"status": "sent"}}))
 elif req["method"] == "risk_score":
     print(json.dumps({"ok": True, "result": {"risk_score": 0, "confidence": 1.0}}))
 else:
@@ -1837,11 +2106,18 @@ else:
         )
         .unwrap();
 
+        let ok_marker = project.path().join("ok.log");
+        let flaky_marker = project.path().join("flaky.log");
+        let fail_flag = project.path().join("fail.flag");
         let packages = load_all_packages(&config).unwrap();
         let mut pkg = load_package(&config, packages[0].package_id).unwrap();
         pkg.changes.pending_actions.push(pending(
             "ta_external_action:notify.send",
-            json!({"marker": marker.to_string_lossy()}),
+            json!({"marker": ok_marker.to_string_lossy(), "fail_flag": "/nonexistent/flag"}),
+        ));
+        pkg.changes.pending_actions.push(pending(
+            "ta_external_action:notify.send",
+            json!({"marker": flaky_marker.to_string_lossy(), "fail_flag": fail_flag.to_string_lossy()}),
         ));
         pkg.changes
             .pending_actions
@@ -1852,7 +2128,9 @@ else:
             _project: project,
             config,
             pkg,
-            marker,
+            ok_marker,
+            flaky_marker,
+            fail_flag,
         }
     }
 
@@ -1861,7 +2139,9 @@ else:
         _project: tempfile::TempDir,
         config: GatewayConfig,
         pkg: DraftPackage,
-        marker: PathBuf,
+        ok_marker: PathBuf,
+        flaky_marker: PathBuf,
+        fail_flag: PathBuf,
     }
 
     #[cfg(unix)]
@@ -1870,8 +2150,8 @@ else:
             self.pkg.package_id.to_string()
         }
 
-        fn apply(&self, dry_run: bool, replay: bool) {
-            super::super::apply_package_with_replay(
+        fn apply_with(&self, dry_run: bool, actions: ApplyActions) -> anyhow::Result<()> {
+            super::super::apply_package_with_actions(
                 &self.config,
                 &self.id(),
                 None,
@@ -1887,15 +2167,30 @@ else:
                 false,
                 false,
                 false,
-                replay,
+                &actions,
             )
-            .unwrap();
         }
 
-        fn sends(&self) -> usize {
-            std::fs::read_to_string(&self.marker)
+        fn apply(&self, dry_run: bool) {
+            self.apply_with(dry_run, ApplyActions::default()).unwrap();
+        }
+
+        fn count(path: &Path) -> usize {
+            std::fs::read_to_string(path)
                 .map(|s| s.lines().count())
                 .unwrap_or(0)
+        }
+
+        fn ok_sends(&self) -> usize {
+            Self::count(&self.ok_marker)
+        }
+
+        fn flaky_sends(&self) -> usize {
+            Self::count(&self.flaky_marker)
+        }
+
+        fn readme(&self) -> String {
+            std::fs::read_to_string(self.config.workspace_root.join("README.md")).unwrap()
         }
 
         fn ledger(&self) -> ReplayLedger {
@@ -1905,18 +2200,20 @@ else:
 
     #[cfg(unix)]
     #[test]
-    fn apply_package_replays_once_and_replay_command_never_resends() {
+    fn apply_executes_once_and_reapply_never_resends() {
         let e = e2e_fixture();
-        e.apply(false, true);
-        assert_eq!(e.sends(), 1, "real apply executes the approved action once");
-
-        replay_actions_command(&e.config, &e.id(), false).unwrap();
-        replay_actions_command(&e.config, &e.id(), true).unwrap();
+        e.apply(false);
         assert_eq!(
-            e.sends(),
+            e.ok_sends(),
             1,
-            "replay-actions must never re-send an executed action"
+            "real apply carries out the approved action"
         );
+        assert_eq!(e.flaky_sends(), 1);
+
+        e.apply(false);
+        e.apply(false);
+        assert_eq!(e.ok_sends(), 1, "re-applying never re-sends");
+        assert_eq!(e.flaky_sends(), 1);
 
         let ledger = e.ledger();
         assert_eq!(
@@ -1928,7 +2225,7 @@ else:
         );
         assert!(
             ledger
-                .latest(e.pkg.package_id, e.pkg.changes.pending_actions[1].action_id)
+                .latest(e.pkg.package_id, e.pkg.changes.pending_actions[2].action_id)
                 .is_none(),
             "ta_propose_* actions belong to their own replay"
         );
@@ -1936,34 +2233,107 @@ else:
 
     #[cfg(unix)]
     #[test]
-    fn dry_run_apply_executes_nothing_and_replay_command_runs_it_later() {
+    fn reapply_retries_only_failed_actions_and_does_not_recopy_files() {
         let e = e2e_fixture();
-        // `apply --dry-run` still copies files and marks the draft applied
-        // (only VCS operations are simulated), so it must never execute.
-        e.apply(true, true);
-        assert_eq!(e.sends(), 0, "dry-run apply must not execute anything");
-        assert!(e
-            .ledger()
-            .latest(e.pkg.package_id, e.pkg.changes.pending_actions[0].action_id)
-            .is_none());
+        std::fs::write(&e.fail_flag, "x").unwrap();
+        e.apply(false);
+        assert_eq!(e.readme(), "# Updated\n");
+        assert_eq!(e.ok_sends(), 1);
+        assert_eq!(e.flaky_sends(), 0, "the flaky destination failed");
+        assert_eq!(
+            e.ledger()
+                .latest(e.pkg.package_id, e.pkg.changes.pending_actions[1].action_id)
+                .unwrap()
+                .state,
+            LedgerState::Failed
+        );
 
-        replay_actions_command(&e.config, &e.id(), false).unwrap();
-        assert_eq!(e.sends(), 1);
+        // The human edits the applied file afterwards; re-apply must not
+        // overwrite it (files are not copied again).
+        std::fs::write(e.config.workspace_root.join("README.md"), "# Human edit\n").unwrap();
+        std::fs::remove_file(&e.fail_flag).unwrap();
+        e.apply(false);
+        assert_eq!(e.readme(), "# Human edit\n", "files must not be re-copied");
+        assert_eq!(e.ok_sends(), 1, "already-sent action not re-sent");
+        assert_eq!(e.flaky_sends(), 1, "failed action retried once");
     }
 
     #[cfg(unix)]
     #[test]
-    fn no_replay_actions_flag_defers_execution() {
+    fn dry_run_apply_previews_only_and_a_later_apply_does_it() {
         let e = e2e_fixture();
-        e.apply(false, false);
+        // `apply --dry-run` still copies files and marks the draft applied
+        // (only VCS operations are simulated), but never carries out actions.
+        e.apply(true);
         assert_eq!(
-            e.sends(),
+            e.ok_sends() + e.flaky_sends(),
             0,
-            "--no-replay-actions must not execute anything"
+            "dry run must not execute"
         );
-        replay_actions_command(&e.config, &e.id(), false).unwrap();
-        replay_actions_command(&e.config, &e.id(), false).unwrap();
-        assert_eq!(e.sends(), 1);
+        assert!(!e
+            .config
+            .workspace_root
+            .join(".ta")
+            .join(LEDGER_FILE)
+            .exists());
+
+        // A dry-run re-apply of the now-applied draft still only previews.
+        e.apply(true);
+        assert_eq!(e.ok_sends() + e.flaky_sends(), 0);
+
+        e.apply(false);
+        assert_eq!(e.ok_sends(), 1);
+        assert_eq!(e.flaky_sends(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skip_actions_and_automated_apply_defer_to_a_human_apply() {
+        let e = e2e_fixture();
+        e.apply_with(
+            false,
+            ApplyActions {
+                skip: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(e.ok_sends(), 0, "--skip-actions must not execute anything");
+
+        e.apply_with(
+            false,
+            ApplyActions {
+                automated: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(e.ok_sends(), 0, "automated apply must not execute anything");
+
+        e.apply(false);
+        e.apply(false);
+        assert_eq!(e.ok_sends(), 1);
+        assert_eq!(e.flaky_sends(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reapply_with_resend_only_resends_outcome_unknown() {
+        let e = e2e_fixture();
+        e.apply(false);
+        assert_eq!(e.ok_sends(), 1);
+        let sent_id = short(e.pkg.changes.pending_actions[0].action_id);
+        // --resend for an action that already went out is refused.
+        assert!(e
+            .apply_with(
+                false,
+                ApplyActions {
+                    resend: vec![sent_id],
+                    ..Default::default()
+                },
+            )
+            .is_err());
+        assert_eq!(e.ok_sends(), 1);
     }
 
     #[test]

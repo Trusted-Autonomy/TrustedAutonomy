@@ -197,10 +197,12 @@ impl ActionNode for AutoApproveAction {
             status: false,
             auto_repair: false,
             skip_plan_merge: false,
-            // An automated auto-approve must never execute irreversible external
-            // actions (email, API calls) with no human in the loop. A human runs
-            // `ta draft replay-actions <id>` to execute them.
-            no_replay_actions: true,
+            // Automated apply: external actions go through the
+            // `automation_actions` rule (today: deny), so a human runs
+            // `ta draft apply <id>` to carry them out.
+            skip_actions: false,
+            resend: vec![],
+            automated: true,
         };
         draft::execute(&cmd, &self.config).map_err(|e| GraphError::NodeExecution {
             node_id: "auto_approve".to_string(),

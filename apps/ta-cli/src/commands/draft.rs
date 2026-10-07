@@ -260,23 +260,19 @@ pub enum DraftCommands {
         /// Skipping is recorded in the audit trail with a warning.
         #[arg(long)]
         skip_plan_merge: bool,
-        /// Do not execute the draft's approved external actions (email, API calls, ...)
-        /// after applying. Run `ta draft replay-actions <id>` later to execute them.
+        /// Do not carry out the draft's approved external actions (email, API calls, ...).
+        /// Run `ta draft apply <id>` again later to do them.
         #[arg(long)]
-        no_replay_actions: bool,
-    },
-    /// Execute the approved external actions captured in an applied draft.
-    ///
-    /// `ta draft apply` does this automatically; use this command after
-    /// `--no-replay-actions`, or with `--retry-failed` to deliberately retry
-    /// actions that previously failed, were blocked, or had no executor.
-    /// Actions already executed are never re-sent (see .ta/action-replay-ledger.jsonl).
-    ReplayActions {
-        /// Draft package ID, goal title, or phase. Omit to auto-select if only one draft.
-        id: Option<String>,
-        /// Retry actions previously recorded as failed, blocked, or no-executor.
-        #[arg(long)]
-        retry_failed: bool,
+        skip_actions: bool,
+        /// Send again an external action whose outcome is unknown (an earlier apply
+        /// stopped while doing it). Use only after checking it did not go out.
+        /// Repeatable. Takes the 8-character action id that apply printed.
+        #[arg(long = "resend", value_name = "ACTION_ID")]
+        resend: Vec<String>,
+        /// Internal: set by automated callers (workflow-graph auto-approve), so external
+        /// actions go through the `automation_actions` rule.
+        #[arg(long, hide = true)]
+        automated: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -749,7 +745,9 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             status,
             auto_repair,
             skip_plan_merge,
-            no_replay_actions,
+            skip_actions,
+            resend,
+            automated,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -828,7 +826,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 ),
             };
 
-            apply_package_with_replay(
+            apply_package_with_actions(
                 config,
                 &resolved,
                 target.as_deref(),
@@ -848,9 +846,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 *validate_version,
                 *auto_repair,
                 *skip_plan_merge,
-                // Automated callers (governed workflows) set TA_NO_REPLAY_ACTIONS=1 so
-                // irreversible external actions only ever run on a human-invoked apply.
-                !*no_replay_actions && !draft_action_replay::replay_disabled_by_env(),
+                &draft_action_replay::ApplyActions::from_cli(*skip_actions, *automated, resend),
             )?;
 
             // --watch: poll until merged, then auto-sync.
@@ -860,10 +856,6 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             }
 
             Ok(())
-        }
-        DraftCommands::ReplayActions { id, retry_failed } => {
-            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
-            draft_action_replay::replay_actions_command(config, &resolved, *retry_failed)
         }
         DraftCommands::Amend {
             id,
@@ -6253,7 +6245,7 @@ fn apply_package(
     auto_repair: bool,
     skip_plan_merge: bool,
 ) -> anyhow::Result<()> {
-    apply_package_with_replay(
+    apply_package_with_actions(
         config,
         id,
         target,
@@ -6269,14 +6261,14 @@ fn apply_package(
         validate_version,
         auto_repair,
         skip_plan_merge,
-        true,
+        &draft_action_replay::ApplyActions::default(),
     )
 }
 
-/// `apply_package` plus control over replaying the draft's approved
-/// `ta_external_action` captures (see `draft_action_replay.rs`).
+/// `apply_package` plus control over the draft's approved external actions
+/// (`ta_external_action` captures, see `draft_action_replay.rs`).
 #[allow(clippy::too_many_arguments)]
-fn apply_package_with_replay(
+fn apply_package_with_actions(
     config: &GatewayConfig,
     id: &str,
     target: Option<&str>,
@@ -6292,7 +6284,7 @@ fn apply_package_with_replay(
     validate_version: bool,
     auto_repair: bool,
     skip_plan_merge: bool,
-    replay_actions: bool,
+    actions: &draft_action_replay::ApplyActions,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
 
@@ -6309,6 +6301,17 @@ fn apply_package_with_replay(
         pkg.goal.title,
         pkg.changes.artifacts.len()
     );
+
+    // Re-running apply on an applied draft is valid when it has external
+    // actions: files are not copied again; only outstanding actions are
+    // worked through (see draft_action_replay.rs).
+    if matches!(pkg.status, DraftStatus::Applied { .. })
+        && draft_action_replay::external_action_count(&pkg) > 0
+    {
+        return draft_action_replay::apply_actions_for_applied_draft(
+            config, &pkg, dry_run, actions,
+        );
+    }
 
     // Check if selective review is enabled.
     let selective_review = patterns.is_enabled();
@@ -9487,7 +9490,7 @@ fn apply_package_with_replay(
     // trustedautonomy-46: execute approved ta_external_action captures
     // (at-most-once, policy re-checked; dry run only previews). Runs while
     // the apply lock is still held. Never fails the already-applied draft.
-    draft_action_replay::post_apply_hook(config, package_id, dry_run, replay_actions);
+    draft_action_replay::post_apply_hook(config, package_id, dry_run, actions);
 
     Ok(())
 }
