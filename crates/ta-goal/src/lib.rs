@@ -27,6 +27,7 @@ pub mod history;
 pub mod human_review;
 pub mod messaging_audit;
 pub mod operations;
+pub mod origin;
 pub mod persona;
 pub mod phase_selector;
 pub mod reviewer;

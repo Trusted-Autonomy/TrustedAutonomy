@@ -118,6 +118,11 @@ pub struct ReviewInput {
     /// Pass/Warn/Block — feeds `AdvisorConfidenceReviewer`.
     #[serde(default = "default_verdict")]
     pub verdict: ta_decision::Verdict,
+    /// Origin of the goal under review (`GoalRun::origin`, H9). When it is
+    /// in `ta_goal::origin::NO_AUTO_APPROVE_ORIGINS`, `run_graph` forces the
+    /// decision to `proceed = false` regardless of reviewer votes.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 fn default_verdict() -> ta_decision::Verdict {
@@ -135,6 +140,7 @@ impl Default for ReviewInput {
             risk_score: 0,
             confidence: 1.0,
             verdict: default_verdict(),
+            origin: None,
         }
     }
 }

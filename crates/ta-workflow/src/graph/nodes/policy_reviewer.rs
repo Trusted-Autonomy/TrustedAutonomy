@@ -33,6 +33,7 @@ impl ReviewerNode for PolicyReviewer {
             lines_changed: input.lines_changed,
             plan_phase: input.plan_phase.clone(),
             agent_id: input.agent_id.clone(),
+            origin: input.origin.clone(),
         };
         let decision = should_auto_approve_draft(&draft, &self.document);
         let (score, findings) = match decision {

@@ -3890,6 +3890,29 @@ impl DiffProvider for ChangeSetDiffProvider {
     }
 }
 
+/// Origin (`GoalRun::origin`, H9) of the goal that produced a draft, looked
+/// up from the goal store by the draft's `goal.goal_id`. `None` when the goal
+/// record is missing, unparsable, or has no origin.
+pub(crate) fn goal_origin_for_draft(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+    let goal_uuid = Uuid::parse_str(goal_id).ok()?;
+    let store = GoalRunStore::new(&config.goals_dir).ok()?;
+    store.get(goal_uuid).ok().flatten()?.origin
+}
+
+/// H9: when the draft's goal came from an origin that is never
+/// auto-approved, the refusal line `ta draft view`/`ta draft apply` print.
+pub(crate) fn auto_approve_refusal_for_draft(
+    config: &GatewayConfig,
+    goal_id: &str,
+) -> Option<String> {
+    let origin = goal_origin_for_draft(config, goal_id)?;
+    if ta_goal::origin::origin_blocks_auto_approve(Some(&origin)) {
+        Some(ta_goal::origin::auto_approve_refusal(&origin))
+    } else {
+        None
+    }
+}
+
 fn view_package_json(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
@@ -3912,6 +3935,13 @@ fn view_package(
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
+
+    // H9: say up front when this draft can never be auto-approved because
+    // of where its goal came from.
+    if let Some(refusal) = auto_approve_refusal_for_draft(config, &pkg.goal.goal_id) {
+        println!("{}", refusal);
+        println!();
+    }
 
     // v0.12.2.1 / v0.13.0.1: Show chain context when this draft is part of a chain.
     let all_packages = load_all_packages(config).unwrap_or_default();
@@ -6404,6 +6434,27 @@ fn apply_package(
         };
 
         if matches!(pkg.status, DraftStatus::PendingReview) {
+            // H9: a goal from an untrusted-ingress origin (CoS, chat) never
+            // gets "apply implies approval": it needs an explicit
+            // `ta draft approve` first, whatever approval_required says.
+            if let Some(refusal) = auto_approve_refusal_for_draft(config, &pkg.goal.goal_id) {
+                tracing::warn!(
+                    draft_id = %package_id,
+                    goal_id = %pkg.goal.goal_id,
+                    "{}",
+                    refusal
+                );
+                anyhow::bail!(
+                    "Draft \"{}\" cannot be applied without explicit approval: {}.\n\
+                     Review it with `ta draft view {}`, then run `ta draft approve {}` \
+                     and re-run `ta draft apply {}`.",
+                    pkg.goal.title,
+                    refusal,
+                    id,
+                    id,
+                    id
+                );
+            }
             if approval_required {
                 anyhow::bail!(
                     "Draft \"{}\" is in PendingReview state but approval is required \
@@ -6449,6 +6500,7 @@ fn apply_package(
                     risk_score: pkg.risk.risk_score,
                     confidence: review.confidence,
                     verdict,
+                    origin: goal_origin_for_draft(config, &pkg.goal.goal_id),
                 };
                 let gate_decision = crate::commands::workflow_graph::run_apply_gate(
                     config,
@@ -19208,6 +19260,129 @@ fn run() {
     /// v0.17.0.12.15: a supervisor review with a clean Pass verdict, high
     /// confidence, and low risk score must still auto-approve on apply —
     /// the Decision gate should not regress the existing single-author flow.
+    /// H9: set up a PendingReview draft with a high-confidence Pass
+    /// supervisor review (the case that auto-approves on apply today), on a
+    /// goal with the given origin. Returns (project guard, config, pkg id).
+    fn h9_pending_draft_with_origin(
+        origin: Option<&str>,
+    ) -> (TempDir, GatewayConfig, String, String) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "H9 origin test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test origin refusal".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = goal_store.list().unwrap()[0].clone();
+        goal.origin = origin.map(str::to_string);
+        goal_store.save(&goal).unwrap();
+        let goal_id = goal.goal_run_id.to_string();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "H9 origin test", false).unwrap();
+        let mut pkg = load_all_packages(&config).unwrap()[0].clone();
+        pkg.supervisor_review = Some(ta_changeset::supervisor_review::SupervisorReview {
+            verdict: ta_changeset::supervisor_review::SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![],
+            summary: "Looks good".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.99,
+        });
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+        (project, config, pkg_id, goal_id)
+    }
+
+    fn h9_apply(config: &GatewayConfig, pkg_id: &str) -> anyhow::Result<()> {
+        apply_package(
+            config,
+            pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+    }
+
+    #[test]
+    fn h9_apply_refuses_apply_implies_approval_for_cos_and_chat_origin() {
+        for origin in ["cos", "chat"] {
+            let (_project, config, pkg_id, goal_id) = h9_pending_draft_with_origin(Some(origin));
+            assert_eq!(
+                auto_approve_refusal_for_draft(&config, &goal_id)
+                    .unwrap()
+                    .split(" (")
+                    .next()
+                    .unwrap(),
+                format!("auto-approve refused: origin={}", origin)
+            );
+            let err = h9_apply(&config, &pkg_id).expect_err("must refuse");
+            assert!(
+                err.to_string()
+                    .contains(&format!("auto-approve refused: origin={}", origin)),
+                "{}",
+                err
+            );
+            let reloaded = load_all_packages(&config)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.package_id.to_string() == pkg_id)
+                .unwrap();
+            assert!(
+                matches!(reloaded.status, DraftStatus::PendingReview),
+                "draft must stay pending human review, got {:?}",
+                reloaded.status
+            );
+        }
+    }
+
+    #[test]
+    fn h9_apply_after_explicit_human_approval_still_works_for_cos_origin() {
+        let (_project, config, pkg_id, _goal_id) = h9_pending_draft_with_origin(Some("cos"));
+        let mut pkg = load_all_packages(&config).unwrap()[0].clone();
+        pkg.status = DraftStatus::Approved {
+            approved_by: "human".to_string(),
+            approved_at: Utc::now(),
+        };
+        save_package(&config, &pkg).unwrap();
+        h9_apply(&config, &pkg_id).unwrap();
+    }
+
+    #[test]
+    fn h9_apply_without_origin_or_other_origin_auto_approves_as_before() {
+        for origin in [None, Some("cli")] {
+            let (_project, config, pkg_id, goal_id) = h9_pending_draft_with_origin(origin);
+            assert!(auto_approve_refusal_for_draft(&config, &goal_id).is_none());
+            h9_apply(&config, &pkg_id).unwrap();
+            let reloaded = load_all_packages(&config)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.package_id.to_string() == pkg_id)
+                .unwrap();
+            assert!(matches!(reloaded.status, DraftStatus::Applied { .. }));
+        }
+    }
+
     #[test]
     fn apply_auto_approves_when_supervisor_review_signals_commit() {
         let project = TempDir::new().unwrap();

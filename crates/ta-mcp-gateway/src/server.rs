@@ -815,6 +815,9 @@ impl GatewayState {
             store_path,
         );
         goal_run.goal_run_id = goal_run_id;
+        // H9: anything a chat session produces is chat-originated and is
+        // never auto-approved.
+        goal_run.origin = Some(ta_goal::origin::CHAT_ORIGIN.to_string());
 
         // Unlike compile_with_id, compile_chat_manifest generates its own
         // manifest_id internally: keep GoalRun's own manifest_id field
@@ -2475,6 +2478,120 @@ mod tests {
             },
         )
         .unwrap_or_else(|e| panic!("legit staged write failed: {}", e.message));
+    }
+
+    // ── H9: no auto-approve shortcut for CoS/chat-originated goals ──────
+
+    /// Build + submit a draft for `goal_run_id` through the real `ta_draft`
+    /// MCP handler, with project policy auto-approving every draft and a
+    /// non-blocking review channel standing in for the human. Returns the
+    /// submit response JSON.
+    fn submit_draft_with_auto_approve_policy(
+        server: &TaGatewayServer,
+        workspace: &std::path::Path,
+        goal_run_id: Uuid,
+        path: &str,
+    ) -> serde_json::Value {
+        use crate::server::DraftToolParams;
+        use crate::tools::draft::handle_draft;
+
+        let mut doc = ta_policy::PolicyDocument::default();
+        doc.defaults.auto_approve.drafts.enabled = true;
+        std::fs::create_dir_all(workspace.join(".ta")).unwrap();
+        std::fs::write(
+            workspace.join(".ta/policy.yaml"),
+            serde_yaml::to_string(&doc).unwrap(),
+        )
+        .unwrap();
+        {
+            let mut state = server.state.lock().unwrap();
+            state.set_review_channel(Box::new(ta_changeset::AutoApproveChannel::new()));
+            state
+                .connectors
+                .get_mut(&goal_run_id)
+                .unwrap()
+                .write_patch(path, b"content")
+                .unwrap();
+        }
+        for action in ["build", "submit"] {
+            let result = handle_draft(
+                &server.state,
+                DraftToolParams {
+                    action: action.to_string(),
+                    goal_run_id: Some(goal_run_id.to_string()),
+                    summary: Some("h9 test".to_string()),
+                    draft_id: None,
+                    require_review: None,
+                },
+            )
+            .unwrap_or_else(|e| panic!("ta_draft {} failed: {}", action, e.message));
+            if action == "submit" {
+                let text = match &result.content[0].raw {
+                    rmcp::model::RawContent::Text(t) => t.text.clone(),
+                    other => panic!("unexpected content: {:?}", other),
+                };
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
+        unreachable!()
+    }
+
+    fn set_goal_origin(server: &TaGatewayServer, goal_run_id: Uuid, origin: Option<&str>) {
+        let state = server.state.lock().unwrap();
+        let mut goal = state.goal_store.get(goal_run_id).unwrap().unwrap();
+        goal.origin = origin.map(str::to_string);
+        state.goal_store.save(&goal).unwrap();
+    }
+
+    #[test]
+    fn h9_cos_origin_goal_is_not_auto_approved_by_mcp_submit() {
+        let (server, dir) = test_server();
+        let goal_id = start_goal(&server);
+        set_goal_origin(&server, goal_id, Some("cos"));
+        let response = submit_draft_with_auto_approve_policy(&server, dir.path(), goal_id, "a.txt");
+        assert_ne!(response["status"], "auto_approved", "{}", response);
+        assert_ne!(response["approved_by"], "policy:auto", "{}", response);
+        let blockers = response["auto_approve_blockers"].to_string();
+        assert!(
+            blockers.contains("auto-approve refused: origin=cos"),
+            "refusal must be visible in the response: {}",
+            response
+        );
+    }
+
+    #[test]
+    fn h9_chat_session_is_stamped_chat_origin_and_not_auto_approved() {
+        let (server, dir) = test_server();
+        let goal_id = {
+            let mut state = server.state.lock().unwrap();
+            let goal = state
+                .start_chat_session("chat-agent", "fs://workspace/**", 1)
+                .unwrap();
+            assert_eq!(goal.origin.as_deref(), Some("chat"));
+            goal.goal_run_id
+        };
+        let path = format!("{}/notes.md", ta_policy::CHAT_SCRATCH_DIR);
+        let response = submit_draft_with_auto_approve_policy(&server, dir.path(), goal_id, &path);
+        assert_ne!(response["status"], "auto_approved", "{}", response);
+        assert!(response["auto_approve_blockers"]
+            .to_string()
+            .contains("auto-approve refused: origin=chat"));
+    }
+
+    #[test]
+    fn h9_goal_without_origin_or_with_other_origin_is_auto_approved_as_before() {
+        for origin in [None, Some("cli")] {
+            let (server, dir) = test_server();
+            let goal_id = start_goal(&server);
+            set_goal_origin(&server, goal_id, origin);
+            let response =
+                submit_draft_with_auto_approve_policy(&server, dir.path(), goal_id, "a.txt");
+            assert_eq!(
+                response["status"], "auto_approved",
+                "origin {:?}: {}",
+                origin, response
+            );
+        }
     }
 
     #[test]

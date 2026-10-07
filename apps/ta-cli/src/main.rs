@@ -465,6 +465,13 @@ enum Commands {
         /// purpose is recording its token cost, never applying.
         #[arg(long, hide = true)]
         auto_cancel_after_draft: bool,
+        /// Component that originated this goal (e.g. `cos` when the
+        /// Chief-of-Staff dispatched it). Stored on the goal record as
+        /// `origin`. Goals with origin `cos` or `chat` are never
+        /// auto-approved by any path: they always go to human review.
+        /// 1-32 chars of `[a-z0-9_-]`. Falls back to `$TA_GOAL_ORIGIN`.
+        #[arg(long)]
+        origin: Option<String>,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1686,9 +1693,19 @@ fn dispatch_raw(
             experiment_shadow_pair_id,
             experiment_shadow_overrides,
             auto_cancel_after_draft,
+            origin,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
+
+            // H9: `--origin` is validated here and exported as
+            // TA_GOAL_ORIGIN, which every goal-creating path below reads
+            // (and which nested `ta` invocations inherit), so the origin
+            // reaches the goal record however this run is executed.
+            if let Some(o) = origin {
+                let o = ta_goal::origin::validate_origin(o).map_err(anyhow::Error::msg)?;
+                std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, &o);
+            }
 
             // Paired cost-experiment shadow-goal bypass flags (v0.17.x,
             // internal/hidden): bundle the four `--experiment-shadow-*`
@@ -2248,6 +2265,18 @@ mod verb_dispatch_tests {
             parse(&["sync"]),
             Commands::Sync { noun: None, .. }
         ));
+    }
+
+    #[test]
+    fn run_accepts_origin_flag() {
+        match parse(&["run", "Some goal", "--origin", "cos"]) {
+            Commands::Run { origin, .. } => assert_eq!(origin.as_deref(), Some("cos")),
+            other => panic!("expected Commands::Run, got {other:?}"),
+        }
+        match parse(&["run", "Some goal"]) {
+            Commands::Run { origin, .. } => assert_eq!(origin, None),
+            other => panic!("expected Commands::Run, got {other:?}"),
+        }
     }
 
     #[test]

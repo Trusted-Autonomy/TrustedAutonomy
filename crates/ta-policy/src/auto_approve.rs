@@ -29,6 +29,31 @@ pub struct DraftInfo {
     pub plan_phase: Option<String>,
     /// Agent ID that produced this draft.
     pub agent_id: String,
+    /// Origin of the goal that produced this draft (`GoalRun::origin`, H9).
+    /// An origin in `ta_goal::origin::NO_AUTO_APPROVE_ORIGINS` (e.g. `cos`,
+    /// `chat`) is never auto-approved. `None` keeps prior behavior.
+    pub origin: Option<String>,
+}
+
+/// H9: refuse auto-approval for goals from an untrusted-ingress origin,
+/// before any other condition (including constitution `approve` rules) is
+/// consulted. Logged so the refusal is observable.
+fn origin_refusal(draft: &DraftInfo) -> Option<AutoApproveDecision> {
+    let origin = draft.origin.as_deref()?;
+    if !ta_goal::origin::origin_blocks_auto_approve(Some(origin)) {
+        return None;
+    }
+    let message = ta_goal::origin::auto_approve_refusal(origin);
+    tracing::warn!(
+        agent_id = %draft.agent_id,
+        origin = %origin,
+        changed_paths = draft.changed_paths.len(),
+        "{}",
+        message
+    );
+    Some(AutoApproveDecision::Denied {
+        blockers: vec![message],
+    })
 }
 
 /// Result of auto-approval evaluation.
@@ -73,6 +98,9 @@ pub fn should_auto_approve_with_rules(
     doc: &PolicyDocument,
     constitution_rules: &[ApprovalRule],
 ) -> AutoApproveDecision {
+    if let Some(refusal) = origin_refusal(draft) {
+        return refusal;
+    }
     // Agent security level check always applies.
     let agent_level = doc
         .agents
@@ -149,6 +177,9 @@ pub fn should_auto_approve_with_rules(
 /// per-agent overrides. Returns `Denied` immediately if the master
 /// switch is off or any condition fails.
 pub fn should_auto_approve_draft(draft: &DraftInfo, doc: &PolicyDocument) -> AutoApproveDecision {
+    if let Some(refusal) = origin_refusal(draft) {
+        return refusal;
+    }
     let config = resolve_agent_config(doc, &draft.agent_id);
 
     let mut reasons = Vec::new();
@@ -386,7 +417,72 @@ mod tests {
             lines_changed: 50,
             plan_phase: None,
             agent_id: "test-agent".to_string(),
+            origin: None,
         }
+    }
+
+    // ── H9: no auto-approve shortcut for CoS/chat-originated goals ──────
+
+    fn approve_everything_rules() -> Vec<ApprovalRule> {
+        vec![ApprovalRule {
+            patterns: vec!["**".to_string()],
+            action: ApprovalAction::Approve,
+            label: Some("approve all".to_string()),
+        }]
+    }
+
+    #[test]
+    fn h9_cos_and_chat_origin_never_auto_approved_by_policy_flag() {
+        let doc = make_doc(true);
+        for origin in ["cos", "chat", "COS"] {
+            let mut draft = make_draft(&["tests/foo.rs"]);
+            draft.origin = Some(origin.to_string());
+            match should_auto_approve_draft(&draft, &doc) {
+                AutoApproveDecision::Denied { blockers } => assert!(
+                    blockers[0].contains("auto-approve refused: origin="),
+                    "{:?}",
+                    blockers
+                ),
+                other => panic!("origin {} must not auto-approve, got {:?}", origin, other),
+            }
+        }
+    }
+
+    #[test]
+    fn h9_cos_origin_never_auto_approved_even_by_an_approve_all_constitution_rule() {
+        let doc = make_doc(true);
+        let mut draft = make_draft(&["tests/foo.rs"]);
+        draft.origin = Some("cos".to_string());
+        let result = should_auto_approve_with_rules(&draft, &doc, &approve_everything_rules());
+        match result {
+            AutoApproveDecision::Denied { blockers } => {
+                assert!(blockers[0].contains("auto-approve refused: origin=cos"))
+            }
+            other => panic!("expected refusal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h9_none_and_other_origins_behave_exactly_as_before() {
+        let doc = make_doc(true);
+        for origin in [None, Some("cli".to_string()), Some("poller".to_string())] {
+            let mut draft = make_draft(&["tests/foo.rs"]);
+            draft.origin = origin.clone();
+            assert!(
+                should_auto_approve_draft(&draft, &doc).is_approved(),
+                "origin {:?} must keep approving",
+                origin
+            );
+            assert!(
+                should_auto_approve_with_rules(&draft, &doc, &approve_everything_rules())
+                    .is_approved(),
+                "origin {:?} must keep approving via rules",
+                origin
+            );
+        }
+        let mut draft = make_draft(&["tests/foo.rs"]);
+        draft.origin = Some("cli".to_string());
+        assert!(!should_auto_approve_draft(&draft, &make_doc(false)).is_approved());
     }
 
     #[test]

@@ -2981,6 +2981,20 @@ pub fn execute(
         }
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
 
+        // H9: stamp the goal's origin (`ta run --origin`, exported as
+        // TA_GOAL_ORIGIN). Only set when present, so the `--goal-id` reuse
+        // path never clears an origin already on the record.
+        if let Some(origin) = ta_goal::origin::origin_from_env().map_err(anyhow::Error::msg)? {
+            if ta_goal::origin::origin_blocks_auto_approve(Some(&origin)) && !quiet {
+                println!(
+                    "Origin: {} (auto-approve disabled: this goal's draft always needs human review)",
+                    origin
+                );
+            }
+            tracing::info!(goal_id = %updated_goal.goal_run_id, origin = %origin, "goal origin set");
+            updated_goal.origin = Some(origin);
+        }
+
         // Generic cost-classification tag (v0.17.x cost-experiment
         // framework): `--workflow-tag`, opaque to TA core. Set only when the
         // flag is actually present -- this block also runs on the
