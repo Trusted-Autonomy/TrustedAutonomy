@@ -103,6 +103,14 @@ pub struct TeamMember {
     /// per-project routing hint (v0.17.11.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub handles_tags: Vec<String>,
+    /// Goal origin every launch of this role carries (H9), e.g. `"cos"`
+    /// for the Chief-of-Staff. When set, the daemon passes
+    /// `--origin <value>` on every `ta run` it builds for this role, and an
+    /// origin that is never auto-approved (`cos`, `chat`) also forces
+    /// `--chat-mode`, so a role marked as the CoS can never launch with a
+    /// full tool surface. Validated by `ta_goal::origin::validate_origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 // ── RoleRef ───────────────────────────────────────────────────────────────────

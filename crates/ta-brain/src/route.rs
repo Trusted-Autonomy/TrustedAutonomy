@@ -744,6 +744,7 @@ mod tests {
             security: AdvisorSecurity::ReadOnly,
             persona: Some("careful-implementer".to_string()),
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         team_config.save(tmp.path()).unwrap();
@@ -761,6 +762,7 @@ mod tests {
             security: AdvisorSecurity::ReadOnly,
             persona: Some("careful-implementer".to_string()),
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         team_config.save(tmp.path()).unwrap();
@@ -844,6 +846,7 @@ mod tests {
             security: AdvisorSecurity::Suggest,
             persona: None,
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         team_config.save(tmp.path()).unwrap();
