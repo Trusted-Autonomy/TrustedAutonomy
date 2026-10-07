@@ -23,6 +23,26 @@ pub struct PersonaCapabilities {
     /// Tool names the agent may NOT use.
     #[serde(default)]
     pub forbidden_tools: Vec<String>,
+    /// Read-only persona (H7), e.g. the Chief-of-Staff: it must hold no
+    /// tool that mutates anything. When true, `ta run` launches it with
+    /// `allowed_tools` if declared, else
+    /// `tool_surface::READ_ONLY_PERSONA_ALLOWED_TOOLS`, refuses to launch if
+    /// the list contains any native tool, wildcard, foreign MCP server or
+    /// mutating TA tool (`tool_surface::validate_read_only_tool_surface`),
+    /// and explicitly denies every mutating TA MCP tool. Never falls back
+    /// to the broad default allow-list.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Launch this persona as a read-only chat-mode session (equivalent to
+    /// `ta run --chat-mode`). The agent's capability manifest becomes the
+    /// compiled chat manifest (read anywhere in the workspace, write only to
+    /// `.ta/chat-scratch/`, no git/email/external grants), its TA MCP server
+    /// runs locked to that chat session, and its effective tool surface is
+    /// `allowed_tools` intersected with the chat-mode profile: any mutating
+    /// tool listed in `allowed_tools` is stripped with a warning, and every
+    /// native tool (Bash, Read, Write, Edit, ...) is denied.
+    #[serde(default)]
+    pub chat_mode: bool,
 }
 
 /// Style/output preferences for a persona.
@@ -193,6 +213,8 @@ mod tests {
             capabilities: PersonaCapabilities {
                 allowed_tools: vec!["mcp__ta__ta_fs_read".to_string(), "Bash(*)".to_string()],
                 forbidden_tools: vec!["Write(*)".to_string()],
+                read_only: false,
+                chat_mode: false,
             },
             style: PersonaStyle {
                 output_format: "markdown".to_string(),
@@ -275,5 +297,25 @@ mod tests {
 
         let loaded = PersonaConfig::load(dir.path(), "financial-analyst").unwrap();
         assert_eq!(loaded.persona.agent, Some("auto".to_string()));
+    }
+
+    #[test]
+    fn persona_chat_mode_parses_from_toml_and_defaults_off() {
+        let dir = tempdir().unwrap();
+        let personas = dir.path().join(".ta").join("personas");
+        std::fs::create_dir_all(&personas).unwrap();
+        std::fs::write(
+            personas.join("chief-of-staff.toml"),
+            "[persona]\nname = \"chief-of-staff\"\n\n[capabilities]\nchat_mode = true\n\
+             allowed_tools = [\"mcp__ta__ta_fs_read\"]\n",
+        )
+        .unwrap();
+        let loaded = PersonaConfig::load(dir.path(), "chief-of-staff").unwrap();
+        assert!(loaded.capabilities.chat_mode);
+
+        // A persona that never mentions chat_mode keeps today's behavior.
+        sample_persona().save(dir.path()).unwrap();
+        let plain = PersonaConfig::load(dir.path(), "financial-analyst").unwrap();
+        assert!(!plain.capabilities.chat_mode);
     }
 }

@@ -29,7 +29,11 @@ pub enum FsConnectorError {
     #[error("no staged changes for goal '{goal_id}'")]
     NoStagedChanges { goal_id: String },
 
-    /// A path traversal attempt was detected.
-    #[error("path traversal detected: '{path}'")]
-    PathTraversal { path: String },
+    /// A path traversal attempt was detected: an absolute path, a `..`
+    /// component, or a symlink resolving outside the source root (H5).
+    #[error(
+        "path traversal detected: '{path}' ({reason}). Use a path relative to the \
+         workspace root with no '..' components."
+    )]
+    PathTraversal { path: String, reason: String },
 }

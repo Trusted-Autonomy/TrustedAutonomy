@@ -13,9 +13,14 @@ pub enum WorkspaceError {
         source: std::io::Error,
     },
 
-    /// A path traversal attempt was detected (security violation).
-    #[error("path traversal detected: '{path}' resolves outside staging directory")]
-    PathTraversal { path: String },
+    /// A path traversal attempt was detected (security violation): an
+    /// absolute path, a `..` component, or a symlink that resolves outside
+    /// the staging directory (see `path_safety`).
+    #[error(
+        "path traversal detected: '{path}' resolves outside staging directory ({reason}). \
+         Use a path relative to the workspace root with no '..' components."
+    )]
+    PathTraversal { path: String, reason: String },
 
     /// The requested file was not found in the staging workspace.
     #[error("file not found in staging: '{path}'")]
@@ -49,6 +54,23 @@ pub enum WorkspaceError {
         .conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
     )]
     SharedFileConflicts { conflicts: Vec<SharedFileConflict> },
+
+    /// An artifact targets a protected infrastructure path (`.git/`, `.ta/`,
+    /// and so on, in any case or Windows spelling), escapes the project root,
+    /// or would be written through a symlink into one of those (CR-06).
+    /// Refused before any file is written.
+    #[error(
+        "refused to write '{path}' into {}: {reason}. Nothing was applied. \
+         Draft artifacts may never modify TA or VCS infrastructure directories; \
+         deny this draft (`ta draft deny <id>`) and inspect the goal's staging \
+         directory for how the path was produced",
+        .target_dir.display()
+    )]
+    ProtectedPathRefused {
+        path: String,
+        reason: String,
+        target_dir: PathBuf,
+    },
 
     /// A staging path is not a properly isolated, goal-scoped overlay
     /// directory (v0.17.10.2). Either it resolves to the same location as

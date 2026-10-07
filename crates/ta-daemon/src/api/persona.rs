@@ -110,6 +110,8 @@ pub async fn save_persona(
         capabilities: ta_goal::PersonaCapabilities {
             allowed_tools: body.allowed_tools.clone(),
             forbidden_tools: body.forbidden_tools.clone(),
+            read_only: false,
+            chat_mode: false,
         },
         style: ta_goal::PersonaStyle {
             output_format: body.output_format.clone(),

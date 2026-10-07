@@ -176,21 +176,20 @@ impl StagingWorkspace {
     /// Resolve a relative path to an absolute path within the staging dir.
     /// Rejects path traversal attempts.
     fn resolve_path(&self, relative_path: &str) -> Result<PathBuf, WorkspaceError> {
-        // Reject obvious path traversal.
-        if relative_path.contains("..") {
-            return Err(WorkspaceError::PathTraversal {
-                path: relative_path.to_string(),
-            });
-        }
+        // Rejects absolute paths (POSIX and Windows forms, on any host),
+        // `..` components, and symlinks that resolve outside the staging
+        // directory (H5, see `path_safety`).
+        let full_path = crate::path_safety::resolve_within_root(&self.staging_dir, relative_path)
+            .map_err(|reason| WorkspaceError::PathTraversal {
+            path: relative_path.to_string(),
+            reason,
+        })?;
 
-        let full_path = self.staging_dir.join(relative_path);
-
-        // Canonicalize isn't reliable on non-existent paths, so we check
-        // the resolved path starts with the staging directory.
-        // For new files, we verify the parent exists after creation.
+        // Belt and braces: the lexical join must also stay under the root.
         if !full_path.starts_with(&self.staging_dir) {
             return Err(WorkspaceError::PathTraversal {
                 path: relative_path.to_string(),
+                reason: "joined path is not under the staging directory".to_string(),
             });
         }
 
@@ -331,6 +330,34 @@ mod tests {
         let ws = StagingWorkspace::new("goal-1", dir.path()).unwrap();
 
         let result = ws.write_file("../escape.txt", b"malicious");
+        assert!(matches!(result, Err(WorkspaceError::PathTraversal { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_out_of_staging_rejected_for_write_and_read() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"TOP-SECRET").unwrap();
+        let ws = StagingWorkspace::new("goal-1", dir.path()).unwrap();
+        symlink(outside.path(), ws.staging_path().join("link")).unwrap();
+
+        let write = ws.write_file("link/pwned.txt", b"pwned");
+        assert!(matches!(write, Err(WorkspaceError::PathTraversal { .. })));
+        assert!(!outside.path().join("pwned.txt").exists());
+
+        let read = ws.read_file("link/secret.txt");
+        assert!(matches!(read, Err(WorkspaceError::PathTraversal { .. })));
+    }
+
+    #[test]
+    fn absolute_paths_rejected_even_when_inside_staging() {
+        let dir = tempdir().unwrap();
+        let ws = StagingWorkspace::new("goal-1", dir.path()).unwrap();
+        let abs_inside = ws.staging_path().join("x.txt");
+        let result = ws.write_file(&abs_inside.to_string_lossy(), b"x");
         assert!(matches!(result, Err(WorkspaceError::PathTraversal { .. })));
     }
 
