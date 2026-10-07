@@ -258,6 +258,13 @@ fn replay_one(
         }
         ProposeKind::Reassign => {
             let task_id = required(p, "task_id")?;
+            // A missing key is a corrupt action, not a request to clear the
+            // assignee: only an explicit `null` clears.
+            if p.get("assignee_id").is_none() {
+                anyhow::bail!(
+                    "pending action is missing the `assignee_id` key (use an explicit null to clear the assignee)"
+                );
+            }
             let assignee = str_param(p, "assignee_id");
             client.update_task_assignee(task_id, assignee)?;
             Ok(match assignee {
@@ -535,6 +542,20 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn reassign_with_missing_assignee_id_key_fails_instead_of_clearing() {
+        let (s, reqs) = replay_against_mock(
+            "wf-1",
+            &[action(
+                ProposeKind::Reassign,
+                serde_json::json!({"task_id": "wf-1"}),
+            )],
+        );
+        assert_eq!(s.replayed, 0);
+        assert_eq!(s.failed, 1);
+        assert!(reqs.is_empty(), "no Wayfinder call may be made: {reqs:?}");
     }
 
     #[test]
