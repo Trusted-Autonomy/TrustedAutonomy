@@ -27,11 +27,13 @@ use clap::Subcommand;
 // Fix: re-sign the daemon binary here, immediately before every spawn,
 // so this is correct no matter which command built it. Mirrors
 // install_local.sh's own `ta_codesign` function (same identity env var,
-// same identifier, same ad-hoc fallback) but does not call
-// `security find-identity` first -- it tries the named identity directly
-// and falls back to ad-hoc on failure, which needs one process instead of
-// two and avoids a separate Keychain-enumeration call that can itself block
-// waiting for an interactive unlock in some environments.
+// same identifier) but only signs when the named local identity exists:
+// there is no ad-hoc fallback, because this code also runs on end users'
+// machines, where it must leave the installed release binary untouched.
+// It does not call `security find-identity` first (a separate
+// Keychain-enumeration call can itself block waiting for an unlock); it
+// tries the named identity directly, and `codesign` fails fast without
+// modifying the file when that identity is absent.
 //
 // Best-effort and bounded: a signing failure, a missing `codesign` binary,
 // or a hung/slow Keychain prompt must never block the daemon from starting
@@ -45,13 +47,14 @@ fn ensure_stable_codesign(binary_path: &Path) {
     let identity = std::env::var("TA_CODESIGN_IDENTITY")
         .unwrap_or_else(|_| "Trusted Autonomy Local Dev".to_string());
 
-    if run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT) {
-        return;
-    }
-    // Named identity not found, Keychain locked, or timed out -- fall back
-    // to ad-hoc signing (still a stable identifier, just not a stable
-    // identity), same fallback install_local.sh's ta_codesign uses.
-    let _ = run_codesign_with_timeout(binary_path, "-", IDENTIFIER, CODESIGN_TIMEOUT);
+    // Local-dev only. Sign when the named identity exists in this user's
+    // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
+    // function also runs on end users' machines (who do not have the dev
+    // certificate), and re-signing their installed release binary ad-hoc
+    // on every launch would rewrite it and, once releases carry a real
+    // Developer ID signature, replace that signature. `codesign` fails fast
+    // without touching the file when the identity is absent.
+    let _ = run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1547,6 +1550,26 @@ fn cmd_config_show(project_root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Public-install safety: when the named local signing identity does not
+    /// exist (every end user's machine), `ensure_stable_codesign` must leave
+    /// the binary byte-for-byte untouched. No ad-hoc re-signing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_stable_codesign_leaves_binary_untouched_without_the_local_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fake-ta");
+        std::fs::copy("/usr/bin/true", &bin).unwrap();
+        let before = std::fs::read(&bin).unwrap();
+        std::env::set_var("TA_CODESIGN_IDENTITY", "ta-test-nonexistent-identity-xyz");
+        ensure_stable_codesign(&bin);
+        std::env::remove_var("TA_CODESIGN_IDENTITY");
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            before,
+            "binary was modified even though the signing identity does not exist"
+        );
+    }
 
     #[test]
     fn pid_file_roundtrip() {
