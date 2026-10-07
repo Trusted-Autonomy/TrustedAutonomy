@@ -90,7 +90,11 @@ Sent to `agentic-pm-ba` for `ta-virtual-team`/`wayfinder-api`-side implementatio
 
 ## Open items remaining after dispatch
 
-- `security-hypotheses.md` should gain new entries once this ships: CoS's declared toolset contains no mutating tool (a manifest/tool-availability check, not just a `PolicyEngine::evaluate()` check, since several of the tools involved, wiki, whiteboard, the new outcome-reporting surface, aren't policy-gated at all); a prompt-injected routing decision cannot reach an agent persona outside the task type's allowed set; no goal receives an auto-approve shortcut solely because CoS originated it.
+- **Done** (`fix/cos-security-hardening`): `security-hypotheses.md` gained the three entries.
+  - **H7, blocked.** CoS's toolset contains no mutating tool, checked at the tool-availability level. `ta_goal::tool_surface` classifies every registered TA MCP tool as read-only or mutating (a gateway test fails when a new tool is registered unclassified). A persona with `read_only = true` launches with only read-only TA MCP tools, has every mutating TA MCP tool explicitly denied, and refuses to launch on any native, wildcard, foreign or mutating entry. Remaining `ta-virtual-team` step: set `read_only = true` in `chief-of-staff.toml`.
+  - **H8, open.** The task-type to allowed-persona mapping does not exist in TA core (it belongs to `ta-virtual-team`'s dispatch path and dispatch item 5's reconciliation), so the covering test is specified in the ledger for `ta-virtual-team`. TA core's `ta_brain::route` currently lets an explicit/trigger persona hint win with no allowed-set check; noted there.
+  - **H9, blocked.** `GoalRun` gained `origin` (`ta run --origin cos` / `TA_GOAL_ORIGIN`; chat sessions are stamped `chat`). Origins `cos` and `chat` are never auto-approved by policy auto-approve, constitution rules, the workflow-graph decision, `ta draft apply`'s apply-implies-approval, or advisor `auto` security, with a visible `auto-approve refused: origin=cos`. Remaining `ta-virtual-team` step: launch CoS-dispatched goals with `--origin cos`.
+- **Also done on the same branch:** H5 (absolute-path, traversal and symlink workspace escape through `ta_fs_read`/`ta_fs_write`) is fixed at the policy, connector and staging layers, with the secrets backstop extended to home-directory credential locations. This matters most for CoS, whose chat-mode "read anywhere in the workspace" grant could previously read anywhere on disk.
 
 ## Self-review
 

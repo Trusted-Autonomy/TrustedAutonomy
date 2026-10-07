@@ -29,6 +29,9 @@ pub struct WorkflowContext {
     pub security: AdvisorSecurity,
     /// If true (and security = Auto), structural plan edits are permitted.
     pub allow_plan_structural_edits: bool,
+    /// Origin of the goal this context acts for (`GoalRun::origin`, H9).
+    /// `cos`/`chat` clamp `Auto` to `ReadOnly`, see [`Self::effective_security`].
+    pub origin: Option<String>,
 }
 
 impl WorkflowContext {
@@ -37,7 +40,24 @@ impl WorkflowContext {
             workspace_root: workspace_root.into(),
             security,
             allow_plan_structural_edits: false,
+            origin: None,
         }
+    }
+
+    /// Set the originating component of the goal (H9).
+    pub fn with_origin(mut self, origin: Option<String>) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    /// The security level actually in force: `security` clamped by
+    /// `origin` (`Auto` becomes `ReadOnly` for `cos`/`chat`). Every
+    /// primitive that gates on `Auto` must use this, never `security`
+    /// directly.
+    pub fn effective_security(&self) -> AdvisorSecurity {
+        self.security
+            .clone()
+            .clamped_for_origin(self.origin.as_deref())
     }
 }
 
@@ -138,7 +158,7 @@ pub fn check_plan_mod_constitution(
     let is_structural = targets.iter().any(|t| edit_text.contains(t));
 
     if is_structural {
-        if ctx.allow_plan_structural_edits && ctx.security == AdvisorSecurity::Auto {
+        if ctx.allow_plan_structural_edits && ctx.effective_security() == AdvisorSecurity::Auto {
             tracing::warn!(
                 "Constitution guard: allowing structural plan edit (allow_plan_structural_edits=true, security=auto)"
             );
@@ -243,7 +263,7 @@ impl WorkflowPrimitive for StartGoalPrimitive {
         envelope: &ActionEnvelope,
         ctx: &WorkflowContext,
     ) -> Result<ActionEnvelope, PrimitiveError> {
-        if ctx.security != AdvisorSecurity::Auto {
+        if ctx.effective_security() != AdvisorSecurity::Auto {
             return Err(PrimitiveError::Rejected(
                 "StartGoalPrimitive: launching a goal autonomously requires \
                  advisor_security = \"auto\". The human must approve this action."
@@ -392,6 +412,59 @@ mod tests {
             context: None,
         });
         assert!(router.route(&env, &ctx).is_ok());
+    }
+
+    // ── H9: cos/chat origin can never be driven by Auto security ──────────────
+
+    #[test]
+    fn h9_auto_security_cannot_start_a_goal_for_cos_or_chat_origin() {
+        let tmp = TempDir::new().unwrap();
+        let router = ActionRouter::with_defaults();
+        for origin in ["cos", "chat"] {
+            let ctx = make_ctx(&tmp, AdvisorSecurity::Auto).with_origin(Some(origin.into()));
+            assert_eq!(ctx.effective_security(), AdvisorSecurity::ReadOnly);
+            let env = envelope(AgentAction::StartGoal {
+                title: "injected: grant full access".to_string(),
+                phase_id: None,
+                context: None,
+            });
+            assert!(
+                router.route(&env, &ctx).is_err(),
+                "origin {} must not start a goal autonomously",
+                origin
+            );
+        }
+    }
+
+    #[test]
+    fn h9_auto_security_cannot_make_structural_plan_edits_for_cos_origin() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = make_ctx(&tmp, AdvisorSecurity::Auto).with_origin(Some("cos".into()));
+        ctx.allow_plan_structural_edits = true;
+        assert!(check_plan_mod_constitution("remove constitution_check", &ctx).is_err());
+    }
+
+    #[test]
+    fn h9_none_and_other_origins_keep_auto_behavior() {
+        let tmp = TempDir::new().unwrap();
+        let router = ActionRouter::with_defaults();
+        for origin in [None, Some("cli".to_string())] {
+            let mut ctx = make_ctx(&tmp, AdvisorSecurity::Auto).with_origin(origin.clone());
+            assert_eq!(ctx.effective_security(), AdvisorSecurity::Auto);
+            let env = envelope(AgentAction::StartGoal {
+                title: "Fix tests".to_string(),
+                phase_id: None,
+                context: None,
+            });
+            assert!(router.route(&env, &ctx).is_ok(), "origin {:?}", origin);
+            ctx.allow_plan_structural_edits = true;
+            assert!(check_plan_mod_constitution("remove constitution_check", &ctx).is_ok());
+        }
+        // Clamping never raises: Suggest/ReadOnly with cos stay as they are.
+        assert_eq!(
+            AdvisorSecurity::Suggest.clamped_for_origin(Some("cos")),
+            AdvisorSecurity::Suggest
+        );
     }
 
     // ── Constitution guard ────────────────────────────────────────────────────

@@ -2981,6 +2981,20 @@ pub fn execute(
         }
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
 
+        // H9: stamp the goal's origin (`ta run --origin`, exported as
+        // TA_GOAL_ORIGIN). Only set when present, so the `--goal-id` reuse
+        // path never clears an origin already on the record.
+        if let Some(origin) = ta_goal::origin::origin_from_env().map_err(anyhow::Error::msg)? {
+            if ta_goal::origin::origin_blocks_auto_approve(Some(&origin)) && !quiet {
+                println!(
+                    "Origin: {} (auto-approve disabled: this goal's draft always needs human review)",
+                    origin
+                );
+            }
+            tracing::info!(goal_id = %updated_goal.goal_run_id, origin = %origin, "goal origin set");
+            updated_goal.origin = Some(origin);
+        }
+
         // Generic cost-classification tag (v0.17.x cost-experiment
         // framework): `--workflow-tag`, opaque to TA core. Set only when the
         // flag is actually present -- this block also runs on the
@@ -3241,6 +3255,41 @@ pub fn execute(
         }
     }
 
+    // Chat-mode launch (persona `chat_mode = true` or `--chat-mode`): resolve
+    // before any injection so invalid combinations fail fast. `None` for every
+    // normal launch, which then proceeds exactly as before.
+    let chat_mode_plan = {
+        let (persona_chat_mode, persona_tools) = match persona_name {
+            Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
+                Ok(p) => (p.capabilities.chat_mode, p.capabilities.allowed_tools),
+                Err(e) => anyhow::bail!(
+                    "Could not load persona '{}' while checking for chat mode: {}. Check \
+                     .ta/personas/{}.toml exists.",
+                    pname,
+                    e,
+                    pname
+                ),
+            },
+            None => (false, Vec::new()),
+        };
+        let plan =
+            super::chat_launch::plan_chat_mode_launch(&super::chat_launch::ChatModeInputs {
+                cli_flag: super::chat_launch::cli_chat_mode_requested(),
+                persona_name,
+                persona_chat_mode,
+                persona_allowed_tools: &persona_tools,
+                agent,
+                agent_framework_name: agent_config.name.as_deref(),
+                injects_settings: agent_config.injects_settings,
+                macro_goal,
+                uses_pty: interactive && !headless && !quiet,
+            })?;
+        if let Some(ref p) = plan {
+            super::chat_launch::report_chat_mode_plan(p, quiet);
+        }
+        plan
+    };
+
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
         // Load context budget config (v0.14.3.1).
@@ -3308,6 +3357,9 @@ pub fn execute(
                     );
                 }
             }
+        }
+        if let Some(ref plan) = chat_mode_plan {
+            channel.inject_persona(&super::chat_launch::chat_mode_context_section(plan))?;
         }
 
         // v0.16.3: Inject context.files declared in the agent manifest.
@@ -3406,9 +3458,14 @@ pub fn execute(
             profile
         };
 
+        let mut read_only_extra_deny: Vec<String> = Vec::new();
         let persona_allowed_tools: Vec<String> = match persona_name {
             Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
-                Ok(persona) => persona.capabilities.allowed_tools,
+                Ok(persona) => {
+                    let surface = resolve_persona_tool_surface(&persona)?;
+                    read_only_extra_deny = surface.extra_deny;
+                    surface.allowed
+                }
                 Err(e) => {
                     anyhow::bail!(
                         "Could not load persona '{}' while preparing tool-surface \
@@ -3473,10 +3530,34 @@ pub fn execute(
             None
         };
 
+        let mut extra_deny = security_profile.forbidden_tool_patterns.clone();
+        for pattern in read_only_extra_deny {
+            if !extra_deny.contains(&pattern) {
+                extra_deny.push(pattern);
+            }
+        }
+
+        // Chat mode replaces the allow-list with persona tools INTERSECTED
+        // with the chat-mode profile (then the posture ceiling), and adds a
+        // deny for every native tool. Never the union. Any read-only deny
+        // patterns above are carried into the chat deny list too.
+        let chat_mode_lists = match &chat_mode_plan {
+            Some(plan) => Some(super::chat_launch::chat_mode_settings_lists(
+                plan,
+                security_profile.max_allowed_tools.as_deref(),
+                &extra_deny,
+            )?),
+            None => None,
+        };
+        let (effective_persona_tools, deny_patterns) = match &chat_mode_lists {
+            Some((allow, deny)) => (Some(allow.as_slice()), deny.as_slice()),
+            None => (effective_persona_tools, extra_deny.as_slice()),
+        };
+
         inject_claude_settings_with_security(
             &staging_path,
             source,
-            &security_profile.forbidden_tool_patterns,
+            deny_patterns,
             security_profile.web_search_enabled,
             effective_persona_tools,
         )?;
@@ -3566,6 +3647,21 @@ pub fn execute(
     {
         tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
+    // Chat mode: a separate, equally stable config whose `ta` server is
+    // switched into chat mode by its own env block. Failing to write it is
+    // fatal for a chat launch: falling back to the normal config would hand
+    // the agent an unrestricted TA MCP server.
+    if chat_mode_plan.is_some() {
+        super::chat_launch::write_chat_agent_mcp_config(&config.workspace_root).map_err(|e| {
+            anyhow::anyhow!(
+                "Could not write the chat-mode MCP config at {}: {}. The chat-mode agent was \
+                 not launched. Check that {} is writable and retry.",
+                super::chat_launch::agent_mcp_config_path(&config.workspace_root, true).display(),
+                e,
+                config.workspace_root.join(".ta").display()
+            )
+        })?;
+    }
 
     // v0.17.11.8: for a team-session role launch (--team-session-id), deliver
     // the session's whiteboard token into this goal's staging workspace so
@@ -3599,6 +3695,13 @@ pub fn execute(
 
     // Merge framework env extras into agent_config so they are passed to the process.
     agent_config.env.extend(framework_env_extras);
+    // Chat mode: hand the pre-generated chat session to the agent's `ta serve`
+    // MCP process. Inserted last so no other env source can override it.
+    if let Some(ref plan) = chat_mode_plan {
+        agent_config
+            .env
+            .extend(super::chat_launch::chat_mode_agent_env(plan, &staging_path));
+    }
 
     // VCS environment isolation (v0.13.17.3).
     // Inject VCS env vars before the agent spawns to prevent index-lock
@@ -5990,12 +6093,25 @@ fn launch_agent_via_runtime(
         //   parent()     = project_root/.ta/staging
         //   parent()     = project_root/.ta
         //   parent()     = project_root
-        let stable_mcp_path = staging_path
+        // Chat-mode launches use the chat-locked config instead
+        // (`.ta/mcp-agent-chat.json`, see commands/chat_launch.rs).
+        let chat_mode = super::chat_launch::env_requests_chat_mode(&env);
+        let stable_mcp_path = match staging_path
             .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.parent())
-            .map(|root| root.join(".ta").join("mcp-agent.json"))
-            .unwrap_or_else(|| staging_path.join(".mcp.json")); // fallback: staging (old behavior)
+        {
+            Some(root) => super::chat_launch::agent_mcp_config_path(root, chat_mode),
+            None if chat_mode => {
+                return Err(std::io::Error::other(format!(
+                    "chat-mode launch: cannot locate the project root from staging path {} \
+                     (expected <project>/.ta/staging/<id>), so the chat-locked MCP config \
+                     cannot be used. Refusing to launch with an unrestricted TA MCP server.",
+                    staging_path.display()
+                )));
+            }
+            None => staging_path.join(".mcp.json"), // fallback: staging (old behavior)
+        };
         args.push("--strict-mcp-config".to_string());
         args.push("--mcp-config".to_string());
         args.push(stable_mcp_path.display().to_string());
@@ -6641,6 +6757,66 @@ fn intersect_allowed_tools(base: &[String], ceiling: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// A persona's resolved harness tool surface: the allow-list to write
+/// (empty = no persona declaration, fall back to the posture default) and
+/// extra deny patterns.
+#[derive(Debug)]
+struct PersonaToolSurface {
+    allowed: Vec<String>,
+    extra_deny: Vec<String>,
+}
+
+/// Resolve what a persona may call at launch (H7).
+///
+/// A normal persona's `allowed_tools` is used as declared (unchanged
+/// behavior). A `read_only = true` persona (the Chief-of-Staff) gets its
+/// declared list or, when it declares none, the built-in read-only surface;
+/// never the broad default. The list must pass
+/// `validate_read_only_tool_surface` or the launch is refused, and every
+/// mutating TA MCP tool is denied explicitly.
+fn resolve_persona_tool_surface(
+    persona: &ta_goal::PersonaConfig,
+) -> anyhow::Result<PersonaToolSurface> {
+    use ta_goal::tool_surface;
+
+    let caps = &persona.capabilities;
+    if !caps.read_only {
+        return Ok(PersonaToolSurface {
+            allowed: caps.allowed_tools.clone(),
+            extra_deny: Vec::new(),
+        });
+    }
+    let allowed: Vec<String> = if caps.allowed_tools.is_empty() {
+        tool_surface::READ_ONLY_PERSONA_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        caps.allowed_tools.clone()
+    };
+    if let Err(violations) = tool_surface::validate_read_only_tool_surface(&allowed) {
+        tracing::error!(
+            persona = %persona.persona.name,
+            violations = ?violations,
+            "refusing to launch read-only persona with a mutating or unclassified tool"
+        );
+        anyhow::bail!(
+            "Persona '{}' is declared read_only = true but its allowed_tools would give it \
+             tools that can mutate state:\n  - {}\n\
+             Remove these entries from .ta/personas/{}.toml (or drop allowed_tools entirely \
+             to use the built-in read-only surface). A read-only persona may only hold TA MCP \
+             tools classified read-only in ta_goal::tool_surface.",
+            persona.persona.name,
+            violations.join("\n  - "),
+            persona.persona.name
+        );
+    }
+    Ok(PersonaToolSurface {
+        allowed,
+        extra_deny: tool_surface::mutating_mcp_deny_patterns(),
+    })
+}
+
 /// The "tool identity" a permission pattern belongs to, for comparing a
 /// specific declared entry against a broader wildcard covering the same
 /// tool/server. Native patterns (`"Bash(*)"`, `"Bash(git *)"`) share the
@@ -6676,7 +6852,7 @@ fn tool_identity(pattern: &str) -> &str {
 /// responsible for resolving the final list (including any
 /// `max_allowed_tools` ceiling); this function's job is only to write it
 /// out.
-fn inject_claude_settings_with_security(
+pub(crate) fn inject_claude_settings_with_security(
     staging_path: &Path,
     source_dir: Option<&Path>,
     extra_deny: &[String],
@@ -8615,11 +8791,9 @@ fn count_changed_recursive(staging_root: &Path, dir: &Path, source_root: &Path) 
             Err(_) => continue,
         };
         // Skip .ta/ directory — it's TA metadata, not agent work.
-        if rel
-            .components()
-            .next()
-            .is_some_and(|c| c.as_os_str() == ".ta")
-        {
+        if rel.components().next().is_some_and(|c| {
+            ta_workspace::path_safety::is_agent_infra_component(&c.as_os_str().to_string_lossy())
+        }) {
             continue;
         }
         let ft = match entry.file_type() {
@@ -10996,6 +11170,192 @@ pre_launch:
         let ceiling = vec!["B".to_string(), "C".to_string(), "D".to_string()];
         let result = intersect_allowed_tools(&base, &ceiling);
         assert_eq!(result, vec!["B".to_string(), "C".to_string()]);
+    }
+
+    // ── H7: a read-only (CoS) persona holds no mutating tool ─────────────
+
+    fn write_persona(project: &Path, name: &str, capabilities_toml: &str) {
+        let dir = project.join(".ta").join("personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.toml", name)),
+            format!(
+                "[persona]\nname = \"{name}\"\ndescription = \"test\"\n\
+                 system_prompt = \"You triage and dispatch.\"\n\n[capabilities]\n{caps}\n",
+                name = name,
+                caps = capabilities_toml
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Writes settings for `persona` through the real launch resolution
+    /// (`resolve_persona_tool_surface` + `inject_claude_settings_with_security`,
+    /// as `execute()` does) and returns (allow, deny).
+    fn launch_settings_for(persona: &ta_goal::PersonaConfig) -> (Vec<String>, Vec<String>) {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        // A global settings file that would widen the surface if merged.
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(*)", "mcp__ta__*"]}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let surface = resolve_persona_tool_surface(persona).unwrap();
+        let result = inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            &surface.extra_deny,
+            true,
+            Some(&surface.allowed),
+        );
+
+        if let Some(h) = original_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        result.unwrap();
+
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let strings = |key: &str| -> Vec<String> {
+            val["permissions"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        (strings("allow"), strings("deny"))
+    }
+
+    /// Every TA MCP tool a CoS must never hold, by capability.
+    const H7_MUTATING_DENYLIST: &[&str] = &[
+        "ta_fs_write",
+        "ta_wiki_create",
+        "ta_wiki_update",
+        "ta_external_action",
+        "ta_propose_task_update",
+        "ta_draft",
+        "ta_pr_build",
+        "ta_goal_start",
+        "ta_goal_inner",
+        "ta_plan",
+        "ta_workflow",
+        "ta_context",
+        "ta_whiteboard_presence_register",
+        "ta_whiteboard_handoff_send",
+        "ta_whiteboard_handoff_receive",
+        "ta_whiteboard_task_claim",
+        "ta_whiteboard_task_complete",
+        "ta_human_verify",
+    ];
+
+    #[test]
+    fn h7_read_only_persona_launches_with_only_read_only_ta_tools_and_denies_mutating_ones() {
+        let project = TempDir::new().unwrap();
+        write_persona(project.path(), "chief-of-staff", "read_only = true");
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        let (allow, deny) = launch_settings_for(&persona);
+
+        assert!(!allow.is_empty());
+        for entry in &allow {
+            assert!(
+                ta_goal::tool_surface::read_only_violation(entry).is_none(),
+                "read-only persona was granted '{}'",
+                entry
+            );
+        }
+        for native in [
+            "Bash(*)",
+            "Read(*)",
+            "Write(*)",
+            "Edit(*)",
+            "MultiEdit(*)",
+            "Task(*)",
+        ] {
+            assert!(!allow.iter().any(|a| a == native), "{} allowed", native);
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+        assert!(!allow.iter().any(|a| a == "mcp__ta__*"));
+        for tool in H7_MUTATING_DENYLIST {
+            let pattern = format!("mcp__ta__{}", tool);
+            assert!(!allow.contains(&pattern), "{} allowed", pattern);
+            assert!(deny.contains(&pattern), "{} not explicitly denied", pattern);
+        }
+        assert!(deny.contains(&"mcp__ta__ta_propose_*".to_string()));
+        // Read-only by classification (they change no project state), so a
+        // read-only persona may hold them and they are not in the deny list.
+        for tool in ["ta_ask_human", "ta_whiteboard_outcome_send"] {
+            assert!(
+                ta_goal::tool_surface::read_only_violation(&format!("mcp__ta__{tool}")).is_none(),
+                "{tool} should be allowed for a read-only persona"
+            );
+        }
+    }
+
+    #[test]
+    fn h7_read_only_persona_with_a_mutating_or_broad_declaration_refuses_to_launch() {
+        for bad in [
+            r#"allowed_tools = ["mcp__ta__ta_fs_read", "Bash(*)"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_fs_write"]"#,
+            r#"allowed_tools = ["mcp__ta__*"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_whiteboard_*"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_wiki_update"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_propose_task_update"]"#,
+            r#"allowed_tools = ["Read(*)"]"#,
+        ] {
+            let project = TempDir::new().unwrap();
+            write_persona(
+                project.path(),
+                "chief-of-staff",
+                &format!("read_only = true\n{}", bad),
+            );
+            let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+            let err = resolve_persona_tool_surface(&persona).expect_err(bad);
+            assert!(err.to_string().contains("read_only = true"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn h7_read_only_persona_may_narrow_but_keeps_explicit_mutating_denies() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "chief-of-staff",
+            "read_only = true\nallowed_tools = [\"mcp__ta__ta_fs_read\", \"mcp__ta__ta_wiki_search\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        let (allow, deny) = launch_settings_for(&persona);
+        assert_eq!(
+            allow,
+            vec![
+                "mcp__ta__ta_fs_read".to_string(),
+                "mcp__ta__ta_wiki_search".to_string()
+            ]
+        );
+        assert!(deny.contains(&"mcp__ta__ta_fs_write".to_string()));
+    }
+
+    #[test]
+    fn h7_non_read_only_persona_surface_is_unchanged() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "implementer",
+            "allowed_tools = [\"Bash(*)\", \"mcp__ta__ta_fs_write\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "implementer").unwrap();
+        let surface = resolve_persona_tool_surface(&persona).unwrap();
+        assert_eq!(surface.allowed, vec!["Bash(*)", "mcp__ta__ta_fs_write"]);
+        assert!(surface.extra_deny.is_empty());
     }
 
     #[test]
