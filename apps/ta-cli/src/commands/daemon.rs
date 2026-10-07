@@ -9,8 +9,96 @@
 use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use clap::Subcommand;
+
+// ─── macOS code signing (self-healing, best-effort) ─────────────────────────
+//
+// install_local.sh signs ta/ta-daemon with a stable local identity so
+// macOS Keychain's "Always Allow" grant (keyed to the signing identity, not
+// the file path) survives rebuilds -- but that signing only happens when
+// install_local.sh itself runs. A normal dev loop (`cargo build` then
+// `ta daemon restart` directly, skipping install_local.sh) produces a fresh,
+// unsigned `target/debug/ta-daemon` every time, so every iteration gets a
+// fresh Keychain prompt regardless of whether the stable cert exists.
+//
+// Fix: re-sign the daemon binary here, immediately before every spawn,
+// so this is correct no matter which command built it. Mirrors
+// install_local.sh's own `ta_codesign` function (same identity env var,
+// same identifier, same ad-hoc fallback) but does not call
+// `security find-identity` first -- it tries the named identity directly
+// and falls back to ad-hoc on failure, which needs one process instead of
+// two and avoids a separate Keychain-enumeration call that can itself block
+// waiting for an interactive unlock in some environments.
+//
+// Best-effort and bounded: a signing failure, a missing `codesign` binary,
+// or a hung/slow Keychain prompt must never block the daemon from starting
+// -- each attempt is capped at a short timeout and failures are silently
+// ignored, exactly like `install_local.sh`'s own `|| true` fallback.
+#[cfg(target_os = "macos")]
+fn ensure_stable_codesign(binary_path: &Path) {
+    const IDENTIFIER: &str = "com.trustedautonomy.ta-daemon";
+    const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let identity = std::env::var("TA_CODESIGN_IDENTITY")
+        .unwrap_or_else(|_| "Trusted Autonomy Local Dev".to_string());
+
+    if run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT) {
+        return;
+    }
+    // Named identity not found, Keychain locked, or timed out -- fall back
+    // to ad-hoc signing (still a stable identifier, just not a stable
+    // identity), same fallback install_local.sh's ta_codesign uses.
+    let _ = run_codesign_with_timeout(binary_path, "-", IDENTIFIER, CODESIGN_TIMEOUT);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_stable_codesign(_binary_path: &Path) {}
+
+/// Run `codesign --force --sign <identity> --identifier <identifier>
+/// <binary_path>`, killing it if it doesn't finish within `timeout`.
+/// Returns whether it exited successfully. Never panics or blocks past
+/// the timeout -- a Keychain prompt the caller isn't interactively present
+/// for must not hang daemon startup indefinitely.
+#[cfg(target_os = "macos")]
+fn run_codesign_with_timeout(
+    binary_path: &Path,
+    identity: &str,
+    identifier: &str,
+    timeout: Duration,
+) -> bool {
+    let mut child = match Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg(identity)
+        .arg("--identifier")
+        .arg(identifier)
+        .arg(binary_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
+}
 
 /// `ta daemon` subcommands.
 #[derive(Debug, Subcommand)]
@@ -257,6 +345,7 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
     }
 
     let daemon_bin = super::version_guard::find_daemon_binary()?;
+    ensure_stable_codesign(&daemon_bin);
 
     // Ensure .ta directory exists.
     let ta_dir = project_root.join(".ta");

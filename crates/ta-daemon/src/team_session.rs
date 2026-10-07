@@ -519,6 +519,78 @@ pub fn build_ta_run_args(
     args
 }
 
+// ─── macOS code signing (self-healing, best-effort) ─────────────────────────
+//
+// Both this module and `wake_listener.rs` spawn `ta_bin` (the main `ta`
+// binary, via `build_ta_run_args`' output) directly, once per rotation
+// cycle or wake-on-demand poll -- a much higher-frequency spawn than the
+// daemon's own one-time startup. `apps/ta-cli/src/commands/daemon.rs` has
+// the matching fix for `ta-daemon` itself (`ensure_stable_codesign`); this
+// is the same fix, duplicated rather than shared across the `ta-cli`/
+// `ta-daemon` crate boundary, for whichever binary `ta_bin` resolves to
+// here (`ta`, not `ta-daemon`). See that file's module comment for the
+// full rationale: a bare `cargo build` produces a fresh, unsigned binary
+// every time, so without this, every single poll cycle could get a fresh
+// Keychain prompt, not just every rebuild.
+//
+// Best-effort and bounded: never blocks a cycle on a signing failure or a
+// slow/locked Keychain -- each attempt is capped at a short timeout.
+#[cfg(target_os = "macos")]
+pub(crate) fn ensure_stable_codesign(binary_path: &Path) {
+    const IDENTIFIER: &str = "com.trustedautonomy.ta";
+    const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let identity = std::env::var("TA_CODESIGN_IDENTITY")
+        .unwrap_or_else(|_| "Trusted Autonomy Local Dev".to_string());
+
+    if run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT) {
+        return;
+    }
+    let _ = run_codesign_with_timeout(binary_path, "-", IDENTIFIER, CODESIGN_TIMEOUT);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn ensure_stable_codesign(_binary_path: &Path) {}
+
+#[cfg(target_os = "macos")]
+fn run_codesign_with_timeout(
+    binary_path: &Path,
+    identity: &str,
+    identifier: &str,
+    timeout: Duration,
+) -> bool {
+    let mut child = match std::process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg(identity)
+        .arg("--identifier")
+        .arg(identifier)
+        .arg(binary_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleOutcome {
     /// The current role's goal-run succeeded; state advanced to the next
@@ -655,6 +727,7 @@ pub fn run_one_cycle(
         None,
     );
 
+    ensure_stable_codesign(ta_bin);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
         .current_dir(project_root)
