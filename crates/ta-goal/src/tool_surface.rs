@@ -217,9 +217,114 @@ pub fn mutating_mcp_deny_patterns() -> Vec<String> {
         .collect()
 }
 
+/// Whether a harness allow-list entry covers the TA MCP tool `name`: an
+/// exact `mcp__ta__<name>` entry, the server-wide `mcp__ta__*` / `mcp__ta`,
+/// or a trailing-`*` prefix such as `mcp__ta__ta_wiki_*`.
+fn allow_entry_covers_ta_tool(entry: &str, name: &str) -> bool {
+    let entry = entry.trim();
+    if entry == "mcp__ta" || entry == "mcp__ta__" {
+        return true;
+    }
+    let Some(rest) = entry.strip_prefix(TA_MCP_PREFIX) else {
+        return false;
+    };
+    match rest.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => rest == name,
+    }
+}
+
+/// Explicit deny patterns for every TA MCP tool a restricted launch did NOT
+/// allow (every tool in [`MCP_TOOL_EFFECTS`], plus the
+/// [`MUTATING_TOOL_PREFIXES`] families).
+///
+/// A restricted launch (persona `allowed_tools`, `read_only`, chat mode)
+/// writes these so a broader allow from any other settings source (for
+/// example an operator's global `mcp__ta__*`) cannot hand the agent a TA
+/// tool its persona never listed: deny wins over allow in Claude Code.
+/// Nothing the allow-list covers is ever denied.
+pub fn unlisted_ta_mcp_deny_patterns(allowed: &[String]) -> Vec<String> {
+    let covered = |name: &str| allowed.iter().any(|a| allow_entry_covers_ta_tool(a, name));
+    let mut deny: Vec<String> = MCP_TOOL_EFFECTS
+        .iter()
+        .filter(|(n, _)| !covered(n))
+        .map(|(n, _)| format!("{}{}", TA_MCP_PREFIX, n))
+        .collect();
+    for prefix in MUTATING_TOOL_PREFIXES {
+        // Deny the whole family only when no allow entry reaches into it,
+        // otherwise the family deny would override that allow.
+        let family_touched = allowed.iter().any(|a| {
+            let a = a.trim();
+            a == "mcp__ta"
+                || a == "mcp__ta__"
+                || a.strip_prefix(TA_MCP_PREFIX).is_some_and(|rest| {
+                    rest.starts_with(prefix)
+                        || rest
+                            .strip_suffix('*')
+                            .is_some_and(|wild| prefix.starts_with(wild))
+                })
+        });
+        if !family_touched {
+            deny.push(format!("{}{}*", TA_MCP_PREFIX, prefix));
+        }
+    }
+    deny
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unlisted_ta_tools_are_all_denied_and_listed_ones_never_are() {
+        let allowed = strings(&["mcp__ta__ta_fs_read", "mcp__ta__ta_wiki_search", "Bash(*)"]);
+        let deny = unlisted_ta_mcp_deny_patterns(&allowed);
+        assert!(!deny.contains(&"mcp__ta__ta_fs_read".to_string()));
+        assert!(!deny.contains(&"mcp__ta__ta_wiki_search".to_string()));
+        for (name, _) in MCP_TOOL_EFFECTS {
+            if *name != "ta_fs_read" && *name != "ta_wiki_search" {
+                assert!(
+                    deny.contains(&format!("mcp__ta__{}", name)),
+                    "{} not denied",
+                    name
+                );
+            }
+        }
+        assert!(deny.contains(&"mcp__ta__ta_propose_*".to_string()));
+    }
+
+    #[test]
+    fn server_wide_allow_denies_nothing() {
+        for wide in ["mcp__ta__*", "mcp__ta"] {
+            assert!(unlisted_ta_mcp_deny_patterns(&strings(&[wide])).is_empty());
+        }
+    }
+
+    #[test]
+    fn prefix_allow_covers_its_family_only() {
+        let deny = unlisted_ta_mcp_deny_patterns(&strings(&["mcp__ta__ta_wiki_*"]));
+        assert!(!deny.iter().any(|d| d.starts_with("mcp__ta__ta_wiki_")));
+        assert!(deny.contains(&"mcp__ta__ta_fs_write".to_string()));
+    }
+
+    #[test]
+    fn allowed_propose_tool_is_not_shadowed_by_the_family_deny() {
+        let deny = unlisted_ta_mcp_deny_patterns(&strings(&["mcp__ta__ta_propose_task_update"]));
+        assert!(!deny.contains(&"mcp__ta__ta_propose_*".to_string()));
+    }
+
+    #[test]
+    fn empty_allow_list_denies_every_ta_tool() {
+        let deny = unlisted_ta_mcp_deny_patterns(&[]);
+        assert_eq!(
+            deny.len(),
+            MCP_TOOL_EFFECTS.len() + MUTATING_TOOL_PREFIXES.len()
+        );
+    }
 
     #[test]
     fn table_has_no_duplicates() {

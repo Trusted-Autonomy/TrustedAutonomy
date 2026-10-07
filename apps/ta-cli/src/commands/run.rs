@@ -114,6 +114,58 @@ struct AgentLaunchConfig {
     /// When `true`, goals with no state update for `stale_threshold_secs` emit `GoalStale`.
     #[serde(default)]
     heartbeat_required: bool,
+
+    /// Set by `execute()` (never read from YAML) when this launch has an
+    /// explicit tool restriction: a persona `allowed_tools` list, a
+    /// `read_only` persona, chat mode, or a `max_allowed_tools` ceiling.
+    /// For Claude Code it adds [`RESTRICTED_LAUNCH_FLAGS`] to the command
+    /// line so the operator's global `~/.claude/settings.json` (and any
+    /// project `.claude/settings.json`) cannot widen the tool surface, and
+    /// anything not pre-approved is denied instead of auto-allowed or
+    /// prompted (red-team CR-01/CR-13).
+    #[serde(skip)]
+    restricted_tool_surface: bool,
+}
+
+/// Claude Code flags for a restricted launch. Verified against Claude Code
+/// 2.1.x (`claude --help`, and live: with a global `defaultMode: "auto"`
+/// plus `allow: ["Write"]`, a staging `settings.local.json` allowing only
+/// `Read` still let the agent write a file until both flags were passed):
+///
+/// - `--setting-sources local`: load only the `.claude/settings.local.json`
+///   TA writes into staging. User (`~/.claude/settings.json`) and project
+///   (`.claude/settings.json`, editable through drafts) settings are not
+///   loaded, so their `allow` rules and `defaultMode` cannot merge in.
+/// - `--permission-mode dontAsk`: a tool call that is not pre-approved is
+///   denied, never auto-approved (`auto`) or prompted.
+pub(crate) const RESTRICTED_LAUNCH_FLAGS: &[&str] =
+    &["--setting-sources", "local", "--permission-mode", "dontAsk"];
+
+/// The permission mode written into a restricted launch's settings file
+/// (matches [`RESTRICTED_LAUNCH_FLAGS`]).
+pub(crate) const RESTRICTED_DEFAULT_MODE: &str = "dontAsk";
+
+/// Whether `config` launches Claude Code (the only framework whose
+/// permission flags TA knows).
+fn is_claude_code_launch(config: &AgentLaunchConfig) -> bool {
+    config.name.as_deref() == Some("claude-code")
+        || Path::new(&config.command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s == "claude")
+}
+
+/// Extra command-line flags for this launch: [`RESTRICTED_LAUNCH_FLAGS`]
+/// for a restricted Claude Code launch, nothing otherwise.
+fn restricted_launch_flags(config: &AgentLaunchConfig) -> Vec<String> {
+    if config.restricted_tool_surface && is_claude_code_launch(config) {
+        RESTRICTED_LAUNCH_FLAGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Auto-answer configuration for interactive prompts (v0.10.18.5).
@@ -222,6 +274,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             runtime: Default::default(),
             // Claude Code does not send heartbeats — disable stale checking (v0.13.14).
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -245,6 +298,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -301,6 +355,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -320,6 +375,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
     }
 }
@@ -414,6 +470,7 @@ fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> 
         context_file: None,
         runtime: Default::default(),
         heartbeat_required: false,
+        restricted_tool_surface: false,
     }
 }
 
@@ -2982,9 +3039,16 @@ pub fn execute(
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
 
         // H9: stamp the goal's origin (`ta run --origin`, exported as
-        // TA_GOAL_ORIGIN). Only set when present, so the `--goal-id` reuse
-        // path never clears an origin already on the record.
-        if let Some(origin) = ta_goal::origin::origin_from_env().map_err(anyhow::Error::msg)? {
+        // TA_GOAL_ORIGIN) onto the record. The record is the only thing any
+        // auto-approve decision reads, and an origin already on it is never
+        // changed or cleared here: the environment only fills in a record
+        // that has none yet (goal creation), so a later `ta run --goal-id`
+        // with a different or missing TA_GOAL_ORIGIN cannot relax it.
+        let requested_origin = ta_goal::origin::origin_from_env().map_err(anyhow::Error::msg)?;
+        if let Some(origin) = ta_goal::origin::origin_to_stamp(
+            updated_goal.origin.as_deref(),
+            requested_origin.as_deref(),
+        ) {
             if ta_goal::origin::origin_blocks_auto_approve(Some(&origin)) && !quiet {
                 println!(
                     "Origin: {} (auto-approve disabled: this goal's draft always needs human review)",
@@ -2993,6 +3057,25 @@ pub fn execute(
             }
             tracing::info!(goal_id = %updated_goal.goal_run_id, origin = %origin, "goal origin set");
             updated_goal.origin = Some(origin);
+        } else if let (Some(existing), Some(requested)) =
+            (updated_goal.origin.as_deref(), requested_origin.as_deref())
+        {
+            if existing != requested {
+                tracing::warn!(
+                    goal_id = %updated_goal.goal_run_id,
+                    recorded_origin = %existing,
+                    requested_origin = %requested,
+                    "ignoring requested goal origin: the goal record already has an origin and it \
+                     cannot be changed after creation"
+                );
+                if !quiet {
+                    eprintln!(
+                        "[warn] Goal {} keeps its recorded origin '{}'; the requested origin '{}' \
+                         was ignored (an origin is fixed when the goal is created).",
+                        updated_goal.goal_run_id, existing, requested
+                    );
+                }
+            }
         }
 
         // Generic cost-classification tag (v0.17.x cost-experiment
@@ -3553,6 +3636,21 @@ pub fn execute(
             Some((allow, deny)) => (Some(allow.as_slice()), deny.as_slice()),
             None => (effective_persona_tools, extra_deny.as_slice()),
         };
+
+        // CR-01/CR-13: any explicit restriction (persona list, read-only,
+        // chat mode, posture ceiling) also isolates the launch from the
+        // operator's global and project Claude Code settings on the
+        // command line (see RESTRICTED_LAUNCH_FLAGS).
+        agent_config.restricted_tool_surface =
+            effective_persona_tools.is_some() || chat_mode_plan.is_some();
+        if agent_config.restricted_tool_surface {
+            tracing::info!(
+                persona = persona_name.unwrap_or("<none>"),
+                chat_mode = chat_mode_plan.is_some(),
+                flags = ?RESTRICTED_LAUNCH_FLAGS,
+                "restricted tool surface: only TA's staging settings apply, unlisted tools are denied"
+            );
+        }
 
         inject_claude_settings_with_security(
             &staging_path,
@@ -5215,6 +5313,7 @@ fn execute_resume(
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -5333,11 +5432,12 @@ fn launch_agent(
     prompt: &str,
     pid_callback: Option<&dyn Fn(u32)>,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let args: Vec<String> = config
+    let mut args: Vec<String> = config
         .args_template
         .iter()
         .map(|t| t.replace("{prompt}", prompt))
         .collect();
+    args.extend(restricted_launch_flags(config));
     let mut cmd = resolve_agent_command(&config.command, &args);
     cmd.current_dir(staging_path);
 
@@ -5435,11 +5535,12 @@ fn launch_agent_interactive(
     Vec<(InteractionRequest, InteractionResponse)>,
 )> {
     // Build args with template substitution.
-    let args: Vec<String> = config
+    let mut args: Vec<String> = config
         .args_template
         .iter()
         .map(|t| t.replace("{prompt}", prompt))
         .collect();
+    args.extend(restricted_launch_flags(config));
 
     // Launch via PTY.
     let pty_config = pty_capture::PtyLaunchConfig {
@@ -5990,6 +6091,65 @@ fn project_root_from_staging(staging_path: &Path) -> Option<std::path::PathBuf> 
         .map(|p| p.to_path_buf())
 }
 
+/// Command-line arguments for a `launch_agent_via_runtime` spawn: the
+/// framework's `args_template` (with `{prompt}`), its headless args, and for
+/// Claude Code the strict MCP config plus, on a restricted launch,
+/// [`RESTRICTED_LAUNCH_FLAGS`]. Pure (no spawn) so the exact argv is
+/// testable.
+fn build_runtime_agent_args(
+    config: &AgentLaunchConfig,
+    staging_path: &std::path::Path,
+    prompt: &str,
+    headless: bool,
+    env: &std::collections::HashMap<String, String>,
+) -> std::io::Result<Vec<String>> {
+    let mut args: Vec<String> = config
+        .args_template
+        .iter()
+        .map(|t| t.replace("{prompt}", prompt))
+        .collect();
+    if headless {
+        args.extend_from_slice(&config.headless_args);
+    }
+
+    // For claude-code: use --strict-mcp-config + a STABLE --mcp-config path so that
+    // Claude approves the ta MCP server once and never re-prompts. The stable config
+    // lives at project_root/.ta/mcp-agent.json and has identical content every run
+    // (no TA_PROJECT_ROOT that would vary per UUID staging path). The ta serve subprocess
+    // inherits Claude's cwd (= staging_path) so it discovers the right root at runtime.
+    if config.name.as_deref() == Some("claude-code") {
+        // Stable config is three parents up from staging_path:
+        //   staging_path = project_root/.ta/staging/<uuid>
+        //   parent()     = project_root/.ta/staging
+        //   parent()     = project_root/.ta
+        //   parent()     = project_root
+        // Chat-mode launches use the chat-locked config instead
+        // (`.ta/mcp-agent-chat.json`, see commands/chat_launch.rs).
+        let chat_mode = super::chat_launch::env_requests_chat_mode(env);
+        let stable_mcp_path = match staging_path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            Some(root) => super::chat_launch::agent_mcp_config_path(root, chat_mode),
+            None if chat_mode => {
+                return Err(std::io::Error::other(format!(
+                    "chat-mode launch: cannot locate the project root from staging path {} \
+                     (expected <project>/.ta/staging/<id>), so the chat-locked MCP config \
+                     cannot be used. Refusing to launch with an unrestricted TA MCP server.",
+                    staging_path.display()
+                )));
+            }
+            None => staging_path.join(".mcp.json"), // fallback: staging (old behavior)
+        };
+        args.push("--strict-mcp-config".to_string());
+        args.push("--mcp-config".to_string());
+        args.push(stable_mcp_path.display().to_string());
+    }
+    args.extend(restricted_launch_flags(config));
+    Ok(args)
+}
+
 /// Launch an agent via the RuntimeAdapter and wait for it to exit (v0.13.3).
 ///
 /// This is the non-interactive, non-PTY path.  It replaces `launch_agent` and
@@ -6072,50 +6232,7 @@ fn launch_agent_via_runtime(
         install_credential_shims(&mut env, &project_root, staging_path, &registry);
     }
 
-    // Expand args (replace {prompt} template variable).
-    let mut args: Vec<String> = config
-        .args_template
-        .iter()
-        .map(|t| t.replace("{prompt}", prompt))
-        .collect();
-    if headless {
-        args.extend_from_slice(&config.headless_args);
-    }
-
-    // For claude-code: use --strict-mcp-config + a STABLE --mcp-config path so that
-    // Claude approves the ta MCP server once and never re-prompts. The stable config
-    // lives at project_root/.ta/mcp-agent.json and has identical content every run
-    // (no TA_PROJECT_ROOT that would vary per UUID staging path). The ta serve subprocess
-    // inherits Claude's cwd (= staging_path) so it discovers the right root at runtime.
-    if config.name.as_deref() == Some("claude-code") {
-        // Stable config is three parents up from staging_path:
-        //   staging_path = project_root/.ta/staging/<uuid>
-        //   parent()     = project_root/.ta/staging
-        //   parent()     = project_root/.ta
-        //   parent()     = project_root
-        // Chat-mode launches use the chat-locked config instead
-        // (`.ta/mcp-agent-chat.json`, see commands/chat_launch.rs).
-        let chat_mode = super::chat_launch::env_requests_chat_mode(&env);
-        let stable_mcp_path = match staging_path
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-        {
-            Some(root) => super::chat_launch::agent_mcp_config_path(root, chat_mode),
-            None if chat_mode => {
-                return Err(std::io::Error::other(format!(
-                    "chat-mode launch: cannot locate the project root from staging path {} \
-                     (expected <project>/.ta/staging/<id>), so the chat-locked MCP config \
-                     cannot be used. Refusing to launch with an unrestricted TA MCP server.",
-                    staging_path.display()
-                )));
-            }
-            None => staging_path.join(".mcp.json"), // fallback: staging (old behavior)
-        };
-        args.push("--strict-mcp-config".to_string());
-        args.push("--mcp-config".to_string());
-        args.push(stable_mcp_path.display().to_string());
-    }
+    let args = build_runtime_agent_args(config, staging_path, prompt, headless, &env)?;
 
     let stdin_mode = if headless {
         StdinMode::Null
@@ -6977,6 +7094,17 @@ pub(crate) fn inject_claude_settings_with_security(
                 forbidden.push(tool.to_string());
             }
         }
+        // CR-01: the identity check above treats any one `mcp__ta__<tool>`
+        // entry as covering the whole TA server, so a persona listing 15 TA
+        // tools denied none of the other TA tools, and a global
+        // `mcp__ta__*` allow could hand them over. Deny every registered TA
+        // tool the restriction did not list (`allow` here is already
+        // filtered, so a posture-removed entry is denied too).
+        for pattern in ta_goal::tool_surface::unlisted_ta_mcp_deny_patterns(&allow) {
+            if !forbidden.contains(&pattern) {
+                forbidden.push(pattern);
+            }
+        }
     }
     // A posture-level prohibition must not be defeatable by a persona
     // declaration: identity-based matching above would otherwise treat a
@@ -7001,7 +7129,11 @@ pub(crate) fn inject_claude_settings_with_security(
         "allow": allow,
         "deny": deny,
     });
-    if let Some(m) = global_default_mode {
+    if use_persona_allowlist {
+        // CR-01/CR-13: a restricted launch never inherits the operator's
+        // mode (e.g. "auto"): anything not pre-approved is denied.
+        permissions["defaultMode"] = serde_json::Value::String(RESTRICTED_DEFAULT_MODE.into());
+    } else if let Some(m) = global_default_mode {
         permissions["defaultMode"] = serde_json::Value::String(m);
     }
     let mut root = serde_json::json!({
@@ -10245,6 +10377,75 @@ context_inject = "{mode_toml}"
         assert!(!goals[0].workspace_path.join(SETTINGS_REL_PATH).exists());
     }
 
+    /// CR-11: once a goal record carries an origin, a later `ta run
+    /// --goal-id` whose environment says something else (here the harmless
+    /// `cli`, so parallel tests reading TA_GOAL_ORIGIN are unaffected) must
+    /// not rewrite it. Before this fix the reuse path overwrote `cos` with
+    /// whatever TA_GOAL_ORIGIN held.
+    #[test]
+    fn reused_goal_keeps_recorded_origin_when_env_origin_differs() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "CoS goal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "triage".to_string(),
+                agent: "claude-code".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = store.list().unwrap()[0].clone();
+        goal.origin = Some("cos".to_string());
+        store.save(&goal).unwrap();
+        let goal_id = goal.goal_run_id.to_string();
+
+        let previous = std::env::var(ta_goal::origin::ORIGIN_ENV_VAR).ok();
+        std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, "cli");
+        let result = execute(
+            &config,
+            Some("CoS goal"),
+            "claude-code",
+            Some(project.path()),
+            "triage",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            None,
+            false,
+            false,
+            true,
+            Some(goal_id.as_str()), // reuse the existing goal
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        match previous {
+            Some(v) => std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, v),
+            None => std::env::remove_var(ta_goal::origin::ORIGIN_ENV_VAR),
+        }
+        result.unwrap();
+
+        let reloaded = store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(reloaded.origin.as_deref(), Some("cos"));
+    }
+
     #[test]
     fn workflow_tag_flag_sets_goal_workflow_field() {
         // Generic cost-classification tag (v0.17.x cost-experiment
@@ -11236,6 +11437,218 @@ pre_launch:
                 .collect()
         };
         (strings("allow"), strings("deny"))
+    }
+
+    // ── CR-01: restricted launches are isolated from global settings ─────
+
+    /// The real operator global settings shape the red-team found on the
+    /// dev machine: `defaultMode: "auto"`, and allows that would widen any
+    /// restricted surface if merged.
+    const HOSTILE_GLOBAL_SETTINGS: &str = r#"{"permissions": {"defaultMode": "auto",
+        "allow": ["mcp__ta__*", "Read", "Write", "Edit", "Bash(*)"]},
+        "skipDangerousModePermissionPrompt": true}"#;
+
+    /// Writes staging settings with `HOME` pointing at a fake global
+    /// settings file, and returns the parsed settings JSON.
+    fn settings_with_hostile_global(
+        extra_deny: &[String],
+        persona_allowed: Option<&[String]>,
+    ) -> serde_json::Value {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude").join("settings.json"),
+            HOSTILE_GLOBAL_SETTINGS,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let result = inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            extra_deny,
+            true,
+            persona_allowed,
+        );
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result.unwrap();
+        let text = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn json_strings(val: &serde_json::Value, key: &str) -> Vec<String> {
+        val["permissions"][key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn claude_config(restricted: bool) -> AgentLaunchConfig {
+        let mut c = builtin_agent_config("claude-code");
+        c.restricted_tool_surface = restricted;
+        c
+    }
+
+    #[test]
+    fn restricted_persona_settings_are_dont_ask_and_deny_every_unlisted_ta_tool() {
+        let persona_tools: Vec<String> = [
+            "mcp__ta__ta_fs_read",
+            "mcp__ta__ta_wiki_search",
+            "mcp__ta__ta_whiteboard_outcome_send",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let val = settings_with_hostile_global(&[], Some(&persona_tools));
+        let allow = json_strings(&val, "allow");
+        let deny = json_strings(&val, "deny");
+
+        assert_eq!(allow, persona_tools, "no global allow merged in");
+        assert_eq!(val["permissions"]["defaultMode"], "dontAsk");
+        assert!(val.get("skipDangerousModePermissionPrompt").is_none());
+        for (name, _) in ta_goal::tool_surface::MCP_TOOL_EFFECTS {
+            let p = format!("mcp__ta__{}", name);
+            if persona_tools.contains(&p) {
+                assert!(!deny.contains(&p), "listed tool {} denied", p);
+            } else {
+                assert!(deny.contains(&p), "unlisted TA tool {} not denied", p);
+            }
+        }
+        for native in ["Read(*)", "Write(*)", "Edit(*)", "Bash(*)"] {
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+    }
+
+    #[test]
+    fn unrestricted_launch_keeps_inheriting_global_mode_and_allows() {
+        let val = settings_with_hostile_global(&[], None);
+        assert_eq!(val["permissions"]["defaultMode"], "auto");
+        assert!(json_strings(&val, "allow").contains(&"mcp__ta__*".to_string()));
+        assert!(!json_strings(&val, "deny")
+            .iter()
+            .any(|d| d.starts_with("mcp__ta__")));
+    }
+
+    #[test]
+    fn restricted_claude_launch_argv_isolates_settings_and_sets_dont_ask() {
+        let project = TempDir::new().unwrap();
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let env = std::collections::HashMap::new();
+
+        let args =
+            build_runtime_agent_args(&claude_config(true), &staging, "do it", true, &env).unwrap();
+        assert_eq!(args[0], "do it");
+        let tail: Vec<&str> = args[args.len() - 4..].iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            tail,
+            ["--setting-sources", "local", "--permission-mode", "dontAsk"]
+        );
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+
+        let plain =
+            build_runtime_agent_args(&claude_config(false), &staging, "do it", true, &env).unwrap();
+        assert!(!plain.contains(&"--setting-sources".to_string()));
+        assert!(!plain.contains(&"--permission-mode".to_string()));
+    }
+
+    #[test]
+    fn restricted_flags_are_only_added_for_claude_code() {
+        let mut codex = builtin_agent_config("codex");
+        codex.restricted_tool_surface = true;
+        assert!(restricted_launch_flags(&codex).is_empty());
+        assert_eq!(
+            restricted_launch_flags(&claude_config(true)),
+            RESTRICTED_LAUNCH_FLAGS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(restricted_launch_flags(&claude_config(false)).is_empty());
+    }
+
+    /// The whole CR-01 chain for a chat-mode CoS persona, through the same
+    /// functions `execute()` calls: chat plan, chat settings lists, settings
+    /// injection under a hostile global settings file, and the final argv.
+    #[test]
+    fn chat_mode_cos_persona_chain_has_no_global_allow_dont_ask_and_full_ta_denies() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "chief-of-staff",
+            "chat_mode = true\norigin = \"cos\"\nallowed_tools = [\"mcp__ta__ta_fs_read\", \
+             \"mcp__ta__ta_wiki_search\", \"mcp__ta__ta_whiteboard_outcome_send\", \
+             \"mcp__ta__ta_wiki_update\", \"Bash(*)\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        assert_eq!(persona.capabilities.origin.as_deref(), Some("cos"));
+
+        let plan = super::super::chat_launch::plan_chat_mode_launch(
+            &super::super::chat_launch::ChatModeInputs {
+                cli_flag: true,
+                persona_name: Some("chief-of-staff"),
+                persona_chat_mode: persona.capabilities.chat_mode,
+                persona_allowed_tools: &persona.capabilities.allowed_tools,
+                agent: "claude-code",
+                agent_framework_name: Some("claude-code"),
+                injects_settings: true,
+                macro_goal: false,
+                uses_pty: false,
+            },
+        )
+        .unwrap()
+        .expect("chat mode planned");
+        let (allow_in, deny_in) =
+            super::super::chat_launch::chat_mode_settings_lists(&plan, None, &[]).unwrap();
+        let val = settings_with_hostile_global(&deny_in, Some(&allow_in));
+        let allow = json_strings(&val, "allow");
+        let deny = json_strings(&val, "deny");
+
+        // No global allow merged; mutating and native tools never allowed.
+        for leaked in ["mcp__ta__*", "Read", "Write", "Edit", "Bash(*)"] {
+            assert!(
+                !allow.iter().any(|a| a == leaked),
+                "{} leaked into allow",
+                leaked
+            );
+        }
+        assert!(!allow.contains(&"mcp__ta__ta_wiki_update".to_string()));
+        assert_eq!(val["permissions"]["defaultMode"], "dontAsk");
+        // Every registered TA tool not in the final allow-list is denied.
+        for (name, _) in ta_goal::tool_surface::MCP_TOOL_EFFECTS {
+            let p = format!("mcp__ta__{}", name);
+            assert!(
+                allow.contains(&p) != deny.contains(&p),
+                "{} must be exactly one of allowed/denied (allowed={}, denied={})",
+                p,
+                allow.contains(&p),
+                deny.contains(&p)
+            );
+        }
+        assert!(deny.contains(&"mcp__ta__ta_wiki_update".to_string()));
+        for native in ["Bash", "Read", "Write", "Edit"] {
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+
+        // The argv the agent is spawned with.
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let mut env = std::collections::HashMap::new();
+        for (k, v) in super::super::chat_launch::chat_mode_agent_env(&plan, &staging) {
+            env.insert(k, v);
+        }
+        let args =
+            build_runtime_agent_args(&claude_config(true), &staging, "triage", true, &env).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--setting-sources local"), "{}", joined);
+        assert!(joined.contains("--permission-mode dontAsk"), "{}", joined);
+        assert!(joined.contains("--strict-mcp-config"), "{}", joined);
+        assert!(joined.contains("mcp-agent-chat.json"), "{}", joined);
     }
 
     /// Every TA MCP tool a CoS must never hold, by capability.
