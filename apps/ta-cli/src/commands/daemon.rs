@@ -9,6 +9,7 @@
 use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use clap::Subcommand;
