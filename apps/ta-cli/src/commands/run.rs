@@ -3241,6 +3241,41 @@ pub fn execute(
         }
     }
 
+    // Chat-mode launch (persona `chat_mode = true` or `--chat-mode`): resolve
+    // before any injection so invalid combinations fail fast. `None` for every
+    // normal launch, which then proceeds exactly as before.
+    let chat_mode_plan = {
+        let (persona_chat_mode, persona_tools) = match persona_name {
+            Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
+                Ok(p) => (p.capabilities.chat_mode, p.capabilities.allowed_tools),
+                Err(e) => anyhow::bail!(
+                    "Could not load persona '{}' while checking for chat mode: {}. Check \
+                     .ta/personas/{}.toml exists.",
+                    pname,
+                    e,
+                    pname
+                ),
+            },
+            None => (false, Vec::new()),
+        };
+        let plan =
+            super::chat_launch::plan_chat_mode_launch(&super::chat_launch::ChatModeInputs {
+                cli_flag: super::chat_launch::cli_chat_mode_requested(),
+                persona_name,
+                persona_chat_mode,
+                persona_allowed_tools: &persona_tools,
+                agent,
+                agent_framework_name: agent_config.name.as_deref(),
+                injects_settings: agent_config.injects_settings,
+                macro_goal,
+                uses_pty: interactive && !headless && !quiet,
+            })?;
+        if let Some(ref p) = plan {
+            super::chat_launch::report_chat_mode_plan(p, quiet);
+        }
+        plan
+    };
+
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
         // Load context budget config (v0.14.3.1).
@@ -3308,6 +3343,9 @@ pub fn execute(
                     );
                 }
             }
+        }
+        if let Some(ref plan) = chat_mode_plan {
+            channel.inject_persona(&super::chat_launch::chat_mode_context_section(plan))?;
         }
 
         // v0.16.3: Inject context.files declared in the agent manifest.
@@ -3473,10 +3511,29 @@ pub fn execute(
             None
         };
 
+        // Chat mode replaces the allow-list with persona tools INTERSECTED
+        // with the chat-mode profile (then the posture ceiling), and adds a
+        // deny for every native tool. Never the union.
+        let chat_mode_lists = match &chat_mode_plan {
+            Some(plan) => Some(super::chat_launch::chat_mode_settings_lists(
+                plan,
+                security_profile.max_allowed_tools.as_deref(),
+                &security_profile.forbidden_tool_patterns,
+            )?),
+            None => None,
+        };
+        let (effective_persona_tools, deny_patterns) = match &chat_mode_lists {
+            Some((allow, deny)) => (Some(allow.as_slice()), deny.as_slice()),
+            None => (
+                effective_persona_tools,
+                security_profile.forbidden_tool_patterns.as_slice(),
+            ),
+        };
+
         inject_claude_settings_with_security(
             &staging_path,
             source,
-            &security_profile.forbidden_tool_patterns,
+            deny_patterns,
             security_profile.web_search_enabled,
             effective_persona_tools,
         )?;
@@ -3566,6 +3623,21 @@ pub fn execute(
     {
         tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
+    // Chat mode: a separate, equally stable config whose `ta` server is
+    // switched into chat mode by its own env block. Failing to write it is
+    // fatal for a chat launch: falling back to the normal config would hand
+    // the agent an unrestricted TA MCP server.
+    if chat_mode_plan.is_some() {
+        super::chat_launch::write_chat_agent_mcp_config(&config.workspace_root).map_err(|e| {
+            anyhow::anyhow!(
+                "Could not write the chat-mode MCP config at {}: {}. The chat-mode agent was \
+                 not launched. Check that {} is writable and retry.",
+                super::chat_launch::agent_mcp_config_path(&config.workspace_root, true).display(),
+                e,
+                config.workspace_root.join(".ta").display()
+            )
+        })?;
+    }
 
     // v0.17.11.8: for a team-session role launch (--team-session-id), deliver
     // the session's whiteboard token into this goal's staging workspace so
@@ -3599,6 +3671,13 @@ pub fn execute(
 
     // Merge framework env extras into agent_config so they are passed to the process.
     agent_config.env.extend(framework_env_extras);
+    // Chat mode: hand the pre-generated chat session to the agent's `ta serve`
+    // MCP process. Inserted last so no other env source can override it.
+    if let Some(ref plan) = chat_mode_plan {
+        agent_config
+            .env
+            .extend(super::chat_launch::chat_mode_agent_env(plan, &staging_path));
+    }
 
     // VCS environment isolation (v0.13.17.3).
     // Inject VCS env vars before the agent spawns to prevent index-lock
@@ -5990,12 +6069,25 @@ fn launch_agent_via_runtime(
         //   parent()     = project_root/.ta/staging
         //   parent()     = project_root/.ta
         //   parent()     = project_root
-        let stable_mcp_path = staging_path
+        // Chat-mode launches use the chat-locked config instead
+        // (`.ta/mcp-agent-chat.json`, see commands/chat_launch.rs).
+        let chat_mode = super::chat_launch::env_requests_chat_mode(&env);
+        let stable_mcp_path = match staging_path
             .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.parent())
-            .map(|root| root.join(".ta").join("mcp-agent.json"))
-            .unwrap_or_else(|| staging_path.join(".mcp.json")); // fallback: staging (old behavior)
+        {
+            Some(root) => super::chat_launch::agent_mcp_config_path(root, chat_mode),
+            None if chat_mode => {
+                return Err(std::io::Error::other(format!(
+                    "chat-mode launch: cannot locate the project root from staging path {} \
+                     (expected <project>/.ta/staging/<id>), so the chat-locked MCP config \
+                     cannot be used. Refusing to launch with an unrestricted TA MCP server.",
+                    staging_path.display()
+                )));
+            }
+            None => staging_path.join(".mcp.json"), // fallback: staging (old behavior)
+        };
         args.push("--strict-mcp-config".to_string());
         args.push("--mcp-config".to_string());
         args.push(stable_mcp_path.display().to_string());
@@ -6676,7 +6768,7 @@ fn tool_identity(pattern: &str) -> &str {
 /// responsible for resolving the final list (including any
 /// `max_allowed_tools` ceiling); this function's job is only to write it
 /// out.
-fn inject_claude_settings_with_security(
+pub(crate) fn inject_claude_settings_with_security(
     staging_path: &Path,
     source_dir: Option<&Path>,
     extra_deny: &[String],

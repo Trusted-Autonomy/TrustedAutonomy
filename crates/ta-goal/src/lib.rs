@@ -17,6 +17,7 @@
 //! - [`NotificationSink`] — trait for receiving events (log, webhook, etc.)
 
 pub mod analysis;
+pub mod chat_mode;
 pub mod commit_context;
 pub mod conversation;
 pub mod error;

@@ -4,6 +4,7 @@ pub mod agent;
 pub mod analysis;
 pub mod audit;
 pub mod build;
+pub mod chat_launch;
 pub mod community;
 pub mod compression;
 pub mod config;

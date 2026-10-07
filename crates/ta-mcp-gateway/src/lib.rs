@@ -28,6 +28,7 @@
 //! - `ta_pr_status` — check PR package status
 //! - `ta_event_subscribe` — query/watch events for orchestration (v0.9.4)
 
+pub mod chat_launch;
 pub mod config;
 pub mod daemon_client;
 pub mod error;

@@ -150,6 +150,7 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
                 capabilities: PersonaCapabilities {
                     allowed_tools: allowed_tools.clone(),
                     forbidden_tools: forbidden_tools.clone(),
+                    chat_mode: false,
                 },
                 style: PersonaStyle {
                     output_format: "markdown".to_string(),

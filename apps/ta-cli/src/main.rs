@@ -296,6 +296,11 @@ enum Commands {
         /// Agent persona to apply (name of .ta/personas/<name>.toml).
         #[arg(long)]
         persona: Option<String>,
+        /// Launch as a read-only chat-mode session (same as a persona with
+        /// `chat_mode = true`): chat capability manifest, chat-locked TA MCP
+        /// server, chat-safe MCP tools only, all native tools denied.
+        #[arg(long)]
+        chat_mode: bool,
         /// Suppress streaming agent output; still print completion/failure summary.
         /// Default for daemon-dispatched and channel-dispatched goals.
         /// Inverse: omit --quiet (current interactive default) shows full output.
@@ -1663,6 +1668,7 @@ fn dispatch_raw(
             headless,
             skip_verify,
             persona,
+            chat_mode,
             quiet,
             goal_id,
             workflow,
@@ -1689,6 +1695,23 @@ fn dispatch_raw(
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
+
+            // `--chat-mode`: carried into `commands::run::execute` by a scoped
+            // guard (see commands/chat_launch.rs). Multi-goal workflows spawn
+            // their own sub-goal launches, which would not inherit it, so
+            // reject that combination instead of silently dropping chat mode.
+            if *chat_mode
+                && (phases.is_some()
+                    || workflow.as_deref() == Some("serial-phases")
+                    || !sub_goals.is_empty())
+            {
+                anyhow::bail!(
+                    "--chat-mode cannot be combined with --phases/--workflow serial-phases or \
+                     --sub-goals: those spawn separate sub-goal launches that would not run in \
+                     chat mode. Launch the chat session as a single `ta run --chat-mode` goal."
+                );
+            }
+            let _chat_mode_guard = commands::chat_launch::CliChatModeGuard::set(*chat_mode);
 
             // Paired cost-experiment shadow-goal bypass flags (v0.17.x,
             // internal/hidden): bundle the four `--experiment-shadow-*`
