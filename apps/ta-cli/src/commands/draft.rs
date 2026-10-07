@@ -16,8 +16,8 @@ use ta_changeset::draft_package::{
     assess_risk, AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType,
     ApplyProvenance, ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType,
     Changes, DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal,
-    Iteration, PendingAction, Plan, Provenance, RebuildProvenance, RequestedAction, ReviewRequests,
-    Signatures, Summary, VerificationWarning, WorkspaceRef,
+    Iteration, Plan, Provenance, RebuildProvenance, RequestedAction, ReviewRequests, Signatures,
+    Summary, VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
 use ta_changeset::output_renderers::{
@@ -9475,16 +9475,12 @@ fn apply_package_with_replay(
         run_governed_paths_auto_gc(config);
     }
 
-    // v0.17.11.12 (CoS read-only chat-mode design, item 4): replay any
-    // ta_propose_task_update pending actions against the real Wayfinder
-    // API now that this draft has actually been applied. Scoped
-    // deliberately to this one tool_name -- the general "replay any
-    // approved pending_action on apply" gap (affecting ta_external_action's
-    // email/slack actions too) is a separate, pre-existing issue, not
-    // fixed here.
+    // CoS read-only chat-mode design, item 4: replay approved
+    // ta_propose_task_* pending actions against Wayfinder now that this
+    // draft has actually been applied. See draft_task_replay.rs.
     if !dry_run {
         if let Ok(applied_pkg) = load_package(config, package_id) {
-            replay_propose_task_update_actions(config, &applied_pkg);
+            super::draft_task_replay::replay_task_proposals(config, &applied_pkg);
         }
     }
 
@@ -9494,90 +9490,6 @@ fn apply_package_with_replay(
     draft_action_replay::post_apply_hook(config, package_id, dry_run, replay_actions);
 
     Ok(())
-}
-
-/// Calls the real Wayfinder `PATCH /tasks/:id/content` for every
-/// `ta_propose_task_update` pending action in `pkg`, per the design in
-/// `docs/superpowers/specs/2026-10-06-cos-read-only-chat-mode-design.md`.
-/// A project with no `[plan] backend = "wayfinder"` configured simply has
-/// no way to replay these -- logged, not a hard failure, since the rest of
-/// the draft already applied successfully. Likewise a single action's
-/// failure is logged and does not roll back or block the others.
-fn replay_propose_task_update_actions(config: &GatewayConfig, pkg: &DraftPackage) {
-    let actions: Vec<&PendingAction> = pkg
-        .changes
-        .pending_actions
-        .iter()
-        .filter(|a| a.tool_name == ta_mcp_gateway::tools::wayfinder_task::TOOL_NAME)
-        .collect();
-    if actions.is_empty() {
-        return;
-    }
-
-    let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
-    let workflow_config = ta_submit::WorkflowConfig::load_or_default(&workflow_toml);
-    if workflow_config.plan.backend != "wayfinder" {
-        tracing::warn!(
-            count = actions.len(),
-            "skipping ta_propose_task_update pending action(s): this project has no \
-             [plan] backend = \"wayfinder\" configured in .ta/workflow.toml, so there is no \
-             way to replay them against a real Wayfinder task"
-        );
-        return;
-    }
-    let Some(raw) = workflow_config.plan.wayfinder.as_ref() else {
-        tracing::warn!(
-            count = actions.len(),
-            "skipping ta_propose_task_update pending action(s): [plan] backend = \"wayfinder\" \
-             but no [plan.wayfinder] table was found in .ta/workflow.toml"
-        );
-        return;
-    };
-    let mut cred_config = ta_credentials::CredentialsConfig::for_project(&config.workspace_root);
-    // Respect this gateway's own keychain setting rather than
-    // `WayfinderPlanConfig::load`'s own default (which only checks
-    // `TA_NO_KEYCHAIN` directly) -- matches every other credential
-    // resolution point in this codebase that already has a `GatewayConfig`
-    // in hand (see `tools/wiki.rs`'s own `load_context`).
-    cred_config.use_keychain = config.credential_vault_use_keychain;
-    let wf_config = match ta_plan_wayfinder::WayfinderPlanConfig::load_with_credentials_config(
-        raw,
-        &cred_config,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "skipping ta_propose_task_update pending action(s): failed to load Wayfinder config");
-            return;
-        }
-    };
-    let client = match ta_plan_wayfinder::WayfinderClient::new(&wf_config) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "skipping ta_propose_task_update pending action(s): failed to build Wayfinder client");
-            return;
-        }
-    };
-
-    for action in actions {
-        let task_id = action.parameters.get("task_id").and_then(|v| v.as_str());
-        let Some(task_id) = task_id else {
-            tracing::warn!(action_id = %action.action_id, "ta_propose_task_update pending action has no task_id, skipping");
-            continue;
-        };
-        let title = action.parameters.get("title").and_then(|v| v.as_str());
-        let description = action
-            .parameters
-            .get("description")
-            .and_then(|v| v.as_str());
-        match client.update_task_content(task_id, title, description) {
-            Ok(()) => {
-                println!("  [applied] Wayfinder task {} content updated", task_id);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, task_id = %task_id, "failed to replay ta_propose_task_update against Wayfinder");
-            }
-        }
-    }
 }
 
 /// v0.17.0: Append `Applied` journal entries for all pending writes belonging to this goal.
@@ -13659,213 +13571,6 @@ fn run() {
         // Verify goal state.
         let updated = goal_store.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(updated.state, GoalRunState::Applied);
-    }
-
-    // ── v0.17.11.12 (CoS read-only chat-mode design, item 4): replaying
-    //    ta_propose_task_update pending actions on apply ──────────────────
-
-    /// A `wiremock::MockServer` reachable from plain synchronous `#[test]`
-    /// functions, same reasoning as `ta-plan-wayfinder`'s own
-    /// `test_support::BlockingMockServer` (not reusable from here --
-    /// `#[cfg(test)]`-private to that crate): `WayfinderClient` is
-    /// deliberately `reqwest::blocking`, which panics if built from inside
-    /// an existing tokio runtime, so the mock server needs its own
-    /// dedicated one.
-    struct BlockingMockServer {
-        runtime: tokio::runtime::Runtime,
-        server: wiremock::MockServer,
-    }
-
-    impl BlockingMockServer {
-        fn start() -> Self {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let server = runtime.block_on(wiremock::MockServer::start());
-            Self { runtime, server }
-        }
-
-        fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
-            self.runtime.block_on(fut)
-        }
-
-        fn server(&self) -> &wiremock::MockServer {
-            &self.server
-        }
-    }
-
-    /// Builds a minimal real goal + draft package via the standard
-    /// pipeline (no file changes needed), then hand-injects a
-    /// `ta_propose_task_update` pending action into the saved package --
-    /// simulating what the live MCP gateway's `state.pending_actions`
-    /// would have included, since this test never spins up the gateway
-    /// server itself.
-    fn package_with_propose_task_update_action(
-        config: &GatewayConfig,
-        task_id: &str,
-        title: Option<&str>,
-        description: Option<&str>,
-    ) -> DraftPackage {
-        std::fs::write(config.workspace_root.join("README.md"), "# Original\n").unwrap();
-        super::super::goal::execute(
-            &super::super::goal::GoalCommands::Start {
-                title: "Propose task update test".to_string(),
-                source: Some(config.workspace_root.clone()),
-                objective: "Test the propose-task-update replay".to_string(),
-                agent: "test-agent".to_string(),
-                phase: None,
-                follow_up: None,
-                objective_file: None,
-            },
-            config,
-        )
-        .unwrap();
-        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
-        let goal = &goal_store.list().unwrap()[0];
-        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
-        build_package(config, &goal.goal_run_id.to_string(), "Test", false).unwrap();
-
-        let packages = load_all_packages(config).unwrap();
-        let mut pkg = load_package(config, packages[0].package_id).unwrap();
-        pkg.changes.pending_actions.push(PendingAction {
-            action_id: Uuid::new_v4(),
-            tool_name: ta_mcp_gateway::tools::wayfinder_task::TOOL_NAME.to_string(),
-            parameters: serde_json::json!({
-                "task_id": task_id,
-                "title": title,
-                "description": description,
-            }),
-            kind: ta_changeset::draft_package::ActionKind::StateChanging,
-            intercepted_at: Utc::now(),
-            description: "test proposal".to_string(),
-            target_uri: Some(format!("wayfinder://tasks/{task_id}")),
-            disposition: ArtifactDisposition::Pending,
-        });
-        save_package(config, &pkg).unwrap();
-        pkg
-    }
-
-    fn write_wayfinder_plan_config(config: &GatewayConfig, base_url: &str) {
-        std::fs::create_dir_all(config.workspace_root.join(".ta")).unwrap();
-        std::fs::write(
-            config.workspace_root.join(".ta/workflow.toml"),
-            format!(
-                "[plan]\nbackend = \"wayfinder\"\n\n[plan.wayfinder]\n\
-                 base_url = \"{base_url}\"\norg_id = \"org-1\"\nproject_id = \"proj-1\"\n\
-                 credential_name = \"wayfinder-service-account\"\n"
-            ),
-        )
-        .unwrap();
-
-        let mut cred_config =
-            ta_credentials::CredentialsConfig::for_project(&config.workspace_root);
-        cred_config.use_keychain = false;
-        let mut vault = ta_credentials::FileVault::open(&cred_config).unwrap();
-        use ta_credentials::CredentialVault;
-        vault
-            .add(
-                "wayfinder-service-account",
-                "wayfinder",
-                "wfsa-test-secret",
-                vec![],
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn replay_calls_wayfinder_for_an_approved_propose_task_update_action() {
-        let project = TempDir::new().unwrap();
-        let mut config = GatewayConfig::for_project(project.path());
-        config.credential_vault_use_keychain = false;
-
-        let mock = BlockingMockServer::start();
-        mock.block_on(
-            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
-                .and(wiremock::matchers::path(
-                    "/api/projects/proj-1/tasks/wf-task-1/content",
-                ))
-                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({
-                        "id": "wf-task-1",
-                        "title": "Revised by worker",
-                        "description": null,
-                        "verb": "implement",
-                        "status": "open",
-                        "hold_reason": null,
-                        "external_id": null,
-                        "updated_at": "1000000000"
-                    }),
-                ))
-                .expect(1)
-                .mount(mock.server()),
-        );
-        write_wayfinder_plan_config(&config, &mock.server().uri());
-
-        let pkg = package_with_propose_task_update_action(
-            &config,
-            "wf-task-1",
-            Some("Revised by worker"),
-            None,
-        );
-
-        replay_propose_task_update_actions(&config, &pkg);
-
-        mock.block_on(async {
-            let requests = mock.server().received_requests().await.unwrap();
-            assert_eq!(requests.len(), 1, "expected exactly one PATCH to Wayfinder");
-        });
-    }
-
-    #[test]
-    fn replay_skips_without_error_when_no_wayfinder_backend_is_configured() {
-        let project = TempDir::new().unwrap();
-        let mut config = GatewayConfig::for_project(project.path());
-        config.credential_vault_use_keychain = false;
-        // Deliberately no .ta/workflow.toml at all -- this is the common
-        // case (most projects have no Wayfinder plan backend configured).
-
-        let pkg = package_with_propose_task_update_action(
-            &config,
-            "wf-task-1",
-            Some("Revised by worker"),
-            None,
-        );
-
-        // Must not panic; the action is simply left un-replayed.
-        replay_propose_task_update_actions(&config, &pkg);
-    }
-
-    #[test]
-    fn replay_is_a_no_op_when_there_are_no_propose_task_update_actions() {
-        let project = TempDir::new().unwrap();
-        let mut config = GatewayConfig::for_project(project.path());
-        config.credential_vault_use_keychain = false;
-        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
-
-        super::super::goal::execute(
-            &super::super::goal::GoalCommands::Start {
-                title: "No pending actions".to_string(),
-                source: Some(project.path().to_path_buf()),
-                objective: "Test".to_string(),
-                agent: "test-agent".to_string(),
-                phase: None,
-                follow_up: None,
-                objective_file: None,
-            },
-            &config,
-        )
-        .unwrap();
-        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
-        let goal = &goal_store.list().unwrap()[0];
-        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
-        build_package(&config, &goal.goal_run_id.to_string(), "Test", false).unwrap();
-        let packages = load_all_packages(&config).unwrap();
-        let pkg = load_package(&config, packages[0].package_id).unwrap();
-        assert!(pkg.changes.pending_actions.is_empty());
-
-        // Must not panic, and makes no HTTP calls (no mock server set up at all).
-        replay_propose_task_update_actions(&config, &pkg);
     }
 
     #[test]
