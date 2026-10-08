@@ -111,7 +111,9 @@ pub enum DaemonCommands {
         /// Run in the foreground (for debugging/containers) instead of daemonizing.
         #[arg(long)]
         foreground: bool,
-        /// Override the daemon HTTP port (default: from daemon.toml or 7700).
+        /// Daemon API port (overrides `[server] port` in daemon.toml;
+        /// default 7700). The web dashboard is served by the same listener
+        /// at /ui, so this never binds a second port.
         #[arg(long)]
         port: Option<u16>,
     },
@@ -209,36 +211,36 @@ fn log_path(project_root: &Path) -> PathBuf {
     project_root.join(".ta").join("daemon.log")
 }
 
-/// Read the PID from `.ta/daemon.pid`. Returns `None` if the file is missing or
-/// doesn't contain a valid `pid=<N>` line.
+/// Read the PID from `.ta/daemon.pid` (any format a TA binary has written,
+/// via the shared `ta_mcp_gateway::daemon_pid` reader). Returns `None` if
+/// the file is missing or has no valid `pid=<N>` line.
 pub fn read_pid(project_root: &Path) -> Option<u32> {
-    let content = std::fs::read_to_string(pid_path(project_root)).ok()?;
-    content
-        .lines()
-        .find(|l| l.starts_with("pid="))
-        .and_then(|l| l.strip_prefix("pid="))
-        .and_then(|s| s.parse::<u32>().ok())
+    ta_mcp_gateway::daemon_pid::read_pid_file(project_root)
+        .ok()
+        .flatten()
+        .and_then(|p| p.pid)
 }
 
-/// Read the port from `.ta/daemon.pid`. Returns `None` if absent.
+/// Read the port from `.ta/daemon.pid`: the daemon's `bind=host:port` line
+/// or the legacy `port=` line. Returns `None` if absent.
 fn read_pid_port(project_root: &Path) -> Option<u16> {
-    let content = std::fs::read_to_string(pid_path(project_root)).ok()?;
-    content
-        .lines()
-        .find(|l| l.starts_with("port="))
-        .and_then(|l| l.strip_prefix("port="))
-        .and_then(|s| s.parse::<u16>().ok())
+    ta_mcp_gateway::daemon_pid::read_pid_file(project_root)
+        .ok()
+        .flatten()
+        .and_then(|p| p.port)
 }
 
-/// Write a PID file with pid, port, and log path.
+/// Write the PID file in the single shared format (pid, bind, port, log).
+/// The daemon rewrites it in the same format once it has bound its port.
 fn write_pid_file(project_root: &Path, pid: u32, port: u16) -> anyhow::Result<()> {
-    let content = format!(
-        "pid={}\nport={}\nlog={}\n",
+    let (bind, _) = daemon_toml_bind_port(project_root);
+    ta_mcp_gateway::daemon_pid::write_pid_file(
+        project_root,
         pid,
+        &bind,
         port,
-        log_path(project_root).display()
-    );
-    std::fs::write(pid_path(project_root), content)?;
+        &log_path(project_root),
+    )?;
     Ok(())
 }
 
@@ -279,12 +281,12 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Resolve the daemon URL from `.ta/daemon.toml` or default, with optional port
-/// override.
-pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> String {
+/// `[server] bind` and `[server] port` from `.ta/daemon.toml`, defaulting
+/// to `127.0.0.1` and 7700 (the daemon's own defaults) when absent.
+fn daemon_toml_bind_port(project_root: &Path) -> (String, u16) {
     let config_path = project_root.join(".ta").join("daemon.toml");
     let mut bind = "127.0.0.1".to_string();
-    let mut port: u16 = 7700;
+    let mut port: u16 = ta_mcp_gateway::daemon_pid::DEFAULT_DAEMON_PORT;
 
     if let Ok(content) = std::fs::read_to_string(&config_path) {
         if let Ok(config) = content.parse::<toml::Table>() {
@@ -304,12 +306,80 @@ pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> St
             }
         }
     }
+    (bind, port)
+}
+
+/// Resolve the daemon URL for `project_root`, with optional port override.
+///
+/// Order: `port_override`, then the live daemon's `.ta/daemon.pid` (the
+/// port it actually bound, which can differ from daemon.toml after
+/// `ta daemon start --port`), then `[server] port` in `.ta/daemon.toml`,
+/// then the daemon's default 7700. A pid file that exists but carries no
+/// readable port is reported loudly on stderr rather than silently
+/// ignored. (Whiteboard tools, which send session tokens, go further and
+/// refuse outright: see `ta_mcp_gateway::daemon_pid::resolve_daemon_endpoint`.)
+pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> String {
+    let (bind, toml_port) = daemon_toml_bind_port(project_root);
 
     if let Some(p) = port_override {
-        port = p;
+        return format!("http://{}:{}", bind, p);
     }
 
-    format!("http://{}:{}", bind, port)
+    match ta_mcp_gateway::daemon_pid::read_pid_file(project_root) {
+        Ok(Some(pf)) => match pf.port {
+            Some(p) => {
+                let host = pf.host.unwrap_or(bind);
+                return format!("http://{}:{}", host, p);
+            }
+            None => {
+                eprintln!(
+                    "[warn] {} has no usable port line (expected `bind=<host>:<port>` or \
+                     `port=<port>`). Using [server] port = {} from .ta/daemon.toml instead. \
+                     Run `ta daemon restart` to rewrite the pid file.",
+                    pid_path(project_root).display(),
+                    toml_port
+                );
+                tracing::warn!(
+                    path = %pid_path(project_root).display(),
+                    fallback_port = toml_port,
+                    "daemon.pid has no usable port"
+                );
+            }
+        },
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "[warn] Could not read {}: {}. Using [server] port = {} from .ta/daemon.toml.",
+                pid_path(project_root).display(),
+                e,
+                toml_port
+            );
+        }
+    }
+
+    format!("http://{}:{}", bind, toml_port)
+}
+
+/// Arguments `ta daemon start` passes to `ta-daemon`. `--port` sets the API
+/// port (`[server] port` override); it is never forwarded as `--web-port`,
+/// which used to make the API and the legacy web UI both bind the same
+/// port and crash the daemon with "Address already in use".
+fn daemon_spawn_args(
+    project_root: &Path,
+    port_override: Option<u16>,
+    foreground: bool,
+) -> Vec<String> {
+    let mut args = vec!["--api".to_string()];
+    if foreground {
+        args.push("--foreground".to_string());
+    }
+    args.push("--project-root".to_string());
+    args.push(project_root.display().to_string());
+    if let Some(port) = port_override {
+        args.push("--port".to_string());
+        args.push(port.to_string());
+    }
+    args
 }
 
 /// Start the daemon in the background. Returns the child PID on success.
@@ -366,29 +436,18 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("Cannot clone log file handle: {}", e))?;
 
     let mut cmd = Command::new(&daemon_bin);
-    cmd.arg("--api")
-        .arg("--project-root")
-        .arg(project_root)
+    cmd.args(daemon_spawn_args(project_root, port_override, false))
         .stdout(log_file)
         .stderr(stderr_log);
-
-    if let Some(port) = port_override {
-        cmd.arg("--web-port").arg(port.to_string());
-    }
 
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", daemon_bin.display(), e))?;
 
     let pid = child.id();
-    let port = port_override.unwrap_or_else(|| {
-        // Read from daemon.toml or default.
-        let url = resolve_daemon_url(project_root, None);
-        url.rsplit(':')
-            .next()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(7700)
-    });
+    // The pid file was removed above (stale) or never existed, so the
+    // daemon will bind `--port` if given, else daemon.toml's port.
+    let port = port_override.unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
     write_pid_file(project_root, pid, port)?;
 
@@ -655,7 +714,7 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
     // Not reachable — start it.
     eprintln!("Daemon not reachable at {} — starting...", base_url);
     let pid = start(project_root, None)?;
-    let port = read_pid_port(project_root).unwrap_or(7700);
+    let port = read_pid_port(project_root).unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
     eprintln!(
         "  Started daemon (pid {}), port {}, log: {}",
@@ -688,14 +747,7 @@ fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow
         // Foreground mode: exec the daemon binary directly.
         let daemon_bin = super::version_guard::find_daemon_binary()?;
         let mut cmd = Command::new(&daemon_bin);
-        cmd.arg("--api")
-            .arg("--foreground")
-            .arg("--project-root")
-            .arg(project_root);
-
-        if let Some(p) = port {
-            cmd.arg("--web-port").arg(p.to_string());
-        }
+        cmd.args(daemon_spawn_args(project_root, port, true));
 
         println!(
             "Starting daemon in foreground: {} --api --project-root {}",
@@ -717,7 +769,8 @@ fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow
     }
 
     let pid = start(project_root, port)?;
-    let effective_port = read_pid_port(project_root).unwrap_or(7700);
+    let effective_port =
+        read_pid_port(project_root).unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
     println!("Daemon started.");
     println!("  PID:  {}", pid);
@@ -782,7 +835,8 @@ fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::R
         restart(project_root, port)?
     };
 
-    let effective_port = read_pid_port(project_root).unwrap_or(7700);
+    let effective_port =
+        read_pid_port(project_root).unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
     if let Some(old) = old_pid {
         println!("Daemon restarted (was pid {}, now pid {}).", old, new_pid);
@@ -1584,6 +1638,39 @@ mod tests {
 
         remove_pid_file(project);
         assert!(read_pid(project).is_none());
+    }
+
+    #[test]
+    fn start_forwards_port_as_the_api_port_not_web_port() {
+        // Regression: `--port N` used to be forwarded as `--web-port N`, so
+        // with `[server] port = N` in daemon.toml the API and the legacy web
+        // UI both bound N and the daemon died with "Address already in use".
+        let dir = tempfile::tempdir().unwrap();
+        let args = daemon_spawn_args(dir.path(), Some(7710), false);
+        assert!(!args.iter().any(|a| a == "--web-port"), "{args:?}");
+        let i = args.iter().position(|a| a == "--port").expect("--port");
+        assert_eq!(args[i + 1], "7710");
+        let fg = daemon_spawn_args(dir.path(), Some(7710), true);
+        assert!(!fg.iter().any(|a| a == "--web-port"), "{fg:?}");
+        assert!(fg.iter().any(|a| a == "--foreground"));
+    }
+
+    #[test]
+    fn resolve_daemon_url_reads_the_daemons_own_pid_format() {
+        // The daemon writes `pid=` + `bind=host:port`. The old reader only
+        // understood `port=` and fell back to 7700, another project's daemon.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/daemon.pid"),
+            "pid=31751\nbind=127.0.0.1:7710\n",
+        )
+        .unwrap();
+        assert_eq!(read_pid_port(dir.path()), Some(7710));
+        assert_eq!(
+            resolve_daemon_url(dir.path(), None),
+            "http://127.0.0.1:7710"
+        );
     }
 
     #[test]

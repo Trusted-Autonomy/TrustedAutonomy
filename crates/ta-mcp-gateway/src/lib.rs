@@ -31,8 +31,10 @@
 pub mod chat_launch;
 pub mod config;
 pub mod daemon_client;
+pub mod daemon_pid;
 pub mod error;
 pub mod interceptor;
+pub mod secret_redact;
 pub mod server;
 pub mod staged_conflict_check;
 pub mod tools;

@@ -567,6 +567,9 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/whiteboard/outcome/send",
             post(whiteboard::send_outcome),
         )
+        // Which project this daemon serves: whiteboard clients verify it
+        // before sending a session token.
+        .route("/api/whiteboard/identity", get(whiteboard::identity))
         // Unauthenticated advisory pre-launch conflict check:
         // runs before any team-session/goal exists to mint a scope against.
         .route(

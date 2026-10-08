@@ -247,6 +247,11 @@ impl GoalRunState {
                 | (GoalRunState::Running, GoalRunState::Finalizing { .. })
                 // Finalizing → PrReady (draft built successfully)
                 | (GoalRunState::Finalizing { .. }, GoalRunState::PrReady)
+                // A chat-mode session (e.g. the chief-of-staff) that made no
+                // file changes has nothing to review: it completes without a
+                // draft. `ta run` only takes this path for chat-mode launches.
+                | (GoalRunState::Finalizing { .. }, GoalRunState::Completed)
+                | (GoalRunState::Running, GoalRunState::Completed)
                 // Recover: Finalizing → Running (manual recovery after timeout/interrupt)
                 | (GoalRunState::Finalizing { .. }, GoalRunState::Running)
                 // v0.14.7.2: Running → DraftPending (agent wrote work_complete, exited before build)
@@ -1108,6 +1113,21 @@ mod tests {
         gr.transition(GoalRunState::PrReady).unwrap();
         gr.transition(GoalRunState::Applied).unwrap();
         gr.transition(GoalRunState::Merged).unwrap();
+        gr.transition(GoalRunState::Completed).unwrap();
+        assert_eq!(gr.state, GoalRunState::Completed);
+    }
+
+    #[test]
+    fn finalizing_to_completed_is_valid_for_a_chat_session_without_a_draft() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::Finalizing {
+            exit_code: 0,
+            finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
+        })
+        .unwrap();
         gr.transition(GoalRunState::Completed).unwrap();
         assert_eq!(gr.state, GoalRunState::Completed);
     }

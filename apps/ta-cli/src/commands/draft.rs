@@ -50,6 +50,34 @@ pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatter
     excludes
 }
 
+/// Typed "the diff is empty" error from a draft build, so callers can tell
+/// it apart from real failures without matching on message text.
+/// `ta run` uses it to treat an empty diff as the normal successful outcome
+/// of a chat-mode launch (a chief-of-staff conversation makes no file
+/// changes), while every other goal keeps the error.
+#[derive(Debug)]
+pub struct NoChangesInStaging {
+    pub message: String,
+}
+
+impl std::fmt::Display for NoChangesInStaging {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoChangesInStaging {}
+
+fn no_changes_error(message: String) -> anyhow::Error {
+    anyhow::Error::new(NoChangesInStaging { message })
+}
+
+/// Whether `err` (anywhere in its chain) is a `NoChangesInStaging`.
+pub fn is_no_changes_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|e| e.downcast_ref::<NoChangesInStaging>().is_some())
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DraftCommands {
     /// Build a draft package from overlay workspace diffs.
@@ -2104,7 +2132,7 @@ pub(crate) fn build_package(
         // Diagnose why there are no changes to produce a helpful error.
         let uncommitted = count_working_tree_changes(source_dir);
         if uncommitted > 0 {
-            anyhow::bail!(
+            return Err(no_changes_error(format!(
                 "No changes detected in staging workspace.\n\
                 \n\
                 The agent made no changes relative to the source directory, but there \
@@ -2120,9 +2148,9 @@ pub(crate) fn build_package(
                   git push -u origin feature/<name>\n\
                   gh pr create",
                 uncommitted
-            );
+            )));
         }
-        anyhow::bail!(
+        return Err(no_changes_error(format!(
             "No changes detected in staging workspace.\n\
             \n\
             The agent ran but made no file changes relative to the source. \
@@ -2137,7 +2165,7 @@ pub(crate) fn build_package(
               ta draft build {}",
             goal.workspace_path.display(),
             goal_id
-        );
+        )));
     }
 
     // Convert overlay changes to draft package artifacts.
@@ -18521,12 +18549,25 @@ fn run() {
             result.is_err(),
             "build_package should fail when diff is empty and no memory entries exist"
         );
-        let msg = result.err().unwrap().to_string();
+        let err = result.err().unwrap();
+        assert!(
+            is_no_changes_error(&err),
+            "an empty diff must be the typed NoChangesInStaging error so `ta run` can \
+             tell it apart from real failures"
+        );
+        let msg = err.to_string();
         assert!(
             msg.contains("No changes detected"),
             "error should mention 'No changes detected'; got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn other_errors_are_not_mistaken_for_no_changes() {
+        assert!(!is_no_changes_error(&anyhow::anyhow!(
+            "No changes detected in staging workspace (plain text, not the typed error)"
+        )));
     }
 
     #[test]

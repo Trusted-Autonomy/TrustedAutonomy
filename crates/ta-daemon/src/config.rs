@@ -1966,6 +1966,49 @@ pub fn validate_auth_posture(server: &ServerConfig, auth: &AuthConfig) -> Result
     Ok(())
 }
 
+/// Applies the command-line port flags to `server` and returns the port the
+/// optional separate legacy web UI should bind, refusing any combination
+/// that would bind two listeners on one port.
+///
+/// The rule is deliberately simple:
+/// - `--port N` sets the API port (it overrides `[server] port`). The web
+///   dashboard is already served by the API listener at `/ui`, so `--port`
+///   alone always means exactly ONE listener.
+/// - `--web-port M` (or the gateway's `web_ui_port`) additionally starts the
+///   separate legacy web UI on M, which must differ from the API port.
+///
+/// Before this existed, `ta daemon start --port N` forwarded N as
+/// `--web-port`, so the API (still on `[server] port`) and the legacy web UI
+/// both bound N whenever daemon.toml also said N, and the daemon died with
+/// "Address already in use".
+pub fn apply_port_flags(
+    server: &mut ServerConfig,
+    api_port: Option<u16>,
+    web_port: Option<u16>,
+) -> Result<Option<u16>, String> {
+    if let Some(p) = api_port {
+        server.port = p;
+    }
+    if let Some(w) = web_port {
+        if w == server.port {
+            let api_source = if api_port.is_some() {
+                "--port"
+            } else {
+                "[server] port in .ta/daemon.toml"
+            };
+            return Err(format!(
+                "Two listeners are configured on port {w}: the daemon API ({api_source} = {}) \
+                 and the separate legacy web UI (--web-port, or web_ui_port in the gateway \
+                 config, = {w}). Only one process can bind a port. The API already serves the \
+                 dashboard at http://{}:{}/ui, so the usual fix is to drop --web-port. \
+                 Otherwise give the two settings different ports.",
+                server.port, server.bind, server.port
+            ));
+        }
+    }
+    Ok(web_port)
+}
+
 /// Experimental feature flags — all default `false`.
 ///
 /// Add `[experimental]` to `.ta/config.toml` to opt in:
@@ -2225,6 +2268,48 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_flag_sets_the_api_port_and_starts_no_second_listener() {
+        // `ta daemon start --port 7710` with `[server] port = 7710` in
+        // daemon.toml: one listener, on 7710.
+        let mut server = ServerConfig {
+            port: 7710,
+            ..ServerConfig::default()
+        };
+        let web = apply_port_flags(&mut server, Some(7710), None).unwrap();
+        assert_eq!(server.port, 7710);
+        assert_eq!(web, None, "--port must never start a second listener");
+    }
+
+    #[test]
+    fn port_flag_overrides_daemon_toml_port() {
+        let mut server = ServerConfig::default();
+        apply_port_flags(&mut server, Some(7720), None).unwrap();
+        assert_eq!(server.port, 7720);
+    }
+
+    #[test]
+    fn web_port_equal_to_api_port_is_refused_naming_both_settings() {
+        let mut server = ServerConfig {
+            port: 7710,
+            ..ServerConfig::default()
+        };
+        let err = apply_port_flags(&mut server, None, Some(7710)).unwrap_err();
+        assert!(err.contains("[server] port"), "{err}");
+        assert!(err.contains("--web-port"), "{err}");
+        let err = apply_port_flags(&mut server, Some(7730), Some(7730)).unwrap_err();
+        assert!(err.contains("--port"), "{err}");
+    }
+
+    #[test]
+    fn distinct_web_port_is_allowed() {
+        let mut server = ServerConfig::default();
+        assert_eq!(
+            apply_port_flags(&mut server, Some(7700), Some(8080)).unwrap(),
+            Some(8080)
+        );
+    }
 
     #[test]
     fn default_daemon_config() {

@@ -46,6 +46,25 @@ pub struct WhiteboardConfig {
     /// NATS server URL, only used when `transport = "nats"`.
     #[serde(default = "default_nats_url")]
     pub nats_url: String,
+
+    /// Wake-on-demand listeners: how many times one message may launch its
+    /// role (`ta run`) before it is dead-lettered (acked so it is never
+    /// redelivered, and recorded in `.ta/wake-dead-letter.jsonl`).
+    /// Default 3.
+    #[serde(default = "default_wake_max_attempts")]
+    pub wake_max_attempts: u32,
+
+    /// Wake-on-demand listeners: seconds to wait before retrying a message
+    /// whose launch failed, indexed by failure count (the last value
+    /// repeats). Default `[30, 120, 600]` (30s, 2m, 10m).
+    #[serde(default = "default_wake_backoff_secs")]
+    pub wake_backoff_secs: Vec<u64>,
+
+    /// Wake-on-demand listeners: cost safety net. At most this many
+    /// launches per listener in any rolling hour; further messages wait
+    /// (they are not dropped). Default 6. `0` disables the guard.
+    #[serde(default = "default_wake_max_launches_per_hour")]
+    pub wake_max_launches_per_hour: u32,
 }
 
 impl Default for WhiteboardConfig {
@@ -54,8 +73,23 @@ impl Default for WhiteboardConfig {
             enabled: false,
             transport: default_transport(),
             nats_url: default_nats_url(),
+            wake_max_attempts: default_wake_max_attempts(),
+            wake_backoff_secs: default_wake_backoff_secs(),
+            wake_max_launches_per_hour: default_wake_max_launches_per_hour(),
         }
     }
+}
+
+fn default_wake_max_attempts() -> u32 {
+    3
+}
+
+fn default_wake_backoff_secs() -> Vec<u64> {
+    vec![30, 120, 600]
+}
+
+fn default_wake_max_launches_per_hour() -> u32 {
+    6
 }
 
 fn default_transport() -> String {
@@ -125,6 +159,27 @@ mod tests {
         let config = WhiteboardConfig::load(dir.path());
         assert!(config.enabled);
         assert_eq!(config.transport, "memory");
+    }
+
+    #[test]
+    fn wake_retry_settings_default_and_parse() {
+        let d = WhiteboardConfig::default();
+        assert_eq!(d.wake_max_attempts, 3);
+        assert_eq!(d.wake_backoff_secs, vec![30, 120, 600]);
+        assert_eq!(d.wake_max_launches_per_hour, 6);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nenabled = true\nwake_max_attempts = 5\n\
+             wake_backoff_secs = [1, 2]\nwake_max_launches_per_hour = 2\n",
+        )
+        .unwrap();
+        let c = WhiteboardConfig::load(dir.path());
+        assert_eq!(c.wake_max_attempts, 5);
+        assert_eq!(c.wake_backoff_secs, vec![1, 2]);
+        assert_eq!(c.wake_max_launches_per_hour, 2);
     }
 
     #[test]
