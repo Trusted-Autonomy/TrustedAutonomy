@@ -1360,25 +1360,33 @@ pub async fn serve_daemon_api(
     Ok(())
 }
 
-/// Write a PID file containing the daemon process ID and bind address.
-///
-/// Format: `pid=<PID>\nbind=<host>:<port>\n`
+/// Write `.ta/daemon.pid` through the shared writer
+/// (`ta_mcp_gateway::daemon_pid`), in the same single format the CLI writes,
+/// recording the port this process is about to bind. The daemon's write is
+/// the authoritative one: it runs after the CLI's and carries the port that
+/// is actually served (including a `--port` override).
 fn write_pid_file(path: &std::path::Path, server: &crate::config::ServerConfig) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let content = format!(
-        "pid={}\nbind={}:{}\n",
+    let project_root = path
+        .parent()
+        .and_then(|ta| ta.parent())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let log = ta_mcp_gateway::daemon_pid::default_log_path(project_root);
+    match ta_mcp_gateway::daemon_pid::write_pid_file(
+        project_root,
         std::process::id(),
-        server.bind,
-        server.port
-    );
-    match std::fs::write(path, &content) {
-        Ok(()) => tracing::debug!(path = %path.display(), "Wrote daemon PID file"),
+        &server.bind,
+        server.port,
+        &log,
+    ) {
+        Ok(()) => {
+            tracing::debug!(path = %path.display(), port = server.port, "Wrote daemon PID file")
+        }
         Err(e) => tracing::warn!(
             path = %path.display(),
             error = %e,
-            "Failed to write daemon PID file — auto-start may not detect this instance"
+            "Failed to write daemon PID file. The CLI and whiteboard tools locate this daemon's \
+             port through it, so they will report an error until it is written. Check that \
+             .ta/ is writable, then run `ta daemon restart`."
         ),
     }
 }

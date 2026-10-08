@@ -432,9 +432,10 @@ mod tests {
         // The fixed handler path: resolve against session.source_dir, not
         // the workspace_root passed to load_whiteboard_session.
         let resolved_against_workspace_root =
-            crate::daemon_client::resolve_daemon_url(workspace_root.path());
+            crate::daemon_client::resolve_daemon_url(workspace_root.path()).unwrap();
         let resolved_against_source_dir =
-            crate::daemon_client::resolve_daemon_url(std::path::Path::new(source_dir.path()));
+            crate::daemon_client::resolve_daemon_url(std::path::Path::new(source_dir.path()))
+                .unwrap();
         assert_eq!(
             resolved_against_workspace_root, "http://127.0.0.1:7700",
             "staging has no daemon.pid, so resolving against it silently falls back to 7700 \
@@ -451,5 +452,68 @@ mod tests {
             session.source_dir,
             workspace_root.path().display().to_string()
         );
+    }
+
+    /// End-to-end through the real `ta_whiteboard_outcome_send` handler, the
+    /// way a chat-mode chief-of-staff calls it: the handler's workspace_root
+    /// is the STAGING dir, whose `.ta/whiteboard-session.json` names the real
+    /// project root as `source_dir`, whose `.ta/daemon.pid` was written by
+    /// the daemon itself in its `pid=` + `bind=` shape on a non-default
+    /// port. The POST must land on that daemon (and therefore not on 7700).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outcome_send_handler_reaches_the_projects_real_daemon_from_staging() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        let daemon = crate::daemon_client::test_support::spawn_mock_daemon(project.path()).await;
+        assert_ne!(daemon.port, 7700);
+        std::fs::write(
+            project.path().join(".ta/daemon.pid"),
+            format!("pid=4242\nbind=127.0.0.1:{}\n", daemon.port),
+        )
+        .unwrap();
+
+        let staging = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(staging.path().join(".ta")).unwrap();
+        std::fs::write(
+            staging.path().join(".ta/whiteboard-session.json"),
+            serde_json::json!({
+                "team_session": "sess-cos",
+                "token": "tok-cos",
+                "source_dir": project.path().display().to_string(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut config = crate::config::GatewayConfig::for_project(staging.path());
+        config.credential_vault_use_keychain = false;
+        let state = Arc::new(Mutex::new(GatewayState::new(config).unwrap()));
+
+        let result = tokio::task::spawn_blocking(move || {
+            handle_outcome_send(
+                &state,
+                OutcomeSendParams {
+                    candidate_id: "wayfinder-task:t1".to_string(),
+                    outcome: "done".to_string(),
+                    detail: "triaged".to_string(),
+                    new_task_title: None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+
+        let got = daemon.outcomes.lock().unwrap().clone();
+        assert_eq!(
+            got.len(),
+            1,
+            "the outcome POST must arrive at the pid-file daemon"
+        );
+        assert_eq!(got[0]["token"], "tok-cos");
+        assert_eq!(got[0]["team_session"], "sess-cos");
+        let payload: serde_json::Value =
+            serde_json::from_str(got[0]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["candidate_id"], "wayfinder-task:t1");
     }
 }
