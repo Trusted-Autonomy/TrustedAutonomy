@@ -833,26 +833,24 @@ pub async fn claim_phase(
         // `.ta/workflow.toml`'s `[plan] backend = "wayfinder"` opts in —
         // this is exactly the "never needs touching again" call site the
         // comment above already promised.
-        let store: Box<dyn ta_plan::PlanStore> =
-            match ta_plan_wayfinder::select_plan_store(&state.project_root, &state.goals_dir) {
-                Ok(s) => s,
-                Err(e) => {
-                    state.phase_claims.release(&phase_id);
-                    return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::json!({ "error": format!("Failed to open PlanStore: {}", e) }),
-                    ),
-                )
-                    .into_response();
-                }
-            };
-        if let Err(e) = store.update_phase_status(&phase_id, ta_plan::PlanStatus::InProgress, None)
-        {
+        let project_root = state.project_root.clone();
+        let goals_dir = state.goals_dir.clone();
+        let pid = phase_id.clone();
+        let written = run_plan_store_blocking(move || {
+            let store: Box<dyn ta_plan::PlanStore> =
+                ta_plan_wayfinder::select_plan_store(&project_root, &goals_dir)
+                    .map_err(|e| format!("Failed to open PlanStore: {}", e))?;
+            store
+                .update_phase_status(&pid, ta_plan::PlanStatus::InProgress, None)
+                .map_err(|e| format!("Failed to write PLAN.md: {}", e))
+        })
+        .await;
+        if let Err(msg) = written {
+            tracing::error!(phase = %phase_id, error = %msg, "phase claim: PlanStore write failed");
             state.phase_claims.release(&phase_id);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Failed to write PLAN.md: {}", e) })),
+                Json(serde_json::json!({ "error": msg })),
             )
                 .into_response();
         }
@@ -863,6 +861,25 @@ pub async fn claim_phase(
         Json(serde_json::json!({ "status": "claimed", "phase_id": phase_id })),
     )
         .into_response()
+}
+
+/// Runs synchronous `PlanStore` work on Tokio's blocking pool instead of an
+/// async worker. The Wayfinder backend holds a `reqwest::blocking::Client`,
+/// which owns a private Tokio runtime; building, using, or dropping it on an
+/// async worker panics with "Cannot drop a runtime in a context where
+/// blocking is not allowed". Found live: with `[plan] backend = "wayfinder"`
+/// every phase claim panicked this handler (the daemon kept running, the
+/// connection dropped, and `ta run` fell back to a direct PLAN.md write).
+async fn run_plan_store_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| {
+        format!(
+            "PlanStore task did not complete ({}). Check the daemon log for a panic in \
+             the plan backend.",
+            e
+        )
+    })?
 }
 
 /// `POST /api/plan/phase/release` — Release an in-memory phase claim.
@@ -1873,5 +1890,43 @@ Future work.
             Some(states),
             "goals scan should be served from cache within the TTL window"
         );
+    }
+}
+
+#[cfg(test)]
+mod plan_store_blocking_tests {
+    use super::run_plan_store_blocking;
+
+    /// Stand-in for the Wayfinder `PlanStore`: builds and drops a
+    /// `reqwest::blocking::Client`, the exact thing that panicked the live
+    /// daemon's phase-claim handler.
+    fn build_and_drop_blocking_client() -> Result<(), String> {
+        let client = reqwest::blocking::Client::builder()
+            .build()
+            .map_err(|e| e.to_string())?;
+        drop(client);
+        Ok(())
+    }
+
+    /// The hazard itself: on an async worker this panics.
+    #[tokio::test]
+    async fn blocking_http_client_on_an_async_worker_panics() {
+        let result = std::panic::catch_unwind(build_and_drop_blocking_client);
+        assert!(
+            result.is_err(),
+            "expected tokio's 'Cannot drop a runtime' panic on an async worker"
+        );
+    }
+
+    /// Regression: the same work through the handler's helper completes.
+    #[tokio::test]
+    async fn plan_store_work_runs_off_the_async_worker() {
+        run_plan_store_blocking(build_and_drop_blocking_client)
+            .await
+            .unwrap();
+        let err = run_plan_store_blocking(|| Err::<(), _>("Failed to write PLAN.md: x".into()))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to write PLAN.md"), "{err}");
     }
 }

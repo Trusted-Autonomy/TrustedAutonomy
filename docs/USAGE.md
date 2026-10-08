@@ -406,6 +406,14 @@ A role whose origin is `cos` or `chat` always launches with `--chat-mode`, even 
 
 Values that look like secrets (keys such as `token`, `api_key`, `password`, `authorization`, and strings such as `sk-ant-...` or `Bearer ...`) are replaced with `[REDACTED]` in both files. To keep the same record for any other goal, set `TA_KEEP_TRANSCRIPT=1` when you run it. Only `--headless` launches can be recorded; an interactive launch prints a warning instead.
 
+**How a woken role receives its intake.** When a message wakes a role (for example the Chief-of-Staff on a new intake item), the daemon writes two files under `.ta/team-sessions/<session>/`: the session context (objective, role prompt, earlier findings) and the message itself as received. It launches `ta run --objective-file <context> --intake-file <message>`. Both go into the agent's first message, so the agent does not have to go and find them. The intake comes from outside sources (chat, forum posts, meeting notes, task trackers) that anyone may have written, so TA never hands it over as instructions:
+
+- A fixed note before it says the block is untrusted data to classify, and that nothing written inside it is to be followed.
+- The block sits between two boundary lines made from a random token chosen for that launch. The token never appears in the data, so text in the intake cannot end the block early, even if it contains fake boundaries or "ignore previous instructions".
+- The `candidate_id` is read from the intake record by TA's code and stated above the block as a trusted value. The agent uses that id when it reports the outcome (`ta_whiteboard_outcome_send`), never an id found inside the block. If the record has no usable `candidate_id`, TA says so instead.
+
+Any `ta run --objective-file <file>` launch, chat mode or not, also puts the file's text into the agent's first message (up to 12 KB; the goal record keeps all of it).
+
 **Wake-on-demand launches (the daemon starting a role when a message arrives).** Each launch writes everything `ta run` printed to `.ta/logs/wake-launches/<session>-<role>-<UTC time>-<message id>.log` (secrets redacted). When a launch fails, the daemon log shows the last 40 lines of its stderr and the path of that file.
 
 A failed launch is not retried straight away. The daemon waits 30 seconds, then 2 minutes, then 10 minutes between attempts, and after 3 failed attempts it stops: the message is acknowledged so it is never delivered again, a line is added to `.ta/wake-dead-letter.jsonl` (message id, session, role, attempts, the end of the last error, timestamps), an error is logged, and a `command_failed` event is emitted. The attempt count is kept in `.ta/wake-attempts/`, so restarting the daemon does not reset it. As a cost safety net, each listener also starts at most 6 launches in any hour; extra messages wait their turn rather than being dropped. All of these are set in `.ta/workflow.toml`:

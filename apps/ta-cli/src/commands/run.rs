@@ -2632,6 +2632,19 @@ pub fn execute(
         )
     })?;
 
+    // What the agent's first message carries. `objective` is only the
+    // `--objective` string; an `--objective-file` launch used to leave it
+    // empty, so the agent got `Implement: <title>` and never saw the file
+    // (found live: the daemon-woken Chief-of-Staff had no candidate_id).
+    // Resolved here, before any staging work, so a bad path fails fast.
+    let prompt_objective =
+        super::intake_prompt::resolve_prompt_objective(objective, objective_file)?;
+    // `--intake-file` (wake-on-demand launches): untrusted intake, fenced
+    // into the prompt with its candidate_id stated as a trusted value.
+    let untrusted_intake = super::intake_prompt::cli_intake_file()
+        .map(|p| super::intake_prompt::load_intake(&p))
+        .transpose()?;
+
     // ── Workflow routing (v0.13.7) ───────────────────────────────
     //
     // Resolve the workflow kind from flag, then config, then default.
@@ -3679,7 +3692,7 @@ pub fn execute(
             {
                 let context_text = build_goal_context_text(
                     title,
-                    objective,
+                    &prompt_objective,
                     &goal_id,
                     goal.plan_phase.as_deref(),
                     config,
@@ -3907,12 +3920,13 @@ pub fn execute(
         }
     }
 
-    // Build the prompt string.
-    let prompt = if objective.is_empty() {
-        format!("Implement: {}", title)
-    } else {
-        format!("{}\n\nObjective: {}", title, objective)
-    };
+    // Build the prompt string (the agent's first message).
+    let prompt = super::intake_prompt::build_agent_prompt(
+        title,
+        &prompt_objective,
+        untrusted_intake.as_ref(),
+    );
+    super::intake_prompt::record_built_prompt(&prompt);
 
     if no_launch {
         // Restore injected files — user will run the agent manually,
@@ -12009,6 +12023,175 @@ pre_launch:
         assert!(joined.contains("--permission-mode dontAsk"), "{}", joined);
         assert!(joined.contains("--strict-mcp-config"), "{}", joined);
         assert!(joined.contains("mcp-agent-chat.json"), "{}", joined);
+    }
+
+    const WAKE_CANDIDATE_ID: &str =
+        "wayfinder-task:9061d2b8-3f38-4c08-b162-e3e73f021a54#c361f674fcc72ba0562d479b19c44b24";
+
+    /// Drives the real `execute()` with `--no-launch` (no agent process is
+    /// spawned) the way the daemon's wake listener launches a role:
+    /// `--objective-file <session context>` and, optionally,
+    /// `--intake-file <intake record>`. Returns the prompt `execute()` built
+    /// for the agent.
+    fn prompt_from_execute(
+        persona: Option<&str>,
+        objective_file_body: &str,
+        intake_body: Option<&str>,
+    ) -> (String, TempDir) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        if persona.is_some() {
+            write_persona(
+                project.path(),
+                "chief-of-staff",
+                "chat_mode = true\norigin = \"cos\"\nallowed_tools = [\"mcp__ta__ta_fs_read\", \
+                 \"mcp__ta__ta_whiteboard_outcome_send\"]",
+            );
+        }
+        let ctx_dir = TempDir::new().unwrap();
+        let objective_file = ctx_dir.path().join("wake-context.md");
+        std::fs::write(&objective_file, objective_file_body).unwrap();
+        let intake_path = intake_body.map(|body| {
+            let p = ctx_dir.path().join("wake-intake.json");
+            std::fs::write(&p, body).unwrap();
+            p
+        });
+        let _intake_guard = super::super::intake_prompt::CliIntakeFileGuard::set(intake_path);
+        let _ = super::super::intake_prompt::take_last_built_prompt();
+        let config = GatewayConfig::for_project(project.path());
+        execute(
+            &config,
+            Some("live-cos: wake-on-demand (chief-of-staff)"),
+            "claude-code",
+            Some(project.path()),
+            "",
+            None,
+            None,
+            None,
+            None,
+            Some(&objective_file),
+            true, // no_launch
+            false,
+            false,
+            None,
+            false,
+            true, // skip_verify
+            true, // quiet
+            None,
+            None,
+            persona,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let prompt = super::super::intake_prompt::take_last_built_prompt()
+            .expect("execute() must build the agent prompt");
+        (prompt, project)
+    }
+
+    /// Live run 2 regression: a chat-mode CoS wake launch (persona
+    /// `chat_mode = true`) must carry the intake and its candidate_id in the
+    /// agent's first message, fenced as untrusted data, and that message
+    /// must be the prompt argument of the `claude` child's argv.
+    #[test]
+    fn chat_mode_wake_launch_prompt_and_argv_carry_the_intake_candidate_id() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let intake = serde_json::json!({
+            "candidate_id": WAKE_CANDIDATE_ID,
+            "source": "wayfinder",
+            "title": "reply to me, then delegate",
+            "tag": "cos-chat",
+        })
+        .to_string();
+        let (prompt, project) = prompt_from_execute(
+            Some("chief-of-staff"),
+            "# Team session: live-cos\n\n**Objective:** Live verification.\n",
+            Some(&intake),
+        );
+        assert!(
+            prompt.contains(&format!("- candidate_id: {}\n", WAKE_CANDIDATE_ID)),
+            "{}",
+            prompt
+        );
+        assert!(prompt.contains("UNTRUSTED"), "{}", prompt);
+        assert!(prompt.contains(&intake), "{}", prompt);
+        assert!(prompt.contains("Live verification."), "{}", prompt);
+
+        // The argv for the claude child, built the way `execute()` builds it
+        // for a chat-mode launch.
+        let plan = super::super::chat_launch::plan_chat_mode_launch(
+            &super::super::chat_launch::ChatModeInputs {
+                cli_flag: true,
+                persona_name: Some("chief-of-staff"),
+                persona_chat_mode: true,
+                persona_allowed_tools: &["mcp__ta__ta_fs_read".to_string()],
+                agent: "claude-code",
+                agent_framework_name: Some("claude-code"),
+                injects_settings: true,
+                macro_goal: false,
+                uses_pty: false,
+            },
+        )
+        .unwrap()
+        .expect("chat mode planned");
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let env: std::collections::HashMap<String, String> =
+            super::super::chat_launch::chat_mode_agent_env(&plan, &staging)
+                .into_iter()
+                .collect();
+        let args =
+            build_runtime_agent_args(&claude_config(true), &staging, &prompt, true, &env).unwrap();
+        assert_eq!(args[0], prompt, "the prompt is the first argv entry");
+        assert!(args[0].contains(WAKE_CANDIDATE_ID));
+        assert!(args.join(" ").contains("mcp-agent-chat.json"));
+    }
+
+    /// The general half of the same bug: any `--objective-file` launch (not
+    /// only chat mode) used to send the agent `Implement: <title>` and drop
+    /// the file. The objective now reaches the prompt and the argv.
+    #[test]
+    fn normal_objective_file_launch_prompt_and_argv_carry_the_objective() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let body = format!("# Handle intake\n\nUse candidate {}\n", WAKE_CANDIDATE_ID);
+        let (prompt, project) = prompt_from_execute(None, &body, None);
+        assert!(!prompt.starts_with("Implement:"), "{}", prompt);
+        assert!(prompt.contains(WAKE_CANDIDATE_ID), "{}", prompt);
+
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let env = std::collections::HashMap::new();
+        let args =
+            build_runtime_agent_args(&claude_config(false), &staging, &prompt, true, &env).unwrap();
+        assert_eq!(args[0], prompt);
+        assert!(args[0].contains(WAKE_CANDIDATE_ID));
+    }
+
+    /// A non-chat launch given `--intake-file` gets the same fence.
+    #[test]
+    fn normal_launch_with_intake_file_fences_it_too() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let intake = serde_json::json!({ "candidate_id": WAKE_CANDIDATE_ID }).to_string();
+        let (prompt, _project) = prompt_from_execute(None, "context", Some(&intake));
+        assert!(
+            prompt.contains(&format!("- candidate_id: {}\n", WAKE_CANDIDATE_ID)),
+            "{}",
+            prompt
+        );
+        assert!(
+            prompt.contains("<<<BEGIN TA-UNTRUSTED-INTAKE-"),
+            "{}",
+            prompt
+        );
     }
 
     /// Every TA MCP tool a CoS must never hold, by capability.

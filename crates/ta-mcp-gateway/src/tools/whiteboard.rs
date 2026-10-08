@@ -323,8 +323,9 @@ pub fn handle_task_complete(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct OutcomeSendParams {
     /// Correlates back to the candidate this outcome is for (the
-    /// `candidate_id` from the "## New intake" context this role was woken
-    /// with, if any) — required so the Wayfinder poller can act on the
+    /// `candidate_id` TA states, outside the fenced untrusted block, in the
+    /// "## New intake" section of the prompt this role was woken with, if
+    /// any). Required so the Wayfinder poller can act on the
     /// right task, never freshly generated.
     pub candidate_id: String,
     /// `"done"`, `"blocked"`, or `"new_work"`.
