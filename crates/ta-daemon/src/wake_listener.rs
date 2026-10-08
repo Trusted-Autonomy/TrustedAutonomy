@@ -29,6 +29,15 @@ use ta_agent_whiteboard::WhiteboardTransport;
 use ta_session::team::TeamConfig;
 
 use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState, TeamSessionStatus};
+use crate::wake_retry::{
+    process_message, sanitize_component, tail_lines, AttemptStore, LaunchRateGuard, ListenerIds,
+    WakeRetryPolicy,
+};
+
+/// How many trailing stderr lines a failed launch's error (and so the
+/// daemon log and dead-letter record) carries. The full output is always
+/// in the per-launch log file.
+const STDERR_TAIL_LINES: usize = 40;
 
 /// How often an idle listener (nothing currently on its stream) re-polls.
 /// Deliberately short and decoupled from `team_session.rs`'s rotation
@@ -247,6 +256,8 @@ async fn run_listener_loop(
     shutdown: Arc<tokio::sync::Notify>,
 ) {
     let consumer = format!("wake-listener:{}", listener.role);
+    let attempts = AttemptStore::for_listener(&project_root, &session_id, &listener.role);
+    let mut rate = LaunchRateGuard::default();
     if let Err(e) = transport.connect().await {
         tracing::error!(
             role = %listener.role,
@@ -288,6 +299,9 @@ async fn run_listener_loop(
         }
 
         let mut launched_this_round = false;
+        // Re-read each round so a [whiteboard] wake_* change in
+        // workflow.toml applies without a daemon restart.
+        let policy = WakeRetryPolicy::load(&project_root);
 
         for key in &listener.keys {
             let next = tokio::select! {
@@ -309,49 +323,55 @@ async fn run_listener_loop(
                 }
             };
 
-            launched_this_round = true;
+            let ids = ListenerIds {
+                project_root: &project_root,
+                session: &session_id,
+                role: &listener.role,
+                key,
+                consumer: &consumer,
+            };
             let pr = project_root.clone();
             let sid = session_id.clone();
             let role = listener.role.clone();
             let bin = ta_bin.clone();
             let payload = envelope.payload.clone();
             let workflow_tag = listener.workflow_tag.clone();
-
-            let launch_result = tokio::select! {
-                r = tokio::task::spawn_blocking(move || {
-                    launch_wake_on_demand(&pr, &sid, &role, &bin, &payload, workflow_tag.as_deref())
-                }) => r,
-                _ = shutdown.notified() => return,
+            let msg_id = envelope.msg_id.clone();
+            let launch = move || async move {
+                match tokio::task::spawn_blocking(move || {
+                    launch_wake_on_demand(
+                        &pr,
+                        &sid,
+                        &role,
+                        &bin,
+                        &payload,
+                        workflow_tag.as_deref(),
+                        &msg_id,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(join_err) => Err(format!("launch task panicked: {join_err}")),
+                }
             };
 
-            match launch_result {
-                Ok(Ok(())) => {
-                    if let Err(e) = transport.stream_ack(key, &consumer, &envelope.msg_id).await {
-                        tracing::warn!(
-                            role = %listener.role,
-                            key = %key,
-                            error = %e,
-                            "wake_listener: failed to ack message after successful launch -- \
-                             will be redelivered next poll"
-                        );
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(
-                        role = %listener.role,
-                        key = %key,
-                        error = %e,
-                        "wake_listener: launch failed, message left unacked for redelivery"
-                    );
-                }
-                Err(join_err) => {
-                    tracing::error!(
-                        role = %listener.role,
-                        key = %key,
-                        error = %join_err,
-                        "wake_listener: launch task panicked, message left unacked for redelivery"
-                    );
-                }
+            let outcome = tokio::select! {
+                o = process_message(
+                    transport.as_ref(),
+                    &attempts,
+                    &policy,
+                    &mut rate,
+                    &ids,
+                    &envelope,
+                    chrono::Utc::now(),
+                    launch,
+                ) => o,
+                _ = shutdown.notified() => return,
+            };
+            if outcome.made_progress() {
+                launched_this_round = true;
             }
         }
 
@@ -376,6 +396,7 @@ fn launch_wake_on_demand(
     ta_bin: &Path,
     payload: &[u8],
     workflow_tag: Option<&str>,
+    msg_id: &str,
 ) -> std::io::Result<()> {
     let mut state = match TeamSessionState::load(project_root, session_id)? {
         Some(s) => s,
@@ -407,32 +428,128 @@ fn launch_wake_on_demand(
     })?;
 
     crate::team_session::ensure_stable_codesign(ta_bin, project_root);
+    let output = run_and_record_launch(project_root, session_id, role, msg_id, ta_bin, &args)?;
+
+    let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    state.findings.push(RoleFinding {
+        stage: label,
+        role: role.to_string(),
+        completed_at: chrono::Utc::now(),
+        summary: if summary.is_empty() {
+            format!("Wake-on-demand role '{role}' completed with no stdout output.")
+        } else {
+            summary
+        },
+    });
+    state.save(project_root)?;
+    Ok(())
+}
+
+/// Runs one launch, always saving its full stdout and stderr under
+/// `.ta/logs/wake-launches/`. A non-zero exit becomes an error carrying the
+/// log path and the last `STDERR_TAIL_LINES` lines of stderr (the daemon log
+/// used to keep only the first line, which hid why the live CoS failed).
+fn run_and_record_launch(
+    project_root: &Path,
+    session_id: &str,
+    role: &str,
+    msg_id: &str,
+    ta_bin: &Path,
+    args: &[String],
+) -> std::io::Result<std::process::Output> {
+    let started_at = chrono::Utc::now();
     let output = std::process::Command::new(ta_bin)
-        .args(&args)
+        .args(args)
         .current_dir(project_root)
         .output()?;
 
-    if output.status.success() {
-        let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        state.findings.push(RoleFinding {
-            stage: label,
-            role: role.to_string(),
-            completed_at: chrono::Utc::now(),
-            summary: if summary.is_empty() {
-                format!("Wake-on-demand role '{role}' completed with no stdout output.")
-            } else {
-                summary
-            },
-        });
-        state.save(project_root)?;
-        Ok(())
+    let log_path = launch_log_path(project_root, session_id, role, msg_id, started_at);
+    if let Err(e) = write_launch_log(&log_path, ta_bin, args, msg_id, started_at, &output) {
+        tracing::warn!(
+            path = %log_path.display(),
+            error = %e,
+            "wake_listener: could not write the launch log"
+        );
     } else {
+        tracing::info!(
+            session = %session_id,
+            role = %role,
+            msg_id = %msg_id,
+            exit_code = ?output.status.code(),
+            log = %log_path.display(),
+            "wake_listener: launch finished, full output saved"
+        );
+    }
+
+    if output.status.success() {
+        Ok(output)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         Err(std::io::Error::other(format!(
-            "wake_listener: ta run for role '{role}' exited with status {:?}, stderr: {}",
+            "wake_listener: ta run for role '{role}' (session '{session_id}', msg {msg_id}) \
+             exited with status {:?}. Full stdout and stderr: {}\n\
+             Last {STDERR_TAIL_LINES} lines of stderr:\n{}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            log_path.display(),
+            tail_lines(stderr.trim_end(), STDERR_TAIL_LINES)
         )))
     }
+}
+
+/// `.ta/logs/wake-launches/<session>-<role>-<UTC timestamp>-<msg_id prefix>.log`
+fn launch_log_path(
+    project_root: &Path,
+    session_id: &str,
+    role: &str,
+    msg_id: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PathBuf {
+    let msg_prefix: String = sanitize_component(msg_id).chars().take(12).collect();
+    project_root
+        .join(".ta")
+        .join("logs")
+        .join("wake-launches")
+        .join(format!(
+            "{}-{}-{}-{}.log",
+            sanitize_component(session_id),
+            sanitize_component(role),
+            at.format("%Y%m%dT%H%M%S%.3fZ"),
+            msg_prefix
+        ))
+}
+
+/// Full record of one launch: what ran, how it exited, everything it
+/// printed. `ta run --headless` echoes the agent's stream-json on stdout,
+/// so this also captures the agent transcript as seen by the daemon.
+fn write_launch_log(
+    path: &Path,
+    ta_bin: &Path,
+    args: &[String],
+    msg_id: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    output: &std::process::Output,
+) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut body = String::new();
+    body.push_str(&format!("# wake-on-demand launch\nmsg_id: {msg_id}\n"));
+    body.push_str(&format!("started_at: {}\n", started_at.to_rfc3339()));
+    body.push_str(&format!(
+        "finished_at: {}\n",
+        chrono::Utc::now().to_rfc3339()
+    ));
+    body.push_str(&format!(
+        "command: {} {}\n",
+        ta_bin.display(),
+        args.join(" ")
+    ));
+    body.push_str(&format!("exit_code: {:?}\n", output.status.code()));
+    body.push_str("\n===== stdout =====\n");
+    body.push_str(&String::from_utf8_lossy(&output.stdout));
+    body.push_str("\n===== stderr =====\n");
+    body.push_str(&String::from_utf8_lossy(&output.stderr));
+    std::fs::write(path, body)
 }
 
 /// Renders context for a wake-on-demand invocation: `team_session.rs`'s
@@ -743,10 +860,60 @@ mod tests {
             Path::new("ta"),
             b"content",
             None,
+            "0",
         )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(format!("{err}").contains("no-such-session"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_launch_saves_full_output_and_reports_the_stderr_tail() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+
+        // A fake `ta` that prints 100 stderr lines and fails, like the live
+        // "No changes detected" exit whose detail the daemon log lost.
+        let fake = tmp.path().join("fake-ta.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho transcript-on-stdout\n\
+             i=1; while [ $i -le 100 ]; do echo \"err line $i\" >&2; i=$((i+1)); done\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Calls the recording runner directly (not launch_wake_on_demand)
+        // so the test never invokes codesign on the developer's machine.
+        let err = run_and_record_launch(
+            tmp.path(),
+            "sess-1",
+            "chief-of-staff",
+            "seq-42",
+            &fake,
+            &["run".to_string(), "--headless".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("err line 100"), "{err}");
+        assert!(err.contains("err line 61"), "{err}");
+        assert!(
+            !err.contains("err line 60\n"),
+            "only the last 40 lines: {err}"
+        );
+
+        let dir = tmp.path().join(".ta/logs/wake-launches");
+        let logs: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(logs.len(), 1);
+        let name = logs[0].file_name().to_string_lossy().to_string();
+        assert!(name.starts_with("sess-1-chief-of-staff-"), "{name}");
+        assert!(name.ends_with("-seq-42.log"), "{name}");
+        assert!(err.contains(&name), "error must name the log file: {err}");
+        let body = std::fs::read_to_string(logs[0].path()).unwrap();
+        assert!(body.contains("transcript-on-stdout"));
+        assert!(body.contains("err line 1\n"));
+        assert!(body.contains("err line 100"));
     }
 
     #[test]
