@@ -10753,14 +10753,24 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [x] `ta draft apply` refuses the whole draft before writing anything if one path is infrastructure, and refuses writes that a symlink would carry outside the project.
 
 ### v0.17.11.21 - Local Code Signing: Self-Healing, Test Binaries, `.env.local`
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: Stop macOS Keychain "Always Allow" prompts from returning on every rebuild, without changing anything for public installs.
 
 1. [x] PR #638: the daemon and the goal launcher re-sign the binary with the local identity before each spawn.
-2. [ ] PR #643 (open): sign only when the named local identity exists and never ad-hoc, so end users' installed binaries are untouched; a Cargo runner signs every macOS test and `cargo run` binary with the same identity; the identity can be set in a gitignored `.env.local` (`TA_CODESIGN_IDENTITY`) read by the installer, the test runner and the daemon.
-3. [ ] Future: the same developer-local identity setting for Linux and Windows.
+2. [x] PR #643 (merged): sign only when the named local identity exists and never ad-hoc, so end users' installed binaries are untouched; a Cargo runner signs every macOS test and `cargo run` binary with the same identity; the identity can be set in a gitignored `.env.local` (`TA_CODESIGN_IDENTITY`) read by the installer, the test runner and the daemon.
+3. [x] Deferred item moved: the same developer-local identity setting for Linux and Windows is a future task (not part of the public-release work in v0.17.12.12, which uses real signing).
+
+### v0.17.11.23 - Extract `typed-ask` as a Standalone OSS Library with a Python Wheel
+<!-- status: in_progress -->
+**Depends on**: none
+
+**Goal**: The bounded-question decision primitive (formerly the in-tree `ta-ask` crate) becomes a public library others can use, like `decision-gate`, `consensus-panel` and `task-graph`. Renamed to `typed-ask` because the `ta-` prefix reads as technical analysis to the public and clashed with the `ta_ask_human` tool.
+
+1. [x] New public repo `Trusted-Autonomy/typed-ask` (Apache-2.0): core crate with `thiserror` as its only required dependency; the subprocess-and-HTTP `DeciderBackend` for the Decider model server behind an off-by-default `decider` feature; Python wrapper from the same repo (PyO3 and maturin, abi3 wheels, module `typed_ask`, pyo3 kept out of the core); CI on Linux, macOS and Windows green; tag `v0.1.0`.
+2. [ ] PR #650: `ta-workflow` and `ta-policy` depend on the git tag instead of the in-tree crate; `crates/ta-ask` deleted. The adapter code (decision reviewer node, chat classifier glue) stays in TA.
+3. [ ] Future: bounded context (a size limit on question and context); a hosted-model backend so one interface covers local and hosted models; optional feature-gated use from `task-graph` and `decision-gate` (their defaults stay dependency-free); publish to crates.io and PyPI when ready.
 
 ### v0.17.11.22 - Automatic Version Sync (Nightly and Release)
 <!-- status: pending -->
