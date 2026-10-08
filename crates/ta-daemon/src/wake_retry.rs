@@ -1,4 +1,4 @@
-// wake_retry.rs — retry cap, backoff, dead-letter and launch-rate guard for
+// wake_retry.rs: retry cap, backoff, dead-letter and launch-rate guard for
 // wake-on-demand listeners (wake_listener.rs).
 //
 // Found live on the first real chief-of-staff run: a launch that exited

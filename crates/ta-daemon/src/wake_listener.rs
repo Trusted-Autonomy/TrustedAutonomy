@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ta_agent_whiteboard::WhiteboardTransport;
+use ta_mcp_gateway::secret_redact::redact_lines;
 use ta_session::team::TeamConfig;
 
 use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState, TeamSessionStatus};
@@ -491,7 +492,7 @@ fn run_and_record_launch(
              Last {STDERR_TAIL_LINES} lines of stderr:\n{}",
             output.status.code(),
             log_path.display(),
-            tail_lines(stderr.trim_end(), STDERR_TAIL_LINES)
+            tail_lines(&redact_lines(stderr.trim_end()), STDERR_TAIL_LINES)
         )))
     }
 }
@@ -546,9 +547,9 @@ fn write_launch_log(
     ));
     body.push_str(&format!("exit_code: {:?}\n", output.status.code()));
     body.push_str("\n===== stdout =====\n");
-    body.push_str(&String::from_utf8_lossy(&output.stdout));
+    body.push_str(&redact_lines(&String::from_utf8_lossy(&output.stdout)));
     body.push_str("\n===== stderr =====\n");
-    body.push_str(&String::from_utf8_lossy(&output.stderr));
+    body.push_str(&redact_lines(&String::from_utf8_lossy(&output.stderr)));
     std::fs::write(path, body)
 }
 

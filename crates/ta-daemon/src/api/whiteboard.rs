@@ -310,7 +310,7 @@ pub async fn send_outcome(
     }
 }
 
-/// `GET /api/whiteboard/identity` — which project this daemon serves.
+/// `GET /api/whiteboard/identity`: which project this daemon serves.
 /// Whiteboard clients call this BEFORE sending a session token anywhere,
 /// and refuse when the answer is not their own project root, so a
 /// mis-resolved port can never hand one project's token to another
