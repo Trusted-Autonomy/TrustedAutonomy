@@ -10760,6 +10760,21 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [ ] PR #643 (open): sign only when the named local identity exists and never ad-hoc, so end users' installed binaries are untouched; a Cargo runner signs every macOS test and `cargo run` binary with the same identity; the identity can be set in a gitignored `.env.local` (`TA_CODESIGN_IDENTITY`) read by the installer, the test runner and the daemon.
 3. [ ] Future: the same developer-local identity setting for Linux and Windows.
 
+### v0.17.11.22 - Automatic Version Sync (Nightly and Release)
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: `Cargo.toml` tracks the last completed plan phase without a human step, however the work was merged. Today the bump fires only inside `ta draft apply --phase`, so work merged as ordinary pull requests (agent or human) never bumps it, and the guard that picks the "last completed phase" stops at the first pending phase, so a single stale or unfinished phase freezes the version for everything after it.
+
+1. [ ] CI job on `main`: compute the expected version from `PLAN.md` with the same function `ta plan status` uses; if `Cargo.toml` differs, run `scripts/bump-version.sh` and open a bump pull request that merges itself when its checks pass.
+2. [ ] Nightly: stamp nightly assets as `<Cargo.toml version>+nightly.<date>.<sha>` and fail visibly (not silently) when `Cargo.toml` lags `PLAN.md`.
+3. [ ] Public release: `ta release run` stays the only path that sets a non-alpha release version; document it.
+4. [ ] When a pending phase blocks the version, say so with an actionable message naming the phase and the two ways out (finish it, or close it with its items moved to a named phase), in `ta plan status --check-order` and in the sync job's output.
+
+**Effort**: S to M.
+
+#### Version: `0.17.11-alpha.22`
+
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped.
 
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
