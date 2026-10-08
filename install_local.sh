@@ -25,8 +25,9 @@
 #   on whether this Mac remembers a Keychain grant for your own app.) Once
 #   the cert exists, this script signs with it automatically on every build
 #   using a stable --identifier, so the Keychain grant carries over across
-#   rebuilds. Override the cert name with TA_CODESIGN_IDENTITY if yours
-#   differs.
+#   rebuilds. Override the cert name with TA_CODESIGN_IDENTITY (environment
+#   variable, or a line in the gitignored .env.local; see .env.local.example)
+#   if yours differs.
 
 set -euo pipefail
 
@@ -50,7 +51,10 @@ cd "$SCRIPT_DIR"
 #
 # See this script's header comment for why a stable identity (not just a
 # stable binary name) is what actually stops repeat Keychain prompts.
-TA_CODESIGN_IDENTITY="${TA_CODESIGN_IDENTITY:-Trusted Autonomy Local Dev}"
+# shellcheck source=scripts/local-env.sh
+source "$SCRIPT_DIR/scripts/local-env.sh"
+# Environment variable, then .env.local, then the default name.
+TA_CODESIGN_IDENTITY="$(ta_local_env TA_CODESIGN_IDENTITY 'Trusted Autonomy Local Dev')"
 _TA_CODESIGN_WARNED=""
 
 # ta_codesign BINARY_PATH IDENTIFIER -- signs BINARY_PATH with

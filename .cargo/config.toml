@@ -1,0 +1,5 @@
+# Sign test and `cargo run` binaries with the stable local identity on macOS
+# so Keychain "Always Allow" grants survive rebuilds. A no-op on Linux/Windows
+# and on any Mac without the local cert. See scripts/codesign-runner.sh.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/codesign-runner.sh"

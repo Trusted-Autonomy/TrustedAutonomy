@@ -406,7 +406,7 @@ fn launch_wake_on_demand(
         std::io::Error::other(e)
     })?;
 
-    crate::team_session::ensure_stable_codesign(ta_bin);
+    crate::team_session::ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
         .current_dir(project_root)
