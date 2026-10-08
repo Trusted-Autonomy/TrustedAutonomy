@@ -28,6 +28,7 @@ use std::time::Duration;
 use ta_agent_whiteboard::WhiteboardTransport;
 use ta_mcp_gateway::secret_redact::redact_lines;
 use ta_session::team::TeamConfig;
+use uuid::Uuid;
 
 use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState, TeamSessionStatus};
 use crate::wake_retry::{
@@ -47,8 +48,34 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// One role's wake-on-demand registration: launch `role` via `ta run`
 /// whenever a message arrives on any of `keys`.
+///
+/// `role` and `agent_id` answer two different questions, and both matter
+/// once more than one listener shares a role (e.g. three `engineer`
+/// listeners registered for horizontal capacity — see
+/// `run_listener_loop`'s durable-consumer-name doc comment for why they
+/// compete for the same stream): `role` is "find me any capable of this
+/// work" (the routing/capability key, shared on purpose); `agent_id` is
+/// "this specific seat" (globally unique, stable for this listener's
+/// entire lifetime, spans every goal it ever launches -- unlike a goal's
+/// own `goal_run_id`, which is fresh per invocation and means nothing once
+/// that one goal ends). A whiteboard claim or presence record that needs
+/// to mean something beyond a single goal's lifetime (v0.17.11.2's shared,
+/// persistent task list) should be attributed to `agent_id`, never `role`
+/// or `goal_run_id` alone -- `role` can't disambiguate between siblings,
+/// and `goal_run_id` can't be recognized again once that goal exits.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WakeListenerConfig {
+    /// Globally unique and long-lived: generated once when this listener
+    /// is registered (`ta team-session start`'s `--wake-on-demand`
+    /// parsing) and persisted in `state.json` from then on -- stable
+    /// across every goal this listener ever launches and across daemon
+    /// restarts. `Uuid::nil()` only for a listener loaded from a
+    /// pre-v0.17.11.16 `state.json` that predates this field; such a
+    /// listener has no persistent identity until the session is
+    /// recreated (no automatic migration -- see this crate's CLAUDE.md on
+    /// not silently reassigning identity data).
+    #[serde(default)]
+    pub agent_id: Uuid,
     pub role: String,
     pub keys: Vec<String>,
     /// Opaque classification tag applied to every goal this listener
@@ -63,6 +90,7 @@ pub struct WakeListenerConfig {
 impl WakeListenerConfig {
     pub fn new(role: impl Into<String>, keys: Vec<String>, workflow_tag: Option<String>) -> Self {
         Self {
+            agent_id: Uuid::new_v4(),
             role: role.into(),
             keys,
             workflow_tag,
@@ -334,6 +362,7 @@ async fn run_listener_loop(
             let pr = project_root.clone();
             let sid = session_id.clone();
             let role = listener.role.clone();
+            let agent_id = listener.agent_id;
             let bin = ta_bin.clone();
             let payload = envelope.payload.clone();
             let workflow_tag = listener.workflow_tag.clone();
@@ -344,6 +373,7 @@ async fn run_listener_loop(
                         &pr,
                         &sid,
                         &role,
+                        agent_id,
                         &bin,
                         &payload,
                         workflow_tag.as_deref(),
@@ -366,7 +396,7 @@ async fn run_listener_loop(
                     &mut rate,
                     &ids,
                     &envelope,
-                    chrono::Utc::now(),
+                    chrono::Utc::now,
                     launch,
                 ) => o,
                 _ = shutdown.notified() => return,
@@ -390,10 +420,12 @@ async fn run_listener_loop(
 /// Synchronous launch of one wake-on-demand invocation — runs on a
 /// blocking thread (see `run_listener_loop`), mirroring
 /// `team_session::run_one_cycle`'s own subprocess-launch shape.
+#[allow(clippy::too_many_arguments)]
 fn launch_wake_on_demand(
     project_root: &Path,
     session_id: &str,
     role: &str,
+    agent_id: Uuid,
     ta_bin: &Path,
     payload: &[u8],
     workflow_tag: Option<&str>,
@@ -419,6 +451,7 @@ fn launch_wake_on_demand(
         &state,
         &label,
         role,
+        agent_id,
         &team_config,
         &context_path,
         workflow_tag,
@@ -707,6 +740,65 @@ mod tests {
     }
 
     #[test]
+    fn wake_listener_config_new_generates_a_real_non_nil_agent_id() {
+        let a = WakeListenerConfig::new("engineer", vec!["implement".to_string()], None);
+        let b = WakeListenerConfig::new("engineer", vec!["implement".to_string()], None);
+        assert_ne!(a.agent_id, Uuid::nil());
+        assert_ne!(
+            a.agent_id, b.agent_id,
+            "two listeners registered under the same role must still get distinct, \
+             independently-stable agent ids -- role is the shared routing key, agent_id is not"
+        );
+    }
+
+    #[test]
+    fn agent_id_round_trips_through_team_session_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listener = WakeListenerConfig::new("engineer", vec!["implement".to_string()], None);
+        let expected_id = listener.agent_id;
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new())
+            .with_wake_on_demand_listeners(vec![listener]);
+        state.save(tmp.path()).unwrap();
+
+        let loaded = TeamSessionState::load(tmp.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.wake_on_demand_listeners[0].agent_id, expected_id);
+    }
+
+    #[test]
+    fn state_json_without_agent_id_field_defaults_to_nil_rather_than_failing_to_load() {
+        // Backward compat: a state.json written before this field existed
+        // (pre-v0.17.11.16) must still load -- with a nil agent_id flagging
+        // "no persistent identity assigned yet" rather than crashing. Built
+        // by saving a real state then stripping just the new field from the
+        // on-disk JSON, rather than hand-maintaining a full literal state.json
+        // shape here that would silently drift from the real struct over time.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new())
+            .with_wake_on_demand_listeners(vec![WakeListenerConfig::new(
+                "chief-of-staff",
+                vec!["external-intake".to_string()],
+                None,
+            )]);
+        state.save(tmp.path()).unwrap();
+
+        let state_path = TeamSessionState::state_dir(tmp.path(), "sess-1").join("state.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        raw["wake_on_demand_listeners"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("agent_id");
+        std::fs::write(&state_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let loaded = TeamSessionState::load(tmp.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.wake_on_demand_listeners[0].agent_id, Uuid::nil());
+    }
+
+    #[test]
     fn gate_proceeds_for_active_session() {
         let tmp = tempfile::tempdir().unwrap();
         let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
@@ -858,6 +950,7 @@ mod tests {
             tmp.path(),
             "no-such-session",
             "chief-of-staff",
+            Uuid::new_v4(),
             Path::new("ta"),
             b"content",
             None,

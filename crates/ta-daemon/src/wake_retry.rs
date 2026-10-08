@@ -165,17 +165,28 @@ impl AttemptStore {
         std::fs::rename(&tmp, &self.path)
     }
 
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        ATTEMPTS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn get(&self, key: &str, msg_id: &str) -> Option<AttemptRecord> {
+        let _g = Self::lock();
         self.load_all().remove(&Self::record_key(key, msg_id))
     }
 
     pub fn put(&self, rec: &AttemptRecord) -> std::io::Result<()> {
+        let _g = Self::lock();
+        self.put_unlocked(rec)
+    }
+
+    fn put_unlocked(&self, rec: &AttemptRecord) -> std::io::Result<()> {
         let mut all = self.load_all();
         all.insert(Self::record_key(&rec.key, &rec.msg_id), rec.clone());
         self.save_all(&all)
     }
 
     pub fn remove(&self, key: &str, msg_id: &str) -> std::io::Result<()> {
+        let _g = Self::lock();
         let mut all = self.load_all();
         if all.remove(&Self::record_key(key, msg_id)).is_some() {
             self.save_all(&all)?;
@@ -183,6 +194,21 @@ impl AttemptStore {
         Ok(())
     }
 }
+
+/// Serializes every read-modify-write of attempt files in this daemon.
+/// Several listeners can share one role (and so one attempts file and one
+/// durable consumer): sibling `engineer` seats registered for capacity
+/// compete for the same stream, so a redelivered message can reach a
+/// different sibling than the one that tried it. All listeners run in the
+/// one daemon process, so a process-wide lock is enough.
+static ATTEMPTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// While an attempt is running, the message is leased for this long, so a
+/// redelivery that reaches a sibling listener sharing the role cannot start
+/// a parallel launch of the same message. A daemon crash mid-launch means
+/// the message waits out the lease (or is dead-lettered if its attempts are
+/// used up) instead of relaunching immediately.
+const IN_FLIGHT_LEASE: chrono::Duration = chrono::Duration::hours(1);
 
 /// Rolling one-hour launch counter for one listener.
 #[derive(Debug, Default)]
@@ -334,83 +360,117 @@ impl MessageOutcome {
 /// Apply the retry policy to one message read from the stream. `launch`
 /// runs the actual `ta run`; it returns `Err(message)` on failure.
 #[allow(clippy::too_many_arguments)]
-pub async fn process_message<F, Fut>(
+pub async fn process_message<F, Fut, C>(
     transport: &dyn WhiteboardTransport,
     store: &AttemptStore,
     policy: &WakeRetryPolicy,
     rate: &mut LaunchRateGuard,
     ids: &ListenerIds<'_>,
     envelope: &StreamEnvelope,
-    now: DateTime<Utc>,
+    clock: C,
     launch: F,
 ) -> MessageOutcome
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
+    C: Fn() -> DateTime<Utc>,
 {
-    let existing = store.get(ids.key, &envelope.msg_id);
-    match decide(existing.as_ref(), now, policy) {
-        Decision::DeadLetter => {
-            // `existing` is Some whenever decide() says DeadLetter.
-            let rec = existing.expect("dead-letter decision implies a record");
-            return dead_letter(transport, store, ids, envelope, rec, now).await;
-        }
-        Decision::Backoff(until) => {
-            tracing::debug!(
-                session = %ids.session,
-                role = %ids.role,
-                msg_id = %envelope.msg_id,
-                retry_at = %until,
-                "wake_listener: message in retry backoff, not launching yet"
-            );
-            return MessageOutcome::SkippedBackoff;
-        }
-        Decision::Launch => {}
+    let now = clock();
+    // Decide and claim atomically (see ATTEMPTS_LOCK): a sibling listener
+    // sharing this role must never launch the same message concurrently.
+    enum Begin {
+        Launch(AttemptRecord),
+        DeadLetter(AttemptRecord, bool),
+        Done(MessageOutcome),
     }
-
-    if let Some(until) = rate.blocked_until(now, policy.max_launches_per_hour) {
-        if rate.should_warn(now) {
-            tracing::warn!(
-                session = %ids.session,
-                role = %ids.role,
-                msg_id = %envelope.msg_id,
-                max_launches_per_hour = policy.max_launches_per_hour,
-                next_launch_allowed_at = %until,
-                "wake_listener: launch-rate cap reached, delaying launch (message kept, not \
-                 dropped). Raise [whiteboard] wake_max_launches_per_hour in .ta/workflow.toml \
-                 if this volume is expected."
-            );
+    let begin = {
+        let _g = AttemptStore::lock();
+        let existing = store
+            .load_all()
+            .remove(&AttemptStore::record_key(ids.key, &envelope.msg_id));
+        match decide(existing.as_ref(), now, policy) {
+            Decision::DeadLetter => {
+                // `existing` is Some whenever decide() says DeadLetter.
+                let mut rec = existing.expect("dead-letter decision implies a record");
+                let first = !rec.dead_lettered;
+                if first {
+                    rec.dead_lettered = true;
+                    let _ = store.put_unlocked(&rec);
+                }
+                Begin::DeadLetter(rec, first)
+            }
+            Decision::Backoff(until) => {
+                tracing::debug!(
+                    session = %ids.session,
+                    role = %ids.role,
+                    msg_id = %envelope.msg_id,
+                    retry_at = %until,
+                    "wake_listener: message in retry backoff or being launched by a sibling, \
+                     not launching"
+                );
+                Begin::Done(MessageOutcome::SkippedBackoff)
+            }
+            Decision::Launch => {
+                if let Some(until) = rate.blocked_until(now, policy.max_launches_per_hour) {
+                    if rate.should_warn(now) {
+                        tracing::warn!(
+                            session = %ids.session,
+                            role = %ids.role,
+                            msg_id = %envelope.msg_id,
+                            max_launches_per_hour = policy.max_launches_per_hour,
+                            next_launch_allowed_at = %until,
+                            "wake_listener: launch-rate cap reached, delaying launch (message \
+                             kept, not dropped). Raise [whiteboard] wake_max_launches_per_hour \
+                             in .ta/workflow.toml if this volume is expected."
+                        );
+                    }
+                    Begin::Done(MessageOutcome::SkippedRateLimited)
+                } else {
+                    // Count the attempt BEFORE launching, so a daemon crash
+                    // or restart in the middle of a launch still uses it up.
+                    let attempt_no = existing.as_ref().map(|r| r.attempts).unwrap_or(0) + 1;
+                    let rec = AttemptRecord {
+                        session: ids.session.to_string(),
+                        role: ids.role.to_string(),
+                        key: ids.key.to_string(),
+                        msg_id: envelope.msg_id.clone(),
+                        attempts: attempt_no,
+                        first_attempt_at: existing
+                            .as_ref()
+                            .map(|r| r.first_attempt_at)
+                            .unwrap_or(now),
+                        last_attempt_at: now,
+                        next_eligible_at: now + IN_FLIGHT_LEASE,
+                        last_error: existing.map(|r| r.last_error).unwrap_or_default(),
+                        dead_lettered: false,
+                    };
+                    match store.put_unlocked(&rec) {
+                        Ok(()) => {
+                            rate.record(now);
+                            Begin::Launch(rec)
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                path = %store.path().display(),
+                                error = %e,
+                                "wake_listener: could not persist the launch attempt; NOT \
+                                 launching, so an unrecorded attempt can never slip past the \
+                                 retry cap. Check that .ta/ is writable."
+                            );
+                            Begin::Done(MessageOutcome::SkippedBackoff)
+                        }
+                    }
+                }
+            }
         }
-        return MessageOutcome::SkippedRateLimited;
-    }
-
-    // Count the attempt BEFORE launching, so a daemon crash or restart in
-    // the middle of a launch still uses up one attempt.
-    let attempt_no = existing.as_ref().map(|r| r.attempts).unwrap_or(0) + 1;
-    let mut rec = AttemptRecord {
-        session: ids.session.to_string(),
-        role: ids.role.to_string(),
-        key: ids.key.to_string(),
-        msg_id: envelope.msg_id.clone(),
-        attempts: attempt_no,
-        first_attempt_at: existing.as_ref().map(|r| r.first_attempt_at).unwrap_or(now),
-        last_attempt_at: now,
-        next_eligible_at: now
-            + chrono::Duration::from_std(policy.backoff_after(attempt_no))
-                .unwrap_or_else(|_| chrono::Duration::seconds(30)),
-        last_error: existing.map(|r| r.last_error).unwrap_or_default(),
-        dead_lettered: false,
     };
-    if let Err(e) = store.put(&rec) {
-        tracing::error!(
-            path = %store.path().display(),
-            error = %e,
-            "wake_listener: could not persist the launch attempt; NOT launching, so an \
-             unrecorded attempt can never slip past the retry cap. Check that .ta/ is writable."
-        );
-        return MessageOutcome::SkippedBackoff;
-    }
-    rate.record(now);
+    let mut rec = match begin {
+        Begin::Launch(rec) => rec,
+        Begin::DeadLetter(rec, first) => {
+            return dead_letter(transport, store, ids, envelope, rec, first, now).await
+        }
+        Begin::Done(outcome) => return outcome,
+    };
 
     match launch().await {
         Ok(()) => {
@@ -432,9 +492,15 @@ where
             MessageOutcome::LaunchSucceeded
         }
         Err(err) => {
+            let failed_at = clock();
             rec.last_error = tail_lines(&err, 40);
+            rec.next_eligible_at = failed_at
+                + chrono::Duration::from_std(policy.backoff_after(rec.attempts))
+                    .unwrap_or_else(|_| chrono::Duration::seconds(30));
             if rec.attempts >= policy.max_attempts {
-                return dead_letter(transport, store, ids, envelope, rec, now).await;
+                rec.dead_lettered = true;
+                let _ = store.put(&rec);
+                return dead_letter(transport, store, ids, envelope, rec, true, failed_at).await;
             }
             if let Err(e) = store.put(&rec) {
                 tracing::warn!(error = %e, "wake_listener: could not persist failure detail");
@@ -461,10 +527,13 @@ async fn dead_letter(
     store: &AttemptStore,
     ids: &ListenerIds<'_>,
     envelope: &StreamEnvelope,
-    mut rec: AttemptRecord,
+    rec: AttemptRecord,
+    write_record: bool,
     now: DateTime<Utc>,
 ) -> MessageOutcome {
-    if !rec.dead_lettered {
+    // `write_record` is true for exactly one caller per message (the claim
+    // that first set `dead_lettered`), so siblings never write it twice.
+    if write_record {
         let dl = DeadLetterRecord {
             msg_id: envelope.msg_id.clone(),
             session: ids.session.to_string(),
@@ -513,8 +582,6 @@ async fn dead_letter(
                 tracing::warn!(error = %e, "wake_listener: could not emit dead-letter event");
             }
         }
-        rec.dead_lettered = true;
-        let _ = store.put(&rec);
     }
 
     match transport
@@ -601,7 +668,7 @@ mod tests {
                     &mut self.rate,
                     &ids,
                     &env,
-                    now,
+                    move || now,
                     move || async move {
                         launches.fetch_add(1, Ordering::SeqCst);
                         if succeed {
@@ -667,6 +734,68 @@ mod tests {
         // An error-level TA event was emitted.
         let events_dir = h.dir.path().join(".ta/events");
         assert!(events_dir.exists(), "dead-letter must emit a TA event");
+    }
+
+    #[tokio::test]
+    async fn a_sibling_listener_cannot_relaunch_a_message_already_in_flight() {
+        // Two listeners share a role (and so the attempts file). While one
+        // is launching a message, a redelivery of it to the sibling must not
+        // start a second launch.
+        let h = Harness::new().await;
+        h.transport
+            .stream_append("intake", b"x".to_vec())
+            .await
+            .unwrap();
+        let store = h.store();
+        let ids = ListenerIds {
+            project_root: h.dir.path(),
+            session: "sess-1",
+            role: "engineer",
+            key: "intake",
+            consumer: "wake-listener:engineer",
+        };
+        let env = h
+            .transport
+            .stream_read_next("intake", "wake-listener:engineer")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut rate_a = LaunchRateGuard::default();
+        let mut rate_b = LaunchRateGuard::default();
+        let policy = WakeRetryPolicy::default();
+        let sibling_outcome = std::sync::Mutex::new(None);
+        let outcome_a = process_message(
+            &h.transport,
+            &store,
+            &policy,
+            &mut rate_a,
+            &ids,
+            &env,
+            t0,
+            || async {
+                // Mid-launch, the sibling sees the same message (60s later,
+                // past the first 30s backoff).
+                let b = process_message(
+                    &h.transport,
+                    &store,
+                    &policy,
+                    &mut rate_b,
+                    &ids,
+                    &env,
+                    || t0() + secs(60),
+                    || async { panic!("sibling must not launch an in-flight message") },
+                )
+                .await;
+                *sibling_outcome.lock().unwrap() = Some(b);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(outcome_a, MessageOutcome::LaunchSucceeded);
+        assert_eq!(
+            sibling_outcome.lock().unwrap().clone(),
+            Some(MessageOutcome::SkippedBackoff)
+        );
     }
 
     #[tokio::test]

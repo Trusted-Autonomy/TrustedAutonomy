@@ -10055,6 +10055,7 @@ fn fix_package(
         None,  // context_path = None
         None,  // credential_scopes = None (v0.17.6.1)
         None,  // team_session_id = None (v0.17.11.8)
+        None,  // agent_id = None (v0.17.11.16)
         None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
         None,  // model override = None (no explicit --model request)
