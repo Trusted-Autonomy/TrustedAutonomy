@@ -10826,7 +10826,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 7. [ ] **Moved here from v0.17.11.9:** a test that registers agents into two sessions on one daemon and asserts each session's `list_presence` sees only its own records (the existing same-session test cannot detect this gap).
 8. [ ] Update `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md` so its per-session isolation promise matches the code.
 
-**Effort**: M. **Unblocks VT**: V6 (role-verified outcomes) and V7 (NATS auth on by default).
+**Effort**: M to L (now includes the team-session data isolation moved from v0.17.11.9). **Unblocks VT**: V6 (role-verified outcomes) and V7 (NATS auth on by default).
 
 #### Version: `0.17.12-alpha.2`
 
