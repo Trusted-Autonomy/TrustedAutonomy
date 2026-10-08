@@ -10807,7 +10807,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: A team session that only has wake-on-demand roles (the Chief-of-Staff deployment) must not need, or run, a round-robin rotation. Today `ta team-session start` refuses a workflow with no stages, and a one-stage workflow makes the daemon launch `ta run` for that stage's role back to back forever (a successful cycle sleeps zero seconds), which burns real agent runs. The runtime already treats an empty stage list as "no rotation" and leaves listeners running, so only the command line blocks it. Found live while writing the 2026-10-08 CoS runbook.
 
-1. [ ] `ta team-session start` accepts a session with no stages when at least one `--wake-on-demand` role is registered; the stage requirement stays for sessions with no listeners.
+1. [ ] New flag `--no-rotation` on `ta team-session start`: with at least one `--wake-on-demand` role registered, the session has no round-robin rotation and `--workflow` becomes optional. A workflow with an empty `stages:` list is also accepted when `--wake-on-demand` is given. The stage requirement stays for sessions with no listeners.
 2. [ ] Test that a wake-only session starts, runs zero rotation cycles, and its listener still launches the role.
 3. [ ] Make rotation cycles rate-limited (a configurable minimum delay between cycles) so a misconfigured one-stage session cannot launch agents in a tight loop.
 4. [ ] Document the wake-only shape in `docs/USAGE.md` and the VT installer's printed command.
@@ -10827,6 +10827,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [ ] Diagnosability: full stdout and stderr of every wake launch saved under `.ta/logs/wake-launches/`, the stderr tail in the error log; chat-mode goals always keep their agent transcript and TA tool-call list under `.ta/logs/goals/<goal-id>/`.
 4. [ ] `ta daemon start --port N` no longer collides with the port in `daemon.toml` (it passed `--web-port N` as well, so two listeners bound one port).
 5. [ ] Daemon address resolution: the daemon rewrote `.ta/daemon.pid` as `pid=` and `bind=host:port`, while the whiteboard tools only read a `port=` line, so any project not on port 7700 silently talked to the default 7700 daemon (a different project's). One shared pid-file format and reader, fail closed when no usable port is found, and the client verifies the daemon belongs to this project before sending a token.
+6. [ ] **Public, stable contract** (documented in `docs/USAGE.md`, versioned): at most N launches per message (default 3), and the dead-letter file `.ta/wake-dead-letter.jsonl` with its record shape and the `command_failed` event, so the VT poller can surface a dead-lettered message as an escalation instead of leaving a chat unanswered.
 
 **Effort**: M.
 
@@ -10856,7 +10857,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: The keys and tokens that make TA's capability tokens and audit log trustworthy are not files an agent can reach with `../../`.
 
-1. [ ] A daemon-only per-user state directory (macOS Application Support, `$XDG_STATE_HOME`, `%LOCALAPPDATA%`) keyed by a stable project id.
+1. [ ] A daemon-only per-user state directory (macOS Application Support, `$XDG_STATE_HOME`, `%LOCALAPPDATA%`) keyed by a stable project id. Document the exact locations per operating system, including the Windows credential vault (DPAPI or Credential Manager) and the daemon pid and port file, in `docs/USAGE.md` so installers do not guess.
 2. [ ] Move `broker_root.key` and `audit.key` to the OS keychain (file fallback in the state directory with a loud warning; `TA_NO_KEYCHAIN` honored); move `daemon-tokens.json`, `tokens/*` and the NATS JetStream data there too.
 3. [ ] Stop saving team-session bearer tokens in `state.json`; hand them to the launched process by inherited file descriptor or environment, one token per role.
 4. [ ] Signed audit-chain checkpoints in the state directory (CR-42); persona and agent-config hashes stored there.
@@ -10874,7 +10875,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 1. [ ] Per-role whiteboard Biscuit tokens (`whiteboard:team_session:<s>:role:<r>`) with a distinct `whiteboard:outcome:send` right granted only to the CoS launch.
 2. [ ] The daemon verifies the role and stamps `{role, goal_id, target, msg_id, issued_at}` (`target` is the execution target identity, so outcomes from a remote runner are attributable) into every outcome envelope; strict message schema and size limits; optional Ed25519 signature the poller verifies.
-3. [ ] TA's whiteboard NATS client supports credentials (environment variable and vault entry name documented); `ta` refuses an unauthenticated non-loopback NATS.
+3. [ ] TA's whiteboard NATS client supports credentials (environment variable and vault entry name documented); `ta` refuses an unauthenticated non-loopback NATS. Works the same on Windows against `nats-server.exe` on loopback.
 4. [ ] Design decision recorded in this phase: the daemon-stamped role and signature travel **inside** the stream envelope (alongside `msg_id` and `payload`, signed as one unit), so a consumer that reads only the stream can verify it. The verification (public) key is distributed to the poller from the daemon-only state directory created in v0.17.12.1, in a location the poller can read and agents cannot; signing keys never leave the daemon. Key rotation and revocation are specified here.
 5. [ ] Tests: a worker token cannot send an outcome; a forged or replayed envelope is rejected; stale messages are rejected; a poller with the public key verifies and one without refuses.
 6. [ ] **Moved here from v0.17.11.9 (whiteboard team-session data isolation):** add `team_session` to `PresenceRecord` (backward compatible); derive the presence key from `(team_session, agent_id)` through one shared function, mindful of the NATS JetStream key character set (use `_` as the separator); stamp and filter by the already-verified session on the daemon side (register, list, task claim and complete, handoff send and receive), never trusting the client body; leave the advisory pre-launch `presence_for_source` query unfiltered.
@@ -10943,6 +10944,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [ ] `ta capabilities --json`: a stable, versioned capability document. Fields at least: `daemon_passes_restricted_flags`, `supports_chat_mode`, `supports_origin`, `rules_engine`, `outcome_roles`, `nats_credentials`, `terms_status`, `atomic_apply`, `sandbox_providers`, `platform` (operating system and architecture), plus a `capabilities_schema` version. Reported per execution target once v0.18.5 lands. Each capability is true only when the code path is really wired, never inferred from a flag existing.
 2. [ ] `ta credentials add` and `ta credentials update` accept the secret on standard input (`--secret-stdin`) or from a named environment variable, and warn when `--secret` is used on the command line (it is visible in `ps`).
 3. [ ] `ta terms-status --json` reports a real terms document version and content hash (today the version shown is the TA version that accepted the terms), so an agreements chain can bind acceptance to the exact text and re-prompt when it changes.
+3a. [ ] **Stable, versioned machine-readable output for every command an installer needs**: `ta init --json`, `ta setup vcs --dry-run --json` (with the evidence list), `ta credentials add --secret-stdin`, `ta terms-status --json`, and `ta daemon start|restart|status --json`. Every JSON document carries a `schema_version`; the shapes are generated from Rust types like the other schemas and guarded by a drift test, so installers never parse human text. The daemon commands report the single pid/port contract from v0.17.11.26.
 
 **Effort**: S to M. **Unblocks VT**: installer safety check, pairing without secrets on argv, the agreements chain.
 
@@ -11366,7 +11368,7 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 
 **Goal**: The owner chooses where a team's work executes: this machine, another machine they control, an office LAN, a private cloud, or the hosted cloud. Design: Untollable spec section 10.1.
 
-1. [ ] Target registry (`targets.toml`) with kinds `local`, `machine`, `lan`, `private-cloud`, `hosted`; one-time pairing with a device identity (`ta target pair`); a target is never used while unpaired or offline without telling the user.
+1. [ ] Target registry (`targets.toml`) with exactly these kinds, one enum shared with Wayfinder's `execution_target.kind`: `local`, `user-machine` (owned by one user; the owner principal is required), `lan` (organization-owned), `private-cloud`, `hosted`; one-time pairing with a device identity (`ta target pair`); a target is never used while unpaired or offline without telling the user.
 2. [ ] Daemon-to-daemon goal dispatch: the controller sends the goal, the source reaches the target by git or snapshot, the worker runs sandboxed in a staging copy on the target, and the draft returns to the controller. **Apply only ever happens on the controller side after a person approves.**
 3. [ ] Per-target scoped credentials issued by the target's own broker; secrets never move between targets.
 4. [ ] Selection: project default, per team or role override in `team.toml`, and a one-off ("run on <name>"); user-facing word is "run on".
@@ -11379,8 +11381,10 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 9b. [ ] The requester identity is **taken from a verified credential, never from a field the caller supplies**: the dispatch token carries the requesting user as an attenuated capability fact that the target daemon verifies. A poller bug, a prompt-injected CoS or a forged request body cannot name a different requester.
 9c. [ ] An offline `user-machine` target never silently falls back to another target: queue or fail fast, by the user's choice, with a clear message. Resolution order is decided on the VT side: one-off choice in chat, then the role's target, then the requester's own preference, then the project default, then the organization default.
 10. [ ] The `hosted` target reports usage for credit metering and is gated by the product entitlement check (VT Phase 10 on the VT side): creation and each dispatch need the VT license plus a hosted-execution feature, checked server-side and failing closed; compute reserves credit before launch, commits actual use, and releases it on failure. A hosted target without a valid entitlement is refused with a clear message.
+11. [ ] **Dispatch-token verification on the target daemon.** Wayfinder mints a Biscuit for the proven requester with these facts: `user("<id>")`, `target("<name>")`, `audience("<app>")`, `goal("<id>")` and an expiry (checked by the Biscuit time check). The target daemon verifies it against the organization's Wayfinder root public key and the paired owner. Key distribution: the key is handed to the target at pairing (the owner confirms its fingerprint, trust on first use); tokens carry a key id; the daemon holds a list of accepted keys for rotation and a revocation list. TA exposes a **verify-only API** (a library function and `ta token verify --json`) so Wayfinder does not reimplement the checks.
+12. [ ] **Per-goal usage records** for metering: a `goal_usage` event emitted when a goal ends with `{schema_version, goal_id, target, requester, origin, model, input_tokens, output_tokens, compute_seconds, started_at, ended_at, outcome}`; the VT poller passes it to the license server for reserve and commit (versioned and stable).
 
-**First target (owner decision, 2026-10-08)**: the owner's Windows laptop on the LAN (`machine` kind), so the Windows daemon and the Windows sandbox parity phase (v0.17.12.9) are on the critical path.
+**First target (owner decision, 2026-10-08)**: the owner's Windows laptop on the LAN (`user-machine` kind, or `lan` if the organization owns it), so the Windows daemon and the Windows sandbox parity phase (v0.17.12.9) are on the critical path.
 
 **Effort**: L.
 
