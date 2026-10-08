@@ -31,6 +31,7 @@ pub mod health_signals;
 pub mod init;
 pub mod install;
 pub mod intake;
+pub mod intake_prompt;
 pub mod kpi_alignment;
 pub mod link;
 pub mod manifest;
