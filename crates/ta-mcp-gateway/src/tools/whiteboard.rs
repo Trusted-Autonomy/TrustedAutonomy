@@ -121,7 +121,18 @@ fn success_json(value: serde_json::Value) -> Result<CallToolResult, McpError> {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PresenceRegisterParams {
-    /// Identifier for this agent (free text, e.g. the role or agent id).
+    /// Your Agent ID -- the `**Agent ID:**` value from your own injected
+    /// context, if you were launched by a wake-on-demand listener (see
+    /// `WakeListenerConfig`'s doc comment in ta-daemon's wake_listener.rs).
+    /// Use that, not your role name: a claim or presence record that needs
+    /// to mean something beyond this one goal's lifetime must be
+    /// attributable to one specific, stable seat -- your role is shared by
+    /// every other listener registered under it (that's the point of
+    /// sharing a role: horizontal capacity), so it can never disambiguate
+    /// you from a sibling. If you have no Agent ID (an ordinary goal, not
+    /// launched by a listener), fall back to your role or another
+    /// consistent label -- just never pass the bare role string when a
+    /// real Agent ID is available.
     pub agent_id: String,
     /// The goal run this presence advertisement is for.
     pub goal_run_id: String,
@@ -254,7 +265,9 @@ pub fn handle_handoff_receive(
 pub struct TaskClaimParams {
     /// The task identifier being claimed.
     pub task_id: String,
-    /// Identifier for the claiming agent.
+    /// Your Agent ID -- see `PresenceRegisterParams.agent_id`'s doc comment
+    /// for why this should be your stable Agent ID, not your role name,
+    /// whenever one is available.
     pub agent_id: String,
 }
 
