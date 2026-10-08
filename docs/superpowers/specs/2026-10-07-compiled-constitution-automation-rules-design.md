@@ -112,3 +112,73 @@ Every decision (allow, deny, ask) is appended to the audit log with the rule tha
 1. Environment-tagged targets + the single `decide()` function + `strict` posture, wired to apply (replaces #642's blanket rule).
 2. `ta constitution show|compile|diff`, the other postures, audit entries.
 3. VT installer posture choice, per-persona tightening, red-team review of the compiler.
+
+---
+
+# Revision 2 (2026-10-07, after owner direction and three independent reviews)
+
+Revision 2 replaces the placement, vocabulary and trust rules above where they differ. It folds in the owner's direction and a security review, an audience review and a commercial review.
+
+## R2.1 Where the rules live
+
+**One engine and one owner file in TA. Role and team presets in VT, as proposals the owner adopts.**
+
+- **TA owns the engine, the floor and the owner's file.** The engine (`decide()`, the compiled table, `show`, `diff`, the audit entries) is open source and lives in TA. The owner's rules file is one file, per project, and nothing below it can loosen it.
+- **The owner's file is signed and held out of agents' reach.** The security review's top finding: if the file is a plain file an agent can edit, the rule table is only advice. So: the file is committed with the project so it travels with the team, it is signed by the owner's key, and that key lives outside the project tree (Keychain, DPAPI or the platform keyring). The daemon verifies the signature on every compile and refuses a file whose signature does not match. A draft that touches the rules file, a posture, a target binding or a persona file always needs a human, even under the `open` posture.
+- **VT supplies presets, not rules.** A preset (for example "research role: may apply notes under `docs/research/**`, no outside actions") is a proposal shipped in a team pack. It can **tighten** freely. It can **loosen** only when the owner adopts it, which rewrites the owner's file, shows the exact table cells that change, and re-signs. The same pattern as Wayfinder's verb adoption: the team proposes, the owner adopts.
+- **Org floor (optional).** An organization may supply a floor file that no project file can loosen. Projects can only tighten beneath it.
+
+Precedence, printed by `show` for every cell: **org floor, then owner file, then a preset that can only tighten, then the posture default.** The old `.ta/constitution.toml` rules and the `[actions]` tables in `workflow.toml` are folded into the new file by one migration, so users meet one file and not three.
+
+## R2.2 Trust inputs the rules depend on
+
+The review found the whole design rested on three inputs that were not yet trustworthy. These must exist before `decide()` is trusted:
+
+1. **"Attended" must be proven, not claimed.** Whether a person is present comes only from a verified human credential presented in the same session. Anything unproven is unattended. It never comes from an environment variable or the goal's origin tag. This requires the CR-02 fix (agents must not reach approve or apply) first.
+2. **A target's environment is bound to its real connection identity**, not to a label. A target called `scratch-db` that points at the production connection string is production. The binding lives in an owner-only file, and any edit to a target through a draft is always a human decision. An unknown target is production.
+3. **The rules file itself is tamper-evident** (R2.1).
+
+## R2.3 File auto-apply is part of the table
+
+The first draft covered outside actions only (email, database). The research-agent case needs file apply in the same table. Rules gain an `apply` action with literal path prefixes:
+
+```toml
+[[allow]]
+action = "apply"
+paths  = ["docs/research/**"]
+when   = "unattended"
+```
+
+Safeguards from the security review:
+
+- Allowed paths are literal prefixes after normalization (case folded, Unicode NFC, no `..`), and can never reach `.ta/`, `.git/`, `.claude/` or `.mcp.json`.
+- Links of any kind (symlinks, hard links) are refused.
+- The rule is matched against the draft's own list of changed files, and no build, hook or script runs on an unattended apply.
+- **Second-order injection.** Auto-applied content is marked untrusted in its metadata. Never allow unattended apply into paths that agent prompts are built from (for example the wiki a CoS reads). Reading untrusted content never raises any agent's permissions.
+- A preset's allowed paths are checked as a subset of the owner file at compile time.
+
+## R2.4 Vocabulary (budget: four new words at most)
+
+| Keep | Meaning |
+|---|---|
+| **apply**, **action** | Already exist. |
+| **posture** | `strict`, `balanced`, `open`. |
+| **environment** | `production`, `staging`, `dev`, `test`. |
+| **rules** | The one word for the constitution and its compiled table. `ta rules show` prints "your rules, printed". |
+
+Cut from anything a user sees: "constitution" (use "rules"), "compile" (happens automatically, cached), "who", "automation", "ask". The rule field becomes `when = "unattended" | "attended"` ("without me" and "with me" in plain English). Refusals name the rule and give the one-line fix, for example: `Blocked: unattended email is not allowed by your rules (strict). To allow it for dev only: ta rules allow email --env dev --unattended`.
+
+**Authoring.** Chat or a short form is the normal way to write rules. The assistant drafts the rules file, the owner reviews the table diff like any other change, and the owner's key signs it. A model never decides anything at run time. The file is the audit artifact, not the place people have to write.
+
+**Machine-readable effective policy.** `ta rules effective --role <name> --json` prints the resolved table for a role. VT's poller uses it to refuse launching a role whose effective policy exceeds the ceiling, and Wayfinder's adoption screen uses it to show what a preset or verb would newly allow.
+
+## R2.5 What is open and what is paid
+
+- **Free and open (TA):** the engine, the owner file format, the postures, `show`, `diff`, `effective`, and the audit entries. Enforcement is never a paid feature; security reviewers will not trust enforcement they cannot read.
+- **In the bundle (VT, Untollable):** maintained role and team presets, the installer's posture picker, plain-English drafting of rules, and a stream of preset updates delivered as diffs that are never applied silently.
+- **Higher tier (SA Enterprise):** central policy across projects, signed organization floors, compliance evidence reports that map rules to controls, verified industry packs, and long audit retention.
+- **Marketplace rule:** packs can only tighten by default. "Verified" means a pack passes the published rule-table test suite, not that it is a safety guarantee.
+
+## R2.6 Sequencing and honesty
+
+This design depends on three fixes the red-team report lists as open: agents reaching approve and apply (CR-02), secrets inside the project tree (CR-03), and agents impersonating roles (CR-04). Until they land, the rules engine would enforce on inputs an agent can influence. The commercial review also notes that marketing "enforced governance" before those are fixed is a risk to the enterprise story. Ship order: CR-02, CR-03 (secrets move), CR-04, then the engine, then presets.
