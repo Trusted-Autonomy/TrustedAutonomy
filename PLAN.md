@@ -10699,6 +10699,249 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **All four verification gates** (`build --workspace`/`test --workspace`/`clippy --workspace --all-targets -- -D warnings`/`fmt --all -- --check`) clean at the full-workspace level.
 
+### v0.17.11.16 - Chat-Mode Secure Launch and Real Tool-Surface Enforcement
+<!-- status: done -->
+**Depends on**: none
+
+**Goal**: Let the Chief-of-Staff (CoS) and any chat-style agent run through a locked-down launch path whose tool surface and file access are enforced by TA code, not by the agent's own settings. PRs #632 to #636 and #640.
+
+1. [x] `ta-ask` chat-versus-work classifier and `ta-policy::chat_manifest` (read anywhere in the workspace, write only to a scratch directory, no git, email or external grants), plus `GatewayState::start_chat_session`.
+2. [x] Persona `[capabilities] chat_mode = true` and `ta run --chat-mode`: the agent's own MCP server is locked to the chat session, every tool outside the chat profile is removed from the router, native tools (Bash, Read, Write, Edit, Task and others) are denied.
+3. [x] Persona `allowed_tools` is the real allow-list (intersected with the chat profile, never unioned), and the user's global Claude settings are not merged into a restricted launch.
+4. [x] End-to-end security tests through the real handlers, and hypotheses H1 to H6 and H10 to H14 in `docs/superpowers/specs/security-hypotheses.md`.
+
+### v0.17.11.17 - Draft-Bundled Wayfinder Task Proposals
+<!-- status: done -->
+**Depends on**: v0.17.11.3
+
+**Goal**: No agent holds a live tool that changes a Wayfinder task. An agent proposes the change as part of its own draft, a person reviews it with the rest of the draft, and it is sent only after the draft is applied. PRs #637 and #639.
+
+1. [x] Tools `ta_propose_task_update`, `_create`, `_reassign`, `_needs_revision`, `_on_hold`, `_complete`, sharing one capture path and strict input validation. Create requires a `verb`; reassign takes a nullable `assignee_id`.
+2. [x] Apply-time replay through the `ta-plan-wayfinder` client against the project-scoped routes, with a replay log so re-applying cannot repeat an action, and per-action failure isolation.
+3. [x] Needs-revision (Wayfinder `open`) and on-hold (`on_hold` plus reason, optional precursor task and dependency edge) stay distinct.
+
+### v0.17.11.18 - CoS Security Hardening: Path Escape, Read-Only Classification, Goal Origin
+<!-- status: done -->
+**Depends on**: v0.17.11.16
+
+**Goal**: Close the open path-escape hypothesis, classify every MCP tool, and make "this goal came from the CoS or chat" a fact that blocks auto-approval. PR #641 (carried into main by #647).
+
+1. [x] H5: absolute, rooted, drive-letter, home and `..` paths are rejected at the policy, connector and staging layers on every host; symlink escapes are resolved and refused; the secrets backstop covers common home-directory credential files.
+2. [x] `ta_goal::tool_surface` classifies every registered MCP tool as read-only or mutating (new tools must be classified or a test fails). `ta_ask_human` and `ta_whiteboard_outcome_send` are read-only; `outcome_send` is also marked an untrusted sink.
+3. [x] Persona option `read_only` for the strictest personas.
+4. [x] `GoalRun.origin` and `ta run --origin`; origins `cos` and `chat` are never auto-approved on any path (policy, draft apply, workflow graph, advisor auto), with a visible refusal.
+
+### v0.17.11.19 - CoS Launch Hardening
+<!-- status: done -->
+**Depends on**: v0.17.11.18
+
+**Goal**: The real CoS launch actually uses the locked-down path. Red-team finding CR-01. PR #646.
+
+1. [x] The daemon passes `--chat-mode` and `--origin` for CoS-style roles; persona and `team.toml` members accept an `origin`; the launch fails closed on a missing persona or conflicting origins.
+2. [x] Restricted launches run with `--setting-sources local --permission-mode dontAsk`, and every registered TA tool not on the allow-list is explicitly denied. Verified live against Claude Code with a hostile global settings file.
+3. [x] A recorded goal origin cannot be overwritten by the environment.
+
+### v0.17.11.20 - Infrastructure Path Case-Bypass Fix
+<!-- status: done -->
+**Depends on**: v0.17.11.18
+
+**Goal**: A draft cannot write into `.git` or `.ta` by spelling the name differently. Red-team finding CR-06. PR #647.
+
+1. [x] One shared `ta_workspace::path_safety` check folds case, trailing dots and spaces, Windows short names and stream syntax, matches infrastructure names in any path component, and is used by staging, diffs, conflict detection and apply.
+2. [x] `ta draft apply` refuses the whole draft before writing anything if one path is infrastructure, and refuses writes that a symlink would carry outside the project.
+
+### v0.17.11.21 - Local Code Signing: Self-Healing, Test Binaries, `.env.local`
+<!-- status: in_progress -->
+**Depends on**: none
+
+**Goal**: Stop macOS Keychain "Always Allow" prompts from returning on every rebuild, without changing anything for public installs.
+
+1. [x] PR #638: the daemon and the goal launcher re-sign the binary with the local identity before each spawn.
+2. [ ] PR #643 (open): sign only when the named local identity exists and never ad-hoc, so end users' installed binaries are untouched; a Cargo runner signs every macOS test and `cargo run` binary with the same identity; the identity can be set in a gitignored `.env.local` (`TA_CODESIGN_IDENTITY`) read by the installer, the test runner and the daemon.
+3. [ ] Future: the same developer-local identity setting for Linux and Windows.
+
+> **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped.
+
+### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: An agent with a shell must not be able to approve or apply its own draft by calling the daemon on localhost.
+
+1. [ ] `local_bypass` defaults off for every mutating route (approve, deny, apply, command execution); read-only routes keep the bypass.
+2. [ ] A human credential held outside any project tree (OS keychain item bound to the signed `ta` binary where available, otherwise a mode-0600 file in the per-user state directory) is presented by the CLI, Studio and channel plugins for mutating calls.
+3. [ ] Host-header allowlist on the daemon (CR-36) and a clear error that names what to do ("run `ta login`").
+4. [ ] `ta draft approve/apply` refuses when it detects an agent context and no human credential.
+5. [ ] Tests: an agent-style loopback call without the credential is refused; the CLI path still works; plugin and Studio paths keep working.
+
+**Effort**: M. **Why first**: the rules engine's idea of "attended" depends on it. **Note**: on its own this is a speed bump while agents run as the same OS user; v0.17.12.6 onward makes it a wall.
+
+#### Version: `0.17.12-alpha`
+
+### v0.17.12.1 - Control-Plane Secrets Out of the Project Tree (CR-03)
+<!-- status: pending -->
+**Depends on**: v0.17.12
+
+**Goal**: The keys and tokens that make TA's capability tokens and audit log trustworthy are not files an agent can reach with `../../`.
+
+1. [ ] A daemon-only per-user state directory (macOS Application Support, `$XDG_STATE_HOME`, `%LOCALAPPDATA%`) keyed by a stable project id.
+2. [ ] Move `broker_root.key` and `audit.key` to the OS keychain (file fallback in the state directory with a loud warning; `TA_NO_KEYCHAIN` honored); move `daemon-tokens.json`, `tokens/*` and the NATS JetStream data there too.
+3. [ ] Stop saving team-session bearer tokens in `state.json`; hand them to the launched process by inherited file descriptor or environment, one token per role.
+4. [ ] Signed audit-chain checkpoints in the state directory (CR-42); persona and agent-config hashes stored there.
+5. [ ] `ta doctor --fix` migration with audit entries; the daemon refuses old-location keys under the `strict` posture.
+
+**Effort**: M. **Source**: sandbox plan phase 1 (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`).
+
+#### Version: `0.17.12-alpha.1`
+
+### v0.17.12.2 - Role-Bound Outcome Tokens, Daemon-Stamped Messages, NATS Credentials (CR-04, CR-05)
+<!-- status: pending -->
+**Depends on**: v0.17.12.1
+
+**Goal**: The poller can prove an outcome came from the CoS and not from another role, and the message bus is not open to anything that can reach it.
+
+1. [ ] Per-role whiteboard Biscuit tokens (`whiteboard:team_session:<s>:role:<r>`) with a distinct `whiteboard:outcome:send` right granted only to the CoS launch.
+2. [ ] The daemon verifies the role and stamps `{role, goal_id, msg_id, issued_at}` into every outcome envelope; strict message schema and size limits; optional Ed25519 signature the poller verifies.
+3. [ ] TA's whiteboard NATS client supports credentials (environment variable and vault entry name documented); `ta` refuses an unauthenticated non-loopback NATS.
+4. [ ] Tests: a worker token cannot send an outcome; a forged or replayed envelope is rejected; stale messages are rejected.
+
+**Effort**: M. **Unblocks VT**: V6 (role-verified outcomes) and V7 (NATS auth on by default).
+
+#### Version: `0.17.12-alpha.2`
+
+### v0.17.12.3 - Atomic Apply, Reversibility Classes and Durable Action Queue
+<!-- status: pending -->
+**Depends on**: v0.17.12.1
+
+**Goal**: A draft is never half applied, outside actions survive restarts and never run twice, and the system is honest that not everything can be undone. Design: `docs/superpowers/specs/2026-10-07-atomic-apply-and-action-queue-design.md`. Supersedes PR #642.
+
+1. [ ] Apply in two phases: prepare (check policy, paths, conflicts; write a journal with prior values) then commit (staged file move, local commit, mark Applied, enqueue every action in one step) with startup recovery from the journal.
+2. [ ] Connector manifests declare `reversibility` (reversible, compensable, irrecoverable), `undo` and `idempotency`; undeclared means irrecoverable. Reversibility table for the built-in media in the design doc.
+3. [ ] Durable action queue in the daemon-only state directory: states queued, sending, done, retrying, needs attention; key is draft id plus action id; retries with growing delays; policy re-checked on every attempt; an unknown outcome is never guessed or resent automatically.
+4. [ ] Irrecoverable actions run last; `ta show actions` lists queue state and offers recorded undo for compensable actions.
+5. [ ] Keep from PR #642: fsynced intent before send, policy re-check at send time, fail-closed config, per-action isolation, exclusion of `ta_propose_*`.
+6. [ ] Optional saga order under the `strict` posture.
+
+**Effort**: L.
+
+#### Version: `0.17.12-alpha.3`
+
+### v0.17.12.4 - Rules Engine: Owner Rules File, Postures and Effective-Policy Output
+<!-- status: pending -->
+**Depends on**: v0.17.12, v0.17.12.1, v0.17.12.3
+
+**Goal**: What agents may do unattended is decided by one deterministic table compiled from the owner's rules, with VT presets that can only tighten. Design: `docs/superpowers/specs/2026-10-07-compiled-constitution-automation-rules-design.md` (Revision 2, PR #644).
+
+1. [ ] One owner rules file per project, signed by an owner key held outside the tree; the daemon verifies the signature on every compile; edits through a draft always need a human. Optional organization floor file that nothing below can loosen.
+2. [ ] Compiled table: action, target environment, `when` (unattended or attended) to allow, deny or ask; default deny for unattended; deny beats allow; fail closed on bad config; unknown target environment is production; environment bound to the connection identity.
+3. [ ] File apply in the same table (`action = "apply"` with literal, normalized path prefixes that can never reach `.ta`, `.git`, `.claude` or `.mcp.json`); links refused; auto-applied content marked untrusted.
+4. [ ] Postures `strict`, `balanced`, `open` shipped as data; `ta rules show` (with the source of every cell), `ta rules diff`, `ta rules effective --role <name> --json`.
+5. [ ] Migration folds `.ta/constitution.toml` and the `[actions]` tables in `workflow.toml` into the rules file.
+6. [ ] The single `decide()` replaces the blanket "automated applies never send" rule and is called by every path that can cause an effect.
+
+**Effort**: L. **Unblocks VT**: V8 (preset overlay and effective-policy view).
+
+#### Version: `0.17.12-alpha.4`
+
+### v0.17.12.5 - VCS Detection and `ta setup vcs`
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: One VCS detector shared by `ta init`, the VT installer and the add-project wizard.
+
+1. [ ] Shared detector (git, svn, perforce, none, plugin) used by `ta init`.
+2. [ ] `ta setup vcs --vcs svn` with ignore rules, and `--json` output for detection.
+3. [ ] `ta init` runs setup vcs on re-run.
+
+**Effort**: M. **Unblocks VT**: V5 (wizard and installer).
+
+#### Version: `0.17.12-alpha.5`
+
+### v0.17.12.6 - Sandbox Launch Plumbing: Out-of-Sandbox Gateway, Trusted Policy Source, Capability Reporting
+<!-- status: pending -->
+**Depends on**: v0.17.12.1
+
+**Goal**: Make sandboxing actually take effect, and make the mediated path survive it. Found while planning: the `[sandbox]` setting is read from the agent's staging copy of `.ta/workflow.toml`, which staging excludes, and it also needs an experimental flag in `daemon.toml`, so a sandbox is very likely never applied today (verified by reading the code, not by a live run). Plan: `docs/superpowers/specs/2026-10-07-os-sandbox-plan.md` (PR #648).
+
+1. [ ] Regression test and fix for the `[sandbox]` config source; remove the experimental gate; connect posture and `security.level` to real enforcement.
+2. [ ] Start `ta serve` outside the sandbox on a per-goal Unix socket or named pipe, with a small `ta mcp-bridge` relay inside; the agent's MCP config points at the bridge.
+3. [ ] The git and `gh` credential helpers become clients of the gateway (today they open the broker key from inside the agent's tree).
+4. [ ] Platform-neutral `SandboxProfile` compiled from the hash-pinned persona and rules, from a source the agent cannot edit; project config may only tighten.
+5. [ ] Environment scrub allowlist, per-goal agent home, and a `SandboxDecision` audit event with required versus enforced capabilities and the posture-based degraded-mode table.
+
+**Effort**: L.
+
+#### Version: `0.17.12-alpha.6`
+
+### v0.17.12.7 - macOS Seatbelt Profile v2 and Egress Proxy
+<!-- status: pending -->
+**Depends on**: v0.17.12.6
+
+1. [ ] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths.
+2. [ ] Mach-service allowlist; deny Apple events, process inspection and signalling of others; deny exec of `ta-daemon` and `/usr/bin/security`.
+3. [ ] Per-goal egress proxy with a hostname allowlist and audit log, shared by all platforms; the profile allows only the proxy and the bridge.
+4. [ ] Violation events from the unified log; Rosetta paths; a conformance suite (`ta-sandbox-probe`) in macOS CI.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.7`
+
+### v0.17.12.8 - Linux Hardened Sandbox: bubblewrap, Landlock, seccomp
+<!-- status: pending -->
+**Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
+
+1. [ ] bubblewrap with user, pid, ipc, uts and network namespaces, a constructed root without `.ta`, private `/proc`, tmpfs `/tmp`, die-with-parent.
+2. [ ] Pre-exec helper applying Landlock (ABI-aware, never silently best-effort) and a seccomp deny list (ptrace, process_vm, bpf, keyctl, io_uring, nested user namespaces).
+3. [ ] Runtime probes and actionable errors for AppArmor user-namespace restriction, disabled namespaces, containers, WSL2 and Nix; a Landlock-only degraded path.
+4. [ ] Conformance suite in Linux CI, including container and missing-syscall jobs.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.8`
+
+### v0.17.12.9 - Default-On Isolation for CoS and Team Roles
+<!-- status: pending -->
+**Depends on**: v0.17.12.4, v0.17.12.7, v0.17.12.8
+
+1. [ ] Per-role profiles (CoS chat strictest, reviewer, worker, librarian) from role class intersected with persona and rules; origins `cos` and `chat` force the CoS class.
+2. [ ] On by default under `balanced` on macOS and Linux; CoS and chat refuse to launch without the required capabilities in every posture except `open`.
+3. [ ] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor`; badges in Studio and `ta status`; drafts built without a required capability are labelled in review.
+4. [ ] USAGE.md sandbox section rewritten as how-to with honest per-platform limits.
+
+**Effort**: M. **Decision pending**: Windows parity (v0.18.0.5) can move into this release if it should wait for it; otherwise strict posture on Windows refuses CoS launch and the gap is documented.
+
+#### Version: `0.17.12-alpha.9`
+
+### v0.17.12.10 - Remaining Red-Team High Findings
+<!-- status: pending -->
+**Depends on**: v0.17.12.4
+
+**Goal**: Work through the other High findings in the red-team report that are not covered above. Scoped when scheduled.
+
+1. [ ] Wiki writes go through draft review, with a non-admin credential for the CoS path (the CoS holds none).
+2. [ ] Untrusted text in prompts: fence and label task titles, wiki pages and chat text before they reach an agent.
+3. [ ] Discord channel access control actually invoked; plugin and channel trust boundaries per the sandbox plan's plugin phase.
+4. [ ] Auto-apply and `--chain` paths: dry-run honored everywhere, no external actions without a human.
+5. [ ] Make `ta_goal_start` stamp origin at creation (today only `ta run --goal-id` does).
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.10`
+
+### v0.17.12.11 - Signed Public Releases
+<!-- status: pending -->
+**Depends on**: v0.17.12.2 (so the public build is not shipped with the open Critical findings)
+
+**Goal**: A real end user can install TA and VT without a source checkout and without repeating Keychain prompts on every upgrade.
+
+1. [ ] macOS: Apple Developer ID signing and notarization in the release workflow (needs an Apple Developer account and certificate secrets from the owner); Windows signing enabled with the existing script; keep Sigstore signing of the checksum manifest.
+2. [ ] `install.sh` and the VT installer verify the signature and checksums; document the first-run experience honestly.
+3. [ ] Once signed, the runtime self-signing from v0.17.11.21 stays a developer-only path (it already does nothing without the local certificate).
+
+**Effort**: M. **Unblocks VT**: V10 (installer hand-off for external users).
+
+#### Version: `0.17.12-alpha.11`
+
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
@@ -10740,6 +10983,64 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [ ] **Capacity benchmark** (prerequisite, blocks everything else in this phase): measure how many concurrent agent connections / whiteboard RPC calls a single daemon sustains before degrading, under realistic team-session load patterns. No design work below should proceed without this data — don't spec shard counts or thresholds speculatively.
 2. [ ] **Sharding design**: once capacity data exists, design horizontal scaling as sharding per logical execution unit (e.g. per team-session or per org), not per-request load balancing — informed by whatever the benchmark shows actually bottlenecks first (connection count, RPC throughput, transport backend, etc).
 3. [ ] **Cross-shard concerns**: if a real Wayfinder-hosted multi-tenant option is ever built on top of this (see the whiteboard design's deferred section), shard boundaries and tenant boundaries should likely be the same boundary — revisit together, not separately.
+
+### v0.18.0.5 - Windows AppContainer Parity
+<!-- status: pending -->
+**Depends on**: v0.17.12.6, v0.17.12.7
+
+1. [ ] Named-pipe gateway bridge and egress relay with container-SID access control (no loopback exemption).
+2. [ ] Staging ACL set before population; toolchain read grants with teardown and a `ta doctor --fix` sweep.
+3. [ ] ProjFS provider refuses infrastructure directories case-insensitively; stream, short-name and device-name rejection.
+4. [ ] Job Object process limits; AppContainer-to-Job-Object fallback becomes a posture decision; conformance suite on Windows CI.
+
+**Effort**: M. (May be pulled into v0.17.12.x.)
+
+#### Version: `0.18.0-alpha.5`
+
+### v0.18.0.6 - Sandbox Verification Runs and Plugin Subprocesses
+<!-- status: pending -->
+**Depends on**: v0.17.12.9
+
+1. [ ] TA's own staging verification commands (build, test, lint) run under the worker profile, network off by default.
+2. [ ] Plugin manifests declare sandbox needs; the profile is shown at install, hash-pinned, and trusted on first use for project-local plugins (CR-25); per-plugin scoped broker tokens and environment allowlist.
+
+**Effort**: M.
+
+#### Version: `0.18.0-alpha.6`
+
+### v0.18.0.7 - Container Provider: Docker, Podman, Lima (Universal Fallback)
+<!-- status: pending -->
+**Depends on**: v0.17.12.6
+
+1. [ ] `oci` runtime plugin for Docker and rootless Podman (Linux), Docker Desktop, Colima and Lima (macOS), Docker Desktop (Windows).
+2. [ ] Staging-only read-write mount, no network except the proxy relay, host gateway blocked, capabilities dropped, non-root; never mount the Docker socket.
+3. [ ] Digest-pinned signed agent images; selectable as the required provider under `strict`; documented plan B if macOS removes Seatbelt; benchmark against native providers.
+
+**Effort**: L.
+
+#### Version: `0.18.0-alpha.7`
+
+### v0.18.0.8 - Windows WSL2 Provider and Stricter AppContainer for the CoS
+<!-- status: pending -->
+**Depends on**: v0.18.0.5, v0.18.0.7
+
+1. [ ] Optional TA-managed WSL2 distro with interop and automount disabled, staging in the distro filesystem, Linux sandbox inside.
+2. [ ] Less-privileged AppContainer for the CoS profile on Windows; networking-mode handling for daemon reachability; manual verification checklist.
+
+**Effort**: M.
+
+#### Version: `0.18.0-alpha.8`
+
+### v0.18.0.9 - Multi-Tenant Token Scoping and Peer Identity (TA-06)
+<!-- status: pending -->
+**Depends on**: v0.17.12.9, v0.18.0
+
+1. [ ] Per-project and per-organization `TokenScope`; tokens cannot act across projects on a shared daemon.
+2. [ ] Daemon mutating routes on a Unix socket or named pipe with peer-identity checks that reject sandboxed or agent-descendant peers; per-goal cgroup or Job Object identity.
+
+**Effort**: L.
+
+#### Version: `0.18.0-alpha.9`
 
 ### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
 <!-- status: pending -->
