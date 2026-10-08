@@ -11322,12 +11322,15 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 <!-- status: pending -->
 **Depends on**: v0.18.3
 
+**Priority (owner, 2026-10-08): not a launch priority; schedule after the v0.17.12 security release.** Spoken replies are only needed for a hands-free conversation mode; phones already read on-screen text aloud through their screen readers. Until then, apps call the platform voices directly and no plugin protocol is built.
+
 **Goal**: Voice in the chat interface of Wayfinder and Untollable, without ever letting voice authorize anything. Design: Untollable spec section 10.3 (private repo `untollable-cli`).
 
-1. [ ] Text-to-speech plugin protocol (same stdio pattern as the speech-to-text plugin). **Default engine on every platform: the operating system's built-in voices** (free, offline, no download, no license obligation; on mobile the native apps call the platform speech API directly). Optional higher-quality voice pack: Kokoro-82M (Apache-2.0 weights, about 80 MB quantized, runs on iPhone and Android) as an opt-in download, enabled only after a license review of its text-to-phoneme step (espeak-ng is GPL-3.0 or later). Not Piper (GPL-3.0 engine, per-voice licenses) and no non-commercial-licensed models. A hosted engine is an explicit opt-in.
+1. [ ] Text-to-speech plugin protocol (same stdio pattern as the speech-to-text plugin). **Default engine on every platform: the operating system's built-in voices** (free, offline, no download, no license obligation; on mobile the native apps call the platform speech API directly). Optional higher-quality voice pack: Kokoro-82M (Apache-2.0 weights, about 80 MB quantized, runs on iPhone and Android) as an opt-in download, **with espeak-ng excluded from everything we ship** (a permissively licensed phonemizer path is required, verified before enabling). A local-model option to investigate for desktop and execution targets: Qwen3-TTS (Apache-2.0, 0.6B and 1.7B, native C++ ports; voice cloning off by default and never shipped as a feature without a consent design). Not Piper (GPL-3.0 engine, per-voice licenses) and no non-commercial-licensed models. A hosted engine is an explicit opt-in.
 2. [ ] Input from voice is labeled `source = voice` at the input layer and can never satisfy a control confirmation (apply, deny, fix, approve): a spoken "apply" only opens the confirmation card. Enforced in code with a test, not by convention.
 3. [ ] Push-to-talk is the default (desktop hotkey). **Owner decision (2026-10-08): no custom wake word in v1** on any platform; use the operating systems' own assistants (Siri App Intents and Shortcuts on iOS, intents on Android) and in-app push-to-talk, implemented in the product apps. A wake word, if ever added, is opt-in, on-device, with a visible listening indicator and no audio retained.
-4. [ ] Privacy defaults: on-device transcription, audio not stored, nothing leaves the machine unless a hosted engine is chosen.
+4. [ ] A CI license scan fails the build if any GPL component (espeak-ng in particular) enters the shipped dependency tree.
+5. [ ] Privacy defaults: on-device transcription, audio not stored, nothing leaves the machine unless a hosted engine is chosen.
 
 **Effort**: M.
 
