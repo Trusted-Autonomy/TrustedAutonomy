@@ -10833,6 +10833,21 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.26`
 
+### v0.17.11.27 - Daemon Self-Update When Idle, as a Reusable Library
+<!-- status: pending -->
+**Depends on**: v0.17.11.26 (single pid and port contract)
+
+**Goal**: Today nothing updates a stale daemon by itself. The only check is in the CLI: `ta shell`, `ta dev` and the terminal UI compare the daemon's reported version and build hash with their own and ask "Restart daemon with the new version? [Y/n]"; non-interactive runs and `--no-version-check` carry on with the stale daemon. That logic lives inside the `ta-cli` binary, so other programs (the VT poller daemon) cannot reuse it. The owner wants both daemons to update themselves when a newer build is installed, with no manual kill.
+
+1. [ ] Extract a small library (version and build-hash comparison, "is the daemon idle" via `/api/drain/status`, drain-aware restart, sibling-binary lookup, codesign) used by the CLI and available to VT.
+2. [ ] Daemon self-check: periodically compare the running build hash with the installed sibling binary's `--version`; when different **and** idle (no active goals or sessions, no in-flight wake launches), restart onto the new binary. Never interrupts a running goal: it waits, and reports "update pending, waiting for N goals" in `ta status`.
+3. [ ] Opt-in or opt-out by posture and setting (`[daemon] auto_update = "when_idle" | "ask" | "never"`), with `ta daemon restart --force` unchanged as the manual override.
+4. [ ] Documented contract so the VT poller daemon implements the same behaviour with the same library: compare, wait for idle (its own in-flight records), exit or re-exec so its supervisor restarts it.
+
+**Effort**: S to M.
+
+#### Version: `0.17.11-alpha.27`
+
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
