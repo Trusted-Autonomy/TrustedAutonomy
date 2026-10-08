@@ -310,6 +310,21 @@ pub async fn send_outcome(
     }
 }
 
+/// `GET /api/whiteboard/identity`: which project this daemon serves.
+/// Whiteboard clients call this BEFORE sending a session token anywhere,
+/// and refuse when the answer is not their own project root, so a
+/// mis-resolved port can never hand one project's token to another
+/// project's daemon. Gated only by the daemon's existing local-bypass auth,
+/// like `presence_for_source`; it reveals nothing beyond the project path.
+pub async fn identity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "project_root": state.project_root.display().to_string(),
+        })),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PresenceForSourceQuery {
     pub source_dir: String,

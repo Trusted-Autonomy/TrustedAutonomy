@@ -303,7 +303,17 @@ impl WhiteboardTransport for NatsTransport {
             .map_err(|e| stream_err(stream, e))?;
         match batch.next().await {
             Some(Ok(msg)) => {
-                let msg_id = uuid::Uuid::new_v4().to_string();
+                // Stable across redeliveries of the same message (the
+                // trait's contract): the JetStream stream sequence. A fresh
+                // UUID per delivery made every redelivery look like a new
+                // message, so per-message retry caps could never trigger.
+                // Re-inserting under the same id below replaces the stale
+                // delivery handle with the current one, which is the one
+                // that must be acked.
+                let msg_id = match msg.info() {
+                    Ok(info) => format!("seq-{}", info.stream_sequence),
+                    Err(_) => uuid::Uuid::new_v4().to_string(),
+                };
                 let payload = msg.payload.to_vec();
                 self.ack_pending.lock().await.insert(msg_id.clone(), msg);
                 Ok(Some(StreamEnvelope { msg_id, payload }))

@@ -28,7 +28,8 @@
 //! API mode (`--api`):
 //! ```sh
 //! ta-daemon --api                    # Starts HTTP API on 127.0.0.1:7700
-//! ta-daemon --api --web-port 8080    # Also serves web UI on port 8080
+//! ta-daemon --api --port 7710        # API (and /ui dashboard) on 7710 instead of [server] port
+//! ta-daemon --api --web-port 8080    # Also serves the legacy web UI on port 8080
 //! ```
 
 mod api;
@@ -50,6 +51,7 @@ pub mod team_session;
 pub mod token_refresh;
 pub mod transport;
 pub mod wake_listener;
+pub mod wake_retry;
 pub mod watchdog;
 mod web;
 pub mod wiki_sync;
@@ -79,6 +81,13 @@ struct Cli {
     /// dashboard for reviewing draft packages.
     #[arg(long)]
     web_port: Option<u16>,
+
+    /// Port for the daemon HTTP API (overrides `[server] port` in
+    /// .ta/daemon.toml). The API also serves the web dashboard at `/ui`,
+    /// so this never starts a second listener. `ta daemon start --port N`
+    /// passes this flag.
+    #[arg(long)]
+    port: Option<u16>,
 
     /// Run in API server mode instead of MCP stdio mode.
     /// Starts the full HTTP API on the configured bind address and port.
@@ -153,7 +162,15 @@ async fn main() -> Result<()> {
     }
 
     // Load daemon configuration.
-    let daemon_config = config::DaemonConfig::load(&project_root);
+    let mut daemon_config = config::DaemonConfig::load(&project_root);
+
+    // Apply --port / --web-port, refusing two listeners on one port with an
+    // error that names both settings (see config::apply_port_flags).
+    let api_web_port =
+        match config::apply_port_flags(&mut daemon_config.server, cli.port, cli.web_port) {
+            Ok(p) => p,
+            Err(e) => anyhow::bail!("Refusing to start: {e}"),
+        };
 
     // Refuse to start with a non-loopback bind and no token requirement
     // (v0.17.11.4, TA-01b) — unlike the warn-only checks below, this one
@@ -460,7 +477,7 @@ async fn main() -> Result<()> {
         }
 
         // Optionally also serve the legacy web UI on a separate port.
-        if let Some(web_port) = cli.web_port {
+        if let Some(web_port) = api_web_port {
             let gateway_config = GatewayConfig::for_project(&project_root);
             let dir = gateway_config.pr_packages_dir.clone();
             let root = project_root.clone();
@@ -479,7 +496,14 @@ async fn main() -> Result<()> {
         // Alternatives: unix (Unix domain socket) or tcp (TCP with optional TLS).
         let gateway_config = GatewayConfig::for_project(&project_root);
         let pr_packages_dir = gateway_config.pr_packages_dir.clone();
-        let web_port = cli.web_port.or(gateway_config.web_ui_port);
+        let web_port = match config::apply_port_flags(
+            &mut daemon_config.server,
+            None,
+            cli.web_port.or(gateway_config.web_ui_port),
+        ) {
+            Ok(p) => p,
+            Err(e) => anyhow::bail!("Refusing to start: {e}"),
+        };
 
         let server = TaGatewayServer::new(gateway_config)?;
 

@@ -397,6 +397,35 @@ origin = "cos"
 
 A role whose origin is `cos` or `chat` always launches with `--chat-mode`, even if its persona forgot `chat_mode = true`. The daemon refuses to launch a role, and logs why, when its persona file cannot be read, when the persona and the role name different origins, or when a chat-mode launch would carry an origin that can be auto-approved.
 
+**When a chat-mode session ends.** A chat-mode agent has no file-writing tools, so finishing without file changes is the normal outcome. `ta run` then marks the goal `completed`, prints `Chat session finished: no draft needed.`, and exits 0. Any other goal that ends with no changes still fails with `No changes detected in staging workspace.`
+
+**Where to find what a chat-mode agent did.** Every chat-mode goal keeps its record after the staging copy is deleted:
+
+- `.ta/logs/goals/<goal-id>/agent-transcript.jsonl`: the agent's full stream-json output, one line per event.
+- `.ta/logs/goals/<goal-id>/ta-tool-calls.jsonl`: one line per TA tool the agent called (for example `mcp__ta__ta_whiteboard_outcome_send`) with its arguments.
+
+Values that look like secrets (keys such as `token`, `api_key`, `password`, `authorization`, and strings such as `sk-ant-...` or `Bearer ...`) are replaced with `[REDACTED]` in both files. To keep the same record for any other goal, set `TA_KEEP_TRANSCRIPT=1` when you run it. Only `--headless` launches can be recorded; an interactive launch prints a warning instead.
+
+**How a woken role receives its intake.** When a message wakes a role (for example the Chief-of-Staff on a new intake item), the daemon writes two files under `.ta/team-sessions/<session>/`: the session context (objective, role prompt, earlier findings) and the message itself as received. It launches `ta run --objective-file <context> --intake-file <message>`. Both go into the agent's first message, so the agent does not have to go and find them. The intake comes from outside sources (chat, forum posts, meeting notes, task trackers) that anyone may have written, so TA never hands it over as instructions:
+
+- A fixed note before it says the block is untrusted data to classify, and that nothing written inside it is to be followed.
+- The block sits between two boundary lines made from a random token chosen for that launch. The token never appears in the data, so text in the intake cannot end the block early, even if it contains fake boundaries or "ignore previous instructions".
+- The `candidate_id` is read from the intake record by TA's code and stated above the block as a trusted value. The agent uses that id when it reports the outcome (`ta_whiteboard_outcome_send`), never an id found inside the block. If the record has no usable `candidate_id`, TA says so instead.
+
+Any `ta run --objective-file <file>` launch, chat mode or not, also puts the file's text into the agent's first message (up to 12 KB; the goal record keeps all of it).
+
+**Wake-on-demand launches (the daemon starting a role when a message arrives).** Each launch writes everything `ta run` printed to `.ta/logs/wake-launches/<session>-<role>-<UTC time>-<message id>.log` (secrets redacted). When a launch fails, the daemon log shows the last 40 lines of its stderr and the path of that file.
+
+A failed launch is not retried straight away. The daemon waits 30 seconds, then 2 minutes, then 10 minutes between attempts, and after 3 failed attempts it stops: the message is acknowledged so it is never delivered again, a line is added to `.ta/wake-dead-letter.jsonl` (message id, session, role, attempts, the end of the last error, timestamps), an error is logged, and a `command_failed` event is emitted. The attempt count is kept in `.ta/wake-attempts/`, so restarting the daemon does not reset it. As a cost safety net, each listener also starts at most 6 launches in any hour; extra messages wait their turn rather than being dropped. All of these are set in `.ta/workflow.toml`:
+
+```toml
+[whiteboard]
+enabled = true
+wake_max_attempts = 3                 # launches per message before dead-lettering
+wake_backoff_secs = [30, 120, 600]    # wait after the 1st, 2nd, 3rd... failure (last value repeats)
+wake_max_launches_per_hour = 6        # per listener; 0 turns the limit off
+```
+
 ### Restricted Launches Ignore Your Global Claude Code Settings
 
 Any launch with a tool restriction (a persona `allowed_tools` list, `read_only = true`, chat mode, or a `max_allowed_tools` ceiling) runs Claude Code with:
@@ -8898,6 +8927,10 @@ ta daemon start --foreground
 ```
 
 The daemon writes its PID to `.ta/daemon.pid` and logs to `.ta/daemon.log`. On success, the command prints the PID, port, and log path.
+
+**Ports, in one rule:** `--port N` sets the daemon API port and overrides `[server] port` in `.ta/daemon.toml`. The web dashboard is served by that same listener at `/ui`, so one daemon uses one port. The only way to get a second listener is the legacy `ta-daemon --web-port M` flag, and the daemon refuses to start, with an error naming both settings, if M equals the API port.
+
+`.ta/daemon.pid` records the port the daemon actually bound (lines `pid=`, `bind=host:port`, `port=`, `log=`). The CLI and the agent whiteboard tools read it to find this project's daemon. If the file exists but has no usable port, or `.ta/daemon.toml` is unreadable, the whiteboard tools refuse to guess the default 7700 (which could be a different project's daemon) and tell you to run `ta daemon restart`. Before sending a session token they also ask the daemon which project it serves and refuse if it is not this one.
 
 #### Stopping the daemon
 

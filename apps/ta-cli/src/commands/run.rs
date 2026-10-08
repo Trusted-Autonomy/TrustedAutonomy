@@ -2632,6 +2632,19 @@ pub fn execute(
         )
     })?;
 
+    // What the agent's first message carries. `objective` is only the
+    // `--objective` string; an `--objective-file` launch used to leave it
+    // empty, so the agent got `Implement: <title>` and never saw the file
+    // (found live: the daemon-woken Chief-of-Staff had no candidate_id).
+    // Resolved here, before any staging work, so a bad path fails fast.
+    let prompt_objective =
+        super::intake_prompt::resolve_prompt_objective(objective, objective_file)?;
+    // `--intake-file` (wake-on-demand launches): untrusted intake, fenced
+    // into the prompt with its candidate_id stated as a trusted value.
+    let untrusted_intake = super::intake_prompt::cli_intake_file()
+        .map(|p| super::intake_prompt::load_intake(&p))
+        .transpose()?;
+
     // ── Workflow routing (v0.13.7) ───────────────────────────────
     //
     // Resolve the workflow kind from flag, then config, then default.
@@ -3679,7 +3692,7 @@ pub fn execute(
             {
                 let context_text = build_goal_context_text(
                     title,
-                    objective,
+                    &prompt_objective,
                     &goal_id,
                     goal.plan_phase.as_deref(),
                     config,
@@ -3907,12 +3920,13 @@ pub fn execute(
         }
     }
 
-    // Build the prompt string.
-    let prompt = if objective.is_empty() {
-        format!("Implement: {}", title)
-    } else {
-        format!("{}\n\nObjective: {}", title, objective)
-    };
+    // Build the prompt string (the agent's first message).
+    let prompt = super::intake_prompt::build_agent_prompt(
+        title,
+        &prompt_objective,
+        untrusted_intake.as_ref(),
+    );
+    super::intake_prompt::record_built_prompt(&prompt);
 
     if no_launch {
         // Restore injected files — user will run the agent manually,
@@ -4088,6 +4102,27 @@ pub fn execute(
     type GuidanceLog = Vec<(String, String)>;
     // Agent token counts are accumulated from headless stream-json output (v0.15.14.2).
     let mut agent_tokens_out = AgentTokens::default();
+    // Audit trail: chat-mode goals (the chief-of-staff is the most
+    // security-sensitive agent) always keep their transcript and TA tool-call
+    // list under .ta/logs/goals/<goal-id>/, outside staging, so it survives
+    // staging cleanup. TA_KEEP_TRANSCRIPT=1 does the same for any goal.
+    let transcript_dir = transcript_dir_for_goal(
+        &config.workspace_root,
+        goal.goal_run_id,
+        chat_mode_plan.is_some(),
+        keep_transcript_env(),
+    );
+    if let Some(ref dir) = transcript_dir {
+        if !headless && !quiet {
+            eprintln!(
+                "[warn] A transcript was requested for goal {} but this launch is not headless, \
+                 so the agent's output goes straight to the terminal and cannot be recorded. \
+                 Run with --headless to capture it under {}.",
+                goal.goal_run_id,
+                dir.display()
+            );
+        }
+    }
     let launch_result: std::io::Result<(std::process::ExitStatus, GuidanceLog)> = if headless
         || quiet
     {
@@ -4100,6 +4135,7 @@ pub fn execute(
             goal.goal_run_id,
             &events_dir_for_launch,
             credential_scopes,
+            transcript_dir.as_deref(),
         )
         .map(|(exit, tokens)| {
             agent_tokens_out = tokens;
@@ -4131,6 +4167,7 @@ pub fn execute(
                 goal.goal_run_id,
                 &events_dir_for_launch,
                 credential_scopes,
+                transcript_dir.as_deref(),
             )
             .map(|(exit, tokens)| {
                 agent_tokens_out = tokens;
@@ -4147,6 +4184,7 @@ pub fn execute(
             goal.goal_run_id,
             &events_dir_for_launch,
             credential_scopes,
+            transcript_dir.as_deref(),
         )
         .map(|(exit, tokens)| {
             agent_tokens_out = tokens;
@@ -4946,6 +4984,9 @@ pub fn execute(
         .get(goal.goal_run_id)?
         .unwrap_or_else(|| goal.clone());
     // v0.13.14: Also build draft when state is Finalizing (set just above on agent exit).
+    // Set when a chat-mode session ends with no file changes: it completed
+    // successfully and has no draft (see chat_session_no_changes_is_success).
+    let mut chat_session_finished = false;
     let draft_built = if matches!(
         goal_current.state,
         ta_goal::GoalRunState::Running | ta_goal::GoalRunState::Finalizing { .. }
@@ -4966,7 +5007,10 @@ pub fn execute(
         // - Non-TTY / daemon-mediated: spawn `ta draft build` as a background process
         //   and return immediately. Returns `Some(Background(pid))`.
         // - Headless CI: always build synchronously (None path below).
-        let spawned_async = if !headless {
+        // Chat-mode launches always build synchronously so an empty diff
+        // (their normal outcome) can be recognized below and turned into a
+        // clean completion instead of a background build failure.
+        let spawned_async = if !headless && chat_mode_plan.is_none() {
             try_spawn_background_draft_build(
                 config,
                 &goal_id,
@@ -5013,7 +5057,7 @@ pub fn execute(
                 // Synchronous build (headless mode or background spawn failed — fall back).
                 update_finalize_note("diffing workspace files");
                 update_finalize_note("building draft package");
-                super::draft::execute(
+                let build_result = super::draft::execute(
                     &super::draft::DraftCommands::Build {
                         goal_id: goal_id.clone(),
                         summary: format!("Changes from goal: {}", title),
@@ -5021,7 +5065,15 @@ pub fn execute(
                         apply_context_file: None,
                     },
                     config,
-                )?;
+                );
+                if let Err(e) = build_result {
+                    if chat_session_no_changes_is_success(chat_mode_plan.is_some(), &e) {
+                        complete_chat_session_without_draft(config, goal.goal_run_id)?;
+                        chat_session_finished = true;
+                    } else {
+                        return Err(e);
+                    }
+                }
 
                 // 7a. If there are verification warnings (warn mode), attach them to the draft.
                 if !verification_warnings.is_empty() {
@@ -5076,7 +5128,7 @@ pub fn execute(
             }
         }
 
-        true
+        !chat_session_finished
     } else {
         println!(
             "\nGoal is already in {} state — skipping automatic draft build.",
@@ -5134,11 +5186,18 @@ pub fn execute(
             None
         };
 
+        let final_state = goal_store
+            .get(goal.goal_run_id)
+            .ok()
+            .flatten()
+            .map(|g| g.state.to_string())
+            .unwrap_or_else(|| goal_current.state.to_string());
         let output = serde_json::json!({
             "goal_id": goal_id,
             "draft_built": draft_built,
             "draft_id": draft_id,
-            "state": goal_current.state.to_string(),
+            "state": final_state,
+            "chat_session_finished": chat_session_finished,
         });
         println!("\n__TA_HEADLESS_RESULT__:{}", output);
     } else if quiet {
@@ -6173,6 +6232,7 @@ fn launch_agent_via_runtime(
     goal_id: uuid::Uuid,
     events_dir: &std::path::Path,
     credential_scopes: Option<&[String]>,
+    transcript_dir: Option<&std::path::Path>,
 ) -> std::io::Result<(std::process::ExitStatus, AgentTokens)> {
     use std::io::{BufRead, BufReader};
     use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
@@ -6423,12 +6483,35 @@ fn launch_agent_via_runtime(
     // If headless, stream stdout lines to parent stdout and accumulate token usage.
     let mut tokens = AgentTokens::default();
     if headless {
+        let mut recorder = transcript_dir.and_then(|dir| match TranscriptRecorder::open(dir) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::error!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "could not open the agent transcript files; this goal's transcript will \
+                     NOT be kept. Check that .ta/logs/ is writable."
+                );
+                eprintln!(
+                    "[warn] Could not record the agent transcript under {}: {}",
+                    dir.display(),
+                    e
+                );
+                None
+            }
+        });
         if let Some(stdout) = handle.take_stdout() {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 accumulate_tokens(&line, &mut tokens);
+                if let Some(r) = recorder.as_mut() {
+                    r.record(&line);
+                }
                 println!("{}", line);
             }
+        }
+        if let Some(r) = recorder {
+            r.finish(goal_id);
         }
     }
 
@@ -6459,6 +6542,154 @@ fn launch_agent_via_runtime(
     }
 
     Ok((exit_status, tokens))
+}
+
+/// Whether a failed draft build after the agent exited is in fact the normal,
+/// successful end of a chat-mode session. A chat-mode agent (for example
+/// the chief-of-staff) has no native file tools, so an empty diff is its
+/// expected outcome, not an error. Every non-chat launch keeps the error.
+///
+/// Found live: the daemon's wake listener treated the resulting exit 1 as a
+/// failed launch, left the message unacked, and JetStream redelivered it,
+/// relaunching the paid CoS run three times in about three minutes.
+fn chat_session_no_changes_is_success(is_chat_mode: bool, err: &anyhow::Error) -> bool {
+    is_chat_mode && super::draft::is_no_changes_error(err)
+}
+
+/// Finish a chat-mode goal that produced no file changes: transition it to
+/// `Completed` (no draft), record why, and say so plainly.
+fn complete_chat_session_without_draft(
+    config: &GatewayConfig,
+    goal_run_id: uuid::Uuid,
+) -> anyhow::Result<()> {
+    let store = GoalRunStore::new(&config.goals_dir)?;
+    let mut g = store.get(goal_run_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "chat session finished but goal {} is missing from {}; nothing to complete",
+            goal_run_id,
+            config.goals_dir.display()
+        )
+    })?;
+    g.transition(ta_goal::GoalRunState::Completed)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "chat session finished with no changes, but goal {} could not move from {} \
+                 to completed: {}. Check it with `ta goal status {}`.",
+                goal_run_id,
+                g.state,
+                e,
+                goal_run_id
+            )
+        })?;
+    store.save(&g)?;
+    let _ = store.update_progress_note(goal_run_id, "chat session finished: no draft needed");
+    append_progress_journal(
+        &config.goals_dir,
+        goal_run_id,
+        "chat_session_finished",
+        "chat-mode session made no file changes; completed without a draft",
+    );
+    tracing::info!(
+        goal_id = %goal_run_id,
+        "chat-mode session made no file changes; goal completed without a draft"
+    );
+    println!("Chat session finished: no draft needed.");
+    Ok(())
+}
+
+/// `TA_KEEP_TRANSCRIPT` set to `1`, `true` or `yes`.
+fn keep_transcript_env() -> bool {
+    std::env::var("TA_KEEP_TRANSCRIPT")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Where a goal's agent transcript is kept, or `None` when it is not kept.
+/// Always kept for chat-mode goals; for any other goal only when
+/// `TA_KEEP_TRANSCRIPT=1`. Lives under the project's `.ta/logs/`, never in
+/// staging, so it outlives the staging workspace.
+fn transcript_dir_for_goal(
+    project_root: &std::path::Path,
+    goal_run_id: uuid::Uuid,
+    is_chat_mode: bool,
+    keep_env: bool,
+) -> Option<std::path::PathBuf> {
+    (is_chat_mode || keep_env).then(|| {
+        project_root
+            .join(".ta")
+            .join("logs")
+            .join("goals")
+            .join(goal_run_id.to_string())
+    })
+}
+
+/// Writes a headless agent's stream-json output, secrets redacted, to
+/// `agent-transcript.jsonl`, and every TA MCP tool call it made (arguments
+/// redacted) to `ta-tool-calls.jsonl`, in the goal's transcript directory.
+struct TranscriptRecorder {
+    dir: std::path::PathBuf,
+    transcript: std::io::BufWriter<std::fs::File>,
+    tool_calls: std::io::BufWriter<std::fs::File>,
+    lines: usize,
+    calls: usize,
+}
+
+impl TranscriptRecorder {
+    const TRANSCRIPT_FILE: &'static str = "agent-transcript.jsonl";
+    const TOOL_CALLS_FILE: &'static str = "ta-tool-calls.jsonl";
+
+    fn open(dir: &std::path::Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let open = |name: &str| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(name))
+                .map(std::io::BufWriter::new)
+        };
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            transcript: open(Self::TRANSCRIPT_FILE)?,
+            tool_calls: open(Self::TOOL_CALLS_FILE)?,
+            lines: 0,
+            calls: 0,
+        })
+    }
+
+    fn record(&mut self, line: &str) {
+        use std::io::Write;
+        use ta_mcp_gateway::secret_redact::{redact_line, ta_tool_calls_in_line};
+        if writeln!(self.transcript, "{}", redact_line(line)).is_ok() {
+            self.lines += 1;
+        }
+        for call in ta_tool_calls_in_line(line) {
+            if let Ok(json) = serde_json::to_string(&call) {
+                if writeln!(self.tool_calls, "{}", json).is_ok() {
+                    self.calls += 1;
+                }
+            }
+        }
+    }
+
+    fn finish(mut self, goal_id: uuid::Uuid) {
+        use std::io::Write;
+        let _ = self.transcript.flush();
+        let _ = self.tool_calls.flush();
+        tracing::info!(
+            goal_id = %goal_id,
+            dir = %self.dir.display(),
+            transcript_lines = self.lines,
+            ta_tool_calls = self.calls,
+            "agent transcript kept"
+        );
+        eprintln!(
+            "Agent transcript kept: {} ({} lines, {} TA tool call(s) listed in {})",
+            self.dir.join(Self::TRANSCRIPT_FILE).display(),
+            self.lines,
+            self.calls,
+            Self::TOOL_CALLS_FILE
+        );
+    }
 }
 
 /// Result of attempting a non-blocking draft build (v0.15.8.1).
@@ -9689,6 +9920,124 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn no_changes_err() -> anyhow::Error {
+        // Produce the real typed error through the real draft build path:
+        // a goal whose staging is identical to its source.
+        let project = TempDir::new().unwrap();
+        let staging = project.path().join(".ta/staging/g");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(project.path().join("a.txt"), "same").unwrap();
+        std::fs::write(staging.join("a.txt"), "same").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "chat",
+            "chat",
+            "claude-code",
+            staging,
+            project.path().join(".ta/store/g"),
+        );
+        goal.source_dir = Some(project.path().to_path_buf());
+        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
+        goal.transition(ta_goal::GoalRunState::Running).unwrap();
+        store.save(&goal).unwrap();
+        super::super::draft::execute(
+            &super::super::draft::DraftCommands::Build {
+                goal_id: goal.goal_run_id.to_string(),
+                summary: "x".to_string(),
+                latest: false,
+                apply_context_file: None,
+            },
+            &config,
+        )
+        .expect_err("an unchanged staging dir must fail the draft build")
+    }
+
+    #[test]
+    fn transcript_is_kept_for_chat_mode_or_on_request_only() {
+        let root = std::path::Path::new("/proj");
+        let id = uuid::Uuid::new_v4();
+        let dir = transcript_dir_for_goal(root, id, true, false).unwrap();
+        assert_eq!(dir, root.join(format!(".ta/logs/goals/{id}")));
+        assert!(transcript_dir_for_goal(root, id, false, true).is_some());
+        assert!(transcript_dir_for_goal(root, id, false, false).is_none());
+    }
+
+    #[test]
+    fn transcript_recorder_keeps_redacted_transcript_and_ta_tool_calls() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".ta/logs/goals/g1");
+        let mut r = TranscriptRecorder::open(&dir).unwrap();
+        r.record(r#"{"type":"system","subtype":"init","api_key":"sk-ant-api03-zzzzzzzzzzzzzzzz"}"#);
+        r.record(
+            &serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use", "id": "tu_9",
+                    "name": "mcp__ta__ta_whiteboard_outcome_send",
+                    "input": {"candidate_id": "c1", "outcome": "done", "detail": "ok"}
+                }]}
+            })
+            .to_string(),
+        );
+        r.record("plain non-json line");
+        r.finish(uuid::Uuid::nil());
+
+        let transcript = std::fs::read_to_string(dir.join("agent-transcript.jsonl")).unwrap();
+        assert_eq!(transcript.lines().count(), 3);
+        assert!(!transcript.contains("zzzzzzzzzzzzzzzz"), "{transcript}");
+        let calls = std::fs::read_to_string(dir.join("ta-tool-calls.jsonl")).unwrap();
+        assert_eq!(calls.lines().count(), 1);
+        assert!(calls.contains("mcp__ta__ta_whiteboard_outcome_send"));
+        assert!(calls.contains("\"candidate_id\":\"c1\""));
+    }
+
+    #[test]
+    fn chat_mode_treats_an_empty_diff_as_success_but_other_goals_do_not() {
+        let err = no_changes_err();
+        assert!(
+            chat_session_no_changes_is_success(true, &err),
+            "a chat-mode goal with no file changes finished normally"
+        );
+        assert!(
+            !chat_session_no_changes_is_success(false, &err),
+            "non-chat goals keep the 'No changes detected' error"
+        );
+        assert!(
+            !chat_session_no_changes_is_success(true, &anyhow::anyhow!("disk full")),
+            "a real build failure is never swallowed, even in chat mode"
+        );
+    }
+
+    #[test]
+    fn complete_chat_session_without_draft_marks_goal_completed() {
+        let project = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "cos",
+            "triage intake",
+            "claude-code",
+            project.path().join(".ta/staging/cos"),
+            project.path().join(".ta/store/cos"),
+        );
+        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
+        goal.transition(ta_goal::GoalRunState::Running).unwrap();
+        goal.transition(ta_goal::GoalRunState::Finalizing {
+            exit_code: 0,
+            finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
+        })
+        .unwrap();
+        store.save(&goal).unwrap();
+
+        complete_chat_session_without_draft(&config, goal.goal_run_id).unwrap();
+
+        let after = store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(after.state, ta_goal::GoalRunState::Completed);
+        assert!(after.pr_package_id.is_none(), "no draft is created");
+    }
+
     // Finding 4 (final whole-branch review): shared across every
     // `commands::*` test module (this one and `terms.rs`) so HOME-mutating
     // tests serialize against each other regardless of which module they
@@ -11674,6 +12023,175 @@ pre_launch:
         assert!(joined.contains("--permission-mode dontAsk"), "{}", joined);
         assert!(joined.contains("--strict-mcp-config"), "{}", joined);
         assert!(joined.contains("mcp-agent-chat.json"), "{}", joined);
+    }
+
+    const WAKE_CANDIDATE_ID: &str =
+        "wayfinder-task:9061d2b8-3f38-4c08-b162-e3e73f021a54#c361f674fcc72ba0562d479b19c44b24";
+
+    /// Drives the real `execute()` with `--no-launch` (no agent process is
+    /// spawned) the way the daemon's wake listener launches a role:
+    /// `--objective-file <session context>` and, optionally,
+    /// `--intake-file <intake record>`. Returns the prompt `execute()` built
+    /// for the agent.
+    fn prompt_from_execute(
+        persona: Option<&str>,
+        objective_file_body: &str,
+        intake_body: Option<&str>,
+    ) -> (String, TempDir) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        if persona.is_some() {
+            write_persona(
+                project.path(),
+                "chief-of-staff",
+                "chat_mode = true\norigin = \"cos\"\nallowed_tools = [\"mcp__ta__ta_fs_read\", \
+                 \"mcp__ta__ta_whiteboard_outcome_send\"]",
+            );
+        }
+        let ctx_dir = TempDir::new().unwrap();
+        let objective_file = ctx_dir.path().join("wake-context.md");
+        std::fs::write(&objective_file, objective_file_body).unwrap();
+        let intake_path = intake_body.map(|body| {
+            let p = ctx_dir.path().join("wake-intake.json");
+            std::fs::write(&p, body).unwrap();
+            p
+        });
+        let _intake_guard = super::super::intake_prompt::CliIntakeFileGuard::set(intake_path);
+        let _ = super::super::intake_prompt::take_last_built_prompt();
+        let config = GatewayConfig::for_project(project.path());
+        execute(
+            &config,
+            Some("live-cos: wake-on-demand (chief-of-staff)"),
+            "claude-code",
+            Some(project.path()),
+            "",
+            None,
+            None,
+            None,
+            None,
+            Some(&objective_file),
+            true, // no_launch
+            false,
+            false,
+            None,
+            false,
+            true, // skip_verify
+            true, // quiet
+            None,
+            None,
+            persona,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let prompt = super::super::intake_prompt::take_last_built_prompt()
+            .expect("execute() must build the agent prompt");
+        (prompt, project)
+    }
+
+    /// Live run 2 regression: a chat-mode CoS wake launch (persona
+    /// `chat_mode = true`) must carry the intake and its candidate_id in the
+    /// agent's first message, fenced as untrusted data, and that message
+    /// must be the prompt argument of the `claude` child's argv.
+    #[test]
+    fn chat_mode_wake_launch_prompt_and_argv_carry_the_intake_candidate_id() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let intake = serde_json::json!({
+            "candidate_id": WAKE_CANDIDATE_ID,
+            "source": "wayfinder",
+            "title": "reply to me, then delegate",
+            "tag": "cos-chat",
+        })
+        .to_string();
+        let (prompt, project) = prompt_from_execute(
+            Some("chief-of-staff"),
+            "# Team session: live-cos\n\n**Objective:** Live verification.\n",
+            Some(&intake),
+        );
+        assert!(
+            prompt.contains(&format!("- candidate_id: {}\n", WAKE_CANDIDATE_ID)),
+            "{}",
+            prompt
+        );
+        assert!(prompt.contains("UNTRUSTED"), "{}", prompt);
+        assert!(prompt.contains(&intake), "{}", prompt);
+        assert!(prompt.contains("Live verification."), "{}", prompt);
+
+        // The argv for the claude child, built the way `execute()` builds it
+        // for a chat-mode launch.
+        let plan = super::super::chat_launch::plan_chat_mode_launch(
+            &super::super::chat_launch::ChatModeInputs {
+                cli_flag: true,
+                persona_name: Some("chief-of-staff"),
+                persona_chat_mode: true,
+                persona_allowed_tools: &["mcp__ta__ta_fs_read".to_string()],
+                agent: "claude-code",
+                agent_framework_name: Some("claude-code"),
+                injects_settings: true,
+                macro_goal: false,
+                uses_pty: false,
+            },
+        )
+        .unwrap()
+        .expect("chat mode planned");
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let env: std::collections::HashMap<String, String> =
+            super::super::chat_launch::chat_mode_agent_env(&plan, &staging)
+                .into_iter()
+                .collect();
+        let args =
+            build_runtime_agent_args(&claude_config(true), &staging, &prompt, true, &env).unwrap();
+        assert_eq!(args[0], prompt, "the prompt is the first argv entry");
+        assert!(args[0].contains(WAKE_CANDIDATE_ID));
+        assert!(args.join(" ").contains("mcp-agent-chat.json"));
+    }
+
+    /// The general half of the same bug: any `--objective-file` launch (not
+    /// only chat mode) used to send the agent `Implement: <title>` and drop
+    /// the file. The objective now reaches the prompt and the argv.
+    #[test]
+    fn normal_objective_file_launch_prompt_and_argv_carry_the_objective() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let body = format!("# Handle intake\n\nUse candidate {}\n", WAKE_CANDIDATE_ID);
+        let (prompt, project) = prompt_from_execute(None, &body, None);
+        assert!(!prompt.starts_with("Implement:"), "{}", prompt);
+        assert!(prompt.contains(WAKE_CANDIDATE_ID), "{}", prompt);
+
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let env = std::collections::HashMap::new();
+        let args =
+            build_runtime_agent_args(&claude_config(false), &staging, &prompt, true, &env).unwrap();
+        assert_eq!(args[0], prompt);
+        assert!(args[0].contains(WAKE_CANDIDATE_ID));
+    }
+
+    /// A non-chat launch given `--intake-file` gets the same fence.
+    #[test]
+    fn normal_launch_with_intake_file_fences_it_too() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let intake = serde_json::json!({ "candidate_id": WAKE_CANDIDATE_ID }).to_string();
+        let (prompt, _project) = prompt_from_execute(None, "context", Some(&intake));
+        assert!(
+            prompt.contains(&format!("- candidate_id: {}\n", WAKE_CANDIDATE_ID)),
+            "{}",
+            prompt
+        );
+        assert!(
+            prompt.contains("<<<BEGIN TA-UNTRUSTED-INTAKE-"),
+            "{}",
+            prompt
+        );
     }
 
     /// Every TA MCP tool a CoS must never hold, by capability.
