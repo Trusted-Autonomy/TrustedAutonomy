@@ -51,7 +51,6 @@ members = [
     "apps/ta-cli",
     "crates/ta-agent-ollama",
     "crates/ta-agent-whiteboard",
-    "crates/ta-ask",
     "crates/ta-extension",
     "crates/ta-init",
     "crates/ta-governed-paths",
