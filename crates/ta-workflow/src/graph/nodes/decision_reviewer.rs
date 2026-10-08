@@ -1,6 +1,6 @@
 // graph/nodes/decision_reviewer.rs — `DecisionReviewerNode`.
 //
-// Wraps `ta_ask::ask()` as one scored `ReviewerVote`, filling the
+// Wraps `typed_ask::ask()` as one scored `ReviewerVote`, filling the
 // consensus-panel-reviewer and decision-gate-input call sites named in
 // docs/superpowers/specs/2026-10-04-local-decision-model-primitive-design.md
 // §1's table ("Does this diff look safe to commit?"). Registered opt-in via
@@ -20,7 +20,7 @@ use crate::graph::types::{GraphContext, GraphError, ReviewInput, ReviewerNode, R
 /// new special-casing.
 ///
 /// KNOWN LIMITATION, not yet resolved: the one real-server validation this
-/// backend has (see crates/ta-ask's tests) judged a prose recommendation
+/// backend has (see crates/typed-ask's tests) judged a prose recommendation
 /// question with the relevant evidence fully present in its context. This
 /// node asks a code-safety question instead, and still never includes the
 /// actual diff content -- only summary fields. Whatever calibration the
@@ -29,11 +29,11 @@ use crate::graph::types::{GraphContext, GraphError, ReviewInput, ReviewerNode, R
 /// low-confidence/exploratory until it's been validated on real code-safety
 /// questions with real diff text, not production-weighted as-is.
 pub struct DecisionReviewerNode {
-    backend: std::sync::Arc<dyn ta_ask::DecisionBackend>,
+    backend: std::sync::Arc<dyn typed_ask::DecisionBackend>,
 }
 
 impl DecisionReviewerNode {
-    pub fn new(backend: std::sync::Arc<dyn ta_ask::DecisionBackend>) -> Self {
+    pub fn new(backend: std::sync::Arc<dyn typed_ask::DecisionBackend>) -> Self {
         Self { backend }
     }
 }
@@ -53,18 +53,18 @@ impl ReviewerNode for DecisionReviewerNode {
             input.plan_phase.as_deref().unwrap_or("none"),
         );
 
-        let response = ta_ask::ask(
+        let response = typed_ask::ask(
             self.backend.as_ref(),
             "Does this diff look safe to commit?",
             context,
-            ta_ask::DecisionSchema::YesNo,
+            typed_ask::DecisionSchema::YesNo,
         )
         .map_err(|e| GraphError::NodeExecution {
             node_id: "decision".to_string(),
-            message: format!("ta-ask backend call failed: {}", e),
+            message: format!("typed-ask backend call failed: {}", e),
         })?;
 
-        let is_safe = matches!(response.result, ta_ask::DecisionResult::Bool(true));
+        let is_safe = matches!(response.result, typed_ask::DecisionResult::Bool(true));
         let finding = format!(
             "decision_reviewer: model={} confidence={:.2} answer={}",
             response.model_id, response.confidence, is_safe
@@ -86,10 +86,10 @@ impl ReviewerNode for DecisionReviewerNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ta_ask::{DecisionError, DecisionRequest, DecisionResponse, DecisionResult};
+    use typed_ask::{DecisionError, DecisionRequest, DecisionResponse, DecisionResult};
 
     struct YesBackend;
-    impl ta_ask::DecisionBackend for YesBackend {
+    impl typed_ask::DecisionBackend for YesBackend {
         fn decide(&self, _req: &DecisionRequest) -> Result<DecisionResponse, DecisionError> {
             Ok(DecisionResponse {
                 result: DecisionResult::Bool(true),
@@ -101,7 +101,7 @@ mod tests {
     }
 
     struct NoBackend;
-    impl ta_ask::DecisionBackend for NoBackend {
+    impl typed_ask::DecisionBackend for NoBackend {
         fn decide(&self, _req: &DecisionRequest) -> Result<DecisionResponse, DecisionError> {
             Ok(DecisionResponse {
                 result: DecisionResult::Bool(false),
@@ -113,7 +113,7 @@ mod tests {
     }
 
     struct ErrorBackend;
-    impl ta_ask::DecisionBackend for ErrorBackend {
+    impl typed_ask::DecisionBackend for ErrorBackend {
         fn decide(&self, _req: &DecisionRequest) -> Result<DecisionResponse, DecisionError> {
             Err(DecisionError::MalformedResponse("boom".to_string()))
         }

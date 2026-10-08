@@ -87,7 +87,7 @@ impl NodeRegistry {
 
     /// Registers `"decision"` → `DecisionReviewerNode`, backed by `backend`.
     /// Deliberately NOT part of `with_builtins()` -- unlike `advisor_confidence`/
-    /// `policy`, this needs a live `ta_ask::DecisionBackend` instance (typically
+    /// `policy`, this needs a live `typed_ask::DecisionBackend` instance (typically
     /// a `DeciderBackend` managing a real subprocess), which a caller must
     /// construct and own; `ta-workflow` itself has no opinion on which backend
     /// or how it's configured. Call this explicitly, after `with_builtins()`,
@@ -99,7 +99,7 @@ impl NodeRegistry {
     /// backend instance instead.
     pub fn register_decision_reviewer(
         &mut self,
-        backend: std::sync::Arc<dyn ta_ask::DecisionBackend>,
+        backend: std::sync::Arc<dyn typed_ask::DecisionBackend>,
     ) {
         self.register_reviewer("decision", move |_def| {
             Ok(
@@ -266,13 +266,13 @@ mod tests {
     #[test]
     fn register_decision_reviewer_adds_the_decision_kind() {
         struct AlwaysYes;
-        impl ta_ask::DecisionBackend for AlwaysYes {
+        impl typed_ask::DecisionBackend for AlwaysYes {
             fn decide(
                 &self,
-                _req: &ta_ask::DecisionRequest,
-            ) -> Result<ta_ask::DecisionResponse, ta_ask::DecisionError> {
-                Ok(ta_ask::DecisionResponse {
-                    result: ta_ask::DecisionResult::Bool(true),
+                _req: &typed_ask::DecisionRequest,
+            ) -> Result<typed_ask::DecisionResponse, typed_ask::DecisionError> {
+                Ok(typed_ask::DecisionResponse {
+                    result: typed_ask::DecisionResult::Bool(true),
                     confidence: 1.0,
                     model_id: "always-yes".to_string(),
                     latency_ms: 0,

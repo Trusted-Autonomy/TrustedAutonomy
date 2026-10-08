@@ -1,13 +1,13 @@
 // chat_classifier_security_e2e.rs — the first real, live proof that
-// `ta-ask`'s classifier and `ta-policy`'s chat-scoped `CapabilityManifest`
+// `typed-ask`'s classifier and `ta-policy`'s chat-scoped `CapabilityManifest`
 // actually compose into a working, enforced security boundary.
 //
 // This is NOT a mock of the security boundary — every assertion here goes
 // through the real `PolicyEngine::evaluate()` (crates/ta-policy/src/engine.rs),
 // the real `compile_chat_manifest()` (crates/ta-policy/src/chat_manifest.rs),
-// and the real `ta_ask::ask()` entry point (crates/ta-ask/src/lib.rs). The
+// and the real `typed_ask::ask()` entry point (the typed-ask crate (github.com/Trusted-Autonomy/typed-ask) src/lib.rs). The
 // only thing faked is the LLM/decision-model backend itself
-// (`ta_ask::FixtureBackend`), because the point of this test is the
+// (`typed_ask::FixtureBackend`), because the point of this test is the
 // enforcement layer, not the model.
 //
 // The core property under test, verbatim from the user's own requirement:
@@ -21,8 +21,8 @@
 // thing that can allow or deny -- and it is compiled independently of
 // whatever the classifier said.
 
-use ta_ask::{ask, DecisionResponse, DecisionResult, DecisionSchema, FixtureBackend};
 use ta_policy::{compile_chat_manifest, PolicyDecision, PolicyEngine, PolicyRequest};
+use typed_ask::{ask, DecisionResponse, DecisionResult, DecisionSchema, FixtureBackend};
 
 const WORKSPACE: &str = "fs://workspace/**";
 const AGENT_ID: &str = "wayfinder-chat-session";

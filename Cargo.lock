@@ -5163,19 +5163,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ta-ask"
-version = "0.17.11-alpha.8"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "wiremock",
-]
-
-[[package]]
 name = "ta-audit"
 version = "0.17.11-alpha.8"
 dependencies = [
@@ -5820,11 +5807,11 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "ta-ask",
  "ta-goal",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "typed-ask",
  "uuid",
 ]
 
@@ -5931,7 +5918,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "ta-ask",
  "ta-changeset",
  "ta-goal",
  "ta-policy",
@@ -5941,6 +5927,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+ "typed-ask",
  "uuid",
 ]
 
@@ -6437,6 +6424,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
 dependencies = [
  "rustc-hash",
+]
+
+[[package]]
+name = "typed-ask"
+version = "0.1.0"
+source = "git+https://github.com/Trusted-Autonomy/typed-ask?tag=v0.1.0#43a642040b681f69d9dddfbddae236f58d40f616"
+dependencies = [
+ "thiserror 2.0.20",
 ]
 
 [[package]]
