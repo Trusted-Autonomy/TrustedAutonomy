@@ -491,6 +491,13 @@ enum Commands {
         /// 1-32 chars of `[a-z0-9_-]`. Falls back to `$TA_GOAL_ORIGIN`.
         #[arg(long)]
         origin: Option<String>,
+        /// Intake record (JSON) to hand the agent as untrusted data. Set by
+        /// the daemon's wake listener for wake-on-demand launches (the
+        /// Chief-of-Staff). The record goes into the agent's first message
+        /// inside a fenced block labeled as untrusted data, and its
+        /// `candidate_id` is stated outside the fence as a value TA parsed.
+        #[arg(long)]
+        intake_file: Option<PathBuf>,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1715,6 +1722,7 @@ fn dispatch_raw(
             experiment_shadow_overrides,
             auto_cancel_after_draft,
             origin,
+            intake_file,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -1743,6 +1751,21 @@ fn dispatch_raw(
                 );
             }
             let _chat_mode_guard = commands::chat_launch::CliChatModeGuard::set(*chat_mode);
+            // `--intake-file`: carried the same way. Multi-goal workflows would
+            // not pass it on to their sub-goals, so reject that combination.
+            if intake_file.is_some()
+                && (phases.is_some()
+                    || workflow.as_deref() == Some("serial-phases")
+                    || !sub_goals.is_empty())
+            {
+                anyhow::bail!(
+                    "--intake-file cannot be combined with --phases/--workflow serial-phases or \
+                     --sub-goals: those spawn separate sub-goal launches that would not receive \
+                     the intake. Launch it as a single `ta run --intake-file` goal."
+                );
+            }
+            let _intake_file_guard =
+                commands::intake_prompt::CliIntakeFileGuard::set(intake_file.clone());
 
             // Paired cost-experiment shadow-goal bypass flags (v0.17.x,
             // internal/hidden): bundle the four `--experiment-shadow-*`
@@ -2313,6 +2336,20 @@ mod verb_dispatch_tests {
         }
         match parse(&["run", "Some goal"]) {
             Commands::Run { origin, .. } => assert_eq!(origin, None),
+            other => panic!("expected Commands::Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_accepts_intake_file_flag() {
+        match parse(&["run", "Wake", "--intake-file", "/tmp/intake.json"]) {
+            Commands::Run { intake_file, .. } => {
+                assert_eq!(intake_file, Some(PathBuf::from("/tmp/intake.json")))
+            }
+            other => panic!("expected Commands::Run, got {other:?}"),
+        }
+        match parse(&["run", "Some goal"]) {
+            Commands::Run { intake_file, .. } => assert_eq!(intake_file, None),
             other => panic!("expected Commands::Run, got {other:?}"),
         }
     }

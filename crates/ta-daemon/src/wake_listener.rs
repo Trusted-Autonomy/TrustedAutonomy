@@ -442,7 +442,8 @@ fn launch_wake_on_demand(
     };
 
     let content = String::from_utf8_lossy(payload).to_string();
-    let context_path = write_wake_on_demand_context(project_root, &state, role, &content)?;
+    let files = write_wake_on_demand_context(project_root, &state, role, &content)?;
+    let context_path = files.context.clone();
 
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
     let label = "wake-on-demand".to_string();
@@ -460,6 +461,7 @@ fn launch_wake_on_demand(
         tracing::error!(session_id = %session_id, role = %role, error = %e, "refusing to launch wake-on-demand role");
         std::io::Error::other(e)
     })?;
+    let args = with_intake_file(args, &files.intake);
 
     crate::team_session::ensure_stable_codesign(ta_bin, project_root);
     let output = run_and_record_launch(project_root, session_id, role, msg_id, ta_bin, &args)?;
@@ -586,31 +588,53 @@ fn write_launch_log(
     std::fs::write(path, body)
 }
 
+/// The two files written for one wake-on-demand launch.
+#[derive(Debug)]
+struct WakeLaunchFiles {
+    /// Trusted session context (objective, role prompt, budget, prior
+    /// findings), passed as `--objective-file`.
+    context: PathBuf,
+    /// The triggering message exactly as received, passed as
+    /// `--intake-file`. It comes from untrusted sources (chat, forum posts,
+    /// meeting notes), so `ta run` puts it into the agent's first message
+    /// inside a fenced block labeled as untrusted data, and states its
+    /// `candidate_id` outside the fence as a value parsed by code.
+    intake: PathBuf,
+}
+
 /// Renders context for a wake-on-demand invocation: `team_session.rs`'s
 /// existing session-context framing (objective, role prompt, budget, prior
-/// findings), plus the triggering message's raw content appended under its
-/// own heading — no wake-on-demand-specific behavior baked into
-/// `render_session_context` itself, per the design doc's "reuse the
-/// existing mechanism, add a new caller" principle.
+/// findings) in one file, and the triggering message's raw content in a
+/// separate intake file. The intake is kept out of the objective file on
+/// purpose: the objective is delivered as trusted text, the intake never is.
 fn write_wake_on_demand_context(
     project_root: &Path,
     state: &TeamSessionState,
     role: &str,
     content: &str,
-) -> std::io::Result<PathBuf> {
+) -> std::io::Result<WakeLaunchFiles> {
     let mut rendered = crate::team_session::render_session_context(project_root, state, role);
     rendered.push_str("\n## New intake\n\n");
-    rendered.push_str(content);
-    rendered.push('\n');
+    rendered.push_str(
+        "TA delivers this wake's intake in your first message, inside a fenced block \
+         labeled as untrusted data, with its candidate_id stated before the block.\n",
+    );
 
     let dir = TeamSessionState::state_dir(project_root, &state.id);
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!(
-        "wake-context-{role}-{}.md",
-        chrono::Utc::now().timestamp_millis()
-    ));
-    std::fs::write(&path, rendered)?;
-    Ok(path)
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let context = dir.join(format!("wake-context-{role}-{stamp}.md"));
+    std::fs::write(&context, rendered)?;
+    let intake = dir.join(format!("wake-intake-{role}-{stamp}.json"));
+    std::fs::write(&intake, content)?;
+    Ok(WakeLaunchFiles { context, intake })
+}
+
+/// Appends `--intake-file <path>` to a wake launch's `ta run` arguments.
+fn with_intake_file(mut args: Vec<String>, intake: &Path) -> Vec<String> {
+    args.push("--intake-file".to_string());
+    args.push(intake.to_string_lossy().to_string());
+    args
 }
 
 #[cfg(test)]
@@ -915,13 +939,33 @@ mod tests {
         );
         let state = TeamSessionState::new("sess-1".to_string(), config, Vec::new());
 
-        let path =
+        let files =
             write_wake_on_demand_context(tmp.path(), &state, "chief-of-staff", "raw chat text")
                 .unwrap();
-        let rendered = std::fs::read_to_string(path).unwrap();
+        let rendered = std::fs::read_to_string(&files.context).unwrap();
         assert!(rendered.contains("You triage intake."));
         assert!(rendered.contains("## New intake"));
-        assert!(rendered.contains("raw chat text"));
+        // The untrusted message never goes into the trusted objective file;
+        // it is written, unchanged, to the separate intake file.
+        assert!(!rendered.contains("raw chat text"), "{rendered}");
+        assert_eq!(
+            std::fs::read_to_string(&files.intake).unwrap(),
+            "raw chat text"
+        );
+    }
+
+    #[test]
+    fn wake_launch_args_pass_the_intake_file_alongside_the_objective_file() {
+        let base = vec![
+            "run".to_string(),
+            "title".to_string(),
+            "--objective-file".to_string(),
+            "/x/ctx.md".to_string(),
+        ];
+        let args = with_intake_file(base, Path::new("/x/intake.json"));
+        let i = args.iter().position(|a| a == "--intake-file").unwrap();
+        assert_eq!(args[i + 1], "/x/intake.json");
+        assert!(args.contains(&"--objective-file".to_string()));
     }
 
     #[tokio::test]
