@@ -10763,14 +10763,14 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [x] Deferred item moved: the same developer-local identity setting for Linux and Windows is a future task (not part of the public-release work in v0.17.12.12, which uses real signing).
 
 ### v0.17.11.23 - Extract `typed-ask` as a Standalone OSS Library with a Python Wheel
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: The bounded-question decision primitive (formerly the in-tree `ta-ask` crate) becomes a public library others can use, like `decision-gate`, `consensus-panel` and `task-graph`. Renamed to `typed-ask` because the `ta-` prefix reads as technical analysis to the public and clashed with the `ta_ask_human` tool.
 
 1. [x] New public repo `Trusted-Autonomy/typed-ask` (Apache-2.0): core crate with `thiserror` as its only required dependency; the subprocess-and-HTTP `DeciderBackend` for the Decider model server behind an off-by-default `decider` feature; Python wrapper from the same repo (PyO3 and maturin, abi3 wheels, module `typed_ask`, pyo3 kept out of the core); CI on Linux, macOS and Windows green; tag `v0.1.0`.
-2. [ ] PR #650: `ta-workflow` and `ta-policy` depend on the git tag instead of the in-tree crate; `crates/ta-ask` deleted. The adapter code (decision reviewer node, chat classifier glue) stays in TA.
-3. [ ] Future: bounded context (a size limit on question and context); a hosted-model backend so one interface covers local and hosted models; optional feature-gated use from `task-graph` and `decision-gate` (their defaults stay dependency-free); publish to crates.io and PyPI when ready.
+2. [x] PR #650 (merged via #649): `ta-workflow` and `ta-policy` depend on the git tag instead of the in-tree crate; `crates/ta-ask` deleted. The adapter code (decision reviewer node, chat classifier glue) stays in TA.
+3. [x] Deferred items moved/resolved: bounded context (a size limit on question and context), a hosted-model backend, optional feature-gated use from `task-graph` and `decision-gate`, and publishing to crates.io and PyPI are future work tracked in the `typed-ask` repository README ("Planned"), not in this phase. Original note: bounded context (a size limit on question and context); a hosted-model backend so one interface covers local and hosted models; optional feature-gated use from `task-graph` and `decision-gate` (their defaults stay dependency-free); publish to crates.io and PyPI when ready.
 
 ### v0.17.11.22 - Automatic Version Sync (Nightly and Release)
 <!-- status: pending -->
@@ -10800,6 +10800,37 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: S.
 
 #### Version: `0.17.11-alpha.24`
+
+### v0.17.11.25 - Wake-On-Demand-Only Team Sessions (No Rotation)
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: A team session that only has wake-on-demand roles (the Chief-of-Staff deployment) must not need, or run, a round-robin rotation. Today `ta team-session start` refuses a workflow with no stages, and a one-stage workflow makes the daemon launch `ta run` for that stage's role back to back forever (a successful cycle sleeps zero seconds), which burns real agent runs. The runtime already treats an empty stage list as "no rotation" and leaves listeners running, so only the command line blocks it. Found live while writing the 2026-10-08 CoS runbook.
+
+1. [ ] `ta team-session start` accepts a session with no stages when at least one `--wake-on-demand` role is registered; the stage requirement stays for sessions with no listeners.
+2. [ ] Test that a wake-only session starts, runs zero rotation cycles, and its listener still launches the role.
+3. [ ] Make rotation cycles rate-limited (a configurable minimum delay between cycles) so a misconfigured one-stage session cannot launch agents in a tight loop.
+4. [ ] Document the wake-only shape in `docs/USAGE.md` and the VT installer's printed command.
+
+**Effort**: S.
+
+#### Version: `0.17.11-alpha.25`
+
+### v0.17.11.26 - Live CoS Run Findings: No-Change Chat Goals, Retry Cap, Transcripts, Ports, Daemon Address
+<!-- status: in_progress -->
+**Depends on**: none
+
+**Goal**: Fix what the first live run of the real, daemon-launched Chief-of-Staff found on 2026-10-08. PR `fix/live-cos-run-findings`.
+
+1. [ ] A chat-mode goal that makes no file changes ends as success (exit 0, no draft) instead of failing with "No changes detected in staging workspace". That failure made the wake listener leave the message unacked and relaunch the CoS three times in three minutes (real paid runs).
+2. [ ] Wake listener: per-message attempt tracking persisted on disk, a maximum attempt count (default 3) with exponential backoff, a dead-letter file (`.ta/wake-dead-letter.jsonl`) after the cap, and a per-listener launch-rate guard (default 6 per hour).
+3. [ ] Diagnosability: full stdout and stderr of every wake launch saved under `.ta/logs/wake-launches/`, the stderr tail in the error log; chat-mode goals always keep their agent transcript and TA tool-call list under `.ta/logs/goals/<goal-id>/`.
+4. [ ] `ta daemon start --port N` no longer collides with the port in `daemon.toml` (it passed `--web-port N` as well, so two listeners bound one port).
+5. [ ] Daemon address resolution: the daemon rewrote `.ta/daemon.pid` as `pid=` and `bind=host:port`, while the whiteboard tools only read a `port=` line, so any project not on port 7700 silently talked to the default 7700 daemon (a different project's). One shared pid-file format and reader, fail closed when no usable port is found, and the client verifies the daemon belongs to this project before sending a token.
+
+**Effort**: M.
+
+#### Version: `0.17.11-alpha.26`
 
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
@@ -10842,7 +10873,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Goal**: The poller can prove an outcome came from the CoS and not from another role, and the message bus is not open to anything that can reach it.
 
 1. [ ] Per-role whiteboard Biscuit tokens (`whiteboard:team_session:<s>:role:<r>`) with a distinct `whiteboard:outcome:send` right granted only to the CoS launch.
-2. [ ] The daemon verifies the role and stamps `{role, goal_id, msg_id, issued_at}` into every outcome envelope; strict message schema and size limits; optional Ed25519 signature the poller verifies.
+2. [ ] The daemon verifies the role and stamps `{role, goal_id, target, msg_id, issued_at}` (`target` is the execution target identity, so outcomes from a remote runner are attributable) into every outcome envelope; strict message schema and size limits; optional Ed25519 signature the poller verifies.
 3. [ ] TA's whiteboard NATS client supports credentials (environment variable and vault entry name documented); `ta` refuses an unauthenticated non-loopback NATS.
 4. [ ] Design decision recorded in this phase: the daemon-stamped role and signature travel **inside** the stream envelope (alongside `msg_id` and `payload`, signed as one unit), so a consumer that reads only the stream can verify it. The verification (public) key is distributed to the poller from the daemon-only state directory created in v0.17.12.1, in a location the poller can read and agents cannot; signing keys never leave the daemon. Key rotation and revocation are specified here.
 5. [ ] Tests: a worker token cannot send an outcome; a forged or replayed envelope is rejected; stale messages are rejected; a poller with the public key verifies and one without refuses.
@@ -10909,7 +10940,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: A script can ask `ta` what it can safely do, and can supply secrets and read terms status without scraping text. Requested by the VT installer, which today cannot tell a safe `ta` from an unsafe one: `ta --version` reads `0.17.11-alpha.8` both before and after the CoS hardening, and a build made before PR #646 lists `--chat-mode` and `--origin` in `ta run --help` while its daemon does not pass them.
 
-1. [ ] `ta capabilities --json`: a stable, versioned capability document. Fields at least: `daemon_passes_restricted_flags`, `supports_chat_mode`, `supports_origin`, `rules_engine`, `outcome_roles`, `nats_credentials`, `terms_status`, `atomic_apply`, `sandbox_providers`, plus a `capabilities_schema` version. Each capability is true only when the code path is really wired, never inferred from a flag existing.
+1. [ ] `ta capabilities --json`: a stable, versioned capability document. Fields at least: `daemon_passes_restricted_flags`, `supports_chat_mode`, `supports_origin`, `rules_engine`, `outcome_roles`, `nats_credentials`, `terms_status`, `atomic_apply`, `sandbox_providers`, `platform` (operating system and architecture), plus a `capabilities_schema` version. Reported per execution target once v0.18.5 lands. Each capability is true only when the code path is really wired, never inferred from a flag existing.
 2. [ ] `ta credentials add` and `ta credentials update` accept the secret on standard input (`--secret-stdin`) or from a named environment variable, and warn when `--secret` is used on the command line (it is visible in `ps`).
 3. [ ] `ta terms-status --json` reports a real terms document version and content hash (today the version shown is the TA version that accepted the terms), so an agreements chain can bind acceptance to the exact text and re-prompt when it changes.
 
@@ -11285,6 +11316,21 @@ SA cannot productively start until TA's extension surface is stable — building
 Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, SA design work (ADRs, architecture documents, plugin interface sketches) can happen in parallel — just no implementation that depends on unstable TA traits.
 
 ---
+### v0.18.3.1 - Voice: Text-to-Speech Replies and Wake-Word Policy
+<!-- status: pending -->
+**Depends on**: v0.18.3
+
+**Goal**: Voice in the chat interface of Wayfinder and Untollable, without ever letting voice authorize anything. Design: Untollable spec section 10.3 (private repo `untollable-cli`).
+
+1. [ ] Text-to-speech plugin protocol (same stdio pattern as the speech-to-text plugin) with a local engine as the default and a hosted engine as an explicit opt-in.
+2. [ ] Input from voice is labeled `source = voice` at the input layer and can never satisfy a control confirmation (apply, deny, fix, approve): a spoken "apply" only opens the confirmation card. Enforced in code with a test, not by convention.
+3. [ ] Push-to-talk is the default (desktop hotkey). An optional opt-in on-device wake-word plugin for desktop and Android, with a visible listening indicator and no audio retained. No custom wake word on iOS (the platform has none; use Siri App Intents and in-app push-to-talk, implemented in the product apps).
+4. [ ] Privacy defaults: on-device transcription, audio not stored, nothing leaves the machine unless a hosted engine is chosen.
+
+**Effort**: M.
+
+#### Version: `0.18.3-alpha.1`
+
 ### v0.18.4 — Studio Frontend Migration (Next.js/React/TS/Tailwind) + Visual Plan Graph
 <!-- status: pending -->
 **Depends on**: v0.17.7.4 (workflow graph engine + PLAN.md phase-ordering/dependency-wave data this visualizes), v0.17.0.12.34 (`ta plan waves` — the data source for the graph view)
@@ -11313,6 +11359,52 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 #### Version: `0.18.4-alpha`
 
 ---
+
+### v0.18.5 - Execution Targets: Remote Runners
+<!-- status: pending -->
+**Depends on**: v0.17.12 (human-credential gate), v0.17.12.2 (role-bound tokens), v0.17.12.3 (action queue), v0.17.12.4 (rules engine), v0.17.12.10 (default-on isolation), v0.17.11.8 (presence `host_id`)
+
+**Goal**: The owner chooses where a team's work executes: this machine, another machine they control, an office LAN, a private cloud, or the hosted cloud. Design: Untollable spec section 10.1.
+
+1. [ ] Target registry (`targets.toml`) with kinds `local`, `machine`, `lan`, `private-cloud`, `hosted`; one-time pairing with a device identity (`ta target pair`); a target is never used while unpaired or offline without telling the user.
+2. [ ] Daemon-to-daemon goal dispatch: the controller sends the goal, the source reaches the target by git or snapshot, the worker runs sandboxed in a staging copy on the target, and the draft returns to the controller. **Apply only ever happens on the controller side after a person approves.**
+3. [ ] Per-target scoped credentials issued by the target's own broker; secrets never move between targets.
+4. [ ] Selection: project default, per team or role override in `team.toml`, and a one-off ("run on <name>"); user-facing word is "run on".
+5. [ ] Offline handling through the durable queue (wait) or fail-fast, by user choice; per-target health from the existing presence heartbeat (`host_id`); `ta capabilities --json` reported per target.
+6. [ ] The rules engine gains a `target` dimension that can express the target's **kind and owner** (so an organization can forbid personal machines for a protected project); audit entries carry the target id.
+7. [ ] A documented remote-runner API over mutual TLS or target-bound tokens: submit a goal (with its origin), stream events, fetch the finished draft and artifacts, cancel. The VT poller calls it instead of launching `ta run` locally, so delegation and outcome binding work against remote in-flight state.
+8. [ ] **Remote outcomes return through this API as daemon-stamped, signed outcomes that carry the target identity** (v0.17.12.2), not through the controller's local message bus, which a remote worker cannot reach.
+9. [ ] A generic device-pairing API shared by targets and phones: register a device id and public key, challenge-response, list, revoke. Built here and reused by v0.18.5.1.
+9a. [ ] **Owned targets (owner refinement, 2026-10-08):** pairing records carry an **owner principal** (user id) and a kind. A new kind `user-machine` is owned by exactly one user and is registered at VT install time under an optional name (default: the hostname), through the same pairing-code mechanism. LAN hosts register the same way but are organization-owned. The daemon **refuses** a goal for a `user-machine` target unless the goal's requester equals the target's owner, so an organization default can never land on a colleague's laptop and a user cannot route someone else's work to their machine.
+9b. [ ] The requester identity is **taken from a verified credential, never from a field the caller supplies**: the dispatch token carries the requesting user as an attenuated capability fact that the target daemon verifies. A poller bug, a prompt-injected CoS or a forged request body cannot name a different requester.
+9c. [ ] An offline `user-machine` target never silently falls back to another target: queue or fail fast, by the user's choice, with a clear message. Resolution order is decided on the VT side: one-off choice in chat, then the role's target, then the requester's own preference, then the project default, then the organization default.
+10. [ ] The `hosted` target reports usage for credit metering and is gated by the product entitlement check (VT Phase 10 on the VT side): creation and each dispatch need the VT license plus a hosted-execution feature, checked server-side and failing closed; compute reserves credit before launch, commits actual use, and releases it on failure. A hosted target without a valid entitlement is refused with a clear message.
+
+**First target (owner decision, 2026-10-08)**: the owner's Windows laptop on the LAN (`machine` kind), so the Windows daemon and the Windows sandbox parity phase (v0.17.12.9) are on the critical path.
+
+**Effort**: L.
+
+#### Version: `0.18.5-alpha`
+
+### v0.18.5.1 - Mobile Device Pairing and Biometric Approval Credential
+<!-- status: pending -->
+**Depends on**: v0.17.12, v0.17.12.2
+
+**Goal**: A phone can act as a second control channel. The native iOS and Android apps live in the Wayfinder and Untollable repos; TA provides the pairing, the credential check and the event surface. Design: Untollable spec section 10.2.
+
+1. [ ] Device enrollment: the phone generates a key in its secure hardware, the owner pairs it with a one-time code, and TA stores the public key against the owner (revocable, listed in `ta show devices`). **Device records are keyed by (user, app, install)** because Wayfinder and Untollable are separate apps for separate customers (owner decision D8); every token carries the app id as a separate audience fact, so a token for one app is useless against the other app's endpoints.
+2. [ ] `approve`, `deny`, `fix` and `apply` accept a device-signed approval bound to the draft's content hash, unlocked on the phone by Face ID or fingerprint, and **TA verifies it against the registered device keys**; this counts as a verified human credential for the gate in v0.17.12. Relays only forward the approval; they never decide.
+2a. [ ] A stable review-card data shape (facts computed from TA's own data) that the shell and the phone both render, with a versioned schema.
+2b. [ ] Review-card detail and diffs are end-to-end encrypted between the controller and the phone for the cloud relay (key agreement from the phone's P-256 secure-hardware key); push payloads carry no content. The phone holds only a short-lived attenuated capability token.
+3. [ ] Event surface for push notifications (work ready, needs attention, target offline) delivered through the product relay; no secrets in notifications.
+4. [ ] Chat and voice messages from the phone are conversation only and cannot satisfy any control action.
+5. [ ] Replay protection, key rotation and a lost-phone revocation path, with audit entries.
+5a. [ ] The Untollable app's push notifications come from its own relay on the TA and Untollable side (push credentials and topics are per bundle id), not from Wayfinder's push service.
+6. [ ] **TA owns the `api-untollable` schema** (devices, approvals, review cards, events); Wayfinder owns `api-wayfinder`. Publish the device, approval and **event stream** API as versioned JSON schemas generated from the Rust types (the existing `ta-data-spec` pattern with a CI drift test), so the native apps' shared core (iPhone first, then Android; Rust core with generated Swift and Kotlin bindings, per the Untollable spec section 10.4) generates its models and never hand-copies them.
+
+**Effort**: M.
+
+#### Version: `0.18.5-alpha.1`
 
 ## Projects On Top (separate repos, built on TA)
 
