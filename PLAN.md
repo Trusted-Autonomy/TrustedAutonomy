@@ -10640,19 +10640,21 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.8`
 
 ### v0.17.11.9 — Whiteboard Team-Session Data Isolation
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.11.8 (daemon-hosted whiteboard coordination)
 
 **Goal**: Close the data-isolation gap found in v0.17.11.8's final review: `team_session` is verified as a Biscuit auth *scope* on every whiteboard request, but the underlying data (presence, tasks, handoff messages) is never actually filtered or namespaced by it — `discovery::list_active_agents` returns every presence record on the daemon regardless of which session asked, and presence records are keyed on `agent_id` alone, so two concurrent team sessions each having a role with the same name (e.g. two `implementer`s) would silently overwrite each other's record. This is the same class of silent-collision bug v0.17.11.8 exists to eliminate, just one level up (across sessions, not across processes).
 
-**Items**:
-1. [ ] Add `#[serde(default)] team_session: Option<String>` to `PresenceRecord` (`crates/ta-agent-whiteboard/src/presence.rs`), mirroring `host_id`'s existing pattern exactly — `None` in `new()`, a `with_team_session(..)` builder, one backward-compat deserialization test.
-2. [ ] Collision-free presence key: derive from `(team_session, agent_id)` instead of `agent_id` alone in `publish_presence`/`withdraw_presence` — factor into one shared `fn presence_key(record: &PresenceRecord) -> String`. Mind the NATS JetStream KV key charset (`[-/_=.a-zA-Z0-9]`, no `:` — see `tasks.rs`'s existing `claim_marker_key` for the same constraint); use `_` as separator.
-3. [ ] Daemon-side stamping and filtering, never trusting the client body: in `register_presence`, overwrite `record.team_session` with the already-scope-verified `req.team_session` (cannot be forged, since `require_whiteboard_scope` already checked it); in `list_presence`, filter `discovery::list_active_agents`'s result to only records matching the query's `team_session`. Leave `presence_for_source` unfiltered — it's deliberately session-agnostic (runs before any session exists).
-4. [ ] Apply the same daemon-side-stamped-and-namespaced pattern to task ids (`claim_task`/`complete_task`) and the handoff routing key (`send_handoff`/`receive_handoff`).
-5. [ ] Test that no existing test substitutes for: register into `sess-1` and `sess-2` against one daemon, assert each session's `list_presence` sees only its own records. (The existing `two_concurrent_agent_processes_both_see_each_other_via_presence` regression test from v0.17.11.8 puts both simulated agents in the *same* session, so it cannot detect this gap.)
+**Deferred items moved/resolved** (closed by the owner's decision, 2026-10-07, so the version line can advance; the work is the same problem as the role-bound outcome tokens and is done there):
 
-**Alternative to consider before implementing**: if one daemon is meant to host at most one team session at a time (a legitimate simpler model for the near term), write that constraint explicitly into `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md`'s §3 instead of implementing isolation — the design doc currently promises per-session isolation the code doesn't provide, and that mismatch itself needs resolving one way or the other, not left implicit.
+1. Presence record `team_session` field and backward-compatible deserialization: **moved to v0.17.12.2** (item 6).
+2. Collision-free presence key from `(team_session, agent_id)`: **moved to v0.17.12.2** (item 6).
+3. Daemon-side stamping and filtering of `team_session`, never trusting the client body: **moved to v0.17.12.2** (items 2 and 6).
+4. Same pattern for task ids and handoff routing keys: **moved to v0.17.12.2** (item 6).
+5. Two-session isolation test: **moved to v0.17.12.2** (item 7).
+6. The "one daemon hosts one team session" alternative: **resolved**: not chosen. Per-session isolation is implemented, because the red-team report (CR-04, CR-34) shows roles in one session can otherwise read and forge each other's messages.
+
+#### Version: `0.17.11-alpha.9`
 
 ### v0.17.11.13 — `ta credentials update` (In-Place Credential Rotation)
 <!-- status: done -->
@@ -10775,7 +10777,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.22`
 
-> **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped.
+> **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
 <!-- status: pending -->
@@ -10820,6 +10822,9 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [ ] TA's whiteboard NATS client supports credentials (environment variable and vault entry name documented); `ta` refuses an unauthenticated non-loopback NATS.
 4. [ ] Design decision recorded in this phase: the daemon-stamped role and signature travel **inside** the stream envelope (alongside `msg_id` and `payload`, signed as one unit), so a consumer that reads only the stream can verify it. The verification (public) key is distributed to the poller from the daemon-only state directory created in v0.17.12.1, in a location the poller can read and agents cannot; signing keys never leave the daemon. Key rotation and revocation are specified here.
 5. [ ] Tests: a worker token cannot send an outcome; a forged or replayed envelope is rejected; stale messages are rejected; a poller with the public key verifies and one without refuses.
+6. [ ] **Moved here from v0.17.11.9 (whiteboard team-session data isolation):** add `team_session` to `PresenceRecord` (backward compatible); derive the presence key from `(team_session, agent_id)` through one shared function, mindful of the NATS JetStream key character set (use `_` as the separator); stamp and filter by the already-verified session on the daemon side (register, list, task claim and complete, handoff send and receive), never trusting the client body; leave the advisory pre-launch `presence_for_source` query unfiltered.
+7. [ ] **Moved here from v0.17.11.9:** a test that registers agents into two sessions on one daemon and asserts each session's `list_presence` sees only its own records (the existing same-session test cannot detect this gap).
+8. [ ] Update `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md` so its per-session isolation promise matches the code.
 
 **Effort**: M. **Unblocks VT**: V6 (role-verified outcomes) and V7 (NATS auth on by default).
 
@@ -10930,20 +10935,37 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.12-alpha.8`
 
-### v0.17.12.9 - Default-On Isolation for CoS and Team Roles
+### v0.17.12.9 - Windows AppContainer Parity
 <!-- status: pending -->
-**Depends on**: v0.17.12.4, v0.17.12.7, v0.17.12.8
+**Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
 
-1. [ ] Per-role profiles (CoS chat strictest, reviewer, worker, librarian) from role class intersected with persona and rules; origins `cos` and `chat` force the CoS class.
-2. [ ] On by default under `balanced` on macOS and Linux; CoS and chat refuse to launch without the required capabilities in every posture except `open`.
-3. [ ] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor`; badges in Studio and `ta status`; drafts built without a required capability are labelled in review.
-4. [ ] USAGE.md sandbox section rewritten as how-to with honest per-platform limits.
+**Goal**: Windows gets the same isolation as macOS and Linux in the same release. All platforms launch at once.
 
-**Effort**: M. **Decision pending**: Windows parity (v0.18.0.5) can move into this release if it should wait for it; otherwise strict posture on Windows refuses CoS launch and the gap is documented.
+1. [ ] Named-pipe gateway bridge and egress relay with container-SID access control (no loopback exemption).
+2. [ ] Staging ACL set before population; toolchain read grants with teardown and a `ta doctor --fix` sweep.
+3. [ ] ProjFS provider refuses infrastructure directories case-insensitively; alternate-stream, short-name and device-name rejection.
+4. [ ] Job Object process limits; the AppContainer-to-Job-Object fallback becomes a posture decision, never silent.
+5. [ ] Open questions from the sandbox plan resolved by testing on Windows CI: whether an AppContainer process can read Credential Manager, and how the secrets move in v0.17.12.1 maps to DPAPI or Credential Manager.
+6. [ ] Conformance suite on Windows CI; default-on for team roles on Windows (v0.17.12.10).
+
+**Effort**: M.
 
 #### Version: `0.17.12-alpha.9`
 
-### v0.17.12.10 - Remaining Red-Team High Findings
+### v0.17.12.10 - Default-On Isolation for CoS and Team Roles
+<!-- status: pending -->
+**Depends on**: v0.17.12.4, v0.17.12.7, v0.17.12.8, v0.17.12.9
+
+1. [ ] Per-role profiles (CoS chat strictest, reviewer, worker, librarian) from role class intersected with persona and rules; origins `cos` and `chat` force the CoS class.
+2. [ ] On by default under `balanced` on macOS, Linux and Windows; CoS and chat refuse to launch without the required capabilities in every posture except `open`.
+3. [ ] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor`; badges in Studio and `ta status`; drafts built without a required capability are labelled in review.
+4. [ ] USAGE.md sandbox section rewritten as how-to with honest per-platform limits.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.10`
+
+### v0.17.12.11 - Remaining Red-Team High Findings
 <!-- status: pending -->
 **Depends on**: v0.17.12.4
 
@@ -10957,9 +10979,9 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Effort**: M.
 
-#### Version: `0.17.12-alpha.10`
+#### Version: `0.17.12-alpha.11`
 
-### v0.17.12.11 - Signed Public Releases
+### v0.17.12.12 - Signed Public Releases
 <!-- status: pending -->
 **Depends on**: v0.17.12.2 (so the public build is not shipped with the open Critical findings)
 
@@ -10968,11 +10990,13 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [ ] macOS: Apple Developer ID signing and notarization in the release workflow (needs an Apple Developer account and certificate secrets from the owner); Windows signing enabled with the existing script; keep Sigstore signing of the checksum manifest.
 2. [ ] `install.sh` and the VT installer verify the signature and checksums; document the first-run experience honestly.
 2a. [ ] A verifiable download path that does not mean "clone a private repository and build": per-version release assets for each platform, a signed checksum manifest (the Sigstore-signed `SHA256SUMS.txt` bundle from v0.17.11.5) that an installer can pin by version, and a documented stable URL scheme.
+2b. [ ] **Windows code signing (required for the public release):** Authenticode-sign `ta.exe`, `ta-daemon.exe`, the VT binaries and the installer. Needs a code-signing certificate issued to the LLC (identity validation). Current certificate authorities require the private key to live on hardware or in a cloud signing service, so the existing workflow step that expects an exported certificate file may not work for a newly issued certificate; evaluate a cloud signing service (for example a cloud HSM offered by a certificate authority, or a managed signing service) against cost, LLC eligibility and SmartScreen reputation (an EV certificate builds reputation fastest), and adapt `scripts/sign-windows.ps1` and the release job.
+2c. [ ] **Linux (no operating-system signing gate, but a verifiable and compatible build):** signed tarballs (the Sigstore-signed checksum manifest already in place); build against an old enough glibc baseline (or a static musl build) so one artifact runs on current mainstream distributions; documented runtime requirements for the sandbox (unprivileged user namespaces or Landlock, bubblewrap) and for credentials (Secret Service or the file fallback); an optional signed container image and, later, `.deb` and `.rpm` packages behind a signed repository key.
 3. [ ] Once signed, the runtime self-signing from v0.17.11.21 stays a developer-only path (it already does nothing without the local certificate).
 
 **Effort**: M. **Unblocks VT**: V10 (installer hand-off for external users).
 
-#### Version: `0.17.12-alpha.11`
+#### Version: `0.17.12-alpha.12`
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.18.0 — SA Enterprise Credential Store Plugin
@@ -11016,22 +11040,11 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [ ] **Sharding design**: once capacity data exists, design horizontal scaling as sharding per logical execution unit (e.g. per team-session or per org), not per-request load balancing — informed by whatever the benchmark shows actually bottlenecks first (connection count, RPC throughput, transport backend, etc).
 3. [ ] **Cross-shard concerns**: if a real Wayfinder-hosted multi-tenant option is ever built on top of this (see the whiteboard design's deferred section), shard boundaries and tenant boundaries should likely be the same boundary — revisit together, not separately.
 
-### v0.18.0.5 - Windows AppContainer Parity
-<!-- status: pending -->
-**Depends on**: v0.17.12.6, v0.17.12.7
-
-1. [ ] Named-pipe gateway bridge and egress relay with container-SID access control (no loopback exemption).
-2. [ ] Staging ACL set before population; toolchain read grants with teardown and a `ta doctor --fix` sweep.
-3. [ ] ProjFS provider refuses infrastructure directories case-insensitively; stream, short-name and device-name rejection.
-4. [ ] Job Object process limits; AppContainer-to-Job-Object fallback becomes a posture decision; conformance suite on Windows CI.
-
-**Effort**: M. (May be pulled into v0.17.12.x.)
-
-#### Version: `0.18.0-alpha.5`
+> Note: Windows AppContainer parity (formerly v0.18.0.5) moved to v0.17.12.9 so all platforms launch together.
 
 ### v0.18.0.6 - Sandbox Verification Runs and Plugin Subprocesses
 <!-- status: pending -->
-**Depends on**: v0.17.12.9
+**Depends on**: v0.17.12.10
 
 1. [ ] TA's own staging verification commands (build, test, lint) run under the worker profile, network off by default.
 2. [ ] Plugin manifests declare sandbox needs; the profile is shown at install, hash-pinned, and trusted on first use for project-local plugins (CR-25); per-plugin scoped broker tokens and environment allowlist.
@@ -11054,7 +11067,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 ### v0.18.0.8 - Windows WSL2 Provider and Stricter AppContainer for the CoS
 <!-- status: pending -->
-**Depends on**: v0.18.0.5, v0.18.0.7
+**Depends on**: v0.17.12.9, v0.18.0.7
 
 1. [ ] Optional TA-managed WSL2 distro with interop and automount disabled, staging in the distro filesystem, Linux sandbox inside.
 2. [ ] Less-privileged AppContainer for the CoS profile on Windows; networking-mode handling for daemon reachability; manual verification checklist.
@@ -11065,7 +11078,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 ### v0.18.0.9 - Multi-Tenant Token Scoping and Peer Identity (TA-06)
 <!-- status: pending -->
-**Depends on**: v0.17.12.9, v0.18.0
+**Depends on**: v0.17.12.10, v0.18.0
 
 1. [ ] Per-project and per-organization `TokenScope`; tokens cannot act across projects on a shared daemon.
 2. [ ] Daemon mutating routes on a Unix socket or named pipe with peer-identity checks that reject sandboxed or agent-descendant peers; per-goal cgroup or Job Object identity.
