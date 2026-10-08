@@ -19210,6 +19210,44 @@ fn run() {
         }
     }
 
+    /// CR-11: the auto-approve decision reads the goal record, never the
+    /// environment. Changing TA_GOAL_ORIGIN after the goal was created
+    /// (to a harmless value, so parallel tests that read it are unaffected)
+    /// must not change the decision in either direction.
+    #[test]
+    fn h9_decision_ignores_ta_goal_origin_changed_after_creation() {
+        let (_project, config, pkg_id, goal_id) = h9_pending_draft_with_origin(Some("cos"));
+        let (_p2, config_none, _pkg2, goal_none) = h9_pending_draft_with_origin(None);
+
+        let previous = std::env::var(ta_goal::origin::ORIGIN_ENV_VAR).ok();
+        std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, "cli");
+        let cos_refusal = auto_approve_refusal_for_draft(&config, &goal_id);
+        let cos_apply = h9_apply(&config, &pkg_id);
+        let none_refusal = auto_approve_refusal_for_draft(&config_none, &goal_none);
+        match previous {
+            Some(v) => std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, v),
+            None => std::env::remove_var(ta_goal::origin::ORIGIN_ENV_VAR),
+        }
+
+        assert!(
+            cos_refusal
+                .as_deref()
+                .is_some_and(|r| r.starts_with("auto-approve refused: origin=cos")),
+            "{:?}",
+            cos_refusal
+        );
+        let err = cos_apply.expect_err("cos-origin draft must still be refused");
+        assert!(err.to_string().contains("origin=cos"), "{}", err);
+        assert!(none_refusal.is_none());
+        // The record itself was not rewritten by the environment.
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goal = store
+            .get(uuid::Uuid::parse_str(&goal_id).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.origin.as_deref(), Some("cos"));
+    }
+
     #[test]
     fn h9_apply_after_explicit_human_approval_still_works_for_cos_origin() {
         let (_project, config, pkg_id, _goal_id) = h9_pending_draft_with_origin(Some("cos"));

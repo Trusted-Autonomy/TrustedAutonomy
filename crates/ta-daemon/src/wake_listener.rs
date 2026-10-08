@@ -393,13 +393,18 @@ fn launch_wake_on_demand(
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
     let label = "wake-on-demand".to_string();
     let args = build_ta_run_args(
+        project_root,
         &state,
         &label,
         role,
         &team_config,
         &context_path,
         workflow_tag,
-    );
+    )
+    .map_err(|e| {
+        tracing::error!(session_id = %session_id, role = %role, error = %e, "refusing to launch wake-on-demand role");
+        std::io::Error::other(e)
+    })?;
 
     crate::team_session::ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)

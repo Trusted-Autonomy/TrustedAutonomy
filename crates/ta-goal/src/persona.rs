@@ -43,6 +43,13 @@ pub struct PersonaCapabilities {
     /// native tool (Bash, Read, Write, Edit, ...) is denied.
     #[serde(default)]
     pub chat_mode: bool,
+    /// Goal origin a launch of this persona carries (H9), e.g. `"cos"`.
+    /// The daemon passes it as `ta run --origin <value>`. A chat-mode
+    /// persona with no origin gets `"chat"`. A chat-mode persona's origin
+    /// must be one that is never auto-approved (`cos` or `chat`). Validated
+    /// by `ta_goal::origin::validate_origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Style/output preferences for a persona.
@@ -215,6 +222,7 @@ mod tests {
                 forbidden_tools: vec!["Write(*)".to_string()],
                 read_only: false,
                 chat_mode: false,
+                origin: None,
             },
             style: PersonaStyle {
                 output_format: "markdown".to_string(),

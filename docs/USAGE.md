@@ -376,7 +376,38 @@ What a chat-mode launch gets:
 - none of the persona's `allowed_tools` are chat-safe, or the posture ceiling leaves no tools,
 - the persona or agent name contains the reserved `:chat:` marker.
 
-The daemon launches team personas with `ta run --headless --team <team> --persona <persona>`, so setting `chat_mode = true` in the persona file is all a team needs to run that role in chat mode.
+The daemon launches team personas with `ta run --headless --team <team> --persona <persona>`. When the persona has `chat_mode = true`, the daemon also passes `--chat-mode` and `--origin <origin>` itself. The origin is the persona's `origin` (for example `origin = "cos"`), the role's `origin` in `.ta/team.toml`, or `chat` when neither is set:
+
+```toml
+# .ta/personas/chief-of-staff.toml
+[capabilities]
+chat_mode = true
+origin = "cos"
+```
+
+```toml
+# .ta/team.toml: mark the role itself, so it can never launch outside chat mode
+[[members]]
+role = "chief-of-staff"
+agent_id = "claude-opus-5"
+security = "auto"
+persona = "chief-of-staff"
+origin = "cos"
+```
+
+A role whose origin is `cos` or `chat` always launches with `--chat-mode`, even if its persona forgot `chat_mode = true`. The daemon refuses to launch a role, and logs why, when its persona file cannot be read, when the persona and the role name different origins, or when a chat-mode launch would carry an origin that can be auto-approved.
+
+### Restricted Launches Ignore Your Global Claude Code Settings
+
+Any launch with a tool restriction (a persona `allowed_tools` list, `read_only = true`, chat mode, or a `max_allowed_tools` ceiling) runs Claude Code with:
+
+- `--setting-sources local`: only the `.claude/settings.local.json` TA writes into staging is loaded. Your `~/.claude/settings.json` and the project's `.claude/settings.json` are not, so their allow rules (for example `mcp__ta__*`, `Write`) and `defaultMode` cannot widen the persona's tools.
+- `--permission-mode dontAsk` (also written as `defaultMode` in the staging settings): a tool that is not on the list is refused instead of being approved or prompted for.
+- an explicit deny for every TA MCP tool not on the list.
+
+Launches with no restriction are unchanged: they still pick up your global allow rules and `defaultMode`. Because user settings are skipped for restricted launches, anything those launches need from `~/.claude/settings.json` (for example an `apiKeyHelper`) must come from the environment instead, such as `ANTHROPIC_API_KEY` or your normal `claude` login.
+
+A goal's origin is fixed when the goal is created. A later `ta run --goal-id <id>` with a different `--origin` or `TA_GOAL_ORIGIN` keeps the recorded origin and prints a warning.
 
 ---
 

@@ -128,6 +128,7 @@ impl TeamConfig {
                 security,
                 persona,
                 model_tier: None,
+                origin: None,
                 handles_tags: Vec::new(),
             });
         }
@@ -166,6 +167,7 @@ mod tests {
             security: AdvisorSecurity::ReadOnly,
             persona: None,
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         }
     }
@@ -187,6 +189,7 @@ mod tests {
             security: AdvisorSecurity::Auto,
             persona: Some("strict-reviewer".to_string()),
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         config.save(tmp.path()).unwrap();
@@ -212,6 +215,7 @@ mod tests {
             security: AdvisorSecurity::ReadOnly,
             persona: None,
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         config.members.push(TeamMember {
@@ -220,6 +224,7 @@ mod tests {
             security: AdvisorSecurity::Auto,
             persona: Some("strict".to_string()),
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         config.save(tmp.path()).unwrap();
@@ -241,6 +246,7 @@ mod tests {
             security: AdvisorSecurity::ReadOnly,
             persona: None,
             model_tier: None,
+            origin: None,
             handles_tags: Vec::new(),
         });
         config.save(tmp.path()).unwrap();
@@ -335,6 +341,7 @@ persona = "strict-reviewer"
             security: AdvisorSecurity::Auto,
             persona: None,
             model_tier: Some("highest".to_string()),
+            origin: None,
             handles_tags: vec![
                 "task-delegation".to_string(),
                 "research-request".to_string(),
