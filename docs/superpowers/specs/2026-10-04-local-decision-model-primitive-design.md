@@ -1,5 +1,8 @@
 # Local Decision-Model Primitive — Design
 
+> **Status update (2026-10-07):** the crate this document calls `ta-ask` was extracted from TrustedAutonomy into a standalone public library and renamed **`typed-ask`** (repository `Trusted-Autonomy/typed-ask`, tag `v0.1.0`; Rust crate `typed-ask`, Python module `typed_ask`). The `ta-` prefix read as technical analysis to the public and clashed with the `ta_ask_human` tool. Everywhere below, `ta-ask` means that crate: TA's `ta-workflow` and `ta-policy` now depend on it by git tag, and the adapter code (decision reviewer node, chat classifier glue) stays in TA. Section 7 ("Where it lives") describes the original in-tree decision and is superseded by PLAN.md phase v0.17.11.23.
+
+
 **Goal:** One reusable TA-core crate that lets any caller ask a narrow, bounded question and get
 back a calibrated decision — fast and cheap — replacing ad-hoc per-project reimplementations of
 the same pattern that has already independently emerged five times across two products.
