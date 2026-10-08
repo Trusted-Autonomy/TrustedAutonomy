@@ -429,14 +429,25 @@ pub fn write_session_context(
 /// function only needs a string for the title, not a full stage struct, so
 /// it's callable outside `team_session.rs`'s rotation state machine too
 /// (v0.17.11.10).
+///
+/// Origin and chat mode (H7/H9, red-team CR-01): when the role's persona
+/// (`.ta/personas/<name>.toml`, loaded from `project_root`) declares
+/// `chat_mode = true`, or the role or persona declares an `origin`, the
+/// arguments carry `--chat-mode` and/or `--origin <value>` (see
+/// `ta_goal::origin::resolve_launch_origin`). An origin that is never
+/// auto-approved (`cos`, `chat`) always comes with `--chat-mode`. Fails
+/// closed: a persona that cannot be loaded, or an invalid or conflicting
+/// origin, returns an error and the role is not launched, because the
+/// daemon could otherwise launch a CoS with a full tool surface.
 pub fn build_ta_run_args(
+    project_root: &Path,
     state: &TeamSessionState,
     label: &str,
     role: &str,
     team_config: &TeamConfig,
     context_path: &Path,
     workflow_tag: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let title = format!("{}: {} ({})", state.config.name, label, role);
     let mut args = vec![
         "run".to_string(),
@@ -460,6 +471,38 @@ pub fn build_ta_run_args(
         if let Some(persona) = &member.persona {
             args.push("--persona".to_string());
             args.push(persona.clone());
+        }
+        let (persona_chat_mode, persona_origin) = match &member.persona {
+            Some(name) => {
+                let p = ta_goal::PersonaConfig::load(project_root, name).map_err(|e| {
+                    format!(
+                        "cannot launch role '{}': its persona '{}' could not be loaded to \
+                         check chat mode and origin ({}). Fix .ta/personas/{}.toml or the \
+                         role's persona in .ta/team.toml.",
+                        role, name, e, name
+                    )
+                })?;
+                (p.capabilities.chat_mode, p.capabilities.origin)
+            }
+            None => (false, None),
+        };
+        let launch = ta_goal::origin::resolve_launch_origin(
+            persona_chat_mode,
+            persona_origin.as_deref(),
+            member.origin.as_deref(),
+        )
+        .map_err(|e| {
+            format!(
+                "cannot launch role '{}': {}. Check the role in .ta/team.toml and its persona.",
+                role, e
+            )
+        })?;
+        if launch.chat_mode {
+            args.push("--chat-mode".to_string());
+        }
+        if let Some(origin) = launch.origin {
+            args.push("--origin".to_string());
+            args.push(origin);
         }
         // `team.toml`'s `member.agent_id`/`model_tier` name a MODEL (e.g.
         // "claude-opus-5"), not a framework -- `ta run`'s `--agent` flag
@@ -516,7 +559,7 @@ pub fn build_ta_run_args(
         args.push(tag.to_string());
     }
 
-    args
+    Ok(args)
 }
 
 // ─── macOS code signing (self-healing, best-effort) ─────────────────────────
@@ -719,13 +762,18 @@ pub fn run_one_cycle(
     // tag -- only wake-on-demand listeners (`wake_listener.rs`) carry one
     // today, via their own `workflow_tag` config.
     let args = build_ta_run_args(
+        project_root,
         &state,
         &stage.name,
         &role,
         &team_config,
         &context_path,
         None,
-    );
+    )
+    .map_err(|e| {
+        tracing::error!(session_id = %id, role = %role, error = %e, "refusing to launch team role");
+        io::Error::other(e)
+    })?;
 
     ensure_stable_codesign(ta_bin);
     let output = std::process::Command::new(ta_bin)
@@ -1421,15 +1469,18 @@ mod tests {
             ta_session::workflow_session::AdvisorSecurity::Auto,
             Some("careful-analyst".to_string()),
         );
+        write_test_persona(dir.path(), "careful-analyst", "");
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--headless".to_string()));
@@ -1474,13 +1525,15 @@ mod tests {
         team_config.members[0].model_tier = Some("highest".to_string());
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
@@ -1511,13 +1564,15 @@ mod tests {
         );
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"auto".to_string()));
@@ -1544,13 +1599,15 @@ mod tests {
         team_config.members[0].model_tier = Some("nonexistent-tier".to_string());
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
@@ -1567,13 +1624,15 @@ mod tests {
         let team_config = TeamConfig::default(); // no members assigned
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(!args.contains(&"--security".to_string()));
         assert!(!args.contains(&"--persona".to_string()));
@@ -1596,13 +1655,15 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         let flag_idx = args
             .iter()
@@ -1624,13 +1685,15 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "specialist",
             &team_config,
             &context_path,
             Some("brain-maintenance"),
-        );
+        )
+        .unwrap();
 
         let flag_pos = args
             .iter()
@@ -1649,15 +1712,151 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "researcher",
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(!args.contains(&"--workflow-tag".to_string()));
+    }
+
+    // ── CR-01: chat mode and origin for CoS-style launches ────────────────
+
+    fn write_test_persona(project: &Path, name: &str, capabilities_toml: &str) {
+        let dir = project.join(".ta").join("personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.toml", name)),
+            format!(
+                "[persona]\nname = \"{}\"\n\n[capabilities]\n{}\n",
+                name, capabilities_toml
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Builds args for `role` assigned to `persona` (and optional role
+    /// origin), in a temp project.
+    fn args_for_role(
+        persona: Option<(&str, &str)>,
+        role_origin: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let context_path =
+            write_session_context(dir.path(), &state, "intake", "chief-of-staff").unwrap();
+        if let Some((name, caps)) = persona {
+            write_test_persona(dir.path(), name, caps);
+        }
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("chief-of-staff"),
+            "claude-opus-5".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            persona.map(|(n, _)| n.to_string()),
+        );
+        team_config.members[0].origin = role_origin.map(str::to_string);
+        build_ta_run_args(
+            dir.path(),
+            &state,
+            "intake",
+            "chief-of-staff",
+            &team_config,
+            &context_path,
+            None,
+        )
+    }
+
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].as_str())
+    }
+
+    #[test]
+    fn chat_mode_persona_with_cos_origin_launches_with_chat_mode_and_origin_cos() {
+        let args = args_for_role(
+            Some(("chief-of-staff", "chat_mode = true\norigin = \"cos\"")),
+            None,
+        )
+        .unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()), "{:?}", args);
+        assert_eq!(flag_value(&args, "--origin"), Some("cos"));
+        assert_eq!(flag_value(&args, "--persona"), Some("chief-of-staff"));
+    }
+
+    #[test]
+    fn chat_mode_persona_without_origin_gets_origin_chat() {
+        let args = args_for_role(Some(("chief-of-staff", "chat_mode = true")), None).unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()));
+        assert_eq!(flag_value(&args, "--origin"), Some("chat"));
+    }
+
+    #[test]
+    fn cos_role_origin_forces_chat_mode_even_for_a_plain_persona() {
+        let args = args_for_role(Some(("chief-of-staff", "")), Some("cos")).unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()), "{:?}", args);
+        assert_eq!(flag_value(&args, "--origin"), Some("cos"));
+    }
+
+    #[test]
+    fn cos_role_origin_with_no_persona_still_gets_chat_mode() {
+        let args = args_for_role(None, Some("cos")).unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()));
+        assert_eq!(flag_value(&args, "--origin"), Some("cos"));
+    }
+
+    #[test]
+    fn non_chat_persona_gets_neither_chat_mode_nor_origin() {
+        let args =
+            args_for_role(Some(("implementer", "allowed_tools = [\"Bash(*)\"]")), None).unwrap();
+        assert!(!args.contains(&"--chat-mode".to_string()));
+        assert!(!args.contains(&"--origin".to_string()));
+    }
+
+    #[test]
+    fn unloadable_persona_or_bad_origin_refuses_to_build_args() {
+        // Persona named in team.toml but missing on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let context_path = write_session_context(dir.path(), &state, "intake", "cos").unwrap();
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("cos"),
+            "claude-opus-5".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            Some("missing-persona".to_string()),
+        );
+        let err = build_ta_run_args(
+            dir.path(),
+            &state,
+            "intake",
+            "cos",
+            &team_config,
+            &context_path,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("missing-persona"), "{}", err);
+
+        // Invalid origin, conflicting origins, chat mode with an
+        // auto-approvable origin.
+        assert!(args_for_role(Some(("chief-of-staff", "origin = \"COS\"")), None).is_err());
+        assert!(args_for_role(
+            Some(("chief-of-staff", "chat_mode = true\norigin = \"cos\"")),
+            Some("chat")
+        )
+        .is_err());
+        assert!(args_for_role(
+            Some(("chief-of-staff", "chat_mode = true\norigin = \"poller\"")),
+            None
+        )
+        .is_err());
     }
 
     #[cfg(unix)]

@@ -79,6 +79,78 @@ pub fn origin_blocks_auto_approve(origin: Option<&str>) -> bool {
     }
 }
 
+/// The origin `ta run` should write onto a goal record, given the origin
+/// already on the record and the one requested for this run (`--origin` /
+/// `TA_GOAL_ORIGIN`). `None` means "leave the record alone".
+///
+/// A goal's origin is fixed once it is on the record: a later run against
+/// the same goal (`ta run --goal-id`) can never change or clear it, whatever
+/// its environment says. The environment only fills in a record that has no
+/// origin yet, which in practice is goal creation. Every auto-approve
+/// decision then reads the record, never the environment.
+pub fn origin_to_stamp(existing: Option<&str>, requested: Option<&str>) -> Option<String> {
+    match (existing, requested) {
+        (None, Some(r)) => Some(r.to_string()),
+        _ => None,
+    }
+}
+
+/// Origin settings a daemon-built `ta run` for one team role must carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchOrigin {
+    /// Pass `--chat-mode` (read-only chat session).
+    pub chat_mode: bool,
+    /// Pass `--origin <value>`.
+    pub origin: Option<String>,
+}
+
+/// Work out the origin and chat-mode flags for a role launch from its
+/// persona (`[capabilities] chat_mode` / `origin`) and its team role
+/// (`team.toml` member `origin`).
+///
+/// Rules (fail closed):
+/// - Each declared origin must pass [`validate_origin`].
+/// - If both the persona and the role declare an origin they must agree.
+/// - A chat-mode persona with no declared origin gets [`CHAT_ORIGIN`].
+/// - An origin that is never auto-approved (`cos`, `chat`) forces chat mode,
+///   so a role marked as the CoS can never launch with a full tool surface.
+/// - A chat-mode launch must carry an origin that is never auto-approved.
+pub fn resolve_launch_origin(
+    persona_chat_mode: bool,
+    persona_origin: Option<&str>,
+    role_origin: Option<&str>,
+) -> Result<LaunchOrigin, String> {
+    let persona_origin = persona_origin
+        .map(|o| validate_origin(o.trim()).map_err(|e| format!("persona origin: {}", e)))
+        .transpose()?;
+    let role_origin = role_origin
+        .map(|o| validate_origin(o.trim()).map_err(|e| format!("team role origin: {}", e)))
+        .transpose()?;
+    if let (Some(p), Some(r)) = (&persona_origin, &role_origin) {
+        if p != r {
+            return Err(format!(
+                "the persona declares origin {:?} but the team role declares origin {:?}; \
+                 set the same origin in both places (or remove one)",
+                p, r
+            ));
+        }
+    }
+    let mut origin = role_origin.or(persona_origin);
+    if persona_chat_mode && origin.is_none() {
+        origin = Some(CHAT_ORIGIN.to_string());
+    }
+    let chat_mode = persona_chat_mode || origin_blocks_auto_approve(origin.as_deref());
+    if chat_mode && !origin_blocks_auto_approve(origin.as_deref()) {
+        return Err(format!(
+            "a chat-mode launch must carry an origin that is never auto-approved ({}), \
+             but origin {:?} was declared; use origin = \"cos\" or remove the origin",
+            NO_AUTO_APPROVE_ORIGINS.join(", "),
+            origin.as_deref().unwrap_or_default()
+        ));
+    }
+    Ok(LaunchOrigin { chat_mode, origin })
+}
+
 /// The user-visible refusal text every auto-approve path uses, so log
 /// lines, `ta draft view` and `ta draft apply` output all say the same
 /// thing: `auto-approve refused: origin=cos`.
@@ -146,6 +218,64 @@ mod tests {
         std::env::set_var(ORIGIN_ENV_VAR, "COS!");
         assert!(origin_from_env().is_err());
         std::env::remove_var(ORIGIN_ENV_VAR);
+    }
+
+    #[test]
+    fn origin_on_record_is_never_changed_by_a_later_request() {
+        assert_eq!(origin_to_stamp(None, Some("cos")).as_deref(), Some("cos"));
+        assert_eq!(origin_to_stamp(None, None), None);
+        assert_eq!(origin_to_stamp(Some("cos"), Some("cli")), None);
+        assert_eq!(origin_to_stamp(Some("cos"), None), None);
+        assert_eq!(origin_to_stamp(Some("cli"), Some("cos")), None);
+    }
+
+    #[test]
+    fn chat_mode_persona_defaults_to_chat_origin() {
+        let l = resolve_launch_origin(true, None, None).unwrap();
+        assert!(l.chat_mode);
+        assert_eq!(l.origin.as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn chat_mode_persona_with_cos_origin() {
+        let l = resolve_launch_origin(true, Some("cos"), None).unwrap();
+        assert_eq!(
+            l,
+            LaunchOrigin {
+                chat_mode: true,
+                origin: Some("cos".into())
+            }
+        );
+    }
+
+    #[test]
+    fn cos_role_forces_chat_mode_even_without_a_chat_persona() {
+        let l = resolve_launch_origin(false, None, Some("cos")).unwrap();
+        assert!(l.chat_mode);
+        assert_eq!(l.origin.as_deref(), Some("cos"));
+    }
+
+    #[test]
+    fn plain_persona_has_no_origin_and_no_chat_mode() {
+        assert_eq!(
+            resolve_launch_origin(false, None, None).unwrap(),
+            LaunchOrigin::default()
+        );
+        let l = resolve_launch_origin(false, Some("poller"), None).unwrap();
+        assert!(!l.chat_mode);
+        assert_eq!(l.origin.as_deref(), Some("poller"));
+    }
+
+    #[test]
+    fn launch_origin_fails_closed() {
+        // Invalid names.
+        assert!(resolve_launch_origin(true, Some("COS"), None).is_err());
+        assert!(resolve_launch_origin(false, None, Some("c o s")).is_err());
+        // Persona and role disagree.
+        assert!(resolve_launch_origin(true, Some("cos"), Some("chat")).is_err());
+        // Chat mode with an origin that would be auto-approvable.
+        assert!(resolve_launch_origin(true, Some("poller"), None).is_err());
+        assert!(resolve_launch_origin(true, None, Some("poller")).is_err());
     }
 
     #[test]
