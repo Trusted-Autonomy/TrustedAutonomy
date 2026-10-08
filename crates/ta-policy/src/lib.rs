@@ -27,6 +27,7 @@ pub mod alignment;
 pub mod business_budget;
 pub mod capability;
 pub mod cascade;
+pub mod chat_manifest;
 pub mod compiler;
 pub mod constitution;
 pub mod context;
@@ -45,6 +46,7 @@ pub use business_budget::{
 };
 pub use capability::{CapabilityGrant, CapabilityManifest};
 pub use cascade::{CliOverrides, PolicyCascade};
+pub use chat_manifest::{compile_chat_manifest, CHAT_SCRATCH_DIR};
 pub use compiler::{CompilerError, CompilerOptions, PolicyCompiler};
 pub use constitution::{
     AccessConstitution, ConstitutionEntry, ConstitutionError, ConstitutionStore,

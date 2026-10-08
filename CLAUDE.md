@@ -16,6 +16,19 @@ Or use the helper script for one-liners:
 ./dev just verify
 ```
 
+## Testing the Daemon or Poller Locally
+
+**Never run the daemon/poller via a bare `cargo build` + direct `target/debug/ta` invocation.** `ta daemon restart` resolves `ta-daemon` as the sibling of whichever `ta` binary is currently running. A bare `cargo build` produces a fresh, unsigned binary at `target/debug/ta-daemon` on every build, so macOS treats it as a new identity each time and you get a Keychain "Always Allow" prompt on every single iteration, even with the local codesigning cert set up (see `install_local.sh`'s own header comment for the full explanation).
+
+Always use the installed, signed path instead:
+```bash
+./install_local.sh --debug   # same cargo build underneath, plus install + codesign
+ta daemon restart
+```
+This is the same script real installs use (just a faster debug profile), so the signing step can't silently drift out of sync with a separate fast-loop path the way a second, parallel codesign mechanism could.
+
+**Test binaries are signed too.** `.cargo/config.toml` routes every macOS test and `cargo run` binary through `scripts/codesign-runner.sh`, which signs it with the same local identity (identifier `com.trustedautonomy.ta-test`), so tests that touch the Keychain do not re-prompt on every build. It is a no-op on Linux, CI, and any Mac without the "Trusted Autonomy Local Dev" certificate. To use a differently named certificate, copy `.env.local.example` to `.env.local` (gitignored) and set `TA_CODESIGN_IDENTITY`; the installer, the test runner and the daemon all read it. Linux and Windows have no equivalent yet.
+
 ## Verification Before Every Commit
 
 Run these four checks (all must pass):

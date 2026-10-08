@@ -29,7 +29,7 @@ use ta_agent_whiteboard::WhiteboardTransport;
 use ta_session::team::TeamConfig;
 use uuid::Uuid;
 
-use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState};
+use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState, TeamSessionStatus};
 
 /// How often an idle listener (nothing currently on its stream) re-polls.
 /// Deliberately short and decoupled from `team_session.rs`'s rotation
@@ -88,12 +88,91 @@ impl WakeListenerConfig {
     }
 }
 
+/// How often the discovery loop (below) re-scans for wake-on-demand
+/// listeners registered after this daemon process itself started — either
+/// a new session, or a new listener added to an existing one. Matches
+/// `team_session.rs`'s `SESSION_DISCOVERY_INTERVAL` (and `watchdog.rs`'s
+/// own `interval_secs` convention) for consistency. Fixes the same class of
+/// bug found live, 2026-10-02, and already fixed for `team_session::start`'s
+/// rotation supervisor: a listener added to a session while the daemon is
+/// already running was previously never discovered at all -- not stuck,
+/// no task was ever spawned for it, since this module's own one-time
+/// enumeration at process-launch was the *only* place listeners were ever
+/// discovered.
+const LISTENER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Identifies one wake-on-demand listener for dedup purposes: which session
+/// it belongs to, plus its role and registered keys. `(role, keys)` is not
+/// globally unique on its own -- the same role can be registered under
+/// more than one session -- so the session id is part of the key too.
+type ListenerIdentity = (String, String, Vec<String>);
+
+fn listener_identity(session_id: &str, listener: &WakeListenerConfig) -> ListenerIdentity {
+    (
+        session_id.to_string(),
+        listener.role.clone(),
+        listener.keys.clone(),
+    )
+}
+
+/// Spawns `run_listener_loop` for every wake-on-demand listener declared on
+/// every non-`Stopped` team session, skipping any listener whose identity
+/// is already in `known` (and recording newly-spawned ones into it) --
+/// shared by `start()`'s initial scan and its ongoing discovery loop so
+/// both apply the identical "spawn once per listener identity" rule. Keyed
+/// by session id + role + keys (see `ListenerIdentity`), not session id
+/// alone, because one session can declare multiple listeners, and
+/// listeners can be added to an existing session over time, not just whole
+/// new sessions appearing.
+#[allow(clippy::too_many_arguments)]
+fn spawn_new_listeners(
+    project_root: &Path,
+    ta_bin: &Path,
+    transport: &Arc<dyn WhiteboardTransport>,
+    shutdown: &Arc<tokio::sync::Notify>,
+    known: &mut std::collections::HashSet<ListenerIdentity>,
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    for id in TeamSessionState::list_ids(project_root) {
+        let Ok(Some(state)) = TeamSessionState::load(project_root, &id) else {
+            continue;
+        };
+        // Mirrors team_session::start's own "don't spawn a loop for an
+        // already-Stopped session" filter -- a stopped session doesn't come
+        // back without a fresh registration, so there's nothing for a
+        // listener loop to wait around for.
+        if state.status == TeamSessionStatus::Stopped {
+            continue;
+        }
+        for listener in state.wake_on_demand_listeners.clone() {
+            if !known.insert(listener_identity(&id, &listener)) {
+                continue;
+            }
+            let pr = project_root.to_path_buf();
+            let bin = ta_bin.to_path_buf();
+            let sd = shutdown.clone();
+            let t = transport.clone();
+            let session_id = id.clone();
+            tracing::info!(
+                session = %session_id,
+                role = %listener.role,
+                keys = ?listener.keys,
+                "wake_listener: starting listener"
+            );
+            handles.push(tokio::spawn(async move {
+                run_listener_loop(pr, session_id, listener, bin, t, sd).await;
+            }));
+        }
+    }
+}
+
 /// Discovers all team sessions' `wake_on_demand_listeners` and spawns one
 /// supervised watcher task per `(session, listener)` pair — mirrors
-/// `team_session::start`'s "read config, spawn one task per entry" shape
-/// and its one-time-at-startup discovery (a listener added to a session
-/// while the daemon is already running needs a daemon restart to pick up,
-/// same limitation `team_session::start` already has for new sessions).
+/// `team_session::start`'s "read config, spawn one task per entry" shape.
+/// Also mirrors `team_session::start`'s ongoing discovery loop (added
+/// alongside it, 2026-10-02): a listener added after this initial scan
+/// (new session, or a new listener on an existing one) is picked up within
+/// `LISTENER_DISCOVERY_INTERVAL`, not only on the next daemon restart.
 ///
 /// A no-op (returns an empty `Vec`) when `[whiteboard] enabled = false` —
 /// there is no transport to watch a stream on, and that's the expected,
@@ -112,29 +191,75 @@ pub fn start(
     let ta_bin = PathBuf::from(crate::web::find_ta_binary_web());
     let project_root = app_state.project_root.clone();
     let mut handles = Vec::new();
+    let mut known: std::collections::HashSet<ListenerIdentity> = std::collections::HashSet::new();
 
-    for id in TeamSessionState::list_ids(&project_root) {
-        let Ok(Some(state)) = TeamSessionState::load(&project_root, &id) else {
-            continue;
-        };
-        for listener in state.wake_on_demand_listeners.clone() {
-            let pr = project_root.clone();
-            let bin = ta_bin.clone();
-            let sd = shutdown.clone();
-            let t = transport.clone();
-            let session_id = id.clone();
-            tracing::info!(
-                session = %session_id,
-                role = %listener.role,
-                keys = ?listener.keys,
-                "wake_listener: starting listener"
-            );
-            handles.push(tokio::spawn(async move {
-                run_listener_loop(pr, session_id, listener, bin, t, sd).await;
-            }));
-        }
+    spawn_new_listeners(
+        &project_root,
+        &ta_bin,
+        &transport,
+        &shutdown,
+        &mut known,
+        &mut handles,
+    );
+
+    {
+        let pr = project_root.clone();
+        let bin = ta_bin.clone();
+        let sd = shutdown.clone();
+        let t = transport.clone();
+        handles.push(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(LISTENER_DISCOVERY_INTERVAL) => {}
+                    _ = sd.notified() => return,
+                }
+                let mut discovered = Vec::new();
+                spawn_new_listeners(&pr, &bin, &t, &sd, &mut known, &mut discovered);
+            }
+        }));
     }
+
     handles
+}
+
+/// Outcome of checking a team session's live status against disk, decoupled
+/// from async/sleep/logging so it can be unit-tested directly against real
+/// on-disk `TeamSessionState` fixtures.
+#[derive(Debug, PartialEq, Eq)]
+enum ListenerGate {
+    /// `Active` (or any status without special handling): proceed to read
+    /// and launch as normal.
+    Proceed,
+    /// Session is `Stopped` or no longer exists: the listener loop should
+    /// return permanently. Carries a human-readable reason for logging.
+    Exit(&'static str),
+    /// Session is `Paused`/`Suspended`, or its state couldn't be read: sleep
+    /// one poll interval and check again. Carries an optional reason to
+    /// warn-log (set only for the error case; pause/suspend is expected,
+    /// routine operation and logs at a lower level by the caller).
+    WaitAndRetry(Option<String>),
+}
+
+/// Pure status check used at the top of every `run_listener_loop` iteration.
+/// Mirrors `team_session::run_one_cycle`'s own pause/stop handling for the
+/// round-robin rotation, applied here to wake-on-demand listeners.
+fn gate_on_session_status(project_root: &Path, session_id: &str) -> ListenerGate {
+    match TeamSessionState::load(project_root, session_id) {
+        Ok(Some(state)) if state.status == TeamSessionStatus::Stopped => {
+            ListenerGate::Exit("team session stopped, listener exiting")
+        }
+        Ok(Some(state))
+            if state.status == TeamSessionStatus::Paused
+                || state.status == TeamSessionStatus::Suspended =>
+        {
+            ListenerGate::WaitAndRetry(None)
+        }
+        Ok(Some(_)) => ListenerGate::Proceed,
+        Ok(None) => ListenerGate::Exit("team session no longer exists, listener exiting"),
+        Err(e) => ListenerGate::WaitAndRetry(Some(format!(
+            "failed to read team session state, will retry next poll: {e}"
+        ))),
+    }
 }
 
 /// The supervised loop for one `(session, listener)` pair. Runs until the
@@ -160,6 +285,36 @@ async fn run_listener_loop(
     }
 
     loop {
+        // Live pause/stop check, re-read fresh every round -- not just once
+        // at startup -- so `ta team-session pause <id>` actually stops new
+        // inference from being spawned by this listener, the same way it
+        // already stops the round-robin rotation (team_session.rs's own
+        // `run_one_cycle`). Found live, 2026-10-01: before this check
+        // existed, "paused" only ever applied to the rotation; wake-on-demand
+        // listeners kept firing real `ta run` invocations regardless, which
+        // is not what a human pausing a session would reasonably expect.
+        //
+        // Not reading from the stream while paused loses nothing -- JetStream
+        // pull-consumer position is durable server-side, so a message that
+        // arrives while paused is still there, unconsumed, once resumed.
+        match gate_on_session_status(&project_root, &session_id) {
+            ListenerGate::Proceed => {}
+            ListenerGate::Exit(reason) => {
+                tracing::info!(session = %session_id, role = %listener.role, "wake_listener: {reason}");
+                return;
+            }
+            ListenerGate::WaitAndRetry(reason) => {
+                if let Some(reason) = reason {
+                    tracing::warn!(session = %session_id, role = %listener.role, "wake_listener: {reason}");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    _ = shutdown.notified() => return,
+                }
+                continue;
+            }
+        }
+
         let mut launched_this_round = false;
 
         for key in &listener.keys {
@@ -268,6 +423,7 @@ fn launch_wake_on_demand(
     let team_config = TeamConfig::load(project_root).unwrap_or_default();
     let label = "wake-on-demand".to_string();
     let args = build_ta_run_args(
+        project_root,
         &state,
         &label,
         role,
@@ -275,8 +431,13 @@ fn launch_wake_on_demand(
         &team_config,
         &context_path,
         workflow_tag,
-    );
+    )
+    .map_err(|e| {
+        tracing::error!(session_id = %session_id, role = %role, error = %e, "refusing to launch wake-on-demand role");
+        std::io::Error::other(e)
+    })?;
 
+    crate::team_session::ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
         .current_dir(project_root)
@@ -349,6 +510,90 @@ mod tests {
             whiteboard_token: None,
             whiteboard_token_expires_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_new_listeners_skips_already_known_and_picks_up_newly_added() {
+        // Regression coverage for the same discovery gap fixed for
+        // team_session::start (2026-10-02): a listener added to a session
+        // after the daemon's initial scan must still get picked up -- by
+        // the ongoing discovery loop calling this function again, not only
+        // on a daemon restart. Exercises spawn_new_listeners directly
+        // (not the full start()) since that's where the dedup logic lives.
+        let tmp = tempfile::tempdir().unwrap();
+        let listener_a =
+            WakeListenerConfig::new("chief-of-staff", vec!["intake-a".to_string()], None);
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new())
+            .with_wake_on_demand_listeners(vec![listener_a]);
+        state.save(tmp.path()).unwrap();
+
+        let transport: Arc<dyn WhiteboardTransport> = Arc::new(InMemoryTransport::new());
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let ta_bin = Path::new("ta");
+        let mut known = std::collections::HashSet::new();
+        let mut handles = Vec::new();
+
+        spawn_new_listeners(
+            tmp.path(),
+            ta_bin,
+            &transport,
+            &shutdown,
+            &mut known,
+            &mut handles,
+        );
+        assert_eq!(
+            handles.len(),
+            1,
+            "first scan must spawn the one existing listener"
+        );
+        assert_eq!(known.len(), 1);
+
+        // Re-scan with nothing changed on disk -- must not double-spawn.
+        spawn_new_listeners(
+            tmp.path(),
+            ta_bin,
+            &transport,
+            &shutdown,
+            &mut known,
+            &mut handles,
+        );
+        assert_eq!(
+            handles.len(),
+            1,
+            "re-scanning an unchanged session must not spawn a second task for \
+             the same listener"
+        );
+
+        // Add a second listener to the SAME session, simulating
+        // `ta team-session start --wake-on-demand` run again against an
+        // already-running daemon.
+        let mut state = TeamSessionState::load(tmp.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        state.wake_on_demand_listeners.push(WakeListenerConfig::new(
+            "implementer",
+            vec!["intake-b".to_string()],
+            None,
+        ));
+        state.save(tmp.path()).unwrap();
+
+        spawn_new_listeners(
+            tmp.path(),
+            ta_bin,
+            &transport,
+            &shutdown,
+            &mut known,
+            &mut handles,
+        );
+        assert_eq!(
+            handles.len(),
+            2,
+            "a listener added after the initial scan must be discovered and \
+             spawned, not require a daemon restart"
+        );
+        assert_eq!(known.len(), 2);
+
+        shutdown.notify_waiters();
     }
 
     #[test]
@@ -431,6 +676,68 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.wake_on_demand_listeners[0].agent_id, Uuid::nil());
+    }
+
+    #[test]
+    fn gate_proceeds_for_active_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::Proceed
+        );
+    }
+
+    #[test]
+    fn gate_waits_and_retries_for_paused_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.status = TeamSessionStatus::Paused;
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::WaitAndRetry(None),
+            "a paused session must not proceed to read/launch -- it should wait and re-check, \
+             the same way team_session's own round-robin rotation respects pause"
+        );
+    }
+
+    #[test]
+    fn gate_waits_and_retries_for_suspended_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.status = TeamSessionStatus::Suspended;
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::WaitAndRetry(None)
+        );
+    }
+
+    #[test]
+    fn gate_exits_for_stopped_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.status = TeamSessionStatus::Stopped;
+        state.save(tmp.path()).unwrap();
+
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "sess-1"),
+            ListenerGate::Exit("team session stopped, listener exiting")
+        );
+    }
+
+    #[test]
+    fn gate_exits_when_session_no_longer_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            gate_on_session_status(tmp.path(), "no-such-session"),
+            ListenerGate::Exit("team session no longer exists, listener exiting")
+        );
     }
 
     #[test]

@@ -243,6 +243,7 @@ fn run_init(
         None,             // agent_id = None (v0.17.11.16)
         None,             // workflow_tag = None (v0.17.x cost-experiment framework)
         None,             // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        None,             // model override = None (no explicit --model request)
     )?;
 
     println!();
@@ -1520,6 +1521,7 @@ fn create_constitution_amend_draft(
         progress_note: None,
         vcs_isolation: None,
         initiated_by: None,
+        origin: None,
         memory_entries_created: vec![],
         created_at: now,
         updated_at: now,
@@ -2302,6 +2304,7 @@ fn create_review_draft(
         progress_note: None,
         vcs_isolation: None,
         initiated_by: None,
+        origin: None,
         memory_entries_created: vec![],
         created_at: now,
         updated_at: now,

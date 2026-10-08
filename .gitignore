@@ -184,3 +184,6 @@ memory/work_queue.md
 .ta/*.log
 .ta/*.pid
 .ta/*.lock
+
+# Per-developer local settings (code-signing identity); see .env.local.example
+.env.local

@@ -240,6 +240,17 @@ enum Commands {
         /// recommendation (logged to .ta/agent-recommendations.jsonl).
         #[arg(long)]
         agent: Option<String>,
+        /// Model override forwarded to the resolved agent framework's CLI
+        /// (e.g. `claude --model <value>`), independent of --agent.
+        ///
+        /// --agent selects WHICH framework/binary runs (claude-code, codex,
+        /// a custom manifest); --model selects WHICH model that framework
+        /// uses once launched. Only forwarded for frameworks confirmed to
+        /// accept a `--model` flag (currently: claude-code) — ignored with
+        /// a warning for any other framework rather than silently passed
+        /// through to a binary that doesn't understand it.
+        #[arg(long)]
+        model: Option<String>,
         /// Source directory to overlay (defaults to project root).
         #[arg(long)]
         source: Option<PathBuf>,
@@ -285,6 +296,11 @@ enum Commands {
         /// Agent persona to apply (name of .ta/personas/<name>.toml).
         #[arg(long)]
         persona: Option<String>,
+        /// Launch as a read-only chat-mode session (same as a persona with
+        /// `chat_mode = true`): chat capability manifest, chat-locked TA MCP
+        /// server, chat-safe MCP tools only, all native tools denied.
+        #[arg(long)]
+        chat_mode: bool,
         /// Suppress streaming agent output; still print completion/failure summary.
         /// Default for daemon-dispatched and channel-dispatched goals.
         /// Inverse: omit --quiet (current interactive default) shows full output.
@@ -468,6 +484,13 @@ enum Commands {
         /// purpose is recording its token cost, never applying.
         #[arg(long, hide = true)]
         auto_cancel_after_draft: bool,
+        /// Component that originated this goal (e.g. `cos` when the
+        /// Chief-of-Staff dispatched it). Stored on the goal record as
+        /// `origin`. Goals with origin `cos` or `chat` are never
+        /// auto-approved by any path: they always go to human review.
+        /// 1-32 chars of `[a-z0-9_-]`. Falls back to `$TA_GOAL_ORIGIN`.
+        #[arg(long)]
+        origin: Option<String>,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1651,6 +1674,7 @@ fn dispatch_raw(
         Commands::Run {
             title,
             agent,
+            model,
             source,
             objective,
             phase,
@@ -1665,6 +1689,7 @@ fn dispatch_raw(
             headless,
             skip_verify,
             persona,
+            chat_mode,
             quiet,
             goal_id,
             workflow,
@@ -1689,9 +1714,35 @@ fn dispatch_raw(
             experiment_shadow_pair_id,
             experiment_shadow_overrides,
             auto_cancel_after_draft,
+            origin,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
+
+            // H9: `--origin` is validated here and exported as
+            // TA_GOAL_ORIGIN, which every goal-creating path below reads
+            // (and which nested `ta` invocations inherit), so the origin
+            // reaches the goal record however this run is executed.
+            if let Some(o) = origin {
+                let o = ta_goal::origin::validate_origin(o).map_err(anyhow::Error::msg)?;
+                std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, &o);
+            }
+            // `--chat-mode`: carried into `commands::run::execute` by a scoped
+            // guard (see commands/chat_launch.rs). Multi-goal workflows spawn
+            // their own sub-goal launches, which would not inherit it, so
+            // reject that combination instead of silently dropping chat mode.
+            if *chat_mode
+                && (phases.is_some()
+                    || workflow.as_deref() == Some("serial-phases")
+                    || !sub_goals.is_empty())
+            {
+                anyhow::bail!(
+                    "--chat-mode cannot be combined with --phases/--workflow serial-phases or \
+                     --sub-goals: those spawn separate sub-goal launches that would not run in \
+                     chat mode. Launch the chat session as a single `ta run --chat-mode` goal."
+                );
+            }
+            let _chat_mode_guard = commands::chat_launch::CliChatModeGuard::set(*chat_mode);
 
             // Paired cost-experiment shadow-goal bypass flags (v0.17.x,
             // internal/hidden): bundle the four `--experiment-shadow-*`
@@ -1760,6 +1811,17 @@ fn dispatch_raw(
             if workflow.as_deref() == Some("serial-phases") || phases.is_some() {
                 if let Some(phase_list) = phases {
                     if !phase_list.is_empty() {
+                        // --model has no effect on this path yet -- neither
+                        // execute_serial_phases nor its per-phase subprocess
+                        // launches accept a model override today. Warn
+                        // rather than silently drop it (Observability
+                        // Mandate), found in code review, 2026-10-02.
+                        if model.is_some() {
+                            eprintln!(
+                                "Warning: --model is not yet supported for --phases/serial-phases runs \
+                                 -- ignoring --model for this run."
+                            );
+                        }
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
                         let gate_failure_mode =
                             ta_workflow::GateFailureMode::parse(on_gate_failure)
@@ -1781,6 +1843,14 @@ fn dispatch_raw(
 
             // swarm: dispatch to execute_swarm when --sub-goals is provided.
             if !sub_goals.is_empty() {
+                // --model has no effect on this path yet, same gap and
+                // same rationale as the serial-phases warning above.
+                if model.is_some() {
+                    eprintln!(
+                        "Warning: --model is not yet supported for --sub-goals/swarm runs -- \
+                         ignoring --model for this run."
+                    );
+                }
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
                 return commands::run::execute_swarm(
                     config,
@@ -1823,6 +1893,7 @@ fn dispatch_raw(
                 agent_id.as_deref(),
                 workflow_tag.as_deref(),
                 shadow_experiment.as_ref(),
+                model.as_deref(),
             )
         }
         Commands::Events { command } => {
@@ -2232,6 +2303,18 @@ mod verb_dispatch_tests {
             parse(&["sync"]),
             Commands::Sync { noun: None, .. }
         ));
+    }
+
+    #[test]
+    fn run_accepts_origin_flag() {
+        match parse(&["run", "Some goal", "--origin", "cos"]) {
+            Commands::Run { origin, .. } => assert_eq!(origin.as_deref(), Some("cos")),
+            other => panic!("expected Commands::Run, got {other:?}"),
+        }
+        match parse(&["run", "Some goal"]) {
+            Commands::Run { origin, .. } => assert_eq!(origin, None),
+            other => panic!("expected Commands::Run, got {other:?}"),
+        }
     }
 
     #[test]

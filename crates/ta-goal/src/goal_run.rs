@@ -452,6 +452,15 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiated_by: Option<String>,
 
+    /// Component that originated this goal (H9), e.g. `"cos"` when the
+    /// Chief-of-Staff classified and dispatched it, `"chat"` for a chat-mode
+    /// session. Set by `ta run --origin <name>` / `TA_GOAL_ORIGIN`. Goals
+    /// whose origin is in `crate::origin::NO_AUTO_APPROVE_ORIGINS` are never
+    /// auto-approved by any path. `None` (every pre-existing record) keeps
+    /// today's behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+
     /// Memory entry IDs written during this goal run (v0.15.13.2).
     ///
     /// Populated by `ta draft build` when it detects an empty overlay diff but
@@ -639,6 +648,7 @@ impl GoalRun {
             progress_note: None,
             vcs_isolation: None,
             initiated_by: None,
+            origin: None,
             memory_entries_created: Vec::new(),
             created_at: now,
             updated_at: now,
@@ -707,6 +717,27 @@ mod tests {
             PathBuf::from("/tmp/staging"),
             PathBuf::from("/tmp/store"),
         )
+    }
+
+    #[test]
+    fn origin_defaults_to_none_and_old_records_without_it_still_load() {
+        let gr = test_goal_run();
+        assert_eq!(gr.origin, None);
+        let json = serde_json::to_string(&gr).unwrap();
+        assert!(
+            !json.contains("\"origin\""),
+            "None origin must not be serialized, keeping old readers happy"
+        );
+        let loaded: GoalRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.origin, None);
+    }
+
+    #[test]
+    fn origin_round_trips() {
+        let mut gr = test_goal_run();
+        gr.origin = Some("cos".to_string());
+        let loaded: GoalRun = serde_json::from_str(&serde_json::to_string(&gr).unwrap()).unwrap();
+        assert_eq!(loaded.origin.as_deref(), Some("cos"));
     }
 
     #[test]

@@ -372,6 +372,13 @@
       "description": "Detailed objective describing what needs to be accomplished.",
       "type": "string"
     },
+    "origin": {
+      "description": "Component that originated this goal (H9), e.g. `\"cos\"` when the\nChief-of-Staff classified and dispatched it, `\"chat\"` for a chat-mode\nsession. Set by `ta run --origin <name>` / `TA_GOAL_ORIGIN`. Goals\nwhose origin is in `crate::origin::NO_AUTO_APPROVE_ORIGINS` are never\nauto-approved by any path. `None` (every pre-existing record) keeps\ntoday's behavior.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "output_tokens": {
       "description": "Total LLM output tokens generated during this goal's agent session.",
       "format": "uint64",

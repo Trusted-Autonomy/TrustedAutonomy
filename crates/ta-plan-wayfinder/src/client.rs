@@ -56,6 +56,11 @@ pub struct CreateTaskRequest {
     pub verb: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
+    /// Wayfinder roster/team-role id (not a display name). Omitted from the
+    /// body when `None`, which on an upsert leaves any stored assignee
+    /// unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,9 +70,28 @@ struct UpdateTaskStatusRequest<'a> {
     hold_reason: Option<&'a str>,
 }
 
+/// Body for `PATCH /api/projects/:id/tasks/:task_id/assignee`. `assignee_id`
+/// is always serialized (no `skip_serializing_if`): an explicit JSON `null`
+/// is how Wayfinder is told to clear the assignee.
+#[derive(Debug, Clone, Serialize)]
+struct UpdateTaskAssigneeRequest<'a> {
+    assignee_id: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct AddDependencyRequest<'a> {
     depends_on_id: &'a str,
+}
+
+/// Both fields are PATCH-optional, matching `wayfinder-api`'s
+/// `UpdateTaskContentRequest`: an omitted field leaves the stored value
+/// unchanged.
+#[derive(Debug, Clone, Serialize)]
+struct UpdateTaskContentRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
 }
 
 /// Wayfinder's real export response carries goals/team_roles/kpis too;
@@ -223,6 +247,53 @@ impl WayfinderClient {
                 source,
             })?;
         expect_success(response, "updating task status")
+    }
+
+    /// `PATCH /api/projects/:id/tasks/:task_id/content`. Each of
+    /// `title`/`description` of `None` leaves the stored value unchanged
+    /// (see `wayfinder-api::UpdateTaskContentRequest`). Used by `ta draft
+    /// apply`'s replay step for an approved `ta_propose_task_update`
+    /// pending action (v0.17.11.12) -- see
+    /// `apps/ta-cli/src/commands/draft_task_replay.rs`.
+    pub fn update_task_content(
+        &self,
+        task_id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<(), WayfinderClientError> {
+        let response = self
+            .http
+            .patch(self.project_url(&["tasks", task_id, "content"]))
+            .bearer_auth(self.secret.expose_secret())
+            .json(&UpdateTaskContentRequest { title, description })
+            .send()
+            .map_err(|source| WayfinderClientError::Request {
+                context: "updating task content",
+                source,
+            })?;
+        expect_success(response, "updating task content")
+    }
+
+    /// `PATCH /api/projects/:id/tasks/:task_id/assignee` with body
+    /// `{"assignee_id": <roster id> | null}` (route and body verified
+    /// against Wayfinder `main`). `None` clears the assignee. This is the
+    /// only place the reassign route and body shape are defined.
+    pub fn update_task_assignee(
+        &self,
+        task_id: &str,
+        assignee_id: Option<&str>,
+    ) -> Result<(), WayfinderClientError> {
+        let response = self
+            .http
+            .patch(self.project_url(&["tasks", task_id, "assignee"]))
+            .bearer_auth(self.secret.expose_secret())
+            .json(&UpdateTaskAssigneeRequest { assignee_id })
+            .send()
+            .map_err(|source| WayfinderClientError::Request {
+                context: "updating task assignee",
+                source,
+            })?;
+        expect_success(response, "updating task assignee")
     }
 
     /// `POST /api/projects/:id/tasks/:task_id/dependencies` — declares that
@@ -397,6 +468,7 @@ mod tests {
                 description: None,
                 verb: "implement".to_string(),
                 external_id: Some("ta-goal:abc".to_string()),
+                assignee_id: None,
             })
             .unwrap();
         assert_eq!(task.id, "task-1");
@@ -425,6 +497,146 @@ mod tests {
         client
             .update_task_status("task-1", STATUS_IN_PROGRESS, None)
             .unwrap();
+    }
+
+    #[test]
+    fn update_task_content_patches_the_content_endpoint() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("PATCH"))
+                .and(path("/api/projects/proj-1/tasks/task-1/content"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "task-1",
+                    "title": "Revised title",
+                    "description": null,
+                    "verb": "implement",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": null,
+                    "updated_at": "1000000000"
+                })))
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        client
+            .update_task_content("task-1", Some("Revised title"), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn update_task_content_omits_unset_fields_from_the_request_body() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("PATCH"))
+                .and(path("/api/projects/proj-1/tasks/task-1/content"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "description": "New description"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "task-1",
+                    "title": "t",
+                    "description": "New description",
+                    "verb": "implement",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": null,
+                    "updated_at": "1000000000"
+                })))
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        client
+            .update_task_content("task-1", None, Some("New description"))
+            .unwrap();
+    }
+
+    #[test]
+    fn update_task_assignee_patches_the_assignee_endpoint_with_assignee_id() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("PATCH"))
+                .and(path("/api/projects/proj-1/tasks/task-1/assignee"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "assignee_id": "role-dev-1"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "task-1",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": null,
+                    "updated_at": "1000000000"
+                })))
+                .expect(1)
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        client
+            .update_task_assignee("task-1", Some("role-dev-1"))
+            .unwrap();
+    }
+
+    #[test]
+    fn update_task_assignee_sends_an_explicit_null_to_clear() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("PATCH"))
+                .and(path("/api/projects/proj-1/tasks/task-1/assignee"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "assignee_id": null
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "task-1",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": null,
+                    "updated_at": "1000000000"
+                })))
+                .expect(1)
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        client.update_task_assignee("task-1", None).unwrap();
+    }
+
+    #[test]
+    fn upsert_task_sends_assignee_id_only_when_set() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("POST"))
+                .and(path("/api/projects/proj-1/tasks"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "title": "New task",
+                    "description": null,
+                    "verb": "implement",
+                    "external_id": "x-1",
+                    "assignee_id": "role-1"
+                })))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "task-9",
+                    "status": "open",
+                    "hold_reason": null,
+                    "external_id": "x-1",
+                    "updated_at": "1000000000"
+                })))
+                .expect(1)
+                .mount(mock.server()),
+        );
+
+        let client = client_for(&mock);
+        let task = client
+            .upsert_task(&CreateTaskRequest {
+                title: "New task".to_string(),
+                description: None,
+                verb: "implement".to_string(),
+                external_id: Some("x-1".to_string()),
+                assignee_id: Some("role-1".to_string()),
+            })
+            .unwrap();
+        assert_eq!(task.id, "task-9");
     }
 
     #[test]

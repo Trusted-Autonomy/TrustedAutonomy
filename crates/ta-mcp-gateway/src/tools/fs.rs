@@ -16,6 +16,9 @@ pub fn handle_fs_read(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
     let goal_run_id = parse_uuid(&params.goal_run_id)?;
+    state
+        .check_chat_lock(goal_run_id)
+        .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
     let agent_id = state
         .agent_for_goal(goal_run_id)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -67,6 +70,9 @@ pub fn handle_fs_write(
     }
 
     let goal_run_id = parse_uuid(&params.goal_run_id)?;
+    state
+        .check_chat_lock(goal_run_id)
+        .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
     let agent_id = state
         .agent_for_goal(goal_run_id)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -106,6 +112,9 @@ pub fn handle_fs_list(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
     let goal_run_id = parse_uuid(&params.goal_run_id)?;
+    state
+        .check_chat_lock(goal_run_id)
+        .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
 
     let connector = state.connectors.get(&goal_run_id).ok_or_else(|| {
         McpError::invalid_params(
@@ -133,6 +142,9 @@ pub fn handle_fs_diff(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
     let goal_run_id = parse_uuid(&params.goal_run_id)?;
+    state
+        .check_chat_lock(goal_run_id)
+        .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
 
     // §7: policy check — diff exposes source file content, requires read permission.
     let agent_id = state

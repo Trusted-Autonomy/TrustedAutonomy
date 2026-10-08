@@ -25,6 +25,27 @@ pub enum AdvisorSecurity {
     Auto,
 }
 
+impl AdvisorSecurity {
+    /// H9: the security level actually in force for an action whose goal
+    /// has `origin`. `Auto` (fire `ta run` / structural edits without a
+    /// human) is clamped to `ReadOnly` for an origin that is never
+    /// auto-approved (`cos`, `chat`, see `ta_goal::origin`): untrusted-ingress
+    /// work must never drive autonomous execution. Every other combination
+    /// is returned unchanged.
+    pub fn clamped_for_origin(self, origin: Option<&str>) -> AdvisorSecurity {
+        if self == AdvisorSecurity::Auto && ta_goal::origin::origin_blocks_auto_approve(origin) {
+            tracing::warn!(
+                origin = origin.unwrap_or_default(),
+                "{} (advisor security auto clamped to read_only)",
+                ta_goal::origin::auto_approve_refusal(origin.unwrap_or_default())
+            );
+            AdvisorSecurity::ReadOnly
+        } else {
+            self
+        }
+    }
+}
+
 impl std::fmt::Display for AdvisorSecurity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -300,18 +300,11 @@ impl SourceSnapshot {
 
 /// Check if a path is an infrastructure directory (agent runtime, VCS, etc.).
 /// These are always excluded from snapshots and conflict detection.
+///
+/// Delegates to [`crate::path_safety::is_infrastructure_path`] so the check is
+/// case-insensitive, Windows-tolerant and applies at any depth (CR-06).
 fn is_infra_path(path: &str) -> bool {
-    const INFRA_DIRS: &[&str] = &[".ta", ".git", ".claude-flow", ".hive-mind", ".swarm"];
-
-    for dir in INFRA_DIRS {
-        if path == *dir
-            || path.starts_with(&format!("{}/", dir))
-            || path.starts_with(&format!("{}\\", dir))
-        {
-            return true;
-        }
-    }
-    false
+    crate::path_safety::is_infrastructure_path(path)
 }
 
 #[cfg(test)]

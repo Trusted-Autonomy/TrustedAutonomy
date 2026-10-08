@@ -17,6 +17,7 @@
 //! - [`NotificationSink`] — trait for receiving events (log, webhook, etc.)
 
 pub mod analysis;
+pub mod chat_mode;
 pub mod commit_context;
 pub mod conversation;
 pub mod error;
@@ -27,6 +28,7 @@ pub mod history;
 pub mod human_review;
 pub mod messaging_audit;
 pub mod operations;
+pub mod origin;
 pub mod persona;
 pub mod phase_selector;
 pub mod reviewer;
@@ -34,6 +36,7 @@ pub mod security;
 pub mod social_audit;
 pub mod store;
 pub mod token_cost;
+pub mod tool_surface;
 pub mod velocity;
 
 pub use analysis::{

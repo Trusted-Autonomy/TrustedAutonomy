@@ -901,6 +901,7 @@ fn run_new(
         None,  // agent_id = None (v0.17.11.16)
         None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        None,  // model override = None (no explicit --model request)
     )?;
 
     // 12. Post-creation handoff.

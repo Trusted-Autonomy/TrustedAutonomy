@@ -19,6 +19,10 @@ mod store;
 #[cfg(test)]
 mod test_support;
 
+pub use client::{
+    CreateTaskRequest, TaskDto, WayfinderClient, WayfinderClientError, STATUS_CANCELLED,
+    STATUS_DONE, STATUS_IN_PROGRESS, STATUS_ON_HOLD, STATUS_OPEN,
+};
 pub use config::WayfinderPlanConfig;
 pub use select::select_plan_store;
 pub use store::WayfinderPlanStore;

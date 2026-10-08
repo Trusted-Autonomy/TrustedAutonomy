@@ -431,7 +431,19 @@ pub fn write_session_context(
 /// function only needs a string for the title, not a full stage struct, so
 /// it's callable outside `team_session.rs`'s rotation state machine too
 /// (v0.17.11.10).
+///
+/// Origin and chat mode (H7/H9, red-team CR-01): when the role's persona
+/// (`.ta/personas/<name>.toml`, loaded from `project_root`) declares
+/// `chat_mode = true`, or the role or persona declares an `origin`, the
+/// arguments carry `--chat-mode` and/or `--origin <value>` (see
+/// `ta_goal::origin::resolve_launch_origin`). An origin that is never
+/// auto-approved (`cos`, `chat`) always comes with `--chat-mode`. Fails
+/// closed: a persona that cannot be loaded, or an invalid or conflicting
+/// origin, returns an error and the role is not launched, because the
+/// daemon could otherwise launch a CoS with a full tool surface.
+#[allow(clippy::too_many_arguments)]
 pub fn build_ta_run_args(
+    project_root: &Path,
     state: &TeamSessionState,
     label: &str,
     role: &str,
@@ -439,7 +451,7 @@ pub fn build_ta_run_args(
     team_config: &TeamConfig,
     context_path: &Path,
     workflow_tag: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let title = format!("{}: {} ({})", state.config.name, label, role);
     let mut args = vec![
         "run".to_string(),
@@ -477,12 +489,76 @@ pub fn build_ta_run_args(
             args.push("--persona".to_string());
             args.push(persona.clone());
         }
-        args.push("--agent".to_string());
-        // Resolves `member.model_tier` against `team_config.model_tiers`
-        // when set, falling back to `member.agent_id` otherwise
-        // (v0.17.11.6) — this is the one place model_tier actually
-        // affects which model launches a role.
-        args.push(team_config.resolve_agent_id(member).to_string());
+        let (persona_chat_mode, persona_origin) = match &member.persona {
+            Some(name) => {
+                let p = ta_goal::PersonaConfig::load(project_root, name).map_err(|e| {
+                    format!(
+                        "cannot launch role '{}': its persona '{}' could not be loaded to \
+                         check chat mode and origin ({}). Fix .ta/personas/{}.toml or the \
+                         role's persona in .ta/team.toml.",
+                        role, name, e, name
+                    )
+                })?;
+                (p.capabilities.chat_mode, p.capabilities.origin)
+            }
+            None => (false, None),
+        };
+        let launch = ta_goal::origin::resolve_launch_origin(
+            persona_chat_mode,
+            persona_origin.as_deref(),
+            member.origin.as_deref(),
+        )
+        .map_err(|e| {
+            format!(
+                "cannot launch role '{}': {}. Check the role in .ta/team.toml and its persona.",
+                role, e
+            )
+        })?;
+        if launch.chat_mode {
+            args.push("--chat-mode".to_string());
+        }
+        if let Some(origin) = launch.origin {
+            args.push("--origin".to_string());
+            args.push(origin);
+        }
+        // `team.toml`'s `member.agent_id`/`model_tier` name a MODEL (e.g.
+        // "claude-opus-5"), not a framework -- `ta run`'s `--agent` flag
+        // means framework (claude-code, codex, a custom manifest) and
+        // resolves the value against `AgentFrameworkManifest`. Passing a
+        // model id there always failed to resolve, silently fell back to
+        // the hardcoded "claude-code" default, and discarded the
+        // originally-requested model entirely -- every team-session/
+        // wake-on-demand launch silently ran whatever model `claude`'s own
+        // local default happened to be, never what team.toml configured.
+        // Found live, 2026-10-01, investigating a dogfood test failure.
+        //
+        // Fix: route the resolved model through `--model` (forwarded to the
+        // underlying agent binary once the framework is already chosen --
+        // see run.rs's `execute()`), and leave `--agent` unset so `ta run`'s
+        // own framework-resolution chain (persona binding → workflow.toml →
+        // daemon.toml → "claude-code") decides the framework, same as any
+        // other goal. This also fixes a second latent bug for free: passing
+        // the model id into `--agent` previously won tier 1 of that
+        // resolution chain and silently overrode any persona-level
+        // framework binding at tier 2.
+        let resolved = team_config.resolve_agent_id(member);
+        if resolved.eq_ignore_ascii_case("auto") {
+            // `agent_id = "auto"` (`ta team assign <role> auto`) is a
+            // documented sentinel, not a real model name: it hands the
+            // choice to the supervisor's recommendation via `ta run`'s
+            // dedicated `--agent auto` tier (see resolve_effective_agent_full
+            // / recommend_agent in run.rs), which --model has no equivalent
+            // for. Routing it through --model instead (as the general case
+            // below does) would forward a literal `--model auto` to the
+            // `claude` binary, silently breaking supervisor auto-pick for
+            // any team member assigned "auto" -- found in code review of
+            // this very fix, 2026-10-02.
+            args.push("--agent".to_string());
+            args.push("auto".to_string());
+        } else {
+            args.push("--model".to_string());
+            args.push(resolved.to_string());
+        }
     }
     // A role with no `.ta/team.toml` assignment yet falls through to
     // `ta run`'s own default resolution chain (workflow.toml, daemon.toml,
@@ -500,7 +576,82 @@ pub fn build_ta_run_args(
         args.push(tag.to_string());
     }
 
-    args
+    Ok(args)
+}
+
+// ─── macOS code signing (self-healing, best-effort) ─────────────────────────
+//
+// Both this module and `wake_listener.rs` spawn `ta_bin` (the main `ta`
+// binary, via `build_ta_run_args`' output) directly, once per rotation
+// cycle or wake-on-demand poll -- a much higher-frequency spawn than the
+// daemon's own one-time startup. `apps/ta-cli/src/commands/daemon.rs` has
+// the matching fix for `ta-daemon` itself (`ensure_stable_codesign`); this
+// is the same fix, duplicated rather than shared across the `ta-cli`/
+// `ta-daemon` crate boundary, for whichever binary `ta_bin` resolves to
+// here (`ta`, not `ta-daemon`). See that file's module comment for the
+// full rationale: a bare `cargo build` produces a fresh, unsigned binary
+// every time, so without this, every single poll cycle could get a fresh
+// Keychain prompt, not just every rebuild.
+//
+// Best-effort and bounded: never blocks a cycle on a signing failure or a
+// slow/locked Keychain -- each attempt is capped at a short timeout.
+#[cfg(target_os = "macos")]
+pub(crate) fn ensure_stable_codesign(binary_path: &Path, project_root: &Path) {
+    const IDENTIFIER: &str = "com.trustedautonomy.ta";
+    const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let identity = ta_workspace::local_dev::codesign_identity(project_root);
+
+    // Local-dev only. Sign when the named identity exists in this user's
+    // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
+    // function also runs on end users' machines (who do not have the dev
+    // certificate), and re-signing their installed release binary ad-hoc
+    // on every launch would rewrite it and, once releases carry a real
+    // Developer ID signature, replace that signature. `codesign` fails fast
+    // without touching the file when the identity is absent.
+    let _ = run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn ensure_stable_codesign(_binary_path: &Path, _project_root: &Path) {}
+
+#[cfg(target_os = "macos")]
+fn run_codesign_with_timeout(
+    binary_path: &Path,
+    identity: &str,
+    identifier: &str,
+    timeout: Duration,
+) -> bool {
+    let mut child = match std::process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg(identity)
+        .arg("--identifier")
+        .arg(identifier)
+        .arg(binary_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,7 +715,25 @@ pub fn run_one_cycle(
             tracker.reset();
             state.status = TeamSessionStatus::Active;
             state.save(project_root)?;
+            tracing::info!(
+                session_id = %id,
+                "team session restarted via `ta team-session restart` -- failure tracker reset, \
+                 rotation resuming"
+            );
         } else {
+            // Deliberately debug, not silent: a Suspended session with no
+            // restart signal polls forever doing nothing else, and this is
+            // the only place that fact is ever observable short of
+            // `ta team-session status` -- found live, 2026-10-02, when a
+            // user watching `RUST_LOG=debug` across a daemon restart saw
+            // zero team_session/supervisor log lines at all for a
+            // Suspended session and couldn't tell whether the supervisor
+            // was alive, polling, or never started.
+            tracing::debug!(
+                session_id = %id,
+                "team session is Suspended, no restart-signal present -- waiting \
+                 (`ta team-session restart {id}` to clear it)"
+            );
             return Ok((CycleOutcome::Suspended, tracker));
         }
     }
@@ -619,6 +788,7 @@ pub fn run_one_cycle(
     // own doc comment on why nil means "not rendered" rather than "render
     // a nil UUID").
     let args = build_ta_run_args(
+        project_root,
         &state,
         &stage.name,
         &role,
@@ -626,8 +796,13 @@ pub fn run_one_cycle(
         &team_config,
         &context_path,
         None,
-    );
+    )
+    .map_err(|e| {
+        tracing::error!(session_id = %id, role = %role, error = %e, "refusing to launch team role");
+        io::Error::other(e)
+    })?;
 
+    ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
         .current_dir(project_root)
@@ -666,7 +841,43 @@ pub fn run_one_cycle(
             )?;
             Ok((CycleOutcome::Advanced, tracker))
         }
-        _ => {
+        other => {
+            // Found live, 2026-10-02: this branch used to discard the
+            // failed subprocess's exit status and stdout/stderr (or the
+            // spawn error, if `ta_bin` couldn't even be launched) entirely,
+            // just incrementing restart_count -- so when a session hit
+            // Suspended after 5 failures, there was no way, anywhere
+            // (daemon.log included), to find out what the actual goal-run
+            // failure even was. Log it at warn, truncated to a reasonable
+            // preview -- a full agent transcript can be large, and this is
+            // a diagnostic breadcrumb, not the artifact of record (that's
+            // whatever `ta run` itself already wrote to .ta/goals/).
+            const PREVIEW_LEN: usize = 2000;
+            match &other {
+                Ok(out) => {
+                    let stdout_preview = String::from_utf8_lossy(&out.stdout);
+                    let stderr_preview = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        session_id = %id,
+                        role = %role,
+                        stage = %stage.name,
+                        exit_code = ?out.status.code(),
+                        stdout = %crate::watchdog::truncate_preview(&stdout_preview, PREVIEW_LEN),
+                        stderr = %crate::watchdog::truncate_preview(&stderr_preview, PREVIEW_LEN),
+                        "team session goal-run failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        role = %role,
+                        stage = %stage.name,
+                        error = %e,
+                        ta_bin = %ta_bin.display(),
+                        "team session goal-run failed to spawn"
+                    );
+                }
+            }
             state.restart_count += 1;
             state.save(project_root)?;
             let decision = tracker.record_failure(now);
@@ -769,6 +980,41 @@ async fn run_team_session(
 /// one task per entry" shape. Returns the join handles for introspection
 /// (tests / graceful-shutdown awaiting), matching `connector_supervisor`'s
 /// `AllQueues` return-for-introspection precedent.
+/// How often the discovery loop (below) re-scans for team sessions created
+/// after this daemon process itself started. Matches `watchdog.rs`'s own
+/// `interval_secs` convention/default (30s) for consistency -- short enough
+/// that `ta team-session start` run against an already-running daemon gets
+/// picked up promptly, not "on next restart" as it silently required before
+/// this fix (found live, 2026-10-02: a session created after daemon startup
+/// never got a supervisor spawned for it at all -- not stuck, never started
+/// -- because `start()`'s one-time enumeration at process-launch was the
+/// *only* place new sessions were ever discovered).
+const SESSION_DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Spawns `run_team_session` for `id` if its persisted status isn't already
+/// `Stopped`. Shared by `start()`'s initial one-time scan and the ongoing
+/// discovery loop so both apply the identical "skip Stopped" rule.
+fn spawn_if_not_stopped(
+    project_root: &Path,
+    id: &str,
+    ta_bin: &Path,
+    shutdown: &Arc<tokio::sync::Notify>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let Ok(Some(state)) = TeamSessionState::load(project_root, id) else {
+        return None;
+    };
+    if state.status == TeamSessionStatus::Stopped {
+        return None;
+    }
+    let pr = project_root.to_path_buf();
+    let sid = id.to_string();
+    let bin = ta_bin.to_path_buf();
+    let sd = shutdown.clone();
+    Some(tokio::spawn(async move {
+        run_team_session(pr, sid, bin, sd).await;
+    }))
+}
+
 pub fn start(
     project_root: PathBuf,
     shutdown: Arc<tokio::sync::Notify>,
@@ -779,25 +1025,72 @@ pub fn start(
     // back to bare "ta" resolved via PATH) rather than reinventing it.
     let ta_bin = PathBuf::from(crate::web::find_ta_binary_web());
     let mut handles = Vec::new();
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in TeamSessionState::list_ids(&project_root) {
-        let Ok(Some(state)) = TeamSessionState::load(&project_root, &id) else {
-            continue;
-        };
-        if state.status == TeamSessionStatus::Stopped {
-            continue;
+        known.insert(id.clone());
+        if let Some(h) = spawn_if_not_stopped(&project_root, &id, &ta_bin, &shutdown) {
+            handles.push(h);
         }
+    }
+
+    // Ongoing discovery: re-scan every SESSION_DISCOVERY_INTERVAL for
+    // session IDs not seen before, and spawn a supervisor for each one --
+    // the fix for the gap described in SESSION_DISCOVERY_INTERVAL's doc
+    // comment above. Already-known IDs are skipped outright (even a
+    // Stopped-then-restarted one keeps its original supervisor task, which
+    // already polls for exactly that transition -- see run_team_session's
+    // Suspended/Paused handling), so this never double-spawns.
+    {
         let pr = project_root.clone();
         let bin = ta_bin.clone();
         let sd = shutdown.clone();
         handles.push(tokio::spawn(async move {
-            run_team_session(pr, id, bin, sd).await;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(SESSION_DISCOVERY_INTERVAL) => {}
+                    _ = sd.notified() => return,
+                }
+                for id in TeamSessionState::list_ids(&pr) {
+                    if known.contains(&id) {
+                        continue;
+                    }
+                    tracing::info!(
+                        session = %id,
+                        "team_session: discovered session created after daemon startup, \
+                         spawning its supervisor now"
+                    );
+                    known.insert(id.clone());
+                    spawn_if_not_stopped(&pr, &id, &bin, &sd);
+                }
+            }
         }));
     }
+
     handles
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Public-install safety: when the named local signing identity does not
+    /// exist (every end user's machine), `ensure_stable_codesign` must leave
+    /// the binary byte-for-byte untouched. No ad-hoc re-signing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_stable_codesign_leaves_binary_untouched_without_the_local_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fake-ta");
+        std::fs::copy("/usr/bin/true", &bin).unwrap();
+        let before = std::fs::read(&bin).unwrap();
+        std::env::set_var("TA_CODESIGN_IDENTITY", "ta-test-nonexistent-identity-xyz");
+        ensure_stable_codesign(&bin, dir.path());
+        std::env::remove_var("TA_CODESIGN_IDENTITY");
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            before,
+            "binary was modified even though the signing identity does not exist"
+        );
+    }
     use super::*;
 
     fn sample_config() -> TeamSessionConfig {
@@ -899,6 +1192,67 @@ mod tests {
 
         let ids = TeamSessionState::list_ids(dir.path());
         assert_eq!(ids, vec!["sess-a".to_string()]);
+    }
+
+    #[test]
+    fn list_ids_sees_a_session_created_after_an_earlier_snapshot() {
+        // Validates the premise `start()`'s discovery loop relies on: a
+        // session created on disk after an earlier `list_ids()` call shows
+        // up in a later one. Doesn't spawn the real loop (which launches a
+        // real `ta` subprocess via `run_team_session` -- not something to
+        // exercise in a unit test), just the on-disk discovery primitive
+        // the fix for the "daemon never picks up a session created after
+        // its own startup" bug (found live, 2026-10-02) depends on.
+        let dir = tempfile::tempdir().unwrap();
+        let mut first =
+            TeamSessionState::new("sess-a".to_string(), sample_config(), sample_stages());
+        first.save(dir.path()).unwrap();
+
+        let snapshot_one: std::collections::HashSet<String> =
+            TeamSessionState::list_ids(dir.path()).into_iter().collect();
+        assert_eq!(snapshot_one, ["sess-a".to_string()].into());
+
+        // Simulates `ta team-session start` creating a new session while
+        // the daemon (holding `snapshot_one`) is already running.
+        let mut second =
+            TeamSessionState::new("sess-b".to_string(), sample_config(), sample_stages());
+        second.save(dir.path()).unwrap();
+
+        let snapshot_two: std::collections::HashSet<String> =
+            TeamSessionState::list_ids(dir.path()).into_iter().collect();
+        let newly_discovered: Vec<&String> = snapshot_two.difference(&snapshot_one).collect();
+        assert_eq!(newly_discovered, vec![&"sess-b".to_string()]);
+    }
+
+    #[test]
+    fn spawn_if_not_stopped_skips_a_stopped_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state =
+            TeamSessionState::new("sess-a".to_string(), sample_config(), sample_stages());
+        state.status = TeamSessionStatus::Stopped;
+        state.save(dir.path()).unwrap();
+
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle =
+            spawn_if_not_stopped(dir.path(), "sess-a", Path::new("/usr/bin/true"), &shutdown);
+        assert!(
+            handle.is_none(),
+            "a Stopped session must never get a supervisor spawned for it, \
+             whether at daemon startup or by the ongoing discovery loop"
+        );
+    }
+
+    #[test]
+    fn spawn_if_not_stopped_skips_a_nonexistent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = spawn_if_not_stopped(
+            dir.path(),
+            "no-such-session",
+            Path::new("/usr/bin/true"),
+            &shutdown,
+        );
+        assert!(handle.is_none());
     }
 
     #[test]
@@ -1148,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn build_args_with_assigned_role_includes_security_persona_and_agent() {
+    fn build_args_with_assigned_role_includes_security_persona_and_model() {
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
@@ -1162,8 +1516,10 @@ mod tests {
             ta_session::workflow_session::AdvisorSecurity::Auto,
             Some("careful-analyst".to_string()),
         );
+        write_test_persona(dir.path(), "careful-analyst", "");
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
@@ -1171,7 +1527,8 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--headless".to_string()));
@@ -1183,7 +1540,13 @@ mod tests {
         assert!(args.contains(&"auto".to_string()));
         assert!(args.contains(&"--persona".to_string()));
         assert!(args.contains(&"careful-analyst".to_string()));
-        assert!(args.contains(&"--agent".to_string()));
+        // Model id goes through --model, not --agent: --agent means
+        // "framework" to `ta run` (claude-code/codex/a manifest), not
+        // "which model" -- passing a model id there always failed to
+        // resolve and silently fell back to a hardcoded default (the bug
+        // this test now guards against regressing).
+        assert!(!args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
 
@@ -1210,6 +1573,7 @@ mod tests {
         team_config.members[0].model_tier = Some("highest".to_string());
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
@@ -1217,11 +1581,52 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
-        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-opus-5".to_string()));
         assert!(!args.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn build_args_agent_id_literal_auto_routes_through_agent_flag_not_model() {
+        // `ta team assign <role> auto` (documented in USAGE.md's "agent =
+        // auto -- supervisor auto-pick") is a sentinel, not a real model
+        // name -- it must keep going through `--agent auto` (which `ta
+        // run` gives dedicated supervisor-recommendation handling), not
+        // `--model auto`, which would forward a literal, meaningless
+        // "auto" straight to the `claude` binary. Found in code review of
+        // the --model fix itself, 2026-10-02.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "auto".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+
+        let args = build_ta_run_args(
+            dir.path(),
+            &state,
+            &stage.name,
+            "analyst",
+            Uuid::nil(),
+            &team_config,
+            &context_path,
+            None,
+        )
+        .unwrap();
+
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"auto".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
     }
 
     #[test]
@@ -1244,6 +1649,7 @@ mod tests {
         team_config.members[0].model_tier = Some("nonexistent-tier".to_string());
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
@@ -1251,9 +1657,10 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
-        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
     }
 
@@ -1268,6 +1675,7 @@ mod tests {
         let team_config = TeamConfig::default(); // no members assigned
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
@@ -1275,11 +1683,13 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(!args.contains(&"--security".to_string()));
         assert!(!args.contains(&"--persona".to_string()));
         assert!(!args.contains(&"--agent".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
         // Still fires the goal — just without an assignment-derived override.
         assert!(args.contains(&"--team".to_string()));
     }
@@ -1297,6 +1707,7 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
@@ -1304,7 +1715,8 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         let flag_idx = args
             .iter()
@@ -1326,6 +1738,7 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "specialist",
@@ -1333,7 +1746,8 @@ mod tests {
             &team_config,
             &context_path,
             Some("brain-maintenance"),
-        );
+        )
+        .unwrap();
 
         let flag_pos = args
             .iter()
@@ -1352,6 +1766,7 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "researcher",
@@ -1359,7 +1774,8 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(!args.contains(&"--workflow-tag".to_string()));
     }
@@ -1375,6 +1791,7 @@ mod tests {
         let agent_id = Uuid::new_v4();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "engineer",
@@ -1382,7 +1799,8 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         let flag_pos = args
             .iter()
@@ -1405,6 +1823,7 @@ mod tests {
         let team_config = TeamConfig::default();
 
         let args = build_ta_run_args(
+            dir.path(),
             &state,
             &stage.name,
             "analyst",
@@ -1412,9 +1831,146 @@ mod tests {
             &team_config,
             &context_path,
             None,
-        );
+        )
+        .unwrap();
 
         assert!(!args.contains(&"--agent-id".to_string()));
+    }
+
+    // ── CR-01: chat mode and origin for CoS-style launches ────────────────
+
+    fn write_test_persona(project: &Path, name: &str, capabilities_toml: &str) {
+        let dir = project.join(".ta").join("personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.toml", name)),
+            format!(
+                "[persona]\nname = \"{}\"\n\n[capabilities]\n{}\n",
+                name, capabilities_toml
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Builds args for `role` assigned to `persona` (and optional role
+    /// origin), in a temp project.
+    fn args_for_role(
+        persona: Option<(&str, &str)>,
+        role_origin: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let context_path =
+            write_session_context(dir.path(), &state, "intake", "chief-of-staff").unwrap();
+        if let Some((name, caps)) = persona {
+            write_test_persona(dir.path(), name, caps);
+        }
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("chief-of-staff"),
+            "claude-opus-5".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            persona.map(|(n, _)| n.to_string()),
+        );
+        team_config.members[0].origin = role_origin.map(str::to_string);
+        build_ta_run_args(
+            dir.path(),
+            &state,
+            "intake",
+            "chief-of-staff",
+            Uuid::nil(),
+            &team_config,
+            &context_path,
+            None,
+        )
+    }
+
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].as_str())
+    }
+
+    #[test]
+    fn chat_mode_persona_with_cos_origin_launches_with_chat_mode_and_origin_cos() {
+        let args = args_for_role(
+            Some(("chief-of-staff", "chat_mode = true\norigin = \"cos\"")),
+            None,
+        )
+        .unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()), "{:?}", args);
+        assert_eq!(flag_value(&args, "--origin"), Some("cos"));
+        assert_eq!(flag_value(&args, "--persona"), Some("chief-of-staff"));
+    }
+
+    #[test]
+    fn chat_mode_persona_without_origin_gets_origin_chat() {
+        let args = args_for_role(Some(("chief-of-staff", "chat_mode = true")), None).unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()));
+        assert_eq!(flag_value(&args, "--origin"), Some("chat"));
+    }
+
+    #[test]
+    fn cos_role_origin_forces_chat_mode_even_for_a_plain_persona() {
+        let args = args_for_role(Some(("chief-of-staff", "")), Some("cos")).unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()), "{:?}", args);
+        assert_eq!(flag_value(&args, "--origin"), Some("cos"));
+    }
+
+    #[test]
+    fn cos_role_origin_with_no_persona_still_gets_chat_mode() {
+        let args = args_for_role(None, Some("cos")).unwrap();
+        assert!(args.contains(&"--chat-mode".to_string()));
+        assert_eq!(flag_value(&args, "--origin"), Some("cos"));
+    }
+
+    #[test]
+    fn non_chat_persona_gets_neither_chat_mode_nor_origin() {
+        let args =
+            args_for_role(Some(("implementer", "allowed_tools = [\"Bash(*)\"]")), None).unwrap();
+        assert!(!args.contains(&"--chat-mode".to_string()));
+        assert!(!args.contains(&"--origin".to_string()));
+    }
+
+    #[test]
+    fn unloadable_persona_or_bad_origin_refuses_to_build_args() {
+        // Persona named in team.toml but missing on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let context_path = write_session_context(dir.path(), &state, "intake", "cos").unwrap();
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("cos"),
+            "claude-opus-5".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            Some("missing-persona".to_string()),
+        );
+        let err = build_ta_run_args(
+            dir.path(),
+            &state,
+            "intake",
+            "cos",
+            Uuid::nil(),
+            &team_config,
+            &context_path,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("missing-persona"), "{}", err);
+
+        // Invalid origin, conflicting origins, chat mode with an
+        // auto-approvable origin.
+        assert!(args_for_role(Some(("chief-of-staff", "origin = \"COS\"")), None).is_err());
+        assert!(args_for_role(
+            Some(("chief-of-staff", "chat_mode = true\norigin = \"cos\"")),
+            Some("chat")
+        )
+        .is_err());
+        assert!(args_for_role(
+            Some(("chief-of-staff", "chat_mode = true\norigin = \"poller\"")),
+            None
+        )
+        .is_err());
     }
 
     #[cfg(unix)]
@@ -1568,5 +2124,54 @@ mod tests {
         signal_resume(dir.path(), "sess-1").unwrap();
         let (outcome2, _tracker2) = run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
         assert_eq!(outcome2, CycleOutcome::Advanced);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_one_cycle_suspended_then_restart_signal() {
+        // `resume-signal` only clears Paused (see the test above);
+        // Suspended (reached via the backoff/crash-recovery path, not a
+        // human pause) needs restart-signal, written by `ta team-session
+        // restart`, not `resume`. Found live, 2026-10-02: there was no CLI
+        // command for this at all before -- USAGE.md told users to
+        // manually `touch .ta/team-sessions/<name>/restart-signal`.
+        let dir = tempfile::tempdir().unwrap();
+        let ta_bin = write_fake_ta_binary(dir.path(), "#!/bin/sh\nexit 1\n");
+        let mut state =
+            TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        state.save(dir.path()).unwrap();
+
+        let mut tracker = FailureTracker::default();
+        let mut last_outcome = CycleOutcome::Advanced;
+        for _ in 0..5 {
+            let (outcome, next_tracker) =
+                run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
+            tracker = next_tracker;
+            last_outcome = outcome;
+        }
+        assert_eq!(last_outcome, CycleOutcome::Suspended);
+
+        // A resume-signal must NOT clear Suspended -- confirms the two
+        // statuses really do require distinct signals, not just that
+        // restart-signal happens to work.
+        signal_resume(dir.path(), "sess-1").unwrap();
+        let (outcome_resume_attempt, tracker) =
+            run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
+        assert_eq!(
+            outcome_resume_attempt,
+            CycleOutcome::Suspended,
+            "resume-signal must be a no-op against a Suspended session"
+        );
+
+        signal_restart(dir.path(), "sess-1").unwrap();
+        let new_ta_bin = write_fake_ta_binary(dir.path(), "#!/bin/sh\necho ok\nexit 0\n");
+        let (outcome_after_restart, _tracker) =
+            run_one_cycle(dir.path(), "sess-1", &new_ta_bin, tracker).unwrap();
+        assert_eq!(outcome_after_restart, CycleOutcome::Advanced);
+
+        let restarted_state = TeamSessionState::load(dir.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted_state.status, TeamSessionStatus::Active);
     }
 }

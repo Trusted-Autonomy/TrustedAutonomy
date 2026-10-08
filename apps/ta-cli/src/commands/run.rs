@@ -114,6 +114,58 @@ struct AgentLaunchConfig {
     /// When `true`, goals with no state update for `stale_threshold_secs` emit `GoalStale`.
     #[serde(default)]
     heartbeat_required: bool,
+
+    /// Set by `execute()` (never read from YAML) when this launch has an
+    /// explicit tool restriction: a persona `allowed_tools` list, a
+    /// `read_only` persona, chat mode, or a `max_allowed_tools` ceiling.
+    /// For Claude Code it adds [`RESTRICTED_LAUNCH_FLAGS`] to the command
+    /// line so the operator's global `~/.claude/settings.json` (and any
+    /// project `.claude/settings.json`) cannot widen the tool surface, and
+    /// anything not pre-approved is denied instead of auto-allowed or
+    /// prompted (red-team CR-01/CR-13).
+    #[serde(skip)]
+    restricted_tool_surface: bool,
+}
+
+/// Claude Code flags for a restricted launch. Verified against Claude Code
+/// 2.1.x (`claude --help`, and live: with a global `defaultMode: "auto"`
+/// plus `allow: ["Write"]`, a staging `settings.local.json` allowing only
+/// `Read` still let the agent write a file until both flags were passed):
+///
+/// - `--setting-sources local`: load only the `.claude/settings.local.json`
+///   TA writes into staging. User (`~/.claude/settings.json`) and project
+///   (`.claude/settings.json`, editable through drafts) settings are not
+///   loaded, so their `allow` rules and `defaultMode` cannot merge in.
+/// - `--permission-mode dontAsk`: a tool call that is not pre-approved is
+///   denied, never auto-approved (`auto`) or prompted.
+pub(crate) const RESTRICTED_LAUNCH_FLAGS: &[&str] =
+    &["--setting-sources", "local", "--permission-mode", "dontAsk"];
+
+/// The permission mode written into a restricted launch's settings file
+/// (matches [`RESTRICTED_LAUNCH_FLAGS`]).
+pub(crate) const RESTRICTED_DEFAULT_MODE: &str = "dontAsk";
+
+/// Whether `config` launches Claude Code (the only framework whose
+/// permission flags TA knows).
+fn is_claude_code_launch(config: &AgentLaunchConfig) -> bool {
+    config.name.as_deref() == Some("claude-code")
+        || Path::new(&config.command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s == "claude")
+}
+
+/// Extra command-line flags for this launch: [`RESTRICTED_LAUNCH_FLAGS`]
+/// for a restricted Claude Code launch, nothing otherwise.
+fn restricted_launch_flags(config: &AgentLaunchConfig) -> Vec<String> {
+    if config.restricted_tool_surface && is_claude_code_launch(config) {
+        RESTRICTED_LAUNCH_FLAGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Auto-answer configuration for interactive prompts (v0.10.18.5).
@@ -222,6 +274,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             runtime: Default::default(),
             // Claude Code does not send heartbeats — disable stale checking (v0.13.14).
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -245,6 +298,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -301,6 +355,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -320,7 +375,57 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         },
+    }
+}
+
+/// Apply a `--model` override onto an already-resolved `AgentLaunchConfig`,
+/// mutating its `args_template` in place.
+///
+/// `--agent`/`framework` picks WHICH framework/binary runs (claude-code,
+/// codex, a custom manifest); `--model` picks WHICH model that framework
+/// uses once launched — two independent questions that `team.toml`'s
+/// `model_tier`/`agent_id` mechanism once conflated by passing a model id
+/// into `--agent` itself (see `team_session::build_ta_run_args`'s doc
+/// comment for the full history of that bug, found live 2026-10-01).
+///
+/// Inserts `["--model", value]` immediately before the first arg template
+/// entry containing `{prompt}` (or at the end, if none does), so it lands
+/// before the prompt in both interactive mode (`args_template` alone) and
+/// headless mode (`args_template` + `headless_args`, see
+/// `launch_agent_via_runtime`). Only the `claude` binary is confirmed to
+/// accept this flag today (mirroring the same pattern already proven for
+/// the supervisor agent dispatch in
+/// `ta_changeset::supervisor_review::invoke_claude_cli_supervisor`) — any
+/// other framework gets a loud warning and the override is dropped rather
+/// than silently forwarded to a binary that doesn't understand it
+/// (Observability Mandate: never a silent no-op).
+fn apply_model_override(agent_config: &mut AgentLaunchConfig, model_value: &str, framework: &str) {
+    if agent_config.command == "claude" {
+        let prompt_pos = agent_config
+            .args_template
+            .iter()
+            .position(|a| a.contains("{prompt}"))
+            .unwrap_or(agent_config.args_template.len());
+        agent_config
+            .args_template
+            .insert(prompt_pos, model_value.to_string());
+        agent_config
+            .args_template
+            .insert(prompt_pos, "--model".to_string());
+    } else {
+        eprintln!(
+            "Warning: --model '{}' requested but agent framework '{}' (command: '{}') \
+             is not known to support model overrides — ignoring --model for this run.",
+            model_value, framework, agent_config.command
+        );
+        tracing::warn!(
+            model = %model_value,
+            framework = %framework,
+            command = %agent_config.command,
+            "Ignoring --model: framework not known to support model overrides"
+        );
     }
 }
 
@@ -365,6 +470,7 @@ fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> 
         context_file: None,
         runtime: Default::default(),
         heartbeat_required: false,
+        restricted_tool_surface: false,
     }
 }
 
@@ -2292,6 +2398,7 @@ pub fn execute(
     agent_id: Option<&str>,
     workflow_tag: Option<&str>,
     shadow_experiment: Option<&ShadowExperimentFlags>,
+    model: Option<&str>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -2680,6 +2787,15 @@ pub fn execute(
     // agent_config is mutable so we can extend its env with framework-specific vars.
     let mut agent_config = agent_config;
 
+    // ── Model override (--model, independent of --agent/framework) ─────────
+    //
+    // --agent picks WHICH framework/binary runs; --model picks WHICH model
+    // that framework uses once launched. See `apply_model_override`'s doc
+    // comment for the full rationale.
+    if let Some(model_value) = model {
+        apply_model_override(&mut agent_config, model_value, agent);
+    }
+
     // Disk space pre-flight (v0.11.3 item 28).
     {
         let wf = ta_submit::WorkflowConfig::load_or_default(
@@ -2922,6 +3038,46 @@ pub fn execute(
             updated_goal.is_macro = true;
         }
         updated_goal.heartbeat_required = agent_config.heartbeat_required;
+
+        // H9: stamp the goal's origin (`ta run --origin`, exported as
+        // TA_GOAL_ORIGIN) onto the record. The record is the only thing any
+        // auto-approve decision reads, and an origin already on it is never
+        // changed or cleared here: the environment only fills in a record
+        // that has none yet (goal creation), so a later `ta run --goal-id`
+        // with a different or missing TA_GOAL_ORIGIN cannot relax it.
+        let requested_origin = ta_goal::origin::origin_from_env().map_err(anyhow::Error::msg)?;
+        if let Some(origin) = ta_goal::origin::origin_to_stamp(
+            updated_goal.origin.as_deref(),
+            requested_origin.as_deref(),
+        ) {
+            if ta_goal::origin::origin_blocks_auto_approve(Some(&origin)) && !quiet {
+                println!(
+                    "Origin: {} (auto-approve disabled: this goal's draft always needs human review)",
+                    origin
+                );
+            }
+            tracing::info!(goal_id = %updated_goal.goal_run_id, origin = %origin, "goal origin set");
+            updated_goal.origin = Some(origin);
+        } else if let (Some(existing), Some(requested)) =
+            (updated_goal.origin.as_deref(), requested_origin.as_deref())
+        {
+            if existing != requested {
+                tracing::warn!(
+                    goal_id = %updated_goal.goal_run_id,
+                    recorded_origin = %existing,
+                    requested_origin = %requested,
+                    "ignoring requested goal origin: the goal record already has an origin and it \
+                     cannot be changed after creation"
+                );
+                if !quiet {
+                    eprintln!(
+                        "[warn] Goal {} keeps its recorded origin '{}'; the requested origin '{}' \
+                         was ignored (an origin is fixed when the goal is created).",
+                        updated_goal.goal_run_id, existing, requested
+                    );
+                }
+            }
+        }
 
         // Generic cost-classification tag (v0.17.x cost-experiment
         // framework): `--workflow-tag`, opaque to TA core. Set only when the
@@ -3183,6 +3339,41 @@ pub fn execute(
         }
     }
 
+    // Chat-mode launch (persona `chat_mode = true` or `--chat-mode`): resolve
+    // before any injection so invalid combinations fail fast. `None` for every
+    // normal launch, which then proceeds exactly as before.
+    let chat_mode_plan = {
+        let (persona_chat_mode, persona_tools) = match persona_name {
+            Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
+                Ok(p) => (p.capabilities.chat_mode, p.capabilities.allowed_tools),
+                Err(e) => anyhow::bail!(
+                    "Could not load persona '{}' while checking for chat mode: {}. Check \
+                     .ta/personas/{}.toml exists.",
+                    pname,
+                    e,
+                    pname
+                ),
+            },
+            None => (false, Vec::new()),
+        };
+        let plan =
+            super::chat_launch::plan_chat_mode_launch(&super::chat_launch::ChatModeInputs {
+                cli_flag: super::chat_launch::cli_chat_mode_requested(),
+                persona_name,
+                persona_chat_mode,
+                persona_allowed_tools: &persona_tools,
+                agent,
+                agent_framework_name: agent_config.name.as_deref(),
+                injects_settings: agent_config.injects_settings,
+                macro_goal,
+                uses_pty: interactive && !headless && !quiet,
+            })?;
+        if let Some(ref p) = plan {
+            super::chat_launch::report_chat_mode_plan(p, quiet);
+        }
+        plan
+    };
+
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
         // Load context budget config (v0.14.3.1).
@@ -3251,6 +3442,9 @@ pub fn execute(
                     );
                 }
             }
+        }
+        if let Some(ref plan) = chat_mode_plan {
+            channel.inject_persona(&super::chat_launch::chat_mode_context_section(plan))?;
         }
 
         // v0.16.3: Inject context.files declared in the agent manifest.
@@ -3349,11 +3543,123 @@ pub fn execute(
             profile
         };
 
+        let mut read_only_extra_deny: Vec<String> = Vec::new();
+        let persona_allowed_tools: Vec<String> = match persona_name {
+            Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
+                Ok(persona) => {
+                    let surface = resolve_persona_tool_surface(&persona)?;
+                    read_only_extra_deny = surface.extra_deny;
+                    surface.allowed
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "Could not load persona '{}' while preparing tool-surface \
+                         restrictions: {}. Check .ta/personas/{}.toml exists.",
+                        pname,
+                        e,
+                        pname
+                    );
+                }
+            },
+            None => Vec::new(),
+        };
+
+        let persona_declared_tools = !persona_allowed_tools.is_empty();
+        let base_allowed_tools = if persona_declared_tools {
+            persona_allowed_tools.clone()
+        } else {
+            security_profile.default_allowed_tools.clone()
+        };
+        let ceiling_active = security_profile.max_allowed_tools.is_some();
+        let final_allowed_tools = match &security_profile.max_allowed_tools {
+            Some(ceiling) => intersect_allowed_tools(&base_allowed_tools, ceiling),
+            None => base_allowed_tools.clone(),
+        };
+
+        // Finding 1 (final whole-branch review): an empty ceiling/persona
+        // intersection must never silently fall back to the broad default.
+        // Distinguish "the ceiling ate everything" (a real misconfiguration:
+        // the base list was non-empty before the ceiling was applied, so the
+        // ceiling itself is what zeroed it out -- surface this so an
+        // operator debugging "why can't this agent do anything" has a
+        // trail) from "the base was already empty with no ceiling at play"
+        // (a deliberate no-restriction-declared default; nothing to warn
+        // about here).
+        if ceiling_active && final_allowed_tools.is_empty() && !base_allowed_tools.is_empty() {
+            tracing::warn!(
+                persona = persona_name.unwrap_or("<none>"),
+                persona_declared_tools = ?persona_allowed_tools,
+                ceiling = ?security_profile.max_allowed_tools,
+                "security posture's max_allowed_tools ceiling has zero overlap with the \
+                 persona/default allow-list -- the resulting tool allow-list is empty. This \
+                 is almost certainly a misconfiguration: the agent will get NO native tool \
+                 access for this launch. Compare .ta/personas/<name>.toml's allowed_tools \
+                 (logged above as persona_declared_tools) against the ceiling (logged above \
+                 as ceiling) -- as of this release, max_allowed_tools is set programmatically \
+                 by whatever constructed this SecurityProfile, not yet exposed as a \
+                 workflow.toml setting."
+            );
+        }
+
+        // Pass final_allowed_tools as the persona override whenever a persona
+        // declared a non-empty list OR a max_allowed_tools ceiling narrowed
+        // the default. In both cases the caller has already resolved the
+        // intended list, so inject_claude_settings_with_security should use
+        // it verbatim (even when empty) rather than re-deriving its own
+        // default. `None` is reserved for the genuinely-unrestricted case:
+        // no persona declaration and no ceiling at all.
+        let effective_persona_tools: Option<&[String]> = if persona_declared_tools || ceiling_active
+        {
+            Some(&final_allowed_tools)
+        } else {
+            None
+        };
+
+        let mut extra_deny = security_profile.forbidden_tool_patterns.clone();
+        for pattern in read_only_extra_deny {
+            if !extra_deny.contains(&pattern) {
+                extra_deny.push(pattern);
+            }
+        }
+
+        // Chat mode replaces the allow-list with persona tools INTERSECTED
+        // with the chat-mode profile (then the posture ceiling), and adds a
+        // deny for every native tool. Never the union. Any read-only deny
+        // patterns above are carried into the chat deny list too.
+        let chat_mode_lists = match &chat_mode_plan {
+            Some(plan) => Some(super::chat_launch::chat_mode_settings_lists(
+                plan,
+                security_profile.max_allowed_tools.as_deref(),
+                &extra_deny,
+            )?),
+            None => None,
+        };
+        let (effective_persona_tools, deny_patterns) = match &chat_mode_lists {
+            Some((allow, deny)) => (Some(allow.as_slice()), deny.as_slice()),
+            None => (effective_persona_tools, extra_deny.as_slice()),
+        };
+
+        // CR-01/CR-13: any explicit restriction (persona list, read-only,
+        // chat mode, posture ceiling) also isolates the launch from the
+        // operator's global and project Claude Code settings on the
+        // command line (see RESTRICTED_LAUNCH_FLAGS).
+        agent_config.restricted_tool_surface =
+            effective_persona_tools.is_some() || chat_mode_plan.is_some();
+        if agent_config.restricted_tool_surface {
+            tracing::info!(
+                persona = persona_name.unwrap_or("<none>"),
+                chat_mode = chat_mode_plan.is_some(),
+                flags = ?RESTRICTED_LAUNCH_FLAGS,
+                "restricted tool surface: only TA's staging settings apply, unlisted tools are denied"
+            );
+        }
+
         inject_claude_settings_with_security(
             &staging_path,
             source,
-            &security_profile.forbidden_tool_patterns,
+            deny_patterns,
             security_profile.web_search_enabled,
+            effective_persona_tools,
         )?;
     }
 
@@ -3441,6 +3747,21 @@ pub fn execute(
     {
         tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
+    // Chat mode: a separate, equally stable config whose `ta` server is
+    // switched into chat mode by its own env block. Failing to write it is
+    // fatal for a chat launch: falling back to the normal config would hand
+    // the agent an unrestricted TA MCP server.
+    if chat_mode_plan.is_some() {
+        super::chat_launch::write_chat_agent_mcp_config(&config.workspace_root).map_err(|e| {
+            anyhow::anyhow!(
+                "Could not write the chat-mode MCP config at {}: {}. The chat-mode agent was \
+                 not launched. Check that {} is writable and retry.",
+                super::chat_launch::agent_mcp_config_path(&config.workspace_root, true).display(),
+                e,
+                config.workspace_root.join(".ta").display()
+            )
+        })?;
+    }
 
     // v0.17.11.8: for a team-session role launch (--team-session-id), deliver
     // the session's whiteboard token into this goal's staging workspace so
@@ -3474,6 +3795,13 @@ pub fn execute(
 
     // Merge framework env extras into agent_config so they are passed to the process.
     agent_config.env.extend(framework_env_extras);
+    // Chat mode: hand the pre-generated chat session to the agent's `ta serve`
+    // MCP process. Inserted last so no other env source can override it.
+    if let Some(ref plan) = chat_mode_plan {
+        agent_config
+            .env
+            .extend(super::chat_launch::chat_mode_agent_env(plan, &staging_path));
+    }
 
     // VCS environment isolation (v0.13.17.3).
     // Inject VCS env vars before the agent spawns to prevent index-lock
@@ -4987,6 +5315,7 @@ fn execute_resume(
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
+            restricted_tool_surface: false,
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -5105,11 +5434,12 @@ fn launch_agent(
     prompt: &str,
     pid_callback: Option<&dyn Fn(u32)>,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let args: Vec<String> = config
+    let mut args: Vec<String> = config
         .args_template
         .iter()
         .map(|t| t.replace("{prompt}", prompt))
         .collect();
+    args.extend(restricted_launch_flags(config));
     let mut cmd = resolve_agent_command(&config.command, &args);
     cmd.current_dir(staging_path);
 
@@ -5207,11 +5537,12 @@ fn launch_agent_interactive(
     Vec<(InteractionRequest, InteractionResponse)>,
 )> {
     // Build args with template substitution.
-    let args: Vec<String> = config
+    let mut args: Vec<String> = config
         .args_template
         .iter()
         .map(|t| t.replace("{prompt}", prompt))
         .collect();
+    args.extend(restricted_launch_flags(config));
 
     // Launch via PTY.
     let pty_config = pty_capture::PtyLaunchConfig {
@@ -5762,6 +6093,65 @@ fn project_root_from_staging(staging_path: &Path) -> Option<std::path::PathBuf> 
         .map(|p| p.to_path_buf())
 }
 
+/// Command-line arguments for a `launch_agent_via_runtime` spawn: the
+/// framework's `args_template` (with `{prompt}`), its headless args, and for
+/// Claude Code the strict MCP config plus, on a restricted launch,
+/// [`RESTRICTED_LAUNCH_FLAGS`]. Pure (no spawn) so the exact argv is
+/// testable.
+fn build_runtime_agent_args(
+    config: &AgentLaunchConfig,
+    staging_path: &std::path::Path,
+    prompt: &str,
+    headless: bool,
+    env: &std::collections::HashMap<String, String>,
+) -> std::io::Result<Vec<String>> {
+    let mut args: Vec<String> = config
+        .args_template
+        .iter()
+        .map(|t| t.replace("{prompt}", prompt))
+        .collect();
+    if headless {
+        args.extend_from_slice(&config.headless_args);
+    }
+
+    // For claude-code: use --strict-mcp-config + a STABLE --mcp-config path so that
+    // Claude approves the ta MCP server once and never re-prompts. The stable config
+    // lives at project_root/.ta/mcp-agent.json and has identical content every run
+    // (no TA_PROJECT_ROOT that would vary per UUID staging path). The ta serve subprocess
+    // inherits Claude's cwd (= staging_path) so it discovers the right root at runtime.
+    if config.name.as_deref() == Some("claude-code") {
+        // Stable config is three parents up from staging_path:
+        //   staging_path = project_root/.ta/staging/<uuid>
+        //   parent()     = project_root/.ta/staging
+        //   parent()     = project_root/.ta
+        //   parent()     = project_root
+        // Chat-mode launches use the chat-locked config instead
+        // (`.ta/mcp-agent-chat.json`, see commands/chat_launch.rs).
+        let chat_mode = super::chat_launch::env_requests_chat_mode(env);
+        let stable_mcp_path = match staging_path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            Some(root) => super::chat_launch::agent_mcp_config_path(root, chat_mode),
+            None if chat_mode => {
+                return Err(std::io::Error::other(format!(
+                    "chat-mode launch: cannot locate the project root from staging path {} \
+                     (expected <project>/.ta/staging/<id>), so the chat-locked MCP config \
+                     cannot be used. Refusing to launch with an unrestricted TA MCP server.",
+                    staging_path.display()
+                )));
+            }
+            None => staging_path.join(".mcp.json"), // fallback: staging (old behavior)
+        };
+        args.push("--strict-mcp-config".to_string());
+        args.push("--mcp-config".to_string());
+        args.push(stable_mcp_path.display().to_string());
+    }
+    args.extend(restricted_launch_flags(config));
+    Ok(args)
+}
+
 /// Launch an agent via the RuntimeAdapter and wait for it to exit (v0.13.3).
 ///
 /// This is the non-interactive, non-PTY path.  It replaces `launch_agent` and
@@ -5844,37 +6234,7 @@ fn launch_agent_via_runtime(
         install_credential_shims(&mut env, &project_root, staging_path, &registry);
     }
 
-    // Expand args (replace {prompt} template variable).
-    let mut args: Vec<String> = config
-        .args_template
-        .iter()
-        .map(|t| t.replace("{prompt}", prompt))
-        .collect();
-    if headless {
-        args.extend_from_slice(&config.headless_args);
-    }
-
-    // For claude-code: use --strict-mcp-config + a STABLE --mcp-config path so that
-    // Claude approves the ta MCP server once and never re-prompts. The stable config
-    // lives at project_root/.ta/mcp-agent.json and has identical content every run
-    // (no TA_PROJECT_ROOT that would vary per UUID staging path). The ta serve subprocess
-    // inherits Claude's cwd (= staging_path) so it discovers the right root at runtime.
-    if config.name.as_deref() == Some("claude-code") {
-        // Stable config is three parents up from staging_path:
-        //   staging_path = project_root/.ta/staging/<uuid>
-        //   parent()     = project_root/.ta/staging
-        //   parent()     = project_root/.ta
-        //   parent()     = project_root
-        let stable_mcp_path = staging_path
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .map(|root| root.join(".ta").join("mcp-agent.json"))
-            .unwrap_or_else(|| staging_path.join(".mcp.json")); // fallback: staging (old behavior)
-        args.push("--strict-mcp-config".to_string());
-        args.push("--mcp-config".to_string());
-        args.push(stable_mcp_path.display().to_string());
-    }
+    let args = build_runtime_agent_args(config, staging_path, prompt, headless, &env)?;
 
     let stdin_mode = if headless {
         StdinMode::Null
@@ -6466,32 +6826,6 @@ const SETTINGS_BACKUP: &str = ".ta/claude_settings_original";
 const SETTINGS_REL_PATH: &str = ".claude/settings.local.json";
 const FORBIDDEN_TOOLS_FILE: &str = ".ta-forbidden-tools";
 
-/// Tools to allow in the injected Claude Code settings.
-const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
-    "Bash(*)",
-    "Read(*)",
-    "Write(*)",
-    "Edit(*)",
-    "MultiEdit(*)",
-    "Glob(*)",
-    "Grep(*)",
-    "WebFetch(*)",
-    "WebSearch(*)",
-    "NotebookEdit(*)",
-    "Task(*)",
-    "Skill(*)",
-    "TodoRead(*)",
-    "TodoWrite(*)",
-    // Approve TA's built-in MCP server. Memory (ta_context) and community
-    // (community_*) tools are native tools on this server — no separate
-    // ta-memory / ta-community-hub server entries exist (v0.17.0.12.4).
-    // Additional mcp__<server>__* entries are merged dynamically from
-    // ~/.claude/settings.json at injection time (see
-    // inject_claude_settings_with_security). "mcp__*" is not valid here —
-    // Claude Code requires a literal server prefix before the wildcard.
-    "mcp__ta__*",
-];
-
 /// Built-in forbidden tool patterns — community-maintained deny list.
 /// These are always denied even in TA staging workspaces.
 /// Add patterns here as the community identifies dangerous tools/commands.
@@ -6527,18 +6861,122 @@ fn load_forbidden_tools(source_dir: Option<&Path>) -> Vec<String> {
 /// Used directly in tests; production code calls inject_claude_settings_with_security.
 #[cfg_attr(not(test), allow(dead_code))]
 fn inject_claude_settings(staging_path: &Path, source_dir: Option<&Path>) -> anyhow::Result<()> {
-    inject_claude_settings_with_security(staging_path, source_dir, &[], true)
+    inject_claude_settings_with_security(staging_path, source_dir, &[], true, None)
+}
+
+/// Intersect a base allow-list with a posture-level ceiling, preserving
+/// `base`'s own ordering. Used to apply `SecurityProfile.max_allowed_tools`
+/// as a hard cap on top of whichever allow-list (a persona's own
+/// declaration, or the level's `default_allowed_tools` fallback) was chosen.
+/// Never broader than either input.
+fn intersect_allowed_tools(base: &[String], ceiling: &[String]) -> Vec<String> {
+    base.iter()
+        .filter(|t| ceiling.contains(t))
+        .cloned()
+        .collect()
+}
+
+/// A persona's resolved harness tool surface: the allow-list to write
+/// (empty = no persona declaration, fall back to the posture default) and
+/// extra deny patterns.
+#[derive(Debug)]
+struct PersonaToolSurface {
+    allowed: Vec<String>,
+    extra_deny: Vec<String>,
+}
+
+/// Resolve what a persona may call at launch (H7).
+///
+/// A normal persona's `allowed_tools` is used as declared (unchanged
+/// behavior). A `read_only = true` persona (the Chief-of-Staff) gets its
+/// declared list or, when it declares none, the built-in read-only surface;
+/// never the broad default. The list must pass
+/// `validate_read_only_tool_surface` or the launch is refused, and every
+/// mutating TA MCP tool is denied explicitly.
+fn resolve_persona_tool_surface(
+    persona: &ta_goal::PersonaConfig,
+) -> anyhow::Result<PersonaToolSurface> {
+    use ta_goal::tool_surface;
+
+    let caps = &persona.capabilities;
+    if !caps.read_only {
+        return Ok(PersonaToolSurface {
+            allowed: caps.allowed_tools.clone(),
+            extra_deny: Vec::new(),
+        });
+    }
+    let allowed: Vec<String> = if caps.allowed_tools.is_empty() {
+        tool_surface::READ_ONLY_PERSONA_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        caps.allowed_tools.clone()
+    };
+    if let Err(violations) = tool_surface::validate_read_only_tool_surface(&allowed) {
+        tracing::error!(
+            persona = %persona.persona.name,
+            violations = ?violations,
+            "refusing to launch read-only persona with a mutating or unclassified tool"
+        );
+        anyhow::bail!(
+            "Persona '{}' is declared read_only = true but its allowed_tools would give it \
+             tools that can mutate state:\n  - {}\n\
+             Remove these entries from .ta/personas/{}.toml (or drop allowed_tools entirely \
+             to use the built-in read-only surface). A read-only persona may only hold TA MCP \
+             tools classified read-only in ta_goal::tool_surface.",
+            persona.persona.name,
+            violations.join("\n  - "),
+            persona.persona.name
+        );
+    }
+    Ok(PersonaToolSurface {
+        allowed,
+        extra_deny: tool_surface::mutating_mcp_deny_patterns(),
+    })
+}
+
+/// The "tool identity" a permission pattern belongs to, for comparing a
+/// specific declared entry against a broader wildcard covering the same
+/// tool/server. Native patterns (`"Bash(*)"`, `"Bash(git *)"`) share the
+/// identity `"Bash"` (the text before the first `(`). MCP entries
+/// (`"mcp__ta__*"`, `"mcp__ta__ta_fs_read"`) share the identity `"mcp__ta__"`
+/// (the `mcp__<server>__` prefix) -- without this, a persona declaring the
+/// specific tool `"mcp__ta__ta_fs_read"` would not be recognized as already
+/// covering the same identity as the broad default's `"mcp__ta__*"`, and the
+/// deny-complement below would deny the server's whole namespace right back
+/// out from under the persona's own declaration.
+fn tool_identity(pattern: &str) -> &str {
+    if let Some(rest) = pattern.strip_prefix("mcp__") {
+        if let Some(idx) = rest.find("__") {
+            return &pattern[..5 + idx + 2];
+        }
+    }
+    pattern.split('(').next().unwrap_or(pattern)
 }
 
 /// Full version of inject_claude_settings with security profile support.
 ///
 /// `extra_deny` — additional forbidden tool patterns from the security profile (e.g., mid/high level).
 /// `web_search_enabled` — if false, removes `WebSearch(*)` from the allow list.
-fn inject_claude_settings_with_security(
+/// `persona_allowed_tools` — `None` means no override: use the broad
+/// `DEFAULT_ALLOWED_TOOLS` base and merge in the user's global
+/// `~/.claude/settings.json` allow list (today's unrestricted-launch
+/// behavior). `Some(list)` means an explicit restriction is active (a
+/// persona declaration and/or a `max_allowed_tools` ceiling) -- `list` is
+/// used verbatim as the *complete* allow-list and the global-settings merge
+/// is skipped, even when `list` is empty: an explicit "zero tools" result
+/// must actually mean zero tools, never silently fall back to the broad
+/// default (finding 1, final whole-branch review). The caller is
+/// responsible for resolving the final list (including any
+/// `max_allowed_tools` ceiling); this function's job is only to write it
+/// out.
+pub(crate) fn inject_claude_settings_with_security(
     staging_path: &Path,
     source_dir: Option<&Path>,
     extra_deny: &[String],
     web_search_enabled: bool,
+    persona_allowed_tools: Option<&[String]>,
 ) -> anyhow::Result<()> {
     let settings_path = staging_path.join(SETTINGS_REL_PATH);
     let backup_path = staging_path.join(SETTINGS_BACKUP);
@@ -6578,40 +7016,50 @@ fn inject_claude_settings_with_security(
     // Also inherit defaultMode and skipDangerousModePermissionPrompt so that
     // settings.local.json doesn't silently override the user's global "dontAsk"
     // mode back to interactive prompts.
-    let mut allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
-        .iter()
-        .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
-        .map(|s| format!("\"{}\"", s))
-        .collect();
+    let use_persona_allowlist = persona_allowed_tools.is_some();
+    let mut allow: Vec<String> = match persona_allowed_tools {
+        Some(list) => list
+            .iter()
+            .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
+            .cloned()
+            .collect(),
+        None => ta_goal::security::DEFAULT_ALLOWED_TOOLS
+            .iter()
+            .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
+            .map(|s| s.to_string())
+            .collect(),
+    };
     let mut global_default_mode: Option<String> = None;
     let mut global_skip_dangerous: Option<bool> = None;
-    if let Ok(home) = std::env::var("HOME") {
-        let global_path = std::path::Path::new(&home)
-            .join(".claude")
-            .join("settings.json");
-        if let Ok(content) = std::fs::read_to_string(&global_path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                // Inherit defaultMode (e.g. "dontAsk") so staging doesn't revert to prompts.
-                if let Some(m) = val
-                    .pointer("/permissions/defaultMode")
-                    .and_then(|v| v.as_str())
-                {
-                    global_default_mode = Some(m.to_string());
-                }
-                // Inherit skipDangerousModePermissionPrompt.
-                if let Some(b) = val
-                    .get("skipDangerousModePermissionPrompt")
-                    .and_then(|v| v.as_bool())
-                {
-                    global_skip_dangerous = Some(b);
-                }
-                // Merge all allow entries from global settings (MCP and non-MCP).
-                if let Some(arr) = val.pointer("/permissions/allow").and_then(|v| v.as_array()) {
-                    for entry in arr {
-                        if let Some(s) = entry.as_str() {
-                            let quoted = format!("\"{}\"", s);
-                            if !allow.contains(&quoted) {
-                                allow.push(quoted);
+    if !use_persona_allowlist {
+        if let Ok(home) = std::env::var("HOME") {
+            let global_path = std::path::Path::new(&home)
+                .join(".claude")
+                .join("settings.json");
+            if let Ok(content) = std::fs::read_to_string(&global_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    // Inherit defaultMode (e.g. "dontAsk") so staging doesn't revert to prompts.
+                    if let Some(m) = val
+                        .pointer("/permissions/defaultMode")
+                        .and_then(|v| v.as_str())
+                    {
+                        global_default_mode = Some(m.to_string());
+                    }
+                    // Inherit skipDangerousModePermissionPrompt.
+                    if let Some(b) = val
+                        .get("skipDangerousModePermissionPrompt")
+                        .and_then(|v| v.as_bool())
+                    {
+                        global_skip_dangerous = Some(b);
+                    }
+                    // Merge all allow entries from global settings (MCP and non-MCP).
+                    if let Some(arr) = val.pointer("/permissions/allow").and_then(|v| v.as_array())
+                    {
+                        for entry in arr {
+                            if let Some(s) = entry.as_str() {
+                                if !allow.iter().any(|a| a == s) {
+                                    allow.push(s.to_string());
+                                }
                             }
                         }
                     }
@@ -6626,33 +7074,78 @@ fn inject_claude_settings_with_security(
             forbidden.push(pattern.clone());
         }
     }
-    let deny: Vec<String> = forbidden.iter().map(|s| format!("\"{}\"", s)).collect();
+    // Finding 5 (final whole-branch review): `permissions.allow` is a
+    // pre-approval list, not a guaranteed exclusive capability list --
+    // Claude Code's own settings-precedence/layering behavior is not fully
+    // controlled by this one injected file, so an operator's own global
+    // config could independently grant broader access. `permissions.deny`
+    // is documented to win at every level regardless of other settings
+    // layers, so when a persona declaration/ceiling is actively restricting
+    // the allow-list, explicitly deny every tool in the broad default that
+    // the restriction did NOT declare. This makes the restriction
+    // independent of whatever the operator's own global settings might
+    // otherwise grant. Only applies when an explicit restriction is active
+    // (`persona_allowed_tools` is `Some`) -- never for the default/no-persona
+    // launch, to avoid changing behavior for every existing unrestricted run.
+    if let Some(list) = persona_allowed_tools {
+        for tool in ta_goal::security::DEFAULT_ALLOWED_TOOLS {
+            let default_identity = tool_identity(tool);
+            let persona_declared_this_identity =
+                list.iter().any(|t| tool_identity(t) == default_identity);
+            if !persona_declared_this_identity && !forbidden.iter().any(|f| f == tool) {
+                forbidden.push(tool.to_string());
+            }
+        }
+        // CR-01: the identity check above treats any one `mcp__ta__<tool>`
+        // entry as covering the whole TA server, so a persona listing 15 TA
+        // tools denied none of the other TA tools, and a global
+        // `mcp__ta__*` allow could hand them over. Deny every registered TA
+        // tool the restriction did not list (`allow` here is already
+        // filtered, so a posture-removed entry is denied too).
+        for pattern in ta_goal::tool_surface::unlisted_ta_mcp_deny_patterns(&allow) {
+            if !forbidden.contains(&pattern) {
+                forbidden.push(pattern);
+            }
+        }
+    }
+    // A posture-level prohibition must not be defeatable by a persona
+    // declaration: identity-based matching above would otherwise treat a
+    // persona's own "WebSearch(...)" entry as already covering the
+    // "WebSearch(*)" identity and skip denying it, leaving WebSearch neither
+    // allowed (filtered out of `allow` above) nor denied when the security
+    // posture has turned it off entirely. Deny it unconditionally in that
+    // case, regardless of what any persona declared.
+    if !web_search_enabled && !forbidden.iter().any(|f| f == "WebSearch(*)") {
+        forbidden.push("WebSearch(*)".to_string());
+    }
+    let deny: Vec<String> = forbidden;
 
-    // Build optional extra fields inherited from global settings.
-    let default_mode_field = global_default_mode
-        .map(|m| format!(",\n    \"defaultMode\": \"{}\"", m))
-        .unwrap_or_default();
-    let skip_dangerous_field = global_skip_dangerous
-        .map(|b| format!(",\n  \"skipDangerousModePermissionPrompt\": {}", b))
-        .unwrap_or_default();
-
-    let settings_json = format!(
-        r#"{{
-  "_comment": "Injected by Trusted Autonomy. Agent works in a staging sandbox — all changes require human review before applying. See .ta-forbidden-tools to deny specific patterns.",
-  "permissions": {{
-    "allow": [
-      {}
-    ],
-    "deny": [
-      {}
-    ]{}
-  }}{}
-}}"#,
-        allow.join(",\n      "),
-        deny.join(",\n      "),
-        default_mode_field,
-        skip_dangerous_field,
-    );
+    // Finding 3 (final whole-branch review): build the settings object with
+    // serde_json rather than hand-written `format!` string concatenation.
+    // allow/deny entries can originate from operator-authored TOML (persona
+    // allowed_tools) or the forbidden-tools file, so they must go through a
+    // real JSON serializer -- a raw `"` or `\` in one of those strings would
+    // otherwise produce invalid JSON that Claude Code can't parse, a
+    // fail-open outcome for exactly the file meant to restrict access.
+    let mut permissions = serde_json::json!({
+        "allow": allow,
+        "deny": deny,
+    });
+    if use_persona_allowlist {
+        // CR-01/CR-13: a restricted launch never inherits the operator's
+        // mode (e.g. "auto"): anything not pre-approved is denied.
+        permissions["defaultMode"] = serde_json::Value::String(RESTRICTED_DEFAULT_MODE.into());
+    } else if let Some(m) = global_default_mode {
+        permissions["defaultMode"] = serde_json::Value::String(m);
+    }
+    let mut root = serde_json::json!({
+        "_comment": "Injected by Trusted Autonomy. Agent works in a staging sandbox — all changes require human review before applying. See .ta-forbidden-tools to deny specific patterns.",
+        "permissions": permissions,
+    });
+    if let Some(b) = global_skip_dangerous {
+        root["skipDangerousModePermissionPrompt"] = serde_json::Value::Bool(b);
+    }
+    let settings_json = serde_json::to_string_pretty(&root)?;
 
     // Ensure .claude/ directory exists.
     if let Some(parent) = settings_path.parent() {
@@ -8448,11 +8941,9 @@ fn count_changed_recursive(staging_root: &Path, dir: &Path, source_root: &Path) 
             Err(_) => continue,
         };
         // Skip .ta/ directory — it's TA metadata, not agent work.
-        if rel
-            .components()
-            .next()
-            .is_some_and(|c| c.as_os_str() == ".ta")
-        {
+        if rel.components().next().is_some_and(|c| {
+            ta_workspace::path_safety::is_agent_infra_component(&c.as_os_str().to_string_lossy())
+        }) {
             continue;
         }
         let ft = match entry.file_type() {
@@ -9198,6 +9689,14 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // Finding 4 (final whole-branch review): shared across every
+    // `commands::*` test module (this one and `terms.rs`) so HOME-mutating
+    // tests serialize against each other regardless of which module they
+    // live in -- two independently-declared `Mutex` statics in the same test
+    // binary cannot do that, since neither lock knows about the other. See
+    // `crate::commands::test_support` for the full rationale.
+    use crate::commands::test_support::HOME_ENV_LOCK;
+
     // ── write_whiteboard_session_file tests (v0.17.11.8) ────────────────────
     //
     // The most important property here: absent `--team-session-id` (the
@@ -9424,6 +9923,44 @@ context_inject = "{mode_toml}"
         assert_eq!(
             config.args_template,
             vec!["--model", "test-model", "{prompt}"]
+        );
+    }
+
+    // ── apply_model_override tests ──────────────────────────────────────────
+    //
+    // Regression coverage for the team.toml model_tier bug found live
+    // 2026-10-01: team_session::build_ta_run_args used to pass a model id
+    // into `--agent` (which `ta run` resolves as a FRAMEWORK name), always
+    // failed to resolve, and silently fell back to a hardcoded default that
+    // discarded the originally-requested model. These tests cover the
+    // replacement mechanism (`--model`, forwarded to the framework binary
+    // once it's already chosen) directly, without needing to run all of
+    // `execute()`.
+
+    #[test]
+    fn apply_model_override_inserts_model_flag_before_prompt_for_claude() {
+        let mut config = builtin_agent_config("claude-code");
+        assert_eq!(config.args_template, vec!["{prompt}".to_string()]);
+
+        apply_model_override(&mut config, "claude-opus-5", "claude-code");
+
+        assert_eq!(
+            config.args_template,
+            vec!["--model", "claude-opus-5", "{prompt}"]
+        );
+    }
+
+    #[test]
+    fn apply_model_override_ignores_unsupported_framework() {
+        let mut config = builtin_agent_config("codex");
+        let original = config.args_template.clone();
+
+        apply_model_override(&mut config, "claude-opus-5", "codex");
+
+        assert_eq!(
+            config.args_template, original,
+            "codex is not confirmed to support --model -- the override must be \
+             dropped, not silently forwarded to a binary that doesn't understand it"
         );
     }
 
@@ -9839,6 +10376,7 @@ context_inject = "{mode_toml}"
             None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -9854,6 +10392,76 @@ context_inject = "{mode_toml}"
 
         // Settings should also be restored (removed since it didn't exist).
         assert!(!goals[0].workspace_path.join(SETTINGS_REL_PATH).exists());
+    }
+
+    /// CR-11: once a goal record carries an origin, a later `ta run
+    /// --goal-id` whose environment says something else (here the harmless
+    /// `cli`, so parallel tests reading TA_GOAL_ORIGIN are unaffected) must
+    /// not rewrite it. Before this fix the reuse path overwrote `cos` with
+    /// whatever TA_GOAL_ORIGIN held.
+    #[test]
+    fn reused_goal_keeps_recorded_origin_when_env_origin_differs() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "CoS goal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "triage".to_string(),
+                agent: "claude-code".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = store.list().unwrap()[0].clone();
+        goal.origin = Some("cos".to_string());
+        store.save(&goal).unwrap();
+        let goal_id = goal.goal_run_id.to_string();
+
+        let previous = std::env::var(ta_goal::origin::ORIGIN_ENV_VAR).ok();
+        std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, "cli");
+        let result = execute(
+            &config,
+            Some("CoS goal"),
+            "claude-code",
+            Some(project.path()),
+            "triage",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            None,
+            false,
+            false,
+            true,
+            Some(goal_id.as_str()), // reuse the existing goal
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        match previous {
+            Some(v) => std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, v),
+            None => std::env::remove_var(ta_goal::origin::ORIGIN_ENV_VAR),
+        }
+        result.unwrap();
+
+        let reloaded = store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(reloaded.origin.as_deref(), Some("cos"));
     }
 
     #[test]
@@ -9900,6 +10508,7 @@ context_inject = "{mode_toml}"
             None,                      // agent_id = None (v0.17.11.16)
             Some("brain-maintenance"), // workflow_tag
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -9948,6 +10557,7 @@ context_inject = "{mode_toml}"
             None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (omitted)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10014,6 +10624,7 @@ context_inject = "{mode_toml}"
             None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10079,6 +10690,7 @@ context_inject = "{mode_toml}"
             None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10168,6 +10780,7 @@ context_inject = "{mode_toml}"
             None,                       // agent_id = None (v0.17.11.16)
             None,                       // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10248,6 +10861,7 @@ context_inject = "{mode_toml}"
             None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None,  // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10318,6 +10932,7 @@ context_inject = "{mode_toml}"
             None,  // agent_id = None (v0.17.11.16)
             None,  // workflow_tag = None (v0.17.x cost-experiment framework)
             Some(&flags),
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -10334,6 +10949,10 @@ context_inject = "{mode_toml}"
     #[test]
     fn run_injects_context_for_agent() {
         // Verify that inject + restore roundtrip works for the agent path.
+        // Acquire HOME_ENV_LOCK: this test's inject_claude_settings call reads
+        // $HOME internally, so it must serialize against tests that
+        // temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
@@ -10693,6 +11312,9 @@ pre_launch:
 
     #[test]
     fn inject_and_restore_settings_roundtrip() {
+        // Acquire HOME_ENV_LOCK: inject_claude_settings reads $HOME internally,
+        // so it must serialize against tests that temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
 
         inject_claude_settings(staging.path(), None).unwrap();
@@ -10710,6 +11332,9 @@ pre_launch:
 
     #[test]
     fn inject_settings_preserves_existing() {
+        // Acquire HOME_ENV_LOCK: inject_claude_settings reads $HOME internally,
+        // so it must serialize against tests that temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         let claude_dir = staging.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -10750,6 +11375,9 @@ pre_launch:
 
     #[test]
     fn inject_settings_includes_forbidden_tools() {
+        // Acquire HOME_ENV_LOCK: inject_claude_settings reads $HOME internally,
+        // so it must serialize against tests that temporarily swap $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let staging = TempDir::new().unwrap();
         let source = TempDir::new().unwrap();
         std::fs::write(
@@ -10762,6 +11390,681 @@ pre_launch:
 
         let content = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
         assert!(content.contains("Bash(rm -rf /*)"));
+    }
+
+    #[test]
+    fn intersect_allowed_tools_keeps_only_the_overlap() {
+        let base = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let ceiling = vec!["B".to_string(), "C".to_string(), "D".to_string()];
+        let result = intersect_allowed_tools(&base, &ceiling);
+        assert_eq!(result, vec!["B".to_string(), "C".to_string()]);
+    }
+
+    // ── H7: a read-only (CoS) persona holds no mutating tool ─────────────
+
+    fn write_persona(project: &Path, name: &str, capabilities_toml: &str) {
+        let dir = project.join(".ta").join("personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.toml", name)),
+            format!(
+                "[persona]\nname = \"{name}\"\ndescription = \"test\"\n\
+                 system_prompt = \"You triage and dispatch.\"\n\n[capabilities]\n{caps}\n",
+                name = name,
+                caps = capabilities_toml
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Writes settings for `persona` through the real launch resolution
+    /// (`resolve_persona_tool_surface` + `inject_claude_settings_with_security`,
+    /// as `execute()` does) and returns (allow, deny).
+    fn launch_settings_for(persona: &ta_goal::PersonaConfig) -> (Vec<String>, Vec<String>) {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        // A global settings file that would widen the surface if merged.
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(*)", "mcp__ta__*"]}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let surface = resolve_persona_tool_surface(persona).unwrap();
+        let result = inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            &surface.extra_deny,
+            true,
+            Some(&surface.allowed),
+        );
+
+        if let Some(h) = original_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        result.unwrap();
+
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let strings = |key: &str| -> Vec<String> {
+            val["permissions"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        (strings("allow"), strings("deny"))
+    }
+
+    // ── CR-01: restricted launches are isolated from global settings ─────
+
+    /// The real operator global settings shape the red-team found on the
+    /// dev machine: `defaultMode: "auto"`, and allows that would widen any
+    /// restricted surface if merged.
+    const HOSTILE_GLOBAL_SETTINGS: &str = r#"{"permissions": {"defaultMode": "auto",
+        "allow": ["mcp__ta__*", "Read", "Write", "Edit", "Bash(*)"]},
+        "skipDangerousModePermissionPrompt": true}"#;
+
+    /// Writes staging settings with `HOME` pointing at a fake global
+    /// settings file, and returns the parsed settings JSON.
+    fn settings_with_hostile_global(
+        extra_deny: &[String],
+        persona_allowed: Option<&[String]>,
+    ) -> serde_json::Value {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude").join("settings.json"),
+            HOSTILE_GLOBAL_SETTINGS,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let result = inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            extra_deny,
+            true,
+            persona_allowed,
+        );
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result.unwrap();
+        let text = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn json_strings(val: &serde_json::Value, key: &str) -> Vec<String> {
+        val["permissions"][key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn claude_config(restricted: bool) -> AgentLaunchConfig {
+        let mut c = builtin_agent_config("claude-code");
+        c.restricted_tool_surface = restricted;
+        c
+    }
+
+    #[test]
+    fn restricted_persona_settings_are_dont_ask_and_deny_every_unlisted_ta_tool() {
+        let persona_tools: Vec<String> = [
+            "mcp__ta__ta_fs_read",
+            "mcp__ta__ta_wiki_search",
+            "mcp__ta__ta_whiteboard_outcome_send",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let val = settings_with_hostile_global(&[], Some(&persona_tools));
+        let allow = json_strings(&val, "allow");
+        let deny = json_strings(&val, "deny");
+
+        assert_eq!(allow, persona_tools, "no global allow merged in");
+        assert_eq!(val["permissions"]["defaultMode"], "dontAsk");
+        assert!(val.get("skipDangerousModePermissionPrompt").is_none());
+        for (name, _) in ta_goal::tool_surface::MCP_TOOL_EFFECTS {
+            let p = format!("mcp__ta__{}", name);
+            if persona_tools.contains(&p) {
+                assert!(!deny.contains(&p), "listed tool {} denied", p);
+            } else {
+                assert!(deny.contains(&p), "unlisted TA tool {} not denied", p);
+            }
+        }
+        for native in ["Read(*)", "Write(*)", "Edit(*)", "Bash(*)"] {
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+    }
+
+    #[test]
+    fn unrestricted_launch_keeps_inheriting_global_mode_and_allows() {
+        let val = settings_with_hostile_global(&[], None);
+        assert_eq!(val["permissions"]["defaultMode"], "auto");
+        assert!(json_strings(&val, "allow").contains(&"mcp__ta__*".to_string()));
+        assert!(!json_strings(&val, "deny")
+            .iter()
+            .any(|d| d.starts_with("mcp__ta__")));
+    }
+
+    #[test]
+    fn restricted_claude_launch_argv_isolates_settings_and_sets_dont_ask() {
+        let project = TempDir::new().unwrap();
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let env = std::collections::HashMap::new();
+
+        let args =
+            build_runtime_agent_args(&claude_config(true), &staging, "do it", true, &env).unwrap();
+        assert_eq!(args[0], "do it");
+        let tail: Vec<&str> = args[args.len() - 4..].iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            tail,
+            ["--setting-sources", "local", "--permission-mode", "dontAsk"]
+        );
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+
+        let plain =
+            build_runtime_agent_args(&claude_config(false), &staging, "do it", true, &env).unwrap();
+        assert!(!plain.contains(&"--setting-sources".to_string()));
+        assert!(!plain.contains(&"--permission-mode".to_string()));
+    }
+
+    #[test]
+    fn restricted_flags_are_only_added_for_claude_code() {
+        let mut codex = builtin_agent_config("codex");
+        codex.restricted_tool_surface = true;
+        assert!(restricted_launch_flags(&codex).is_empty());
+        assert_eq!(
+            restricted_launch_flags(&claude_config(true)),
+            RESTRICTED_LAUNCH_FLAGS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(restricted_launch_flags(&claude_config(false)).is_empty());
+    }
+
+    /// The whole CR-01 chain for a chat-mode CoS persona, through the same
+    /// functions `execute()` calls: chat plan, chat settings lists, settings
+    /// injection under a hostile global settings file, and the final argv.
+    #[test]
+    fn chat_mode_cos_persona_chain_has_no_global_allow_dont_ask_and_full_ta_denies() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "chief-of-staff",
+            "chat_mode = true\norigin = \"cos\"\nallowed_tools = [\"mcp__ta__ta_fs_read\", \
+             \"mcp__ta__ta_wiki_search\", \"mcp__ta__ta_whiteboard_outcome_send\", \
+             \"mcp__ta__ta_wiki_update\", \"Bash(*)\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        assert_eq!(persona.capabilities.origin.as_deref(), Some("cos"));
+
+        let plan = super::super::chat_launch::plan_chat_mode_launch(
+            &super::super::chat_launch::ChatModeInputs {
+                cli_flag: true,
+                persona_name: Some("chief-of-staff"),
+                persona_chat_mode: persona.capabilities.chat_mode,
+                persona_allowed_tools: &persona.capabilities.allowed_tools,
+                agent: "claude-code",
+                agent_framework_name: Some("claude-code"),
+                injects_settings: true,
+                macro_goal: false,
+                uses_pty: false,
+            },
+        )
+        .unwrap()
+        .expect("chat mode planned");
+        let (allow_in, deny_in) =
+            super::super::chat_launch::chat_mode_settings_lists(&plan, None, &[]).unwrap();
+        let val = settings_with_hostile_global(&deny_in, Some(&allow_in));
+        let allow = json_strings(&val, "allow");
+        let deny = json_strings(&val, "deny");
+
+        // No global allow merged; mutating and native tools never allowed.
+        for leaked in ["mcp__ta__*", "Read", "Write", "Edit", "Bash(*)"] {
+            assert!(
+                !allow.iter().any(|a| a == leaked),
+                "{} leaked into allow",
+                leaked
+            );
+        }
+        assert!(!allow.contains(&"mcp__ta__ta_wiki_update".to_string()));
+        assert_eq!(val["permissions"]["defaultMode"], "dontAsk");
+        // Every registered TA tool not in the final allow-list is denied.
+        for (name, _) in ta_goal::tool_surface::MCP_TOOL_EFFECTS {
+            let p = format!("mcp__ta__{}", name);
+            assert!(
+                allow.contains(&p) != deny.contains(&p),
+                "{} must be exactly one of allowed/denied (allowed={}, denied={})",
+                p,
+                allow.contains(&p),
+                deny.contains(&p)
+            );
+        }
+        assert!(deny.contains(&"mcp__ta__ta_wiki_update".to_string()));
+        for native in ["Bash", "Read", "Write", "Edit"] {
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+
+        // The argv the agent is spawned with.
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let mut env = std::collections::HashMap::new();
+        for (k, v) in super::super::chat_launch::chat_mode_agent_env(&plan, &staging) {
+            env.insert(k, v);
+        }
+        let args =
+            build_runtime_agent_args(&claude_config(true), &staging, "triage", true, &env).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--setting-sources local"), "{}", joined);
+        assert!(joined.contains("--permission-mode dontAsk"), "{}", joined);
+        assert!(joined.contains("--strict-mcp-config"), "{}", joined);
+        assert!(joined.contains("mcp-agent-chat.json"), "{}", joined);
+    }
+
+    /// Every TA MCP tool a CoS must never hold, by capability.
+    const H7_MUTATING_DENYLIST: &[&str] = &[
+        "ta_fs_write",
+        "ta_wiki_create",
+        "ta_wiki_update",
+        "ta_external_action",
+        "ta_propose_task_update",
+        "ta_draft",
+        "ta_pr_build",
+        "ta_goal_start",
+        "ta_goal_inner",
+        "ta_plan",
+        "ta_workflow",
+        "ta_context",
+        "ta_whiteboard_presence_register",
+        "ta_whiteboard_handoff_send",
+        "ta_whiteboard_handoff_receive",
+        "ta_whiteboard_task_claim",
+        "ta_whiteboard_task_complete",
+        "ta_human_verify",
+    ];
+
+    #[test]
+    fn h7_read_only_persona_launches_with_only_read_only_ta_tools_and_denies_mutating_ones() {
+        let project = TempDir::new().unwrap();
+        write_persona(project.path(), "chief-of-staff", "read_only = true");
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        let (allow, deny) = launch_settings_for(&persona);
+
+        assert!(!allow.is_empty());
+        for entry in &allow {
+            assert!(
+                ta_goal::tool_surface::read_only_violation(entry).is_none(),
+                "read-only persona was granted '{}'",
+                entry
+            );
+        }
+        for native in [
+            "Bash(*)",
+            "Read(*)",
+            "Write(*)",
+            "Edit(*)",
+            "MultiEdit(*)",
+            "Task(*)",
+        ] {
+            assert!(!allow.iter().any(|a| a == native), "{} allowed", native);
+            assert!(deny.iter().any(|d| d == native), "{} not denied", native);
+        }
+        assert!(!allow.iter().any(|a| a == "mcp__ta__*"));
+        for tool in H7_MUTATING_DENYLIST {
+            let pattern = format!("mcp__ta__{}", tool);
+            assert!(!allow.contains(&pattern), "{} allowed", pattern);
+            assert!(deny.contains(&pattern), "{} not explicitly denied", pattern);
+        }
+        assert!(deny.contains(&"mcp__ta__ta_propose_*".to_string()));
+        // Read-only by classification (they change no project state), so a
+        // read-only persona may hold them and they are not in the deny list.
+        for tool in ["ta_ask_human", "ta_whiteboard_outcome_send"] {
+            assert!(
+                ta_goal::tool_surface::read_only_violation(&format!("mcp__ta__{tool}")).is_none(),
+                "{tool} should be allowed for a read-only persona"
+            );
+        }
+    }
+
+    #[test]
+    fn h7_read_only_persona_with_a_mutating_or_broad_declaration_refuses_to_launch() {
+        for bad in [
+            r#"allowed_tools = ["mcp__ta__ta_fs_read", "Bash(*)"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_fs_write"]"#,
+            r#"allowed_tools = ["mcp__ta__*"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_whiteboard_*"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_wiki_update"]"#,
+            r#"allowed_tools = ["mcp__ta__ta_propose_task_update"]"#,
+            r#"allowed_tools = ["Read(*)"]"#,
+        ] {
+            let project = TempDir::new().unwrap();
+            write_persona(
+                project.path(),
+                "chief-of-staff",
+                &format!("read_only = true\n{}", bad),
+            );
+            let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+            let err = resolve_persona_tool_surface(&persona).expect_err(bad);
+            assert!(err.to_string().contains("read_only = true"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn h7_read_only_persona_may_narrow_but_keeps_explicit_mutating_denies() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "chief-of-staff",
+            "read_only = true\nallowed_tools = [\"mcp__ta__ta_fs_read\", \"mcp__ta__ta_wiki_search\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "chief-of-staff").unwrap();
+        let (allow, deny) = launch_settings_for(&persona);
+        assert_eq!(
+            allow,
+            vec![
+                "mcp__ta__ta_fs_read".to_string(),
+                "mcp__ta__ta_wiki_search".to_string()
+            ]
+        );
+        assert!(deny.contains(&"mcp__ta__ta_fs_write".to_string()));
+    }
+
+    #[test]
+    fn h7_non_read_only_persona_surface_is_unchanged() {
+        let project = TempDir::new().unwrap();
+        write_persona(
+            project.path(),
+            "implementer",
+            "allowed_tools = [\"Bash(*)\", \"mcp__ta__ta_fs_write\"]",
+        );
+        let persona = ta_goal::PersonaConfig::load(project.path(), "implementer").unwrap();
+        let surface = resolve_persona_tool_surface(&persona).unwrap();
+        assert_eq!(surface.allowed, vec!["Bash(*)", "mcp__ta__ta_fs_write"]);
+        assert!(surface.extra_deny.is_empty());
+    }
+
+    #[test]
+    fn persona_allowed_tools_becomes_the_exact_allow_list_with_no_global_merge() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        // Global settings.json that, if merged, would leak Bash(*) into a
+        // narrow persona's allow-list: this is exactly the bug this task
+        // fixes. Point $HOME at an isolated temp dir so this test never
+        // reads the real developer's global settings.
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(*)"]}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let persona_tools = vec!["mcp__ta__ta_fs_read".to_string()];
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&persona_tools))
+            .unwrap();
+
+        if let Some(h) = original_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let allow = val["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.iter().any(|v| v == "mcp__ta__ta_fs_read"));
+        // The `allow` list specifically must not be widened by the user's
+        // own global settings.json. (Finding 5's defense-in-depth separately
+        // adds Bash(*) to `deny` here, which is correct and expected -- this
+        // assertion is scoped to `allow` on purpose.)
+        assert!(
+            !allow.iter().any(|v| v == "Bash(*)"),
+            "persona's narrow allow-list must not be widened by the user's own global \
+             settings.json, got: {:?}",
+            allow
+        );
+    }
+
+    #[test]
+    fn empty_persona_allowed_tools_preserves_existing_default_behavior() {
+        // Acquire HOME_ENV_LOCK: this call reads $HOME internally (the
+        // `None` branch of inject_claude_settings_with_security),
+        // so it must serialize against persona_allowed_tools_becomes_the_exact_allow_list_with_no_global_merge,
+        // which temporarily swaps $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging = TempDir::new().unwrap();
+        inject_claude_settings_with_security(staging.path(), None, &[], true, None).unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        // Unchanged from today: the broad default list is present.
+        assert!(settings.contains("Bash(*)"));
+        assert!(settings.contains("Read(*)"));
+    }
+
+    #[test]
+    fn extra_deny_applies_regardless_of_which_allow_list_base_was_used() {
+        // Acquire HOME_ENV_LOCK: the first call below (`None` override)
+        // reads $HOME internally, so it must serialize against
+        // persona_allowed_tools_becomes_the_exact_allow_list_with_no_global_merge,
+        // which temporarily swaps $HOME.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let staging_default = TempDir::new().unwrap();
+        inject_claude_settings_with_security(
+            staging_default.path(),
+            None,
+            &["Bash(*rm -rf*)".to_string()],
+            true,
+            None,
+        )
+        .unwrap();
+        let settings_default =
+            std::fs::read_to_string(staging_default.path().join(SETTINGS_REL_PATH)).unwrap();
+        assert!(settings_default.contains("Bash(*rm -rf*)"));
+
+        let staging_persona = TempDir::new().unwrap();
+        let persona_tools = vec!["mcp__ta__ta_fs_read".to_string()];
+        inject_claude_settings_with_security(
+            staging_persona.path(),
+            None,
+            &["Bash(*rm -rf*)".to_string()],
+            true,
+            Some(&persona_tools),
+        )
+        .unwrap();
+        let settings_persona =
+            std::fs::read_to_string(staging_persona.path().join(SETTINGS_REL_PATH)).unwrap();
+        assert!(settings_persona.contains("Bash(*rm -rf*)"));
+    }
+
+    #[test]
+    fn empty_intersection_from_persona_and_ceiling_does_not_fall_back_to_broad_default() {
+        // Finding 1 (final whole-branch review): the blocking bug. When a
+        // persona's declared list and the posture's max_allowed_tools
+        // ceiling have zero overlap, the resolved list the caller passes in
+        // is empty -- this must NOT be treated as "no override" and fall
+        // back to the broad DEFAULT_ALLOWED_TOOLS plus the operator's own
+        // global ~/.claude/settings.json merge.
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+
+        let staging = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        // Global settings.json that, if merged, would leak Bash(*) in --
+        // exactly the fail-open this test guards against.
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(*)"]}}"#,
+        )
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        // Simulate the run.rs call site: a persona declares a narrow list,
+        // a max_allowed_tools ceiling has zero overlap with it.
+        let persona_declared = vec!["mcp__ta__ta_fs_read".to_string()];
+        let ceiling = vec!["mcp__ta__ta_fs_write".to_string()];
+        let resolved = intersect_allowed_tools(&persona_declared, &ceiling);
+        assert!(
+            resolved.is_empty(),
+            "test setup: ceiling must have zero overlap with the persona declaration"
+        );
+
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&resolved))
+            .unwrap();
+
+        if let Some(h) = original_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let allow = val["permissions"]["allow"].as_array().unwrap();
+        // The `allow` list specifically must be genuinely empty, not
+        // repopulated with the broad default or the operator's global
+        // Bash(*). (Finding 5's defense-in-depth separately adds Bash(*)
+        // etc. to `deny` here, which is correct and expected -- this
+        // assertion is scoped to `allow` on purpose.)
+        assert!(
+            allow.is_empty(),
+            "allow-list should be genuinely empty when the ceiling zeroes out the \
+             persona's declared tools, not repopulated with the broad default or the \
+             operator's own global settings.json, got: {:?}",
+            allow
+        );
+    }
+
+    #[test]
+    fn persona_restriction_adds_explicit_deny_for_tools_outside_its_declared_list() {
+        // Finding 5 (final whole-branch review, defense-in-depth): when an
+        // explicit persona restriction is active, tools present in the broad
+        // default but absent from the persona's declaration are added to
+        // `deny` too, so the restriction holds independently of whatever the
+        // operator's own global Claude Code settings might otherwise grant
+        // (`permissions.deny` is documented to win at every layer; `allow`
+        // is only a pre-approval list).
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec!["mcp__ta__ta_fs_read".to_string()];
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&persona_tools))
+            .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            deny.iter().any(|v| v == "Bash(*)"),
+            "deny list should contain Bash(*) since the persona only declared \
+             mcp__ta__ta_fs_read, got: {:?}",
+            deny
+        );
+    }
+
+    #[test]
+    fn persona_declaring_a_specific_mcp_tool_is_not_contradicted_by_its_own_server_wildcard_deny() {
+        // Regression test (final whole-branch review, round 2): the deny-
+        // complement above must compare by tool identity, not exact pattern
+        // string. DEFAULT_ALLOWED_TOOLS contains "mcp__ta__*" as one entry;
+        // a persona declaring the specific tool "mcp__ta__ta_fs_read" shares
+        // that entry's identity ("mcp__ta__"), so "mcp__ta__*" must NOT be
+        // added to deny, or the persona's own declared tool would be denied
+        // right back out from under it.
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec!["mcp__ta__ta_fs_read".to_string()];
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&persona_tools))
+            .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            !deny.iter().any(|v| v == "mcp__ta__*"),
+            "deny list must not contain mcp__ta__* when the persona declared the specific \
+             tool mcp__ta__ta_fs_read, which shares that wildcard's identity: it would deny \
+             the persona's own declared tool. Got: {:?}",
+            deny
+        );
+        let allow = val["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.iter().any(|v| v == "mcp__ta__ta_fs_read"));
+    }
+
+    #[test]
+    fn persona_declaring_a_narrowed_native_pattern_is_not_contradicted_by_the_broad_default_deny() {
+        // Same identity-comparison regression, for a native tool pattern
+        // instead of an MCP one: a persona declaring "Bash(git *)" shares
+        // its identity ("Bash") with DEFAULT_ALLOWED_TOOLS' "Bash(*)" entry,
+        // so "Bash(*)" must not be added to deny, or the persona's own
+        // narrowed Bash access would be denied right back out.
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec!["Bash(git *)".to_string()];
+        inject_claude_settings_with_security(staging.path(), None, &[], true, Some(&persona_tools))
+            .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            !deny.iter().any(|v| v == "Bash(*)"),
+            "deny list must not contain Bash(*) when the persona declared the narrowed \
+             pattern Bash(git *), which shares that entry's identity: it would deny the \
+             persona's own declared access. Got: {:?}",
+            deny
+        );
+    }
+
+    #[test]
+    fn posture_level_web_search_prohibition_is_not_defeatable_by_a_persona_declaration() {
+        // Regression test: identity-based matching in the deny-complement
+        // means a persona declaring its own "WebSearch(...)" entry shares
+        // identity with DEFAULT_ALLOWED_TOOLS' "WebSearch(*)", so the
+        // complement alone would skip denying it -- even when the security
+        // posture has turned web search off entirely (web_search_enabled =
+        // false). A posture-level prohibition must win regardless of what
+        // any persona declared, so WebSearch(*) must still end up denied.
+        let staging = TempDir::new().unwrap();
+        let persona_tools = vec![
+            "WebSearch(*)".to_string(),
+            "mcp__ta__ta_fs_read".to_string(),
+        ];
+        inject_claude_settings_with_security(
+            staging.path(),
+            None,
+            &[],
+            false, // web_search_enabled = false: posture has turned it off
+            Some(&persona_tools),
+        )
+        .unwrap();
+        let settings = std::fs::read_to_string(staging.path().join(SETTINGS_REL_PATH)).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let allow = val["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            !allow.iter().any(|v| v == "WebSearch(*)"),
+            "WebSearch(*) must not be in allow when web_search_enabled is false, got: {:?}",
+            allow
+        );
+        let deny = val["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            deny.iter().any(|v| v == "WebSearch(*)"),
+            "WebSearch(*) must be in deny when web_search_enabled is false, even though the \
+             persona declared it, since a posture-level prohibition must win. Got: {:?}",
+            deny
+        );
     }
 
     #[test]
@@ -12396,6 +13699,7 @@ plan_pending_window = 7
             None, // agent_id = None (v0.17.11.16)
             None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 
@@ -12435,6 +13739,7 @@ plan_pending_window = 7
             None, // agent_id = None (v0.17.11.16)
             None, // workflow_tag = None (v0.17.x cost-experiment framework)
             None, // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+            None, // model override = None (no explicit --model request)
         )
         .unwrap();
 

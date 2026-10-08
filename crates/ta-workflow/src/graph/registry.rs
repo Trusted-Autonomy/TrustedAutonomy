@@ -85,6 +85,30 @@ impl NodeRegistry {
         self.reviewers.insert(kind.into(), Box::new(factory));
     }
 
+    /// Registers `"decision"` → `DecisionReviewerNode`, backed by `backend`.
+    /// Deliberately NOT part of `with_builtins()` -- unlike `advisor_confidence`/
+    /// `policy`, this needs a live `ta_ask::DecisionBackend` instance (typically
+    /// a `DeciderBackend` managing a real subprocess), which a caller must
+    /// construct and own; `ta-workflow` itself has no opinion on which backend
+    /// or how it's configured. Call this explicitly, after `with_builtins()`,
+    /// once a backend is available. Takes an `Arc` (not `Box`) because the
+    /// underlying `Fn` factory closure may be invoked more than once (once per
+    /// graph run resolving this node kind) and `DecisionBackend` isn't `Clone`
+    /// (a `DeciderBackend` owns an unclonable child-process handle) -- `Arc`
+    /// lets each invocation cheaply clone a shared reference to the same
+    /// backend instance instead.
+    pub fn register_decision_reviewer(
+        &mut self,
+        backend: std::sync::Arc<dyn ta_ask::DecisionBackend>,
+    ) {
+        self.register_reviewer("decision", move |_def| {
+            Ok(
+                Box::new(super::nodes::DecisionReviewerNode::new(backend.clone()))
+                    as Box<dyn ReviewerNode>,
+            )
+        });
+    }
+
     pub fn register_decision(
         &mut self,
         kind: impl Into<String>,
@@ -237,5 +261,42 @@ mod tests {
             params: Default::default(),
         };
         assert!(registry.build_action(&def).is_ok());
+    }
+
+    #[test]
+    fn register_decision_reviewer_adds_the_decision_kind() {
+        struct AlwaysYes;
+        impl ta_ask::DecisionBackend for AlwaysYes {
+            fn decide(
+                &self,
+                _req: &ta_ask::DecisionRequest,
+            ) -> Result<ta_ask::DecisionResponse, ta_ask::DecisionError> {
+                Ok(ta_ask::DecisionResponse {
+                    result: ta_ask::DecisionResult::Bool(true),
+                    confidence: 1.0,
+                    model_id: "always-yes".to_string(),
+                    latency_ms: 0,
+                })
+            }
+        }
+
+        let mut registry = NodeRegistry::with_builtins();
+        registry.register_decision_reviewer(std::sync::Arc::new(AlwaysYes));
+
+        let reviewer_def = NodeDef {
+            id: "decision".into(),
+            kind: "decision".into(),
+            params: Default::default(),
+        };
+        let reviewer = registry
+            .build_reviewer(&reviewer_def)
+            .expect("factory should succeed");
+
+        let ctx = crate::graph::types::GraphContext::new("/tmp", "run-1");
+        let vote = reviewer
+            .review(&crate::graph::types::ReviewInput::default(), &ctx)
+            .unwrap();
+        assert_eq!(vote.role, "decision");
+        assert_eq!(vote.score, 1.0);
     }
 }

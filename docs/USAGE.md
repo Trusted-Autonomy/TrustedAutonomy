@@ -252,8 +252,13 @@ Never speculate without data.
 agent = "claude-opus-4-8"   # optional — persona-level agent binding, see below
 
 [capabilities]
-allowed_tools   = ["read", "bash"]   # empty = no restriction
-forbidden_tools = ["write"]          # agent may not use these tools
+# Entries use Claude Code's own permission-pattern syntax -- the same
+# strings used in .claude/settings.json -- not bare tool names. This
+# example narrows the agent to read-only TA filesystem access plus diffing;
+# empty = no restriction (falls back to the security posture's default
+# allow-list).
+allowed_tools   = ["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_diff"]
+forbidden_tools = ["Write(*)", "Bash(*rm -rf*)"]   # agent may not use these tools
 
 [style]
 output_format       = "markdown"
@@ -293,6 +298,37 @@ ta run "Analyze Q3 financials" --persona financial-analyst
 
 The persona's system prompt and tool restrictions are appended to CLAUDE.md in the staging workspace, after the plan context injection.
 
+### Read-Only Personas (Chief-of-Staff)
+
+A persona that must never change anything (for example a Chief-of-Staff that answers questions, triages input, and dispatches work to other personas) declares `read_only = true`:
+
+```toml
+[capabilities]
+read_only = true
+# Optional: narrow further. Omit to get the built-in read-only set
+# (ta_fs_read/diff/list, wiki search/get/types, whiteboard presence list,
+# goal/plan/draft status).
+allowed_tools = ["mcp__ta__ta_fs_read", "mcp__ta__ta_wiki_search"]
+```
+
+For a read-only persona, `ta run --persona <name>`:
+
+- gives the agent only TA MCP tools classified read-only, never native tools such as `Bash`, `Read`, or `Write`, and never the broad default allow-list;
+- explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
+- refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
+
+### Goal Origin and Auto-Approve
+
+`ta run --origin <name>` records which component asked for a goal (for example `--origin cos` when the Chief-of-Staff dispatched it). `TA_GOAL_ORIGIN` is used when the flag is absent. Names are 1-32 characters of lowercase letters, digits, `-` and `_`.
+
+Goals with origin `cos` or `chat` (chat-mode sessions are stamped `chat` automatically) are never auto-approved, by any path: policy auto-approve, constitution `approve` rules, workflow-graph decisions, advisor `auto` security, and `ta draft apply`'s "apply implies approval". Their drafts always wait for a human:
+
+```bash
+ta draft view <id>      # first line: auto-approve refused: origin=cos (...)
+ta draft approve <id>   # explicit human approval
+ta draft apply <id>
+```
+
 ### Persona-Level Agent Binding
 
 A persona can also pin which agent it runs on, so `--persona <name>` alone is enough to select both the identity and the runtime:
@@ -303,6 +339,75 @@ ta persona set-agent financial-analyst auto   # hand the choice to the superviso
 ```
 
 This is the second-highest tier in the full agent resolution order — see [Full agent and model switching](#full-agent-and-model-switching-workload-workflow-and-persona-tiers) for the complete hierarchy and `"auto"` behavior.
+
+### Read-Only Chat-Mode Personas
+
+Some personas (for example a chief-of-staff that answers questions, triages input and reviews other agents' work) should never be able to change anything. Mark them `chat_mode = true`:
+
+```toml
+# .ta/personas/chief-of-staff.toml
+[persona]
+name = "chief-of-staff"
+description = "Answers questions and triages work; never writes"
+
+[capabilities]
+chat_mode = true
+# Optional. Narrows the chat-mode profile further; leave empty for the full profile.
+allowed_tools = ["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_diff", "mcp__ta__ta_wiki_search", "mcp__ta__ta_wiki_get", "mcp__ta__ta_whiteboard_*"]
+```
+
+Or turn it on for a single launch without editing the persona:
+
+```bash
+ta run "What changed in the auth module?" --headless --chat-mode --persona chief-of-staff
+```
+
+What a chat-mode launch gets:
+
+- **Capability manifest**: the compiled chat manifest. It can read anywhere in the workspace (secret files such as `.env` and keys stay blocked), write only under `.ta/chat-scratch/` (discarded with the staging copy), and has no git, email or other external-action grants.
+- **A chat-locked TA MCP server**: the agent's `ta serve` process is started from `.ta/mcp-agent-chat.json` and locked to one chat session. Only chat-safe tools are registered (workspace reads, scratch writes, status queries, wiki reads, community reads, whiteboard presence and handoff). Goal, draft, plan, wiki-write, task and external-action tools do not exist on that server, and the `ta_fs_*` tools reject any `goal_run_id` other than the session's own. The session id is written into the agent's CLAUDE.md and the server's instructions.
+- **Tool surface = allowed_tools intersected with the chat-mode profile**, never the union. Mutating entries (for example `Bash(*)`, `mcp__ta__ta_goal_start`, `mcp__ta__ta_wiki_update`) are stripped and reported as a `[warn]` line plus a `tracing` warning. A wildcard such as `mcp__ta__*` is narrowed to the chat-safe tools it covers. A security-posture `max_allowed_tools` ceiling, when set, narrows the result again.
+- **No native-tool bypass**: `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task` and `Skill` are denied in the injected `.claude/settings.local.json`.
+
+`ta run` refuses chat mode, with an explanation of what to change, when:
+
+- the agent framework is not `claude-code` (TA cannot restrict its native tools),
+- the launch is `--macro`, interactive PTY (`--interactive` without `--headless`), or a multi-goal workflow (`--phases`, `--sub-goals`),
+- none of the persona's `allowed_tools` are chat-safe, or the posture ceiling leaves no tools,
+- the persona or agent name contains the reserved `:chat:` marker.
+
+The daemon launches team personas with `ta run --headless --team <team> --persona <persona>`. When the persona has `chat_mode = true`, the daemon also passes `--chat-mode` and `--origin <origin>` itself. The origin is the persona's `origin` (for example `origin = "cos"`), the role's `origin` in `.ta/team.toml`, or `chat` when neither is set:
+
+```toml
+# .ta/personas/chief-of-staff.toml
+[capabilities]
+chat_mode = true
+origin = "cos"
+```
+
+```toml
+# .ta/team.toml: mark the role itself, so it can never launch outside chat mode
+[[members]]
+role = "chief-of-staff"
+agent_id = "claude-opus-5"
+security = "auto"
+persona = "chief-of-staff"
+origin = "cos"
+```
+
+A role whose origin is `cos` or `chat` always launches with `--chat-mode`, even if its persona forgot `chat_mode = true`. The daemon refuses to launch a role, and logs why, when its persona file cannot be read, when the persona and the role name different origins, or when a chat-mode launch would carry an origin that can be auto-approved.
+
+### Restricted Launches Ignore Your Global Claude Code Settings
+
+Any launch with a tool restriction (a persona `allowed_tools` list, `read_only = true`, chat mode, or a `max_allowed_tools` ceiling) runs Claude Code with:
+
+- `--setting-sources local`: only the `.claude/settings.local.json` TA writes into staging is loaded. Your `~/.claude/settings.json` and the project's `.claude/settings.json` are not, so their allow rules (for example `mcp__ta__*`, `Write`) and `defaultMode` cannot widen the persona's tools.
+- `--permission-mode dontAsk` (also written as `defaultMode` in the staging settings): a tool that is not on the list is refused instead of being approved or prompted for.
+- an explicit deny for every TA MCP tool not on the list.
+
+Launches with no restriction are unchanged: they still pick up your global allow rules and `defaultMode`. Because user settings are skipped for restricted launches, anything those launches need from `~/.claude/settings.json` (for example an `apiKeyHelper`) must come from the environment instead, such as `ANTHROPIC_API_KEY` or your normal `claude` login.
+
+A goal's origin is fixed when the goal is created. A later `ta run --goal-id <id>` with a different `--origin` or `TA_GOAL_ORIGIN` keeps the recorded origin and prints a warning.
 
 ---
 
@@ -1609,6 +1714,21 @@ ta run "Fix the bug" --agent codex
 ta run "Write tests" --agent claude-flow
 ```
 
+#### Overriding the model
+
+`--agent` selects WHICH framework/binary runs; `--model` selects WHICH model that
+framework uses once launched -- two independent questions. `--model` is forwarded
+to the underlying agent CLI (currently supported for Claude Code only; any other
+framework logs a warning and ignores it rather than passing an unsupported flag):
+
+```bash
+ta run "Fix the bug" --model claude-opus-5
+```
+
+This is also what `.ta/team.toml`'s `agent_id`/`model_tier` fields resolve to for
+team-session and wake-on-demand role launches -- they name a model, not a
+framework, and are forwarded via `--model` under the hood.
+
 #### List available frameworks
 
 ```bash
@@ -2895,6 +3015,30 @@ By default TA tracks plan state entirely in local files (PLAN.md + `.ta/goals/`)
 Once enabled, every `ta plan claim`/status transition and every goal-run state change is written to PLAN.md/`.ta/goals/` first (authoritative, always succeeds locally) and then best-effort pushed to Wayfinder as a task — a PLAN.md phase becomes a synthetic "gate" task (`ta-phase-gate:<phase_id>`, dependency-chained to mirror `Depends on` declarations), and a goal run becomes a real task (`ta-goal:<goal_id>`) wired as a dependent of its phase's gate. If Wayfinder is unreachable, the write stays queued locally and retries automatically on the next sync poll — it never blocks TA's own execution.
 
 If a human changes a synced task's status directly in the Wayfinder UI, TA logs it as an override (`tracing::warn!`) and keeps its own local value authoritative on the next push — Wayfinder sync is one-directional for status (TA → Wayfinder), not a live two-way editor.
+
+#### Proposing Wayfinder Task Changes in a Draft
+
+Agents never change a Wayfinder task directly. Instead, a worker proposes the change with one of the `ta_propose_task_*` MCP tools, and the proposal is reviewed as part of that goal's draft, next to the code it describes. Nothing reaches Wayfinder until the draft is approved and applied.
+
+| Tool | What it proposes | Applied as |
+|---|---|---|
+| `ta_propose_task_update` | New title and/or description | `PATCH tasks/:id/content` |
+| `ta_propose_task_create` | A new task (`title`, `verb` required; `description`, `external_id`, `assignee_id` optional) | `POST tasks` (upsert by `external_id`) |
+| `ta_propose_task_reassign` | A new assignee (`assignee_id` is a roster/team-role id, or `null` to clear) | `PATCH tasks/:id/assignee` |
+| `ta_propose_task_needs_revision` | The delivered work is wrong and must be redone | status `open` |
+| `ta_propose_task_on_hold` | The task is blocked (`hold_reason` required; optional `blocking_task` creates a precursor task the held task depends on) | status `on_hold` + `hold_reason` |
+| `ta_propose_task_complete` | The task is done | status `done` |
+
+Needs-revision and on-hold are deliberately different: needs-revision puts the task straight back in the work queue, on-hold marks it blocked.
+
+To review and apply:
+
+```bash
+ta draft view <draft-id>     # proposals appear under pending actions, with a one-line summary each
+ta draft apply <draft-id>    # applies the files, then sends each approved proposal to Wayfinder
+```
+
+On apply, TA prints one `[applied]` or `[failed]` line per proposal. A failed proposal never blocks the others or the file changes; fix the cause and re-run `ta draft apply`. Re-applying is safe: replayed proposals are recorded in `.ta/wayfinder-task-replay.log` and skipped next time, and created tasks always carry an `external_id` (derived from the goal and proposal ids when the agent did not supply one), so a task is never created twice. A project without `[plan] backend = "wayfinder"` simply skips the proposals with a log line. The Wayfinder service account needs only `member` role for these calls.
 
 #### Plan Lint
 
@@ -7011,6 +7155,8 @@ Use `--validate-version` to make version mismatches fail fast with a non-zero ex
 ```bash
 ta draft apply <draft-id> --validate-version
 ```
+
+**Workspace-only Cargo projects are exempt.** A root `Cargo.toml` that is a pure `[workspace]` manifest with no `[package]` section (every member crate versions itself independently), or one using `[package] version.workspace = true`, has no single top-level `version = "..."` line for TA to read or patch. Apply treats this the same as a project with no `Cargo.toml` at all: nothing to validate, nothing blocks.
 
 This exits non-zero if `Cargo.toml` doesn't match the phase semver after apply. Combine with `--phase` when the goal was not started with a linked phase:
 
@@ -16170,9 +16316,14 @@ failures within 5 minutes, the session is marked `suspended` and the supervisor 
 attempting new goal-runs until you clear it:
 
 ```bash
-# write a restart-signal the same way `ta connector restart` does for connectors
-touch .ta/team-sessions/trading-desk/restart-signal
+ta team-session restart trading-desk
 ```
+
+`restart` and `resume` clear different statuses and are not interchangeable:
+`resume` only clears `paused` (a human-initiated pause); it has no effect on a
+`suspended` session (reached via the backoff/crash-recovery path above) since the
+supervisor checks a distinct signal for each status. Use `restart` for `suspended`,
+`resume` for `paused`.
 
 **Context carry-forward**: each completed role's stdout summary is appended to the
 session's findings list and rendered as markdown context

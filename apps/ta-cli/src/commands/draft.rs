@@ -3890,6 +3890,29 @@ impl DiffProvider for ChangeSetDiffProvider {
     }
 }
 
+/// Origin (`GoalRun::origin`, H9) of the goal that produced a draft, looked
+/// up from the goal store by the draft's `goal.goal_id`. `None` when the goal
+/// record is missing, unparsable, or has no origin.
+pub(crate) fn goal_origin_for_draft(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+    let goal_uuid = Uuid::parse_str(goal_id).ok()?;
+    let store = GoalRunStore::new(&config.goals_dir).ok()?;
+    store.get(goal_uuid).ok().flatten()?.origin
+}
+
+/// H9: when the draft's goal came from an origin that is never
+/// auto-approved, the refusal line `ta draft view`/`ta draft apply` print.
+pub(crate) fn auto_approve_refusal_for_draft(
+    config: &GatewayConfig,
+    goal_id: &str,
+) -> Option<String> {
+    let origin = goal_origin_for_draft(config, goal_id)?;
+    if ta_goal::origin::origin_blocks_auto_approve(Some(&origin)) {
+        Some(ta_goal::origin::auto_approve_refusal(&origin))
+    } else {
+        None
+    }
+}
+
 fn view_package_json(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
@@ -3912,6 +3935,13 @@ fn view_package(
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
+
+    // H9: say up front when this draft can never be auto-approved because
+    // of where its goal came from.
+    if let Some(refusal) = auto_approve_refusal_for_draft(config, &pkg.goal.goal_id) {
+        println!("{}", refusal);
+        println!();
+    }
 
     // v0.12.2.1 / v0.13.0.1: Show chain context when this draft is part of a chain.
     let all_packages = load_all_packages(config).unwrap_or_default();
@@ -5427,13 +5457,21 @@ pub fn validate_staging_version(
                 });
             }
             None => {
-                // Cargo.toml exists but no version line — treat as mismatch.
-                return Err(DraftVersionError {
-                    draft_ver: "(unreadable)".to_string(),
-                    expected_ver: expected_version.to_string(),
-                    staging_path: staging_path.to_path_buf(),
-                    field: "Cargo.toml",
-                });
+                // Cargo.toml exists but has no top-level `version = "..."`
+                // line -- a pure `[workspace]` manifest with no root
+                // `[package]` (every member crate versions itself
+                // independently), or a `[package] version.workspace = true`
+                // inherited version, are both common, valid Cargo project
+                // shapes with nothing here to check or patch. Previously
+                // treated as a hard mismatch (draft_ver: "(unreadable)"),
+                // which made every goal/apply on such a project fail
+                // outright with a misleading "version does not match"
+                // error -- found live, 2026-10-02, against a real
+                // workspace-only downstream project. Skip instead, matching
+                // the CLAUDE.md check just below (also "no version line —
+                // skip, not all projects use it") and
+                // validate_cargo_version/validate_cargo_version_as_fallback's
+                // existing non-fatal treatment of the identical case.
             }
         }
 
@@ -5556,12 +5594,17 @@ pub fn validate_cargo_version_as_fallback(
             Ok(false)
         }
         None => {
-            eprintln!(
-                "[version] Warning: could not read Cargo.toml to validate version \
-                 (expected {}). Check that Cargo.toml has a top-level `version = \"...\"` line.",
-                expected_version
-            );
-            Ok(false)
+            // No top-level `version = "..."` line at all -- a pure
+            // `[workspace]` manifest with no root `[package]`, or
+            // `[package] version.workspace = true`, both have nothing here
+            // for TA to check. Previously treated this identically to a
+            // real mismatch (Ok(false), which `--validate-version` turns
+            // into a hard CI failure) -- fixed alongside
+            // validate_staging_version's identical bug, found live,
+            // 2026-10-02, against a real workspace-only downstream
+            // project. Trivially satisfied: there's nothing to validate,
+            // not a failure to report.
+            Ok(true)
         }
     }
 }
@@ -6193,6 +6236,49 @@ fn replay_advisor_patches(target_dir: &Path, config: &GatewayConfig, goal_run_id
     }
 }
 
+/// Refuse a draft whose filesystem artifacts target protected infrastructure
+/// paths (CR-06). Returns an actionable error naming every offending artifact.
+fn refuse_infrastructure_artifacts(pkg: &DraftPackage) -> anyhow::Result<()> {
+    let offending: Vec<(String, String)> = pkg
+        .changes
+        .artifacts
+        .iter()
+        .filter_map(|a| a.resource_uri.strip_prefix("fs://workspace/"))
+        .filter_map(|path| {
+            ta_workspace::path_safety::check_relative_path(path)
+                .err()
+                .map(|issue| (path.to_string(), issue.describe()))
+        })
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    for (path, reason) in &offending {
+        tracing::error!(
+            package_id = %pkg.package_id,
+            path = %path,
+            reason = %reason,
+            "draft apply refused: artifact targets a protected infrastructure path"
+        );
+    }
+    let list = offending
+        .iter()
+        .map(|(p, r)| format!("  - {}: {}", p, r))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "Refusing to apply draft {id}: {n} artifact(s) target protected infrastructure paths \
+         (TA or VCS metadata such as .git/ or .ta/, in any case or Windows spelling) or \
+         unsafe locations:\n{list}\n\
+         Nothing was written to the project. Draft artifacts may never modify these \
+         directories. Deny the draft with `ta draft deny {id}` and inspect the goal's \
+         staging directory to see how the path was produced.",
+        id = pkg.package_id,
+        n = offending.len(),
+        list = list,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_package(
     config: &GatewayConfig,
@@ -6226,6 +6312,14 @@ fn apply_package(
         pkg.goal.title,
         pkg.changes.artifacts.len()
     );
+
+    // CR-06: refuse, before anything is written, any artifact whose path is
+    // (or aliases, via case folding / trailing dots / 8.3 names / NTFS
+    // streams) a protected infrastructure directory such as `.git/` or `.ta/`.
+    // TA never legitimately updates infrastructure through a draft artifact;
+    // its own `.ta/` state is written by TA-owned code paths. The workspace
+    // layer re-checks every destination (including symlink resolution) too.
+    refuse_infrastructure_artifacts(&pkg)?;
 
     // Check if selective review is enabled.
     let selective_review = patterns.is_enabled();
@@ -6391,6 +6485,27 @@ fn apply_package(
         };
 
         if matches!(pkg.status, DraftStatus::PendingReview) {
+            // H9: a goal from an untrusted-ingress origin (CoS, chat) never
+            // gets "apply implies approval": it needs an explicit
+            // `ta draft approve` first, whatever approval_required says.
+            if let Some(refusal) = auto_approve_refusal_for_draft(config, &pkg.goal.goal_id) {
+                tracing::warn!(
+                    draft_id = %package_id,
+                    goal_id = %pkg.goal.goal_id,
+                    "{}",
+                    refusal
+                );
+                anyhow::bail!(
+                    "Draft \"{}\" cannot be applied without explicit approval: {}.\n\
+                     Review it with `ta draft view {}`, then run `ta draft approve {}` \
+                     and re-run `ta draft apply {}`.",
+                    pkg.goal.title,
+                    refusal,
+                    id,
+                    id,
+                    id
+                );
+            }
             if approval_required {
                 anyhow::bail!(
                     "Draft \"{}\" is in PendingReview state but approval is required \
@@ -6436,6 +6551,7 @@ fn apply_package(
                     risk_score: pkg.risk.risk_score,
                     confidence: review.confidence,
                     verdict,
+                    origin: goal_origin_for_draft(config, &pkg.goal.goal_id),
                 };
                 let gate_decision = crate::commands::workflow_graph::run_apply_gate(
                     config,
@@ -9392,6 +9508,15 @@ fn apply_package(
         run_governed_paths_auto_gc(config);
     }
 
+    // CoS read-only chat-mode design, item 4: replay approved
+    // ta_propose_task_* pending actions against Wayfinder now that this
+    // draft has actually been applied. See draft_task_replay.rs.
+    if !dry_run {
+        if let Ok(applied_pkg) = load_package(config, package_id) {
+            super::draft_task_replay::replay_task_proposals(config, &applied_pkg);
+        }
+    }
+
     Ok(())
 }
 
@@ -9905,6 +10030,7 @@ fn fix_package(
         None,  // agent_id = None (v0.17.11.16)
         None,  // workflow_tag = None (v0.17.x cost-experiment framework)
         None,  // shadow_experiment = None (v0.17.x cost-experiment shadow bypass)
+        None,  // model override = None (no explicit --model request)
     )?;
 
     if no_launch {
@@ -13474,6 +13600,104 @@ fn run() {
         // Verify goal state.
         let updated = goal_store.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(updated.state, GoalRunState::Applied);
+    }
+
+    /// CR-06 end to end: a built draft package that carries an artifact
+    /// `.GIT/hooks/pre-commit` must be refused by `ta draft apply`, and the
+    /// real `.git/` must be left untouched (on case-insensitive and
+    /// case-sensitive hosts alike).
+    #[test]
+    fn apply_refuses_case_variant_git_hook_artifact_end_to_end() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::create_dir_all(project.path().join(".git/hooks")).unwrap();
+        std::fs::write(project.path().join(".git/config"), "[core]\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "CR-06 apply refusal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Attempt to plant a git hook via case folding".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent writes a legit change plus the hook under a case variant.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        let hook = goal.workspace_path.join(".GIT/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\ntouch /tmp/cr06-pwned\n").unwrap();
+
+        build_package(&config, &goal_id, "CR-06 attempt", false).unwrap();
+
+        // Draft build itself must not list the hook as an artifact.
+        let mut pkg = load_all_packages(&config).unwrap().remove(0);
+        assert!(
+            !pkg.changes
+                .artifacts
+                .iter()
+                .any(|a| a.resource_uri.to_lowercase().contains(".git/")),
+            "draft build must exclude case-variant .git paths: {:?}",
+            pkg.changes
+                .artifacts
+                .iter()
+                .map(|a| &a.resource_uri)
+                .collect::<Vec<_>>()
+        );
+
+        // Simulate a tampered or older package that does carry it.
+        let mut evil = pkg.changes.artifacts[0].clone();
+        evil.resource_uri = "fs://workspace/.GIT/hooks/pre-commit".to_string();
+        pkg.changes.artifacts.push(evil);
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let err = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(".GIT/hooks/pre-commit"), "{}", msg);
+        assert!(msg.contains("Nothing was written"), "{}", msg);
+        assert!(msg.contains("ta draft deny"), "{}", msg);
+
+        // Real .git untouched, and nothing at all was applied.
+        assert!(!project.path().join(".git/hooks/pre-commit").exists());
+        assert!(!project.path().join(".GIT/hooks/pre-commit").exists());
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".git/config")).unwrap(),
+            "[core]\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("README.md")).unwrap(),
+            "# Original\n"
+        );
     }
 
     #[test]
@@ -18033,6 +18257,31 @@ fn run() {
     }
 
     #[test]
+    fn validate_staging_version_passes_for_workspace_only_manifest_with_no_root_version() {
+        // A pure `[workspace]` manifest (no root `[package]`, every member
+        // crate versions itself independently) or a `[package]
+        // version.workspace = true` inherited version both have no literal
+        // `version = "..."` line for TA to check or patch -- there's
+        // nothing here to validate, not a mismatch. Previously this
+        // returned a hard error with draft_ver "(unreadable)", which made
+        // every `ta draft apply` on such a project fail outright. Found
+        // live, 2026-10-02, against a real workspace-only downstream
+        // project (ta-virtual-team's Wayfinder pairing dogfood test).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"lib\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(
+            result.is_ok(),
+            "a workspace-only Cargo.toml with no root version line must not block apply: {:?}",
+            result
+        );
+    }
+
+    #[test]
     fn validate_staging_version_passes_when_claude_md_absent() {
         // CLAUDE.md absent — only Cargo.toml checked, no error for missing CLAUDE.md.
         let dir = tempfile::tempdir().unwrap();
@@ -18866,6 +19115,167 @@ fn run() {
     /// v0.17.0.12.15: a supervisor review with a clean Pass verdict, high
     /// confidence, and low risk score must still auto-approve on apply —
     /// the Decision gate should not regress the existing single-author flow.
+    /// H9: set up a PendingReview draft with a high-confidence Pass
+    /// supervisor review (the case that auto-approves on apply today), on a
+    /// goal with the given origin. Returns (project guard, config, pkg id).
+    fn h9_pending_draft_with_origin(
+        origin: Option<&str>,
+    ) -> (TempDir, GatewayConfig, String, String) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "H9 origin test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test origin refusal".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = goal_store.list().unwrap()[0].clone();
+        goal.origin = origin.map(str::to_string);
+        goal_store.save(&goal).unwrap();
+        let goal_id = goal.goal_run_id.to_string();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "H9 origin test", false).unwrap();
+        let mut pkg = load_all_packages(&config).unwrap()[0].clone();
+        pkg.supervisor_review = Some(ta_changeset::supervisor_review::SupervisorReview {
+            verdict: ta_changeset::supervisor_review::SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![],
+            summary: "Looks good".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.99,
+        });
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+        (project, config, pkg_id, goal_id)
+    }
+
+    fn h9_apply(config: &GatewayConfig, pkg_id: &str) -> anyhow::Result<()> {
+        apply_package(
+            config,
+            pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+    }
+
+    #[test]
+    fn h9_apply_refuses_apply_implies_approval_for_cos_and_chat_origin() {
+        for origin in ["cos", "chat"] {
+            let (_project, config, pkg_id, goal_id) = h9_pending_draft_with_origin(Some(origin));
+            assert_eq!(
+                auto_approve_refusal_for_draft(&config, &goal_id)
+                    .unwrap()
+                    .split(" (")
+                    .next()
+                    .unwrap(),
+                format!("auto-approve refused: origin={}", origin)
+            );
+            let err = h9_apply(&config, &pkg_id).expect_err("must refuse");
+            assert!(
+                err.to_string()
+                    .contains(&format!("auto-approve refused: origin={}", origin)),
+                "{}",
+                err
+            );
+            let reloaded = load_all_packages(&config)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.package_id.to_string() == pkg_id)
+                .unwrap();
+            assert!(
+                matches!(reloaded.status, DraftStatus::PendingReview),
+                "draft must stay pending human review, got {:?}",
+                reloaded.status
+            );
+        }
+    }
+
+    /// CR-11: the auto-approve decision reads the goal record, never the
+    /// environment. Changing TA_GOAL_ORIGIN after the goal was created
+    /// (to a harmless value, so parallel tests that read it are unaffected)
+    /// must not change the decision in either direction.
+    #[test]
+    fn h9_decision_ignores_ta_goal_origin_changed_after_creation() {
+        let (_project, config, pkg_id, goal_id) = h9_pending_draft_with_origin(Some("cos"));
+        let (_p2, config_none, _pkg2, goal_none) = h9_pending_draft_with_origin(None);
+
+        let previous = std::env::var(ta_goal::origin::ORIGIN_ENV_VAR).ok();
+        std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, "cli");
+        let cos_refusal = auto_approve_refusal_for_draft(&config, &goal_id);
+        let cos_apply = h9_apply(&config, &pkg_id);
+        let none_refusal = auto_approve_refusal_for_draft(&config_none, &goal_none);
+        match previous {
+            Some(v) => std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, v),
+            None => std::env::remove_var(ta_goal::origin::ORIGIN_ENV_VAR),
+        }
+
+        assert!(
+            cos_refusal
+                .as_deref()
+                .is_some_and(|r| r.starts_with("auto-approve refused: origin=cos")),
+            "{:?}",
+            cos_refusal
+        );
+        let err = cos_apply.expect_err("cos-origin draft must still be refused");
+        assert!(err.to_string().contains("origin=cos"), "{}", err);
+        assert!(none_refusal.is_none());
+        // The record itself was not rewritten by the environment.
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goal = store
+            .get(uuid::Uuid::parse_str(&goal_id).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.origin.as_deref(), Some("cos"));
+    }
+
+    #[test]
+    fn h9_apply_after_explicit_human_approval_still_works_for_cos_origin() {
+        let (_project, config, pkg_id, _goal_id) = h9_pending_draft_with_origin(Some("cos"));
+        let mut pkg = load_all_packages(&config).unwrap()[0].clone();
+        pkg.status = DraftStatus::Approved {
+            approved_by: "human".to_string(),
+            approved_at: Utc::now(),
+        };
+        save_package(&config, &pkg).unwrap();
+        h9_apply(&config, &pkg_id).unwrap();
+    }
+
+    #[test]
+    fn h9_apply_without_origin_or_other_origin_auto_approves_as_before() {
+        for origin in [None, Some("cli")] {
+            let (_project, config, pkg_id, goal_id) = h9_pending_draft_with_origin(origin);
+            assert!(auto_approve_refusal_for_draft(&config, &goal_id).is_none());
+            h9_apply(&config, &pkg_id).unwrap();
+            let reloaded = load_all_packages(&config)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.package_id.to_string() == pkg_id)
+                .unwrap();
+            assert!(matches!(reloaded.status, DraftStatus::Applied { .. }));
+        }
+    }
+
     #[test]
     fn apply_auto_approves_when_supervisor_review_signals_commit() {
         let project = TempDir::new().unwrap();
@@ -19267,6 +19677,22 @@ fn run() {
         // Mismatch returns false (caller decides whether to warn or bail).
         let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
         assert!(!ok);
+    }
+
+    #[test]
+    fn validate_cargo_version_as_fallback_ok_for_workspace_only_manifest() {
+        // A workspace-only Cargo.toml has no version line to check --
+        // trivially satisfied, not a mismatch. Before this fix, --validate-version
+        // (which bails on `false`) would hard-fail CI for any workspace-only
+        // downstream project. Found live, 2026-10-02.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        )
+        .unwrap();
+        let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
+        assert!(ok);
     }
 
     // ── v0.15.19.4.2 tests ────────────────────────────────────────────────────
