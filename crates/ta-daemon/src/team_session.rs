@@ -579,21 +579,24 @@ pub fn build_ta_run_args(
 // Best-effort and bounded: never blocks a cycle on a signing failure or a
 // slow/locked Keychain -- each attempt is capped at a short timeout.
 #[cfg(target_os = "macos")]
-pub(crate) fn ensure_stable_codesign(binary_path: &Path) {
+pub(crate) fn ensure_stable_codesign(binary_path: &Path, project_root: &Path) {
     const IDENTIFIER: &str = "com.trustedautonomy.ta";
     const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let identity = std::env::var("TA_CODESIGN_IDENTITY")
-        .unwrap_or_else(|_| "Trusted Autonomy Local Dev".to_string());
+    let identity = ta_workspace::local_dev::codesign_identity(project_root);
 
-    if run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT) {
-        return;
-    }
-    let _ = run_codesign_with_timeout(binary_path, "-", IDENTIFIER, CODESIGN_TIMEOUT);
+    // Local-dev only. Sign when the named identity exists in this user's
+    // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
+    // function also runs on end users' machines (who do not have the dev
+    // certificate), and re-signing their installed release binary ad-hoc
+    // on every launch would rewrite it and, once releases carry a real
+    // Developer ID signature, replace that signature. `codesign` fails fast
+    // without touching the file when the identity is absent.
+    let _ = run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT);
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn ensure_stable_codesign(_binary_path: &Path) {}
+pub(crate) fn ensure_stable_codesign(_binary_path: &Path, _project_root: &Path) {}
 
 #[cfg(target_os = "macos")]
 fn run_codesign_with_timeout(
@@ -775,7 +778,7 @@ pub fn run_one_cycle(
         io::Error::other(e)
     })?;
 
-    ensure_stable_codesign(ta_bin);
+    ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
         .current_dir(project_root)
@@ -1044,6 +1047,26 @@ pub fn start(
 
 #[cfg(test)]
 mod tests {
+
+    /// Public-install safety: when the named local signing identity does not
+    /// exist (every end user's machine), `ensure_stable_codesign` must leave
+    /// the binary byte-for-byte untouched. No ad-hoc re-signing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_stable_codesign_leaves_binary_untouched_without_the_local_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fake-ta");
+        std::fs::copy("/usr/bin/true", &bin).unwrap();
+        let before = std::fs::read(&bin).unwrap();
+        std::env::set_var("TA_CODESIGN_IDENTITY", "ta-test-nonexistent-identity-xyz");
+        ensure_stable_codesign(&bin, dir.path());
+        std::env::remove_var("TA_CODESIGN_IDENTITY");
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            before,
+            "binary was modified even though the signing identity does not exist"
+        );
+    }
     use super::*;
 
     fn sample_config() -> TeamSessionConfig {
