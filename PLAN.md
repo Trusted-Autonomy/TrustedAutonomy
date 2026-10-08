@@ -10803,7 +10803,8 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [ ] Per-role whiteboard Biscuit tokens (`whiteboard:team_session:<s>:role:<r>`) with a distinct `whiteboard:outcome:send` right granted only to the CoS launch.
 2. [ ] The daemon verifies the role and stamps `{role, goal_id, msg_id, issued_at}` into every outcome envelope; strict message schema and size limits; optional Ed25519 signature the poller verifies.
 3. [ ] TA's whiteboard NATS client supports credentials (environment variable and vault entry name documented); `ta` refuses an unauthenticated non-loopback NATS.
-4. [ ] Tests: a worker token cannot send an outcome; a forged or replayed envelope is rejected; stale messages are rejected.
+4. [ ] Design decision recorded in this phase: the daemon-stamped role and signature travel **inside** the stream envelope (alongside `msg_id` and `payload`, signed as one unit), so a consumer that reads only the stream can verify it. The verification (public) key is distributed to the poller from the daemon-only state directory created in v0.17.12.1, in a location the poller can read and agents cannot; signing keys never leave the daemon. Key rotation and revocation are specified here.
+5. [ ] Tests: a worker token cannot send an outcome; a forged or replayed envelope is rejected; stale messages are rejected; a poller with the public key verifies and one without refuses.
 
 **Effort**: M. **Unblocks VT**: V6 (role-verified outcomes) and V7 (NATS auth on by default).
 
@@ -10852,10 +10853,25 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [ ] Shared detector (git, svn, perforce, none, plugin) used by `ta init`.
 2. [ ] `ta setup vcs --vcs svn` with ignore rules, and `--json` output for detection.
 3. [ ] `ta init` runs setup vcs on re-run.
+4. [ ] Detection output includes the evidence list (which markers and files led to the chosen kind), not only the chosen kind, in `ta setup vcs --dry-run --json` and `ta init --json`, so the installer report and the Wayfinder wizard can show why.
 
 **Effort**: M. **Unblocks VT**: V5 (wizard and installer).
 
 #### Version: `0.17.12-alpha.5`
+
+### v0.17.12.5.1 - Capability Probe and Machine-Readable Install Facts
+<!-- status: pending -->
+**Depends on**: none (land early; small)
+
+**Goal**: A script can ask `ta` what it can safely do, and can supply secrets and read terms status without scraping text. Requested by the VT installer, which today cannot tell a safe `ta` from an unsafe one: `ta --version` reads `0.17.11-alpha.8` both before and after the CoS hardening, and a build made before PR #646 lists `--chat-mode` and `--origin` in `ta run --help` while its daemon does not pass them.
+
+1. [ ] `ta capabilities --json`: a stable, versioned capability document. Fields at least: `daemon_passes_restricted_flags`, `supports_chat_mode`, `supports_origin`, `rules_engine`, `outcome_roles`, `nats_credentials`, `terms_status`, `atomic_apply`, `sandbox_providers`, plus a `capabilities_schema` version. Each capability is true only when the code path is really wired, never inferred from a flag existing.
+2. [ ] `ta credentials add` and `ta credentials update` accept the secret on standard input (`--secret-stdin`) or from a named environment variable, and warn when `--secret` is used on the command line (it is visible in `ps`).
+3. [ ] `ta terms-status --json` reports a real terms document version and content hash (today the version shown is the TA version that accepted the terms), so an agreements chain can bind acceptance to the exact text and re-prompt when it changes.
+
+**Effort**: S to M. **Unblocks VT**: installer safety check, pairing without secrets on argv, the agreements chain.
+
+#### Version: `0.17.12-alpha.5.1`
 
 ### v0.17.12.6 - Sandbox Launch Plumbing: Out-of-Sandbox Gateway, Trusted Policy Source, Capability Reporting
 <!-- status: pending -->
@@ -10936,6 +10952,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 1. [ ] macOS: Apple Developer ID signing and notarization in the release workflow (needs an Apple Developer account and certificate secrets from the owner); Windows signing enabled with the existing script; keep Sigstore signing of the checksum manifest.
 2. [ ] `install.sh` and the VT installer verify the signature and checksums; document the first-run experience honestly.
+2a. [ ] A verifiable download path that does not mean "clone a private repository and build": per-version release assets for each platform, a signed checksum manifest (the Sigstore-signed `SHA256SUMS.txt` bundle from v0.17.11.5) that an installer can pin by version, and a documented stable URL scheme.
 3. [ ] Once signed, the runtime self-signing from v0.17.11.21 stays a developer-only path (it already does nothing without the local certificate).
 
 **Effort**: M. **Unblocks VT**: V10 (installer hand-off for external users).
