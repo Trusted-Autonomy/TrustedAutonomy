@@ -10787,6 +10787,20 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.22`
 
+### v0.17.11.24 - Tests Must Never Touch the Real Keychain
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: Eight `shadow_experiment` tests in `ta-cli` (`spawn_shadow_experiment_goal_*`, `shadow_experiment_command_env_*`) block on a macOS Keychain prompt for the test binary even when `TA_NO_KEYCHAIN=1` is set, so every full local test run has to skip them and a prompt can stall a run for hours. Found by several agents during the 2026-10-07 security work.
+
+1. [ ] Find the code path (`load_vault_credentials` reached with keychain use enabled) and make it honor `TA_NO_KEYCHAIN` and the gateway's keychain setting everywhere.
+2. [ ] Tests that need a vault use a temporary file vault only; add a guard that fails a test loudly if anything tries to open the real Keychain under `cfg(test)`.
+3. [ ] Remove the `--skip shadow_experiment` workaround from every local and agent test recipe.
+
+**Effort**: S.
+
+#### Version: `0.17.11-alpha.24`
+
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
