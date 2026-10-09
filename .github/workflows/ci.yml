@@ -6,15 +6,63 @@ on:
   pull_request:
     branches: [main]
 
+# Supersede stale PR runs; never cancel runs on main (each push to main must
+# finish so the post-merge result and the save-on-main cache are complete).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
 env:
   CARGO_TERM_COLOR: always
+  # CI never uses a debugger. Dropping debuginfo shrinks build time, target/
+  # size, cache size and Windows teardown. Incremental artifacts are useless on
+  # a fresh runner and bloat the cache.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 
 jobs:
   version-check:
     name: Version consistency
     runs-on: ubuntu-latest
+    outputs:
+      # 'false' only when a pull request touches nothing but docs. The heavy
+      # steps in the jobs below key off this. The jobs themselves always run,
+      # so the required check names always report (a job-level skip of a matrix
+      # job reports an unexpanded name and leaves required checks pending).
+      code: ${{ steps.changes.outputs.code }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Detect docs-only pull request
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Docs-only means every changed file is a repo-root *.md or under
+          # docs/. Markdown under crates/, apps/ or templates/ is NOT docs-only
+          # because include_str! compiles it into binaries. Anything uncertain
+          # (push events, API failure, empty list) runs the full pipeline.
+          code=true
+          if [ "$EVENT" = "pull_request" ]; then
+            if files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename') && [ -n "$files" ]; then
+              echo "Changed files:"; echo "$files"
+              if ! echo "$files" | grep -qvE '^([^/]+\.md|docs/.*)$'; then
+                code=false
+              fi
+            else
+              echo "Could not list PR files; running full pipeline."
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Code changes present: $code"
       - name: Verify Cargo.toml, CLAUDE.md, and .release.toml agree on version
         run: |
           # Cargo.toml is the single source of truth for semver.
@@ -49,34 +97,63 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+    env:
+      CODE: ${{ needs.version-check.outputs.code }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Docs-only change, skipping build and test
+        if: env.CODE != 'true'
+        run: echo "Only docs changed (see Version consistency job); code checks not required."
+
       - name: Install Nix
+        if: env.CODE == 'true'
         uses: DeterminateSystems/nix-installer-action@main
 
+      # Fast failure first: formatting needs no compilation.
+      - name: Check formatting
+        if: env.CODE == 'true'
+        run: nix develop --command bash -c "cargo fmt --all -- --check"
+        timeout-minutes: 5
+
+      - name: Cache cargo registry and target
+        if: env.CODE == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Build all crates
+        if: env.CODE == 'true'
         run: nix develop --command bash -c "cargo build --workspace --all-targets"
         timeout-minutes: 30
 
       - name: Run tests
+        if: env.CODE == 'true'
         run: nix develop --command bash -c "cargo test --workspace -- --test-threads=4"
         timeout-minutes: 15
 
       - name: Run clippy
+        if: env.CODE == 'true'
         run: nix develop --command bash -c "cargo clippy --workspace --all-targets -- -D warnings"
         timeout-minutes: 15
 
-      - name: Check formatting
-        run: nix develop --command bash -c "cargo fmt --all -- --check"
+      # Pull requests smoke-test the debug binary already built above. The
+      # optimized release build runs on pushes to main (and in the release and
+      # nightly workflows).
+      - name: Test ta-cli --version (debug)
+        if: env.CODE == 'true'
+        run: nix develop --command bash -c "./target/debug/ta --version"
         timeout-minutes: 5
 
-      - name: Build ta-cli binary
+      - name: Build ta-cli binary (release)
+        if: env.CODE == 'true' && github.event_name == 'push'
         run: nix develop --command bash -c "cargo build --release -p ta-cli"
         timeout-minutes: 30
 
-      - name: Test ta-cli --version
+      - name: Test ta-cli --version (release)
+        if: env.CODE == 'true' && github.event_name == 'push'
         run: nix develop --command bash -c "./target/release/ta --version"
         timeout-minutes: 5
 
@@ -85,34 +162,58 @@ jobs:
     name: Windows Build
     needs: version-check
     runs-on: windows-latest
+    env:
+      CODE: ${{ needs.version-check.outputs.code }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Docs-only change, skipping build and test
+        if: env.CODE != 'true'
+        run: echo "Only docs changed (see Version consistency job); code checks not required."
+
       - name: Show Rust toolchain
+        if: env.CODE == 'true'
         # windows-latest ships rustup preinstalled; it auto-installs and selects
         # whatever `rust-toolchain.toml` pins on the first cargo/rustc invocation
         # below, the same file `flake.nix` reads for the ubuntu/macos Nix jobs.
-        # No install step needed — this just makes the resolved version visible
+        # No install step needed. This just makes the resolved version visible
         # in CI logs instead of relying on silent auto-resolution.
         run: rustc --version && cargo --version
 
+      - name: Cache cargo registry and target
+        if: env.CODE == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-latest
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Build all crates
+        if: env.CODE == 'true'
         run: cargo build --workspace --all-targets
         timeout-minutes: 30
 
       - name: Run tests
+        if: env.CODE == 'true'
         run: cargo test --workspace -- --test-threads=4
         timeout-minutes: 15
 
       - name: Run clippy
+        if: env.CODE == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
         timeout-minutes: 15
 
-      - name: Build ta-cli binary
+      - name: Test ta-cli --version (debug)
+        if: env.CODE == 'true'
+        run: target\debug\ta.exe --version
+        timeout-minutes: 5
+
+      - name: Build ta-cli binary (release)
+        if: env.CODE == 'true' && github.event_name == 'push'
         run: cargo build --release -p ta-cli
         timeout-minutes: 30
 
-      - name: Test ta-cli --version
+      - name: Test ta-cli --version (release)
+        if: env.CODE == 'true' && github.event_name == 'push'
         run: target\release\ta.exe --version
         timeout-minutes: 5
