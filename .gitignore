@@ -187,3 +187,28 @@ memory/work_queue.md
 
 # Per-developer local settings (code-signing identity); see .env.local.example
 .env.local
+
+# ── TA secrets and machine-local state under .ta/ (never commit) ─────────────
+# Keys, bearer tokens and credential stores. A root signing key was found
+# untracked and unignored in the project tree (red-team finding CR-03);
+# these rules keep it from being committed by `git add -A`. The planned fix
+# (PLAN v0.17.12.1) moves these out of the project tree entirely.
+.ta/*.key
+.ta/*.pem
+.ta/broker_root.key
+.ta/audit.key
+.ta/credentials.key
+.ta/credentials.json
+.ta/daemon-tokens.json
+.ta/tokens/
+.ta/team-sessions/
+.ta/whiteboard-session.json
+.ta/nats-jetstream/
+.ta/nats-server.log
+.ta/nats-server.pid
+.ta/wake-attempts/
+.ta/wake-dead-letter.jsonl
+.ta/daemon.pid
+.ta/daemon.log
+.ta/mcp-agent.json
+.ta/mcp-agent-chat.json
