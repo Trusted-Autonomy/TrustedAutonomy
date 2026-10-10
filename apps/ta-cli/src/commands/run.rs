@@ -138,6 +138,15 @@ struct AgentLaunchConfig {
     /// with `--strict-mcp-config` so no other MCP server can leak in.
     #[serde(skip)]
     chat_mcp_config: Option<PathBuf>,
+
+    /// Set by `execute()` for a restricted Claude Code launch: the file
+    /// holding the context TA injected into the staged CLAUDE.md
+    /// (`.ta/logs/goals/<goal-id>/system-prompt.txt`, outside staging). A
+    /// restricted launch passes `--setting-sources local`, under which
+    /// Claude Code does NOT load CLAUDE.md, so this file is delivered with
+    /// `--append-system-prompt-file` instead (see [`restricted_launch_flags`]).
+    #[serde(skip)]
+    system_prompt_file: Option<PathBuf>,
 }
 
 /// Claude Code flags for a restricted launch. Verified against Claude Code
@@ -153,6 +162,15 @@ struct AgentLaunchConfig {
 ///   denied, never auto-approved (`auto`) or prompted.
 pub(crate) const RESTRICTED_LAUNCH_FLAGS: &[&str] =
     &["--setting-sources", "local", "--permission-mode", "dontAsk"];
+
+/// Claude Code flag that appends a file's text to the system prompt. Added
+/// to every restricted Claude Code argv together with the path of the
+/// goal's `system-prompt.txt` ([`write_restricted_system_prompt`]).
+pub(crate) const SYSTEM_PROMPT_FILE_FLAG: &str = "--append-system-prompt-file";
+
+/// File name of the context delivered to a restricted launch, in the goal's
+/// log dir next to `first-message.txt`.
+const SYSTEM_PROMPT_FILE: &str = "system-prompt.txt";
 
 /// The permission mode written into a restricted launch's settings file
 /// (matches [`RESTRICTED_LAUNCH_FLAGS`]).
@@ -206,6 +224,13 @@ fn restricted_launch_flags(config: &AgentLaunchConfig) -> Vec<String> {
     }
     if config.restricted_tool_surface {
         flags.extend(RESTRICTED_LAUNCH_FLAGS.iter().map(|s| s.to_string()));
+        // `--setting-sources local` stops Claude Code loading the staged
+        // CLAUDE.md, so TA's injected context (persona, plan, chat-mode
+        // section) is delivered as an explicit system-prompt file.
+        if let Some(path) = &config.system_prompt_file {
+            flags.push(SYSTEM_PROMPT_FILE_FLAG.to_string());
+            flags.push(path.display().to_string());
+        }
     }
     if config.chat_mode {
         flags.extend(
@@ -367,6 +392,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            system_prompt_file: None,
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -393,6 +419,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            system_prompt_file: None,
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -452,6 +479,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            system_prompt_file: None,
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -474,6 +502,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            system_prompt_file: None,
         },
     }
 }
@@ -571,6 +600,7 @@ fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> 
         restricted_tool_surface: false,
         chat_mode: false,
         chat_mcp_config: None,
+        system_prompt_file: None,
     }
 }
 
@@ -3487,6 +3517,9 @@ pub fn execute(
         plan
     };
 
+    // Initial injected context (set below), kept so a restricted launch can be handed
+    // exactly what TA injected through --append-system-prompt-file.
+    let mut injected_context_prefix: Option<String> = None;
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
         // Load context budget config (v0.14.3.1).
@@ -3526,6 +3559,7 @@ pub fn execute(
             user_context.as_deref(),
             agent_id,
         )?;
+        injected_context_prefix = Some(context_content.clone());
         let ctx = ta_runtime::channels::AgentContext {
             goal_id: goal_id.clone(),
             title: title.to_string(),
@@ -4029,6 +4063,33 @@ pub fn execute(
                 goal.goal_run_id
             );
         }
+    }
+
+    // Restricted Claude Code launches pass `--setting-sources local`, under
+    // which Claude Code does not load the staged CLAUDE.md: everything TA
+    // injected there (context, plan, persona Role text, chat-mode section)
+    // would never reach the agent. Deliver it explicitly instead, from a
+    // file outside staging (so the agent cannot edit it), redacted. Done
+    // last, after every injection and before CLAUDE.md is restored.
+    if agent_config.restricted_tool_surface
+        && agent_config.injects_context_file
+        && is_claude_code_launch(&agent_config)
+    {
+        let path = write_restricted_system_prompt(
+            &config.workspace_root,
+            goal.goal_run_id,
+            &staging_path,
+            &injection_context_file,
+            matches!(injection_channel_type, ta_runtime::ChannelType::ClaudeCode),
+            injected_context_prefix.as_deref(),
+        )?;
+        tracing::info!(
+            goal_id = %goal.goal_run_id,
+            path = %path.display(),
+            flag = SYSTEM_PROMPT_FILE_FLAG,
+            "restricted launch: injected context delivered by system-prompt file, not CLAUDE.md"
+        );
+        agent_config.system_prompt_file = Some(path);
     }
 
     // Build the prompt string (the agent's first message).
@@ -5515,6 +5576,7 @@ fn execute_resume(
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            system_prompt_file: None,
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -6810,6 +6872,71 @@ fn write_first_message(
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(FIRST_MESSAGE_FILE);
     std::fs::write(&path, redact_first_message(prompt))?;
+    Ok(path)
+}
+
+/// Persist the context TA injected for a restricted Claude Code launch,
+/// secrets redacted, to `.ta/logs/goals/<goal-id>/system-prompt.txt` (outside
+/// staging, so the agent cannot edit it, and it survives cleanup). The launch
+/// passes this file with `--append-system-prompt-file` because
+/// `--setting-sources local` stops Claude Code loading CLAUDE.md. The same
+/// file is the persisted proof of what the agent was told (persona Role text
+/// included).
+///
+/// Only what TA injected is delivered: with the Claude Code channel the
+/// project's own CLAUDE.md body is left out (it is draft-editable content and
+/// must not be promoted to system-prompt authority), and the operator's global
+/// `~/.claude/CLAUDE.md` is never read. Fails (rather than launching a
+/// persona-less agent) when the context cannot be read or written.
+fn write_restricted_system_prompt(
+    project_root: &Path,
+    goal_id: uuid::Uuid,
+    staging_path: &Path,
+    context_file: &str,
+    is_claude_channel: bool,
+    initial_content: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let injected = match (is_claude_channel, initial_content) {
+        (true, Some(initial)) => {
+            ta_runtime::channels::ClaudeCodeChannel::new(staging_path.to_path_buf())
+                .injected_context(initial)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "could not read the injected context from {}/{}: {}",
+                        staging_path.display(),
+                        context_file,
+                        e
+                    )
+                })?
+        }
+        _ => std::fs::read_to_string(staging_path.join(context_file)).map_err(|e| {
+            anyhow::anyhow!(
+                "could not read the injected context {}/{}: {}",
+                staging_path.display(),
+                context_file,
+                e
+            )
+        })?,
+    };
+    let dir = project_root
+        .join(".ta")
+        .join("logs")
+        .join("goals")
+        .join(goal_id.to_string());
+    let path = dir.join(SYSTEM_PROMPT_FILE);
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(&path, redact_first_message(&injected)))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not write the restricted launch's system prompt to {}: {}. The agent \
+                 was not launched: without this file it would run without TA's context and \
+                 persona (restricted launches do not load CLAUDE.md). Check that {} is \
+                 writable and retry.",
+                path.display(),
+                e,
+                dir.display()
+            )
+        })?;
     Ok(path)
 }
 
@@ -12547,6 +12674,174 @@ pre_launch:
         assert!(joined.contains("mcp-agent-chat.json"), "{}", joined);
     }
 
+    fn system_prompt_files(project: &Path) -> Vec<PathBuf> {
+        let goals = project.join(".ta").join("logs").join("goals");
+        let Ok(rd) = std::fs::read_dir(&goals) else {
+            return Vec::new();
+        };
+        rd.filter_map(|e| e.ok())
+            .map(|e| e.path().join(SYSTEM_PROMPT_FILE))
+            .filter(|p| p.exists())
+            .collect()
+    }
+
+    /// `--append-system-prompt-file <path>` pair in `args`, if present.
+    fn system_prompt_flag_value(args: &[String]) -> Option<&String> {
+        let i = args.iter().position(|a| a == SYSTEM_PROMPT_FILE_FLAG)?;
+        args.get(i + 1)
+    }
+
+    /// Restricted launches do not load CLAUDE.md (`--setting-sources local`),
+    /// so a chat-mode launch must hand the injected context (persona Role
+    /// text, chat-mode section) over in `system-prompt.txt`: outside staging,
+    /// without the project's own CLAUDE.md body, and passed on every argv
+    /// path with `--append-system-prompt-file`.
+    #[test]
+    fn chat_mode_launch_writes_system_prompt_file_with_persona_and_chat_section() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_prompt, project) = prompt_from_execute(Some("chief-of-staff"), "# s\n", None);
+        let files = system_prompt_files(project.path());
+        assert_eq!(files.len(), 1, "{:?}", files);
+        let text = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(text.contains("You triage and dispatch."), "{}", text);
+        assert!(text.contains("## Agent Persona"), "{}", text);
+        assert!(text.contains("### Role"), "{}", text);
+        assert!(text.contains("## Chat Mode (read-only)"), "{}", text);
+        assert!(
+            !text.contains("PROJECT_BODY_MARKER"),
+            "the project's own CLAUDE.md body must not be promoted to system-prompt authority"
+        );
+        assert!(
+            !files[0].starts_with(project.path().join(".ta").join("staging")),
+            "the file must live outside the staging dir the agent can write"
+        );
+
+        // Every claude argv path carries the flag and an existing file.
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let mut cfg = chat_claude_config(project.path());
+        cfg.system_prompt_file = Some(files[0].clone());
+        let env = std::collections::HashMap::new();
+        for args in [
+            build_runtime_agent_args(&cfg, &staging, "p", true, &env).unwrap(),
+            build_runtime_agent_args(&cfg, &staging, "p", false, &env).unwrap(),
+            agent_launch_args(&cfg, "p").unwrap(),
+        ] {
+            let v = system_prompt_flag_value(&args).expect("flag missing");
+            assert!(Path::new(v).exists(), "{}", v);
+            assert_eq!(
+                args.iter()
+                    .filter(|a| *a == SYSTEM_PROMPT_FILE_FLAG)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_launch_writes_system_prompt_file() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_prompt, project) = prompt_from_execute_with_caps(
+            Some("chief-of-staff"),
+            "read_only = true\nallowed_tools = [\"mcp__ta__ta_fs_read\"]",
+            "# s\n",
+            None,
+        );
+        let files = system_prompt_files(project.path());
+        assert_eq!(files.len(), 1, "{:?}", files);
+        let text = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(text.contains("You triage and dispatch."), "{}", text);
+        assert!(!text.contains("## Chat Mode"), "{}", text);
+    }
+
+    /// Unrestricted launches still rely on CLAUDE.md loading: no file, no flag.
+    #[test]
+    fn unrestricted_launch_writes_no_system_prompt_file_and_passes_no_flag() {
+        let _home = super::super::test_support::HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_prompt, project) = prompt_from_execute(None, "# s\n", None);
+        assert!(system_prompt_files(project.path()).is_empty());
+
+        let staging = project.path().join(".ta").join("staging").join("g1");
+        let cfg = claude_config(false);
+        let env = std::collections::HashMap::new();
+        assert!(system_prompt_flag_value(
+            &build_runtime_agent_args(&cfg, &staging, "p", true, &env).unwrap()
+        )
+        .is_none());
+        assert!(system_prompt_flag_value(&agent_launch_args(&cfg, "p").unwrap()).is_none());
+        // Even if a path were set, an unrestricted or non-claude launch ignores it.
+        let mut stray = claude_config(false);
+        stray.system_prompt_file = Some(PathBuf::from("/x/system-prompt.txt"));
+        assert!(system_prompt_flag_value(&agent_launch_args(&stray, "p").unwrap()).is_none());
+        let mut codex = builtin_agent_config("codex");
+        codex.restricted_tool_surface = true;
+        codex.system_prompt_file = Some(PathBuf::from("/x/system-prompt.txt"));
+        assert!(restricted_launch_flags(&codex).is_empty());
+    }
+
+    #[test]
+    fn restricted_system_prompt_redacts_secrets() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        std::fs::write(
+            staging.path().join("CLAUDE.md"),
+            "ROLE text ghp_abcdefghijklmnopqrstuvwxyz0123456789 end\n",
+        )
+        .unwrap();
+        let id = uuid::Uuid::new_v4();
+        let path = write_restricted_system_prompt(
+            project.path(),
+            id,
+            staging.path(),
+            "CLAUDE.md",
+            true,
+            Some("ROLE"),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            project
+                .path()
+                .join(format!(".ta/logs/goals/{id}/system-prompt.txt"))
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("ROLE text"), "{}", text);
+        assert!(!text.contains("ghp_abcdefghijklmnopqrstuvwxyz"), "{}", text);
+    }
+
+    /// Drift guard: every restricted Claude Code argv that passes
+    /// `--setting-sources local` also passes the system-prompt file once
+    /// `execute()` has produced one, and `execute()` is the only place that
+    /// sets it. If RESTRICTED_LAUNCH_FLAGS changes to load CLAUDE.md
+    /// (`project`), this documents the coupling that must be revisited.
+    #[test]
+    fn restricted_launch_flags_do_not_load_claude_md_so_context_is_delivered_by_file() {
+        assert!(RESTRICTED_LAUNCH_FLAGS.contains(&"local"));
+        assert!(!RESTRICTED_LAUNCH_FLAGS
+            .iter()
+            .any(|f| f.contains("project")));
+        let mut cfg = claude_config(true);
+        cfg.system_prompt_file = Some(PathBuf::from("/x/system-prompt.txt"));
+        let flags = restricted_launch_flags(&cfg);
+        assert!(flags
+            .windows(2)
+            .any(|w| w[0] == SYSTEM_PROMPT_FILE_FLAG && w[1] == "/x/system-prompt.txt"));
+        let src = include_str!("run.rs").replace("\r\n", "\n");
+        let production = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert_eq!(
+            production
+                .matches("agent_config.system_prompt_file = Some(")
+                .count(),
+            1,
+            "only execute() may set the restricted launch's system prompt file"
+        );
+    }
+
     const WAKE_CANDIDATE_ID: &str =
         "wayfinder-task:9061d2b8-3f38-4c08-b162-e3e73f021a54#c361f674fcc72ba0562d479b19c44b24";
 
@@ -12560,15 +12855,32 @@ pre_launch:
         objective_file_body: &str,
         intake_body: Option<&str>,
     ) -> (String, TempDir) {
+        prompt_from_execute_with_caps(
+            persona,
+            "chat_mode = true\norigin = \"cos\"\nallowed_tools = [\"mcp__ta__ta_fs_read\", \
+             \"mcp__ta__ta_whiteboard_outcome_send\"]",
+            objective_file_body,
+            intake_body,
+        )
+    }
+
+    /// [`prompt_from_execute`] with the persona's `[capabilities]` body chosen
+    /// by the caller (chat mode, read-only, plain allow-list).
+    fn prompt_from_execute_with_caps(
+        persona: Option<&str>,
+        persona_caps_toml: &str,
+        objective_file_body: &str,
+        intake_body: Option<&str>,
+    ) -> (String, TempDir) {
         let project = TempDir::new().unwrap();
         std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(
+            project.path().join("CLAUDE.md"),
+            "# Project CLAUDE.md\nPROJECT_BODY_MARKER\n",
+        )
+        .unwrap();
         if persona.is_some() {
-            write_persona(
-                project.path(),
-                "chief-of-staff",
-                "chat_mode = true\norigin = \"cos\"\nallowed_tools = [\"mcp__ta__ta_fs_read\", \
-                 \"mcp__ta__ta_whiteboard_outcome_send\"]",
-            );
+            write_persona(project.path(), "chief-of-staff", persona_caps_toml);
         }
         let ctx_dir = TempDir::new().unwrap();
         let objective_file = ctx_dir.path().join("wake-context.md");

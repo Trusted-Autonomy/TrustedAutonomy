@@ -328,9 +328,14 @@ pub struct OutcomeSendParams {
     /// any). Required so the Wayfinder poller can act on the
     /// right task, never freshly generated.
     pub candidate_id: String,
-    /// `"done"`, `"blocked"`, or `"new_work"`.
+    /// `"done"`, `"blocked"`, or `"new_work"` for a normal worker. In a
+    /// chat-mode (Chief-of-Staff) server only `"reply"`, `"delegate"` and
+    /// `"done"` are accepted, see [`CHAT_OUTCOMES`].
     pub outcome: String,
-    /// Free-text detail — what happened, why, or what's blocking it.
+    /// Free-text detail: what happened, why, or what's blocking it. For
+    /// `"reply"` (chat mode) it is the text sent back to the requester. For
+    /// `"delegate"` it is a JSON object, as text, with exactly two string
+    /// fields: `{"tag":"<tag>","objective":"<what the role must do>"}`.
     pub detail: String,
     /// Only meaningful when `outcome == "new_work"`: a title for the new
     /// Wayfinder task the poller should create.
@@ -338,10 +343,77 @@ pub struct OutcomeSendParams {
     pub new_task_title: Option<String>,
 }
 
+/// The only outcomes a chat-mode (Chief-of-Staff) server accepts, in the
+/// vocabulary the Wayfinder poller consumes: `reply` (detail = text for the
+/// requester), `delegate` (detail = `{"tag":..,"objective":..}`, the poller
+/// resolves the tag to a worker role) and `done` (nothing more to do).
+pub const CHAT_OUTCOMES: [&str; 3] = ["reply", "delegate", "done"];
+
+/// Description of `ta_whiteboard_outcome_send` advertised by a chat-mode
+/// server, replacing the normal done/blocked/new_work wording.
+pub const CHAT_OUTCOME_TOOL_DESCRIPTION: &str = "Send the Chief-of-Staff outcome for the intake you were woken with. \
+outcome must be exactly one of: \"reply\" (answer the requester directly; detail is the plain text for them), \
+\"delegate\" (hand the work to a worker role through the poller; detail is a JSON object as text with exactly two \
+string fields {\"tag\":\"<tag from your vocabulary>\",\"objective\":\"<what the role must do>\"}), or \
+\"done\" (nothing more to do; detail is a one line summary). Any other value, including new_work and blocked, is \
+rejected. candidate_id must be the one stated before the fenced intake, nonce included.";
+
+/// Error for an outcome outside the chat-mode vocabulary, or `None` when it
+/// is allowed. Exact, case-sensitive match: that is what the poller matches.
+fn chat_outcome_error(outcome: &str) -> Option<String> {
+    if CHAT_OUTCOMES.contains(&outcome) {
+        return None;
+    }
+    Some(format!(
+        "ta_whiteboard_outcome_send: outcome \"{outcome}\" is not allowed in chat mode. Allowed values: \
+         \"reply\" (answer the requester directly; detail is the text for them), \"delegate\" (hand \
+         the work to a worker role via the poller; detail is a JSON object as text with exactly \
+         the string fields tag and objective), \"done\" (nothing to do). Nothing was sent. Call \
+         the tool again with one of those three values."
+    ))
+}
+
+/// Rewrites the chat-mode server's `ta_whiteboard_outcome_send` tool
+/// definition so the advertised description and `outcome` schema list
+/// exactly [`CHAT_OUTCOMES`]. Called when the chat-mode router is built.
+pub fn advertise_chat_outcome_vocabulary(tool: &mut rmcp::model::Tool) {
+    tool.description = Some(CHAT_OUTCOME_TOOL_DESCRIPTION.into());
+    let mut schema = (*tool.input_schema).clone();
+    if let Some(outcome) = schema
+        .get_mut("properties")
+        .and_then(|p| p.get_mut("outcome"))
+        .and_then(|o| o.as_object_mut())
+    {
+        outcome.insert("type".into(), serde_json::json!("string"));
+        outcome.insert("enum".into(), serde_json::json!(CHAT_OUTCOMES));
+        outcome.insert(
+            "description".into(),
+            serde_json::json!(
+                "reply = answer the requester directly (detail is the text); delegate = hand the \
+                 work to a worker role via the poller (detail is {\"tag\":..,\"objective\":..} \
+                 as JSON text); done = nothing more to do."
+            ),
+        );
+    }
+    tool.input_schema = Arc::new(schema);
+}
+
 pub fn handle_outcome_send(
     state: &Arc<Mutex<GatewayState>>,
     params: OutcomeSendParams,
 ) -> Result<CallToolResult, McpError> {
+    // Chat mode (the Chief-of-Staff): enforce the reply/delegate/done
+    // vocabulary here, at the tool, before anything is sent.
+    let in_chat_mode = state
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?
+        .chat_lock
+        .is_some();
+    if in_chat_mode {
+        if let Some(msg) = chat_outcome_error(&params.outcome) {
+            return Err(McpError::invalid_params(msg, None));
+        }
+    }
     let workspace_root = workspace_root(state)?;
     let session = load_whiteboard_session(&workspace_root)?;
 

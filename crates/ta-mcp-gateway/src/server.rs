@@ -1184,6 +1184,11 @@ impl TaGatewayServer {
         for name in &removed {
             tool_router.remove_route(name);
         }
+        // The Chief-of-Staff's outcome vocabulary is reply/delegate/done:
+        // advertise exactly that (the handler also enforces it).
+        if let Some(route) = tool_router.map.get_mut("ta_whiteboard_outcome_send") {
+            tools::whiteboard::advertise_chat_outcome_vocabulary(&mut route.attr);
+        }
         tracing::info!(
             session_id = %launch.session_id,
             removed_tools = removed.len(),
@@ -1531,7 +1536,7 @@ impl TaGatewayServer {
     }
 
     #[tool(
-        description = "Report an outcome (done/blocked/new_work) for Wayfinder-sourced work back onto the report-back stream, so the Wayfinder poller can PATCH/POST it back to Wayfinder's task API. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
+        description = "Report an outcome (done/blocked/new_work; a chat-mode server accepts only reply/delegate/done) for Wayfinder-sourced work back onto the report-back stream, so the Wayfinder poller can PATCH/POST it back to Wayfinder's task API. Only available for a goal launched as part of a team session with whiteboard coordination enabled."
     )]
     fn ta_whiteboard_outcome_send(
         &self,
@@ -3626,6 +3631,85 @@ mod tests {
                 "chat-mode profile lists '{}' but the gateway has no such tool",
                 name
             );
+        }
+    }
+
+    fn outcome_params(outcome: &str) -> crate::tools::whiteboard::OutcomeSendParams {
+        crate::tools::whiteboard::OutcomeSendParams {
+            candidate_id: "wayfinder-task:t1#abc".to_string(),
+            outcome: outcome.to_string(),
+            detail: "d".to_string(),
+            new_task_title: None,
+        }
+    }
+
+    /// Chat mode accepts only the Chief-of-Staff vocabulary at the tool.
+    /// There is no whiteboard session in this fixture, so an ACCEPTED value
+    /// gets past the vocabulary check and fails later on the missing
+    /// session; a REJECTED value fails on the vocabulary with an actionable
+    /// error naming the allowed values.
+    #[test]
+    fn chat_mode_outcome_send_accepts_only_reply_delegate_done() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[], &launch);
+        for ok in ["reply", "delegate", "done"] {
+            let err =
+                crate::tools::whiteboard::handle_outcome_send(server.state(), outcome_params(ok))
+                    .unwrap_err()
+                    .to_string();
+            assert!(err.contains("no whiteboard session"), "{ok}: {err}");
+        }
+        for bad in ["new_work", "blocked", "Reply", "", "done "] {
+            let err =
+                crate::tools::whiteboard::handle_outcome_send(server.state(), outcome_params(bad))
+                    .unwrap_err()
+                    .to_string();
+            assert!(err.contains("not allowed in chat mode"), "{bad}: {err}");
+            for allowed in ["reply", "delegate", "done"] {
+                assert!(err.contains(allowed), "{bad}: {err}");
+            }
+            assert!(!err.contains("no whiteboard session"), "{bad}: {err}");
+        }
+    }
+
+    /// The chat-mode server advertises exactly reply/delegate/done; a normal
+    /// server keeps the unchanged tool and does not enforce the vocabulary.
+    #[test]
+    fn chat_mode_outcome_tool_advertises_reply_delegate_done_and_normal_server_is_unchanged() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[], &launch);
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "ta_whiteboard_outcome_send")
+            .expect("outcome tool is in the chat profile");
+        let desc = tool.description.clone().unwrap().to_string();
+        for v in ["reply", "delegate", "done"] {
+            assert!(desc.contains(v), "{desc}");
+        }
+        let outcome = &tool.input_schema["properties"]["outcome"];
+        assert_eq!(
+            outcome["enum"],
+            serde_json::json!(["reply", "delegate", "done"])
+        );
+
+        let (normal, _d) = test_server();
+        let ntool = normal
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "ta_whiteboard_outcome_send")
+            .unwrap();
+        assert!(ntool.input_schema["properties"]["outcome"]
+            .get("enum")
+            .is_none());
+        for any in ["new_work", "blocked", "done"] {
+            let err =
+                crate::tools::whiteboard::handle_outcome_send(normal.state(), outcome_params(any))
+                    .unwrap_err()
+                    .to_string();
+            assert!(err.contains("no whiteboard session"), "{any}: {err}");
         }
     }
 
