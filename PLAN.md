@@ -10802,7 +10802,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.24`
 
 ### v0.17.11.25 - Wake-On-Demand-Only Team Sessions (No Rotation)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: A team session that only has wake-on-demand roles (the Chief-of-Staff deployment) must not need, or run, a round-robin rotation. Today `ta team-session start` refuses a workflow with no stages, and a one-stage workflow makes the daemon launch `ta run` for that stage's role back to back forever (a successful cycle sleeps zero seconds), which burns real agent runs. The runtime already treats an empty stage list as "no rotation" and leaves listeners running, so only the command line blocks it. Found live while writing the 2026-10-08 CoS runbook.
