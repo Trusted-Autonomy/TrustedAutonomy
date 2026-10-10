@@ -10867,6 +10867,25 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.11-alpha.28`
 
+### v0.17.11.29 - Draft Apply Fidelity: Plan Merge Touches Only the Target Phase, Dry Run Is a Dry Run
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: `ta draft apply` must change exactly what the draft says and nothing else, and `--dry-run` must change nothing. Every TA-built draft since 2026-10-10 has needed a hand repair of `PLAN.md` after apply, and the last one flipped four unrelated human-gate checkboxes to done, which falsely records human sign-offs. This is the process-fidelity fix that lets the TA flow be used without manual cleanup; it comes before v0.17.11.27.
+
+1. [ ] **Plan merge changes only the target phase.** After apply, `PLAN.md` must be byte-for-byte identical to the pre-apply file except the target phase's `<!-- status: ... -->` marker and the checkbox state of that phase's own numbered items. Find the writer (the plan-merge path in `ta draft apply --phase`, plus the earlier PLAN.md write site documented in this file) and stop it rewriting anything else: no blank-line removal anywhere (including inside code fences), no checkbox change in any other phase, no reordering. Golden tests over a copy of the real `PLAN.md` and over a fixture with look-alike phase headings; a property test that every line outside the target phase block is unchanged.
+2. [ ] **A draft's own `PLAN.md` edits are honored.** When a draft includes item checkmarks for the target phase, apply must carry them; when the phase has items the agent could not complete, leave them unchecked and say which (Deferred Items Policy), never auto-check.
+3. [ ] **`ta draft apply --dry-run` changes nothing.** Observed 2026-10-10: it copied files into the source tree on a new feature branch, marked the draft and goal Applied and deleted the staging directory. A dry run prints what it would do and leaves files, branches, goal state, draft state and staging untouched. Regression test that snapshots the tree, branches, goal and draft state around a dry run.
+4. [ ] **Apply never leaves uncommitted changes on a protected branch.** `--no-submit` applied straight onto `main`'s working tree. Switch to (or create) the feature branch before writing any file, and refuse with an actionable message if that is impossible.
+5. [ ] **Goals build in their own target directory.** Artifacts compiled inside a goal's staging directory bake that path into test binaries (`env!("CARGO_MANIFEST_DIR")`), so after staging is auto-cleaned the next `cargo test` in the source tree fails (seen in the `ta-actions` paper-trading plugin test). Give each goal its own `CARGO_TARGET_DIR`, or stop sharing `target/` between staging and the source tree.
+6. [ ] **Verification output is diagnosable.** The pre-submit verification prints which command failed, the failing test names, and how long each step ran; a step with no output for a configured time is reported as hung (with the last test names that started) instead of waiting forever, and says how to raise or disable the limit.
+7. [ ] **The version a phase apply sets is the contiguous-done version.** Apply sets the version from the phase id (`alpha.25`) even when later phases are already done, which `ta plan expected-version` then reports as lagging. Use the same function so apply lands on the right value the first time.
+
+**Moved here from v0.17.12.11 (items 7, 8 and 9 there).**
+**Effort**: M.
+
+#### Version: `0.17.11-alpha.29`
+
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
 <!-- status: pending -->
 **Depends on**: none
@@ -11066,9 +11085,9 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 4. [ ] Auto-apply and `--chain` paths: dry-run honored everywhere, no external actions without a human.
 5. [ ] Make `ta_goal_start` stamp origin at creation (today only `ta run --goal-id` does).
 6. [ ] `ta session resume` (`execute_resume`) rebuilds its launch config with `restricted_tool_surface` false, so a resumed persona-restricted interactive session relaunches without the restriction flags (`--setting-sources local`, `--permission-mode dontAsk`, the system-prompt file). Carry the restriction and the delivered context through resume, or refuse to resume restricted goals (chat mode already refuses). If a restricted conversation is ever resumed with changed context, pass `--system-prompt-snapshot off` so the new text is used.
-7. [ ] **`ta draft apply --dry-run` must change nothing.** Found 2026-10-10: `ta draft apply <id> --phase <p> --submit --dry-run` copied the draft's files into the source tree on a new feature branch, marked the draft and goal Applied, and auto-cleaned the staging directory; only the commit, push and phase completion were skipped. A dry run must print what would happen and leave files, goal state, draft state and staging untouched. Add a regression test that snapshots the tree and the goal and draft state around a dry run.
-8. [ ] **Plan merge must not rewrite unrelated `PLAN.md` content.** Found 2026-10-10: after applying a draft, `PLAN.md` in the working tree had 60 blank lines removed across unrelated sections (including inside code fences) and the draft's `[x]` item checks were not present, although the draft listed them. The earlier fix (#620) covered heading-style swallowing; this is whitespace and item-state fidelity. Make the merge change only the target phase's status marker and checkbox lines, byte-for-byte elsewhere, with a golden test over the real `PLAN.md`. Seen again on 2026-10-10 (v0.17.11.25 apply) and worse: it also flipped four unrelated human-gate checkboxes in an older phase from `[ ]` to `[x]` (code-signing cert review, hardware validation before promoting alpha to stable, ARK contract sign-off, release-notes human review gate), which would falsely record human sign-offs as done. Add a test that no checkbox outside the target phase ever changes state.
-9. [ ] Build artifacts compiled inside a goal's staging directory bake that path into test binaries (`env!("CARGO_MANIFEST_DIR")`), so after staging is auto-cleaned the next `cargo test` in the source tree fails (seen in `ta-actions` paper-trading plugin test). Give goals a separate `CARGO_TARGET_DIR` under staging, or make the staging build not share `target/` with the source tree.
+7. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
+8. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
+9. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 
 **Effort**: M.
 
