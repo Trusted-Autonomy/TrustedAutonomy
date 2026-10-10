@@ -10802,15 +10802,15 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.24`
 
 ### v0.17.11.25 - Wake-On-Demand-Only Team Sessions (No Rotation)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: A team session that only has wake-on-demand roles (the Chief-of-Staff deployment) must not need, or run, a round-robin rotation. Today `ta team-session start` refuses a workflow with no stages, and a one-stage workflow makes the daemon launch `ta run` for that stage's role back to back forever (a successful cycle sleeps zero seconds), which burns real agent runs. The runtime already treats an empty stage list as "no rotation" and leaves listeners running, so only the command line blocks it. Found live while writing the 2026-10-08 CoS runbook.
 
-1. [ ] New flag `--no-rotation` on `ta team-session start`: with at least one `--wake-on-demand` role registered, the session has no round-robin rotation and `--workflow` becomes optional. A workflow with an empty `stages:` list is also accepted when `--wake-on-demand` is given. The stage requirement stays for sessions with no listeners.
-2. [ ] Test that a wake-only session starts, runs zero rotation cycles, and its listener still launches the role.
-3. [ ] Make rotation cycles rate-limited (a configurable minimum delay between cycles) so a misconfigured one-stage session cannot launch agents in a tight loop.
-4. [ ] Document the wake-only shape in `docs/USAGE.md` and the VT installer's printed command.
+1. [x] New flag `--no-rotation` on `ta team-session start`: with at least one `--wake-on-demand` role registered, the session has no round-robin rotation and `--workflow` becomes optional. A workflow with an empty `stages:` list is also accepted when `--wake-on-demand` is given. The stage requirement stays for sessions with no listeners.
+2. [x] Test that a wake-only session starts, runs zero rotation cycles, and its listener still launches the role.
+3. [x] Make rotation cycles rate-limited (a configurable minimum delay between cycles) so a misconfigured one-stage session cannot launch agents in a tight loop.
+4. [x] Document the wake-only shape in `docs/USAGE.md`. The VT installer's printed command is a ta-virtual-team change, handed to that repo with the exact command line (moved to the ta-virtual-team installer; not part of this repository).
 
 **Effort**: S.
 
@@ -11067,7 +11067,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 5. [ ] Make `ta_goal_start` stamp origin at creation (today only `ta run --goal-id` does).
 6. [ ] `ta session resume` (`execute_resume`) rebuilds its launch config with `restricted_tool_surface` false, so a resumed persona-restricted interactive session relaunches without the restriction flags (`--setting-sources local`, `--permission-mode dontAsk`, the system-prompt file). Carry the restriction and the delivered context through resume, or refuse to resume restricted goals (chat mode already refuses). If a restricted conversation is ever resumed with changed context, pass `--system-prompt-snapshot off` so the new text is used.
 7. [ ] **`ta draft apply --dry-run` must change nothing.** Found 2026-10-10: `ta draft apply <id> --phase <p> --submit --dry-run` copied the draft's files into the source tree on a new feature branch, marked the draft and goal Applied, and auto-cleaned the staging directory; only the commit, push and phase completion were skipped. A dry run must print what would happen and leave files, goal state, draft state and staging untouched. Add a regression test that snapshots the tree and the goal and draft state around a dry run.
-8. [ ] **Plan merge must not rewrite unrelated `PLAN.md` content.** Found 2026-10-10: after applying a draft, `PLAN.md` in the working tree had 60 blank lines removed across unrelated sections (including inside code fences) and the draft's `[x]` item checks were not present, although the draft listed them. The earlier fix (#620) covered heading-style swallowing; this is whitespace and item-state fidelity. Make the merge change only the target phase's status marker and checkbox lines, byte-for-byte elsewhere, with a golden test over the real `PLAN.md`.
+8. [ ] **Plan merge must not rewrite unrelated `PLAN.md` content.** Found 2026-10-10: after applying a draft, `PLAN.md` in the working tree had 60 blank lines removed across unrelated sections (including inside code fences) and the draft's `[x]` item checks were not present, although the draft listed them. The earlier fix (#620) covered heading-style swallowing; this is whitespace and item-state fidelity. Make the merge change only the target phase's status marker and checkbox lines, byte-for-byte elsewhere, with a golden test over the real `PLAN.md`. Seen again on 2026-10-10 (v0.17.11.25 apply) and worse: it also flipped four unrelated human-gate checkboxes in an older phase from `[ ]` to `[x]` (code-signing cert review, hardware validation before promoting alpha to stable, ARK contract sign-off, release-notes human review gate), which would falsely record human sign-offs as done. Add a test that no checkbox outside the target phase ever changes state.
 9. [ ] Build artifacts compiled inside a goal's staging directory bake that path into test binaries (`env!("CARGO_MANIFEST_DIR")`), so after staging is auto-cleaned the next `cargo test` in the source tree fails (seen in `ta-actions` paper-trading plugin test). Give goals a separate `CARGO_TARGET_DIR` under staging, or make the staging build not share `target/` with the source tree.
 
 **Effort**: M.

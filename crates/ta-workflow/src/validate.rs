@@ -65,6 +65,22 @@ impl ValidationResult {
     }
 }
 
+/// Validate a workflow for a wake-on-demand-only team session, which has no
+/// round-robin rotation: identical to [`validate_workflow`] except that an
+/// empty `stages:` list is not an error. Every other check still applies.
+pub fn validate_wake_only_workflow(
+    def: &WorkflowDefinition,
+    project_root: Option<&Path>,
+) -> ValidationResult {
+    let mut result = validate_workflow(def, project_root);
+    if def.stages.is_empty() {
+        result
+            .findings
+            .retain(|f| !(f.location == "stages" && f.severity == ValidationSeverity::Error));
+    }
+    result
+}
+
 /// Validate a workflow definition comprehensively.
 ///
 /// Checks:
@@ -730,5 +746,21 @@ roles: {}
             .filter(|f| f.location.contains("inputs"))
             .collect();
         assert!(artifact_warnings.is_empty());
+    }
+
+    #[test]
+    fn wake_only_validation_accepts_empty_stages_but_normal_validation_does_not() {
+        let mut def = minimal_workflow();
+        def.stages.clear();
+        assert!(validate_workflow(&def, None).has_errors());
+        assert!(!validate_wake_only_workflow(&def, None).has_errors());
+    }
+
+    #[test]
+    fn wake_only_validation_still_reports_other_errors() {
+        let mut def = minimal_workflow();
+        def.stages.clear();
+        def.name = String::new();
+        assert!(validate_wake_only_workflow(&def, None).has_errors());
     }
 }

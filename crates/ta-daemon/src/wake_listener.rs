@@ -276,7 +276,7 @@ fn gate_on_session_status(project_root: &Path, session_id: &str) -> ListenerGate
 /// daemon shuts down or the team session disappears. See this module's doc
 /// comment for why no external single-flight tracking is needed — this
 /// loop's own sequential body is the single-flight guarantee.
-async fn run_listener_loop(
+pub(crate) async fn run_listener_loop(
     project_root: PathBuf,
     session_id: String,
     listener: WakeListenerConfig,
@@ -1242,5 +1242,76 @@ mod tests {
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let handles = start(&app_state, shutdown);
         assert!(handles.is_empty());
+    }
+
+    /// A session with no rotation stages: the rotation supervisor launches
+    /// nothing, and the wake listener still launches the role for a message.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wake_only_session_launches_the_role_on_a_message_and_runs_no_rotation() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("invocations.log");
+        let ta_bin = tmp.path().join("fake-ta");
+        std::fs::write(
+            &ta_bin,
+            format!("#!/bin/sh\necho launched >> '{}'\nexit 0\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ta_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let listener =
+            WakeListenerConfig::new("chief-of-staff", vec!["intake-a".to_string()], None);
+        TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new())
+            .with_wake_on_demand_listeners(vec![listener.clone()])
+            .save(tmp.path())
+            .unwrap();
+
+        let transport: Arc<dyn WhiteboardTransport> = Arc::new(InMemoryTransport::new());
+        transport
+            .stream_append("intake-a", b"hello".to_vec())
+            .await
+            .unwrap();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let rotation = tokio::spawn(crate::team_session::run_team_session(
+            tmp.path().to_path_buf(),
+            "sess-1".to_string(),
+            ta_bin.clone(),
+            shutdown.clone(),
+        ));
+        let wake = tokio::spawn(run_listener_loop(
+            tmp.path().to_path_buf(),
+            "sess-1".to_string(),
+            listener,
+            ta_bin,
+            transport,
+            shutdown,
+        ));
+
+        let count = || {
+            std::fs::read_to_string(&log)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while count() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Give a (wrongly) running rotation time to launch as well.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        rotation.abort();
+        wake.abort();
+
+        assert_eq!(
+            count(),
+            1,
+            "exactly one launch: the wake message. A second would be a rotation cycle."
+        );
+        let state = TeamSessionState::load(tmp.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.findings.len(), 1);
+        assert_eq!(state.findings[0].stage, "wake-on-demand");
+        assert_eq!(state.findings[0].role, "chief-of-staff");
     }
 }

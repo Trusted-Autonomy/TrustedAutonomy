@@ -46,6 +46,7 @@ pub mod power_manager;
 pub mod project_context;
 pub mod prompt_optimizer_supervisor;
 pub mod question_registry;
+pub mod rotation_policy;
 pub mod router;
 pub mod team_session;
 pub mod token_refresh;

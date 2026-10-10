@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.11-alpha.23
+**Version**: 0.17.11-alpha.26
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -16393,6 +16393,47 @@ ta team-session restart trading-desk
 `suspended` session (reached via the backoff/crash-recovery path above) since the
 supervisor checks a distinct signal for each status. Use `restart` for `suspended`,
 `resume` for `paused`.
+
+### Wake-on-demand only sessions (no rotation)
+
+A session does not have to rotate. A team that only reacts to messages (the Chief-of-Staff is the usual example) needs no stages: register its role with `--wake-on-demand`, add `--no-rotation`, and the daemon launches the role only when a message arrives on one of its keys. `--workflow` is optional in this shape.
+
+First enable the message transport in `.ta/workflow.toml`, since wake-on-demand listens on it:
+
+```toml
+[whiteboard]
+enabled = true
+```
+
+Then start the session:
+
+```bash
+ta team-session start cos \
+  --no-rotation \
+  --wake-on-demand chief-of-staff:external-intake \
+  --objective "Triage everything that arrives and answer the owner"
+```
+
+The command prints `no rotation (wake-on-demand only)` when it succeeds, and `ta team-session status cos` reports the same. No round-robin cycle ever runs, so no agent is launched until a message arrives. Pause, resume and stop work as they do for any session.
+
+Rules:
+
+- `--no-rotation` needs at least one `--wake-on-demand` role. Without one the session would have nothing to run, and the command refuses to start it.
+- Pass `--workflow <path>` as well if you want the roles' prompts and the business budget from a workflow YAML. With `--no-rotation` its stages are ignored.
+- A workflow whose `stages:` list is empty is also accepted when `--wake-on-demand` is given, without `--no-rotation`.
+- A session with no `--wake-on-demand` role still needs a workflow with at least one stage. The error names both fixes.
+- If `[whiteboard] enabled = true` is missing, the command warns that nothing will ever wake the role.
+
+### Slowing down rotation
+
+Rotation runs at most one cycle per session every `rotation_min_delay_secs` seconds after a successful cycle. The default is 30. This guards against a one-stage workflow launching an agent run back to back. Change it in `.ta/workflow.toml`:
+
+```toml
+[team_session]
+rotation_min_delay_secs = 120   # accepted range: 1 to 86400
+```
+
+The daemon logs the effective value for each session when its supervisor starts (`rotation_min_delay_secs=... source=...`) and again if you edit the file. The setting is re-read every cycle, so no daemon restart is needed. A value outside the range, or a file that does not parse, is logged as an error and the default is used. The setting only paces rotation: wake-on-demand launches, their retries and their duplicate protection are not delayed by it. A failed cycle keeps its own retry backoff described above.
 
 **Context carry-forward**: each completed role's stdout summary is appended to the
 session's findings list and rendered as markdown context
