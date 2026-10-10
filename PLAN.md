@@ -10850,6 +10850,23 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
+### v0.17.11.28 - Wake Launches Are Idempotent: Ack Progress and Completed-Message Guard
+<!-- status: pending -->
+**Depends on**: v0.17.11.26
+
+**Goal**: A message that woke a role is processed once, even when the role runs longer than the transport's ack wait. Found in live CoS run 5 (2026-10-10): the Chief-of-Staff ran 40 s, longer than the 30 s ack wait, so NATS redelivered the intake; the daemon launched the same message again right after the first launch succeeded, and the second launch failed (`Phase v0.0.0.1 could not be claimed`) and scheduled a retry. Each extra launch is a real paid agent run.
+
+1. [ ] While a wake launch runs, send ack-progress heartbeats to the transport (JetStream `AckProgress`) at an interval comfortably below the ack wait, so a long run is never redelivered. Stop heartbeating when the launch exits.
+2. [ ] Make the ack wait at least the configured launch timeout plus margin (derive it, or refuse to start the listener with a clear message naming both settings and how to change them).
+3. [ ] Idempotency keyed by stream sequence (and message id): record a completed or dead-lettered sequence on disk in `.ta/` (survives daemon restarts); when a message arrives whose sequence is already recorded, ack it and skip the launch, logging the sequence, role and the time of the first completion. Applies equally to redelivery after a daemon restart.
+4. [ ] A phase-claim failure on a wake launch (`Phase ... could not be claimed`) must not be retried as a fresh launch of work that already completed; distinguish "already done" from a real failure.
+5. [ ] Tests: a launch longer than ack wait is not redelivered (in-memory transport with a short ack wait); a redelivered completed sequence is acked and not relaunched; a restart between launch and ack does not relaunch; heartbeats stop after exit.
+6. [ ] Document the behavior and the settings in `docs/USAGE.md` (ack wait, heartbeat interval, the completed-sequence record, how to clear it).
+
+**Effort**: S to M.
+
+#### Version: `0.17.11-alpha.28`
+
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
 <!-- status: pending -->
 **Depends on**: none
