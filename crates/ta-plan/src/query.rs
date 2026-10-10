@@ -375,6 +375,105 @@ pub fn check_version_sync(phases: &[PlanPhase]) -> Option<String> {
     }
 }
 
+/// Result of [`expected_version_from_plan`]: the workspace version PLAN.md
+/// says `Cargo.toml` should carry, and what (if anything) is holding it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedVersion {
+    /// Last phase in the contiguous run of `Done` phases (ascending semver
+    /// order). `None` when the plan has no leading done phase.
+    pub phase_id: Option<String>,
+    /// Semver for `phase_id` (see [`phase_id_to_semver`]). `None` when the plan
+    /// has no completed semver phase.
+    pub version: Option<String>,
+    /// First semver phase after the contiguous run that is not `Done` and not
+    /// `Deferred`. It freezes the version for every phase after it, even ones
+    /// that are already done.
+    pub blocking: Option<BlockingPhase>,
+    /// How many `Done` phases sit after the blocking phase and are therefore
+    /// not reflected in `version`.
+    pub done_after_blocker: usize,
+}
+
+/// A pending or in-progress phase that is holding the expected version back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockingPhase {
+    pub id: String,
+    pub title: String,
+    pub status: PlanStatus,
+}
+
+impl ExpectedVersion {
+    /// Actionable message for a blocked version, or `None` when nothing blocks
+    /// it or no later phase is done (nothing is being held back).
+    ///
+    /// Names the phase and the two ways out: finish it, or close it with its
+    /// items moved to a named phase.
+    pub fn blocked_message(&self) -> Option<String> {
+        let blocker = self.blocking.as_ref()?;
+        if self.done_after_blocker == 0 {
+            return None;
+        }
+        let held = self.version.as_deref().unwrap_or("(none)");
+        Some(format!(
+            "Version is held at {held} because phase {id} ({title}) is {status}, \
+             while {n} later phase(s) are done. Two ways out: \
+             (1) finish {id}, or \
+             (2) close it: move its unfinished items to a named future phase \
+             (`ta plan move-item`), then mark {id} done (or deferred if it is dropped).",
+            id = blocker.id,
+            title = blocker.title,
+            status = blocker.status,
+            n = self.done_after_blocker,
+        ))
+    }
+}
+
+/// Compute the version `Cargo.toml` should carry according to PLAN.md.
+///
+/// Walks semver-ID phases in ascending semver order and takes the last phase of
+/// the leading contiguous run of `Done` phases. `Deferred` phases are parked on
+/// purpose and are skipped without breaking the run. The first `Pending` or
+/// `InProgress` phase ends the run (and is reported as the blocker). Phases
+/// with non-semver IDs are ignored. This is the single source for both
+/// `ta plan status --check-order` and `ta plan expected-version`.
+pub fn expected_version_from_plan(phases: &[PlanPhase]) -> ExpectedVersion {
+    let mut sorted: Vec<&PlanPhase> = phases
+        .iter()
+        .filter(|p| parse_semver_id(&p.id).is_some())
+        .collect();
+    sorted.sort_by(by_semver);
+
+    let mut last_done: Option<&PlanPhase> = None;
+    let mut blocking: Option<BlockingPhase> = None;
+    let mut done_after_blocker = 0;
+    for p in sorted {
+        match (&blocking, &p.status) {
+            (None, PlanStatus::Done) => {
+                if phase_id_to_semver(&p.id).is_some() {
+                    last_done = Some(p);
+                }
+            }
+            (None, PlanStatus::Deferred) => {}
+            (None, status) => {
+                blocking = Some(BlockingPhase {
+                    id: p.id.clone(),
+                    title: p.title.clone(),
+                    status: status.clone(),
+                });
+            }
+            (Some(_), PlanStatus::Done) => done_after_blocker += 1,
+            (Some(_), _) => {}
+        }
+    }
+
+    ExpectedVersion {
+        phase_id: last_done.map(|p| p.id.clone()),
+        version: last_done.and_then(|p| phase_id_to_semver(&p.id)),
+        blocking,
+        done_after_blocker,
+    }
+}
+
 /// Phases that are `Pending` and whose declared dependencies are all `Done`.
 pub fn next_actionable_phases(phases: &[PlanPhase]) -> Vec<&PlanPhase> {
     phases
@@ -487,4 +586,112 @@ pub fn last_completed_phase_id(phases: &[PlanPhase]) -> String {
         .max_by(by_semver)
         .map(|p| p.id.clone())
         .unwrap_or_else(|| "v0.0.0".to_string())
+}
+
+#[cfg(test)]
+mod expected_version_tests {
+    use super::*;
+    use crate::parse::parse_plan;
+
+    fn plan(entries: &[(&str, &str)]) -> Vec<PlanPhase> {
+        let mut md = String::new();
+        for (id, status) in entries {
+            md.push_str(&format!(
+                "### {id} - Title of {id}\n<!-- status: {status} -->\n\n"
+            ));
+        }
+        parse_plan(&md)
+    }
+
+    #[test]
+    fn contiguous_done_takes_last_done() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.1.0", "done"),
+            ("v0.1.1", "done"),
+            ("v0.2.0", "pending"),
+        ]));
+        assert_eq!(e.phase_id.as_deref(), Some("v0.1.1"));
+        assert_eq!(e.version.as_deref(), Some("0.1.1-alpha"));
+        assert_eq!(e.blocking.as_ref().unwrap().id, "v0.2.0");
+        assert_eq!(e.done_after_blocker, 0);
+        assert!(e.blocked_message().is_none());
+    }
+
+    #[test]
+    fn pending_phase_blocks_later_done_phases() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.1.0", "done"),
+            ("v0.1.1", "pending"),
+            ("v0.1.2", "done"),
+            ("v0.1.3", "done"),
+        ]));
+        assert_eq!(e.version.as_deref(), Some("0.1.0-alpha"));
+        assert_eq!(e.done_after_blocker, 2);
+        let msg = e.blocked_message().unwrap();
+        assert!(msg.contains("v0.1.1"), "{msg}");
+        assert!(msg.contains("finish"), "{msg}");
+        assert!(msg.contains("move"), "{msg}");
+        assert!(msg.contains("0.1.0-alpha"), "{msg}");
+    }
+
+    #[test]
+    fn in_progress_phase_blocks_too() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.1.0", "done"),
+            ("v0.1.1", "in_progress"),
+            ("v0.1.2", "done"),
+        ]));
+        assert_eq!(e.blocking.as_ref().unwrap().status, PlanStatus::InProgress);
+        assert!(e.blocked_message().unwrap().contains("in_progress"));
+    }
+
+    #[test]
+    fn sub_phases_map_and_sort_by_semver_not_document_order() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.15.13.2", "done"),
+            ("v0.15.13", "done"),
+            ("v0.15.13.1", "done"),
+        ]));
+        assert_eq!(e.phase_id.as_deref(), Some("v0.15.13.2"));
+        assert_eq!(e.version.as_deref(), Some("0.15.13-alpha.2"));
+        assert!(e.blocking.is_none());
+    }
+
+    #[test]
+    fn deferred_phase_does_not_block() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.1.0", "done"),
+            ("v0.1.1", "deferred"),
+            ("v0.1.2", "done"),
+        ]));
+        assert_eq!(e.version.as_deref(), Some("0.1.2-alpha"));
+        assert!(e.blocking.is_none());
+    }
+
+    #[test]
+    fn empty_plan_has_no_version() {
+        let e = expected_version_from_plan(&[]);
+        assert_eq!(e.version, None);
+        assert_eq!(e.phase_id, None);
+        assert!(e.blocking.is_none());
+    }
+
+    #[test]
+    fn first_phase_pending_yields_no_version_but_names_blocker() {
+        let e = expected_version_from_plan(&plan(&[("v0.1.0", "pending"), ("v0.1.1", "done")]));
+        assert_eq!(e.version, None);
+        assert_eq!(e.blocking.as_ref().unwrap().id, "v0.1.0");
+        assert!(e.blocked_message().unwrap().contains("(none)"));
+    }
+
+    #[test]
+    fn unsorted_document_still_uses_semver_order() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.2.0", "done"),
+            ("v0.1.0", "done"),
+            ("v0.1.5", "pending"),
+        ]));
+        assert_eq!(e.version.as_deref(), Some("0.1.0-alpha"));
+        assert_eq!(e.done_after_blocker, 1);
+    }
 }

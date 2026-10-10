@@ -1,0 +1,192 @@
+name: Version Sync
+
+# Keeps Cargo.toml tracking the last completed PLAN.md phase however the work
+# was merged (ta draft apply, ordinary pull requests, agent pull requests).
+#
+# On every push to main it asks the same code `ta plan status` uses
+# (`ta plan expected-version`, via scripts/plan-version.sh) what version
+# PLAN.md expects. If Cargo.toml lags, it runs scripts/bump-version.sh on a
+# branch and opens (or refreshes) ONE bump pull request with auto-merge on.
+# It never pushes to main, and never creates tags or releases (see CLAUDE.md
+# Release Rules); `ta release run` stays the only path to a non-alpha version.
+#
+# ONE-TIME OWNER SETUP (the job fails with these steps until done):
+#   Pull requests opened with the default GITHUB_TOKEN do not trigger
+#   workflows, so the required checks ("Lint and Test (macos-latest)",
+#   "Lint and Test (ubuntu-latest)", "Windows Build") would never run and the
+#   bump PR could never merge. The job therefore uses a token you provide:
+#   1. Create a fine-grained personal access token (or a GitHub App
+#      installation token) for this repository with permissions
+#      Contents: read and write, Pull requests: read and write.
+#   2. Save it as the repository secret VERSION_SYNC_TOKEN
+#      (Settings > Secrets and variables > Actions > New repository secret).
+#   3. Enable Settings > General > Pull Requests > "Allow auto-merge".
+#
+# Idempotent: one fixed branch (automation/version-sync) and at most one open
+# PR. Loop-free: the bump commit leaves Cargo.toml matching PLAN.md, so the
+# run triggered by its own merge finds nothing to do.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Serialize runs; never cancel one that is mid-push.
+concurrency:
+  group: version-sync
+  cancel-in-progress: false
+
+env:
+  SYNC_BRANCH: automation/version-sync
+
+jobs:
+  sync:
+    name: Sync Cargo.toml version with PLAN.md
+    # Never on forks: they have no VERSION_SYNC_TOKEN and must not open PRs.
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Require VERSION_SYNC_TOKEN
+        env:
+          SYNC_TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            {
+              echo "### Version Sync cannot run: secret VERSION_SYNC_TOKEN is missing"
+              echo
+              echo "Pull requests opened with the default GITHUB_TOKEN do not trigger"
+              echo "workflows, so the required checks would never run on the bump PR."
+              echo
+              echo "One-time setup:"
+              echo "1. Create a fine-grained PAT (or GitHub App installation token) for"
+              echo "   this repository with Contents: read/write and Pull requests: read/write."
+              echo "2. Save it as the repository secret VERSION_SYNC_TOKEN"
+              echo "   (Settings > Secrets and variables > Actions)."
+              echo "3. Enable Settings > General > Pull Requests > Allow auto-merge."
+              echo "4. Re-run this workflow."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::error title=VERSION_SYNC_TOKEN is not set::Add the secret VERSION_SYNC_TOKEN (see the job summary for the exact steps), then re-run Version Sync."
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.VERSION_SYNC_TOKEN }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: version-sync
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Compute expected version from PLAN.md
+        id: expected
+        run: |
+          set +e
+          nix develop --command bash -c "scripts/plan-version.sh --check" \
+            > expected.out 2> expected.err
+          rc=$?
+          set -e
+          cat expected.err
+          EXPECTED=$(tr -d '[:space:]' < expected.out)
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "expected=$EXPECTED" >> "$GITHUB_OUTPUT"
+          echo "exit code $rc, expected version '$EXPECTED'"
+
+          # Item: a pending phase that freezes the version is reported with
+          # the phase and the two ways out. Surface it in the log and summary.
+          if grep -q '^WARNING: Version is held' expected.err; then
+            MSG=$(grep '^WARNING: Version is held' expected.err | sed 's/^WARNING: //')
+            echo "::warning title=A pending phase is blocking the version::$MSG"
+            { echo "### Version is blocked by a pending phase"; echo; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          case "$rc" in
+            0) echo "Cargo.toml already matches PLAN.md ($EXPECTED). Nothing to do." ;;
+            1) echo "Cargo.toml lags PLAN.md; a bump to $EXPECTED is needed." ;;
+            3) echo "::notice::Cargo.toml carries a pinned release version; the sync only manages -alpha versions. Re-bump with scripts/bump-version.sh after the release." ;;
+            4) echo "::error title=Cargo.toml is ahead of PLAN.md::See the log: the sync never lowers a version automatically. Mark finished phases done in PLAN.md or run scripts/bump-version.sh $EXPECTED by hand."
+               exit 1 ;;
+            *) echo "::error title=Could not compute the expected version::See the log above. Re-run manually: scripts/plan-version.sh --check"
+               exit 1 ;;
+          esac
+
+      - name: Open or refresh the bump pull request
+        if: steps.expected.outputs.rc == '1'
+        env:
+          GH_TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
+          EXPECTED: ${{ steps.expected.outputs.expected }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          MAIN_SHA=$(git rev-parse HEAD)
+          OPEN_PR=$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+
+          # Idempotence: an open PR whose branch is exactly one commit on top
+          # of the current main and already carries the expected version needs
+          # no work. A branch that fell behind main is rebuilt, because branch
+          # protection requires an up-to-date branch and auto-merge will not
+          # update it for us.
+          if [ -n "$OPEN_PR" ] && git fetch origin "$SYNC_BRANCH" 2>/dev/null; then
+            BRANCH_VER=$(git show "FETCH_HEAD:Cargo.toml" | grep '^version' | head -1 | sed 's/version = "\(.*\)"/\1/')
+            if [ "$(git rev-parse FETCH_HEAD~1)" = "$MAIN_SHA" ] && [ "$BRANCH_VER" = "$EXPECTED" ]; then
+              echo "Bump PR #$OPEN_PR is already open, current with main and at $EXPECTED. Nothing to do."
+              exit 0
+            fi
+            echo "Bump PR #$OPEN_PR exists but is stale (branch version $BRANCH_VER, expected $EXPECTED, or behind main). Rebuilding the branch."
+          fi
+
+          git checkout -B "$SYNC_BRANCH" "$MAIN_SHA"
+          echo "Running: scripts/bump-version.sh $EXPECTED"
+          nix develop --command bash -c "./scripts/bump-version.sh '$EXPECTED'"
+
+          # The bump must leave Cargo.toml matching PLAN.md or the next run
+          # would open another PR (loop guard).
+          if ! nix develop --command bash -c "scripts/plan-version.sh --check" >/dev/null; then
+            echo "::error title=Bump did not converge::After scripts/bump-version.sh $EXPECTED, 'scripts/plan-version.sh --check' still fails. Not opening a PR. Run both by hand to investigate."
+            exit 1
+          fi
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "::error title=Bump produced no changes::scripts/bump-version.sh $EXPECTED changed nothing although Cargo.toml reported a lag. Investigate by hand."
+            exit 1
+          fi
+
+          PHASE=$(nix develop --command bash -c "scripts/plan-version.sh --check --json" 2>/dev/null | jq -r '.phase')
+          git add -A Cargo.toml Cargo.lock .release.toml CLAUDE.md docs/USAGE.md apps crates
+          git commit -m "chore: sync version to $EXPECTED (last completed phase $PHASE)"
+          # Force is limited to this automation branch; main is never pushed to.
+          git push --force origin "HEAD:refs/heads/$SYNC_BRANCH"
+
+          BODY="Automated version sync. PLAN.md's last completed phase is \`$PHASE\`, so Cargo.toml should be \`$EXPECTED\`.
+
+          Produced by \`scripts/bump-version.sh $EXPECTED\` from the Version Sync workflow. Merges itself when the required checks pass. Do not edit by hand; it is rebuilt when main moves.
+
+          Never creates tags or releases. \`ta release run\` is the only path to a non-alpha version."
+          if [ -n "$OPEN_PR" ]; then
+            gh pr edit "$OPEN_PR" --title "chore: sync version to $EXPECTED" --body "$BODY"
+            PR="$OPEN_PR"
+          else
+            PR_URL=$(gh pr create --base main --head "$SYNC_BRANCH" \
+              --title "chore: sync version to $EXPECTED" --body "$BODY")
+            PR="${PR_URL##*/}"
+          fi
+          echo "Bump PR: #$PR"
+
+          if ! gh pr merge "$PR" --auto --squash; then
+            echo "::error title=Could not enable auto-merge on PR #$PR::Enable Settings > General > Pull Requests > Allow auto-merge, or merge the PR by hand once its checks pass."
+            exit 1
+          fi
+          echo "Auto-merge enabled on PR #$PR; it merges when the required checks pass."

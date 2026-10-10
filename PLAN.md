@@ -10773,15 +10773,15 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [x] Deferred items moved/resolved: bounded context (a size limit on question and context), a hosted-model backend, optional feature-gated use from `task-graph` and `decision-gate`, and publishing to crates.io and PyPI are future work tracked in the `typed-ask` repository README ("Planned"), not in this phase. Original note: bounded context (a size limit on question and context); a hosted-model backend so one interface covers local and hosted models; optional feature-gated use from `task-graph` and `decision-gate` (their defaults stay dependency-free); publish to crates.io and PyPI when ready.
 
 ### v0.17.11.22 - Automatic Version Sync (Nightly and Release)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: `Cargo.toml` tracks the last completed plan phase without a human step, however the work was merged. Today the bump fires only inside `ta draft apply --phase`, so work merged as ordinary pull requests (agent or human) never bumps it, and the guard that picks the "last completed phase" stops at the first pending phase, so a single stale or unfinished phase freezes the version for everything after it.
 
-1. [ ] CI job on `main`: compute the expected version from `PLAN.md` with the same function `ta plan status` uses; if `Cargo.toml` differs, run `scripts/bump-version.sh` and open a bump pull request that merges itself when its checks pass.
-2. [ ] Nightly: stamp nightly assets as `<Cargo.toml version>+nightly.<date>.<sha>` and fail visibly (not silently) when `Cargo.toml` lags `PLAN.md`.
-3. [ ] Public release: `ta release run` stays the only path that sets a non-alpha release version; document it.
-4. [ ] When a pending phase blocks the version, say so with an actionable message naming the phase and the two ways out (finish it, or close it with its items moved to a named phase), in `ta plan status --check-order` and in the sync job's output.
+1. [x] CI job on `main`: compute the expected version from `PLAN.md` with the same function `ta plan status` uses; if `Cargo.toml` differs, run `scripts/bump-version.sh` and open a bump pull request that merges itself when its checks pass.
+2. [x] Nightly: stamp nightly assets as `<Cargo.toml version>+nightly.<date>.<sha>` and fail visibly (not silently) when `Cargo.toml` lags `PLAN.md`.
+3. [x] Public release: `ta release run` stays the only path that sets a non-alpha release version; document it.
+4. [x] When a pending phase blocks the version, say so with an actionable message naming the phase and the two ways out (finish it, or close it with its items moved to a named phase), in `ta plan status --check-order` and in the sync job's output.
 
 **Effort**: S to M.
 
