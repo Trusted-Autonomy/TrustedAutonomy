@@ -10851,7 +10851,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
 ### v0.17.11.28 - Wake Launches Are Idempotent: Ack Progress and Completed-Message Guard
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.11.26
 
 **Goal**: A message that woke a role is processed once, even when the role runs longer than the transport's ack wait. Found in live CoS run 5 (2026-10-10): the Chief-of-Staff ran 40 s, longer than the 30 s ack wait, so NATS redelivered the intake; the daemon launched the same message again right after the first launch succeeded, and the second launch failed (`Phase v0.0.0.1 could not be claimed`) and scheduled a retry. Each extra launch is a real paid agent run.
