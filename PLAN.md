@@ -10868,7 +10868,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.28`
 
 ### v0.17.11.29 - Draft Apply Fidelity: Plan Merge Touches Only the Target Phase, Dry Run Is a Dry Run
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: `ta draft apply` must change exactly what the draft says and nothing else, and `--dry-run` must change nothing. Every TA-built draft since 2026-10-10 has needed a hand repair of `PLAN.md` after apply, and the last one flipped four unrelated human-gate checkboxes to done, which falsely records human sign-offs. This is the process-fidelity fix that lets the TA flow be used without manual cleanup; it comes before v0.17.11.27.
