@@ -367,7 +367,11 @@ What a chat-mode launch gets:
 - **Capability manifest**: the compiled chat manifest. It can read anywhere in the workspace (secret files such as `.env` and keys stay blocked), write only under `.ta/chat-scratch/` (discarded with the staging copy), and has no git, email or other external-action grants.
 - **A chat-locked TA MCP server**: the agent's `ta serve` process is started from `.ta/mcp-agent-chat.json` and locked to one chat session. Only chat-safe tools are registered (workspace reads, scratch writes, status queries, wiki reads, community reads, whiteboard presence and handoff). Goal, draft, plan, wiki-write, task and external-action tools do not exist on that server, and the `ta_fs_*` tools reject any `goal_run_id` other than the session's own. The session id is written into the agent's CLAUDE.md and the server's instructions.
 - **Tool surface = allowed_tools intersected with the chat-mode profile**, never the union. Mutating entries (for example `Bash(*)`, `mcp__ta__ta_goal_start`, `mcp__ta__ta_wiki_update`) are stripped and reported as a `[warn]` line plus a `tracing` warning. A wildcard such as `mcp__ta__*` is narrowed to the chat-safe tools it covers. A security-posture `max_allowed_tools` ceiling, when set, narrows the result again.
-- **No native-tool bypass**: `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task` and `Skill` are denied in the injected `.claude/settings.local.json`.
+- **No built-in tool exists**: every chat-mode `claude` launch passes `--tools ""`, an allowlist with nothing in it, so the agent has none of Claude Code's built-in tools (not `Bash`, `Read`, `Write`, `Edit`, `WebFetch`, and also not `ListAgents`, `SendMessage`, `CronCreate`, `RemoteTrigger` or any built-in added in a later Claude Code release). Its whole tool list is the chat-safe `mcp__ta__*` tools.
+- **Only TA's MCP server**: the launch also passes `--strict-mcp-config --mcp-config .ta/mcp-agent-chat.json`, so MCP servers from your user settings and claude.ai connectors (Gmail, Linear, and so on) are not loaded.
+- **Deny list as a second layer**: the injected `.claude/settings.local.json` also denies every built-in tool by name. Nothing relies on that list being complete; the `--tools ""` allowlist is the control.
+
+To check the tool surface against your installed Claude Code, run `scripts/chat-mode-tool-surface-smoke.sh`. It starts `claude` with the chat-mode flags against a stub MCP server and fails if any tool other than `mcp__ta__*` is listed. It skips (exit 0) when `claude` is not installed.
 
 `ta run` refuses chat mode, with an explanation of what to change, when:
 
@@ -403,6 +407,7 @@ A role whose origin is `cos` or `chat` always launches with `--chat-mode`, even 
 
 - `.ta/logs/goals/<goal-id>/agent-transcript.jsonl`: the agent's full stream-json output, one line per event.
 - `.ta/logs/goals/<goal-id>/ta-tool-calls.jsonl`: one line per TA tool the agent called (for example `mcp__ta__ta_whiteboard_outcome_send`) with its arguments.
+- `.ta/logs/goals/<goal-id>/first-message.txt`: the agent's exact first message (title, objective, and for a wake launch the fenced untrusted intake and the trusted `candidate_id` line). Written for every `ta run` launch, chat mode or not, with secrets redacted.
 
 Values that look like secrets (keys such as `token`, `api_key`, `password`, `authorization`, and strings such as `sk-ant-...` or `Bearer ...`) are replaced with `[REDACTED]` in both files. To keep the same record for any other goal, set `TA_KEEP_TRANSCRIPT=1` when you run it. Only `--headless` launches can be recorded; an interactive launch prints a warning instead.
 

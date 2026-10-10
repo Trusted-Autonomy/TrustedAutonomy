@@ -84,26 +84,87 @@ pub const CHAT_MODE_MCP_TOOLS: &[&str] = &[
     "ta_ask_human",
 ];
 
-/// Native Claude Code tools denied outright in a chat-mode launch. Bare
-/// tool names deny every use of that tool regardless of arguments. These
-/// are the unmediated paths around the capability manifest (shell, native
-/// file read/write, web fetch, sub-agents), so none may remain reachable.
+/// Claude Code built-in tools denied by name in a chat-mode launch.
+///
+/// This is the SECOND layer (belt and braces). The primary control is the
+/// launch allowlist: every chat-mode `claude` launch passes `--tools ""`
+/// ([`CHAT_MODE_BUILTIN_TOOLS_FLAG`]), so no built-in tool exists at all.
+/// A denylist alone cannot be the control: Claude Code gains new built-in
+/// tools over time and every one not named here would stay available (live
+/// run: a read-only Chief-of-Staff could call `ListAgents`, `SendMessage`,
+/// `CronCreate` and `RemoteTrigger`). Nothing may rely on this list being
+/// complete; the drift tests only keep it a superset of what was observed.
+///
+/// Bare tool names deny every use of that tool regardless of arguments.
 pub const CHAT_MODE_NATIVE_DENY: &[&str] = &[
+    // Unmediated shell, file and web paths around the capability manifest.
     "Bash",
+    "BashOutput",
+    "KillShell",
+    "KillBash",
+    "PowerShell",
+    "REPL",
     "Read",
     "Write",
     "Edit",
     "MultiEdit",
     "NotebookEdit",
+    "NotebookRead",
     "Glob",
     "Grep",
     "LS",
     "WebFetch",
     "WebSearch",
+    "SlashCommand",
+    // Sub-agents, skills, workflows.
     "Task",
     "Agent",
     "Skill",
+    "Workflow",
+    "ReportFindings",
+    // Enumerating or messaging other local sessions, scheduling, remote
+    // triggers, notifications.
+    "ListAgents",
+    "SendMessage",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "RemoteTrigger",
+    "PushNotification",
+    "Monitor",
+    "TaskStop",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskUpdate",
+    "TaskOutput",
+    "TodoWrite",
+    "TodoRead",
+    // Session and worktree control.
+    "EnterWorktree",
+    "ExitWorktree",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "AskUserQuestion",
+    "EndConversation",
+    "ToolSearch",
+    // Design and artifact publishing.
+    "DesignSync",
+    "Artifact",
+    "ArtifactComments",
+    "ArtifactData",
+    "ArtifactCheck",
 ];
+
+/// The Claude Code flag pair that disables EVERY built-in tool
+/// (`--tools <tools...>`: `""` disables all tools from the built-in set;
+/// MCP tools are unaffected). Passed on every chat-mode `claude` launch.
+/// Verified live against Claude Code 2.1.295: with it, the agent's complete
+/// tool list is exactly the tools of the `--strict-mcp-config` servers.
+/// `--restricted` and `--setting-sources local` alone do NOT achieve this
+/// (`ListAgents`, `SendMessage`, `Write`, `Edit`, `Skill`... stay available).
+pub const CHAT_MODE_BUILTIN_TOOLS_FLAG: [&str; 2] = ["--tools", ""];
 
 /// True when `tool_name` (a bare MCP tool name such as `"ta_fs_read"`) is
 /// part of the chat-mode profile.
@@ -345,6 +406,71 @@ mod tests {
         for t in ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit"] {
             assert!(CHAT_MODE_NATIVE_DENY.contains(&t), "{} must be denied", t);
         }
+    }
+
+    /// Every built-in tool seen live in a chat-mode session (ListAgents,
+    /// SendMessage, CronCreate, RemoteTrigger and the rest of Claude Code
+    /// 2.1.295's set) is denied by name too. The deny list is the second
+    /// layer; `--tools ""` is the control.
+    #[test]
+    fn native_deny_list_covers_every_observed_builtin_tool() {
+        for t in [
+            "Agent",
+            "Bash",
+            "Edit",
+            "ListAgents",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "Skill",
+            "ToolSearch",
+            "Workflow",
+            "Write",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "DesignSync",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Monitor",
+            "NotebookEdit",
+            "PushNotification",
+            "RemoteTrigger",
+            "SendMessage",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Glob",
+            "Grep",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "EndConversation",
+            "Artifact",
+            "ArtifactComments",
+            "ArtifactData",
+            "ArtifactCheck",
+            "TodoWrite",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+            "TaskOutput",
+        ] {
+            assert!(CHAT_MODE_NATIVE_DENY.contains(&t), "{} must be denied", t);
+        }
+        let mut sorted = CHAT_MODE_NATIVE_DENY.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), CHAT_MODE_NATIVE_DENY.len(), "duplicate entry");
+        // A bare `mcp__ta__*` deny would deny the profile itself.
+        assert!(CHAT_MODE_NATIVE_DENY
+            .iter()
+            .all(|t| !t.starts_with("mcp__")));
+    }
+
+    #[test]
+    fn builtin_tools_flag_disables_every_builtin() {
+        assert_eq!(CHAT_MODE_BUILTIN_TOOLS_FLAG, ["--tools", ""]);
     }
 
     #[test]
