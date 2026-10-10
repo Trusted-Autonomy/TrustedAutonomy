@@ -10788,7 +10788,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.22`
 
 ### v0.17.11.24 - Tests Must Never Touch the Real Keychain
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: Eight `shadow_experiment` tests in `ta-cli` (`spawn_shadow_experiment_goal_*`, `shadow_experiment_command_env_*`) block on a macOS Keychain prompt for the test binary even when `TA_NO_KEYCHAIN=1` is set, so every full local test run has to skip them and a prompt can stall a run for hours. Found by several agents during the 2026-10-07 security work.
