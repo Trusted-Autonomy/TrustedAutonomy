@@ -82,3 +82,33 @@ FLAGS=(--tools "" --strict-mcp-config --mcp-config "$WORK/mcp.json"
 echo "Running: claude -p ... ${FLAGS[*]}"
 claude -p "Reply with the single word ok." "${FLAGS[@]}" \
   --output-format stream-json --verbose 2>/dev/null | python3 "$WORK/check.py"
+
+# ── Context delivery (security hypothesis H22) ──────────────────────────────
+# `--setting-sources local` stops Claude Code loading CLAUDE.md, so a restricted
+# launch gets TA's injected context through `--append-system-prompt-file`.
+# Prove both halves with the same restricted flags: a magic word in
+# CLAUDE.md is NOT seen, a magic word in the system-prompt file IS quoted.
+# Keep the flags in sync with RESTRICTED_LAUNCH_FLAGS and SYSTEM_PROMPT_FILE_FLAG.
+CTX="$WORK/ctx"
+mkdir -p "$CTX"
+FILE_WORD="PELICAN$RANDOM$RANDOM"
+CLAUDE_MD_WORD="XYLOPHONE$RANDOM$RANDOM"
+echo "The secret persona word is $CLAUDE_MD_WORD." >"$CTX/CLAUDE.md"
+echo "## Agent Persona
+### Role
+The secret persona word is $FILE_WORD." >"$WORK/system-prompt.txt"
+CTX_FLAGS=(--tools "" --setting-sources local --permission-mode dontAsk
+           --append-system-prompt-file "$WORK/system-prompt.txt")
+echo "Running (context delivery): claude -p ... ${CTX_FLAGS[*]}"
+ANSWER="$(cd "$CTX" && claude -p "Quote the secret persona word from your instructions exactly, or answer NONE." \
+  "${CTX_FLAGS[@]}" 2>/dev/null || true)"
+echo "answer: $ANSWER"
+if ! grep -q "$FILE_WORD" <<<"$ANSWER"; then
+  echo "FAIL: the word in the system-prompt file was not quoted, so --append-system-prompt-file did not deliver the context."
+  exit 1
+fi
+if grep -q "$CLAUDE_MD_WORD" <<<"$ANSWER"; then
+  echo "FAIL: CLAUDE.md was loaded under --setting-sources local; the premise behind the system-prompt file changed. Re-evaluate H22."
+  exit 1
+fi
+echo "PASS: restricted launch delivers injected context through --append-system-prompt-file (CLAUDE.md is not loaded)."

@@ -37,6 +37,35 @@ impl ClaudeCodeChannel {
             .join(format!("{}.md", goal_id))
     }
 
+    /// The context TA injected into the staged CLAUDE.md, WITHOUT the
+    /// project's own original CLAUDE.md body.
+    ///
+    /// `initial_content` is the `AgentContext::content` passed to
+    /// `inject_initial`. The staged file is `initial_content`, a newline, the
+    /// original body, then any sections appended afterwards (work plan,
+    /// persona, chat-mode section). This returns `initial_content` followed by
+    /// the appended sections. Used to hand restricted launches (which do not
+    /// load CLAUDE.md, see `--setting-sources local`) their context through
+    /// `--append-system-prompt-file`. If the staged file does not have the
+    /// expected shape (for example it was rewritten), the whole staged file
+    /// is returned rather than silently dropping context.
+    pub fn injected_context(&self, initial_content: &str) -> anyhow::Result<String> {
+        let staged = std::fs::read_to_string(self.claude_md_path())?;
+        let original = match std::fs::read_to_string(self.backup_path()) {
+            Ok(o) if o != NO_ORIGINAL => o,
+            _ => return Ok(staged),
+        };
+        if let Some(rest) = staged.strip_prefix(initial_content) {
+            if let Some(after) = rest
+                .strip_prefix('\n')
+                .and_then(|r| r.strip_prefix(original.as_str()))
+            {
+                return Ok(format!("{}{}", initial_content, after));
+            }
+        }
+        Ok(staged)
+    }
+
     fn append_to_context_file(&self, section: &str) -> anyhow::Result<()> {
         let path = self.claude_md_path();
         if path.exists() {
@@ -184,6 +213,30 @@ mod tests {
         ch.inject_initial(&ctx).unwrap();
         let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         assert!(content.contains("# TA Context"));
+    }
+
+    #[test]
+    fn injected_context_excludes_original_body_but_keeps_appended_sections() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# Original body\n").unwrap();
+        let ch = make_channel(&dir);
+        ch.inject_initial(&make_ctx(&dir, "TA CONTEXT")).unwrap();
+        ch.inject_persona("\n## Agent Persona\nROLE TEXT\n")
+            .unwrap();
+        let injected = ch.injected_context("TA CONTEXT").unwrap();
+        assert!(injected.contains("TA CONTEXT"));
+        assert!(injected.contains("ROLE TEXT"));
+        assert!(!injected.contains("Original body"));
+    }
+
+    #[test]
+    fn injected_context_without_original_returns_whole_file() {
+        let dir = TempDir::new().unwrap();
+        let ch = make_channel(&dir);
+        ch.inject_initial(&make_ctx(&dir, "TA CONTEXT")).unwrap();
+        ch.inject_persona("\nPERSONA\n").unwrap();
+        let injected = ch.injected_context("TA CONTEXT").unwrap();
+        assert!(injected.contains("TA CONTEXT") && injected.contains("PERSONA"));
     }
 
     #[test]
