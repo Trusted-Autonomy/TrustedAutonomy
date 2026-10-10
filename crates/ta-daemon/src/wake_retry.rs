@@ -17,6 +17,16 @@
 // - Independently, a per-listener rolling-hour launch cap (default 6) makes
 //   further launches wait rather than run, as a cost safety net.
 //
+// - Redelivery of work that already finished is harmless (v0.17.11.28). A
+//   launch longer than the transport's ack wait used to be redelivered and
+//   launched a second time (a second paid run). Now (1) a running launch
+//   sends ack-progress heartbeats so the transport does not redeliver it,
+//   (2) every completed or dead-lettered sequence is recorded on disk in
+//   `.ta/wake-completed/` BEFORE it is acked, and a message whose sequence is
+//   already recorded is acked and skipped (also across daemon restarts), and
+//   (3) a launch that fails because its phase is already done or already
+//   claimed is told apart from a real failure.
+//
 // All decisions take an explicit `now` so they are unit-testable without a
 // real clock.
 
@@ -37,7 +47,22 @@ pub struct WakeRetryPolicy {
     pub backoff: Vec<Duration>,
     /// `0` disables the rate guard.
     pub max_launches_per_hour: u32,
+    /// Longest one launch may run before it is killed and counted as failed.
+    pub launch_timeout: Duration,
+    /// How long the transport waits for an ack (or ack-progress) before
+    /// redelivering a message. Derived from `launch_timeout` when unset.
+    pub ack_wait: Duration,
+    /// How often a running launch sends ack-progress. Zero disables it.
+    pub ack_heartbeat: Duration,
 }
+
+/// Slack added on top of the launch timeout when deriving or checking the
+/// ack wait, so a launch that runs right up to its timeout, then needs a
+/// moment to be recorded and acked, is still not redelivered.
+pub const ACK_WAIT_MARGIN: Duration = Duration::from_secs(60);
+
+/// Upper bound for the derived heartbeat interval.
+const MAX_DERIVED_HEARTBEAT: Duration = Duration::from_secs(10);
 
 impl Default for WakeRetryPolicy {
     fn default() -> Self {
@@ -47,7 +72,19 @@ impl Default for WakeRetryPolicy {
 
 impl WakeRetryPolicy {
     pub fn from_config(c: &WhiteboardConfig) -> Self {
+        let launch_timeout = Duration::from_secs(c.wake_launch_timeout_secs);
+        let ack_wait = c
+            .wake_ack_wait_secs
+            .map(Duration::from_secs)
+            .unwrap_or(launch_timeout + ACK_WAIT_MARGIN);
+        let ack_heartbeat = c
+            .wake_ack_heartbeat_secs
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| (ack_wait / 3).min(MAX_DERIVED_HEARTBEAT));
         Self {
+            launch_timeout,
+            ack_wait,
+            ack_heartbeat,
             // A cap of 0 would dead-letter every message unread; treat it
             // as the minimum meaningful value instead.
             max_attempts: c.wake_max_attempts.max(1),
@@ -62,6 +99,38 @@ impl WakeRetryPolicy {
 
     pub fn load(project_root: &Path) -> Self {
         Self::from_config(&WhiteboardConfig::load(project_root))
+    }
+
+    /// Checks the launch timeout, ack wait and heartbeat against each other.
+    /// A listener must not run with settings that let the transport redeliver
+    /// a message that is still being worked on. The error names the settings
+    /// involved and how to fix them.
+    pub fn validate_timings(&self) -> Result<(), String> {
+        const WHERE: &str = "in the [whiteboard] section of .ta/workflow.toml";
+        if self.launch_timeout.is_zero() {
+            return Err(format!(
+                "wake_launch_timeout_secs is 0, so every wake launch would be killed at once.                  Set it to the longest a launch may run (default 3600) {WHERE}."
+            ));
+        }
+        let needed = self.launch_timeout + ACK_WAIT_MARGIN;
+        if self.ack_wait < needed {
+            return Err(format!(
+                "wake_ack_wait_secs = {} is shorter than wake_launch_timeout_secs = {} plus the                  {}s margin, so the transport could redeliver a message while its launch is                  still running. Raise wake_ack_wait_secs to at least {}, remove it to derive it                  from the launch timeout, or lower wake_launch_timeout_secs, {WHERE}.",
+                self.ack_wait.as_secs(),
+                self.launch_timeout.as_secs(),
+                ACK_WAIT_MARGIN.as_secs(),
+                needed.as_secs(),
+            ));
+        }
+        if self.ack_heartbeat.is_zero() || self.ack_heartbeat * 2 > self.ack_wait {
+            return Err(format!(
+                "wake_ack_heartbeat_secs = {} must be above 0 and at most half of                  wake_ack_wait_secs = {}, or heartbeats cannot keep a running launch from being                  redelivered. Set it between 1 and {}, or remove it to derive it, {WHERE}.",
+                self.ack_heartbeat.as_secs(),
+                self.ack_wait.as_secs(),
+                (self.ack_wait / 2).as_secs().max(1),
+            ));
+        }
+        Ok(())
     }
 
     /// Wait after the `failures`-th failure (1-based). The last configured
@@ -192,6 +261,126 @@ impl AttemptStore {
             self.save_all(&all)?;
         }
         Ok(())
+    }
+}
+
+/// How a finished sequence ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletedStatus {
+    /// The launch succeeded (or its phase was already done).
+    Completed,
+    /// The message used up its attempts and was dead-lettered.
+    DeadLettered,
+}
+
+impl CompletedStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            CompletedStatus::Completed => "completed",
+            CompletedStatus::DeadLettered => "dead-lettered",
+        }
+    }
+}
+
+/// One finished stream sequence, persisted in the listener's completed file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedRecord {
+    pub session: String,
+    pub role: String,
+    pub key: String,
+    /// The transport's stable id for the message; for NATS `seq-<stream
+    /// sequence>`, so it names the sequence and survives redelivery.
+    pub msg_id: String,
+    /// SHA-256 of the payload. A sequence number can repeat if the stream is
+    /// deleted and recreated; a different payload under a recorded id means
+    /// a new message, which must not be skipped.
+    pub payload_sha256: String,
+    pub status: CompletedStatus,
+    pub completed_at: DateTime<Utc>,
+}
+
+/// Most finished sequences kept per listener. The oldest are dropped first.
+const COMPLETED_RETENTION: usize = 1000;
+
+pub fn payload_digest(payload: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(payload))
+}
+
+/// On-disk record of finished sequences for ONE listener
+/// (`.ta/wake-completed/<session>__<role>.json`), written next to the
+/// attempts file in the same style. It is what makes a redelivered message
+/// harmless: it is acked and skipped, also after a daemon restart. To make a
+/// message run again, delete its entry (or the file) and re-send it.
+pub struct CompletedStore {
+    path: PathBuf,
+}
+
+impl CompletedStore {
+    pub fn for_listener(project_root: &Path, session: &str, role: &str) -> Self {
+        Self {
+            path: project_root
+                .join(".ta")
+                .join("wake-completed")
+                .join(format!(
+                    "{}__{}.json",
+                    sanitize_component(session),
+                    sanitize_component(role)
+                )),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn load_all(&self) -> HashMap<String, CompletedRecord> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "wake_listener: completed-sequence file is unreadable; starting from empty. \
+                     Messages that already ran may run again if they are redelivered. Delete the \
+                     file to silence this, or restore it from backup."
+                );
+                HashMap::new()
+            }),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    fn save_all(&self, all: &HashMap<String, CompletedRecord>) -> std::io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(all)?)?;
+        std::fs::rename(&tmp, &self.path)
+    }
+
+    pub fn get(&self, key: &str, msg_id: &str) -> Option<CompletedRecord> {
+        let _g = AttemptStore::lock();
+        self.load_all()
+            .remove(&AttemptStore::record_key(key, msg_id))
+    }
+
+    pub fn record(&self, rec: &CompletedRecord) -> std::io::Result<()> {
+        let _g = AttemptStore::lock();
+        let mut all = self.load_all();
+        all.insert(AttemptStore::record_key(&rec.key, &rec.msg_id), rec.clone());
+        if all.len() > COMPLETED_RETENTION {
+            let mut by_age: Vec<(String, DateTime<Utc>)> = all
+                .iter()
+                .map(|(k, r)| (k.clone(), r.completed_at))
+                .collect();
+            by_age.sort_by_key(|(_, at)| *at);
+            for (k, _) in by_age.into_iter().take(all.len() - COMPLETED_RETENTION) {
+                all.remove(&k);
+            }
+        }
+        self.save_all(&all)
     }
 }
 
@@ -342,6 +531,15 @@ pub enum MessageOutcome {
     SkippedBackoff,
     SkippedRateLimited,
     DeadLettered,
+    /// The sequence was already completed or dead-lettered (a redelivery).
+    /// It was acked, not launched. `acked` is false when the ack failed and
+    /// the message will come back.
+    SkippedCompleted {
+        acked: bool,
+    },
+    /// The launch reported its phase was already done, so the message was
+    /// recorded as completed and acked rather than retried.
+    PhaseAlreadyDone,
 }
 
 impl MessageOutcome {
@@ -353,7 +551,161 @@ impl MessageOutcome {
             MessageOutcome::LaunchSucceeded
                 | MessageOutcome::LaunchFailed
                 | MessageOutcome::DeadLettered
+                | MessageOutcome::PhaseAlreadyDone
+                | MessageOutcome::SkippedCompleted { acked: true }
         )
+    }
+}
+
+/// Text of the daemon's 409 when a phase is held by another run.
+pub const PHASE_CLAIM_MARKER: &str = "could not be claimed";
+/// Text of the daemon's 409 when a phase is already finished.
+pub const PHASE_DONE_MARKER: &str = "is already done";
+
+/// Why a launch failed, as far as its error text says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchFailure {
+    /// `Phase <id> is already done`: the work this message asked for is
+    /// finished. Retrying would only fail the same way.
+    PhaseAlreadyDone,
+    /// `Phase <id> could not be claimed`: another run holds the phase.
+    PhaseClaimConflict,
+    Other,
+}
+
+pub fn classify_launch_failure(err: &str) -> LaunchFailure {
+    if err.contains("Phase ") && err.contains(PHASE_DONE_MARKER) {
+        LaunchFailure::PhaseAlreadyDone
+    } else if err.contains("Phase ") && err.contains(PHASE_CLAIM_MARKER) {
+        LaunchFailure::PhaseClaimConflict
+    } else {
+        LaunchFailure::Other
+    }
+}
+
+/// Polls `fut` to completion, sending an ack-progress to the transport every
+/// `interval` meanwhile (none if `interval` is zero). The heartbeat lives
+/// inside this one future, so it stops the moment `fut` finishes or is
+/// dropped; nothing is left running after the launch exits.
+async fn with_ack_progress<Fut: std::future::Future>(
+    transport: &dyn WhiteboardTransport,
+    ids: &ListenerIds<'_>,
+    msg_id: &str,
+    interval: Duration,
+    fut: Fut,
+) -> Fut::Output {
+    tokio::pin!(fut);
+    if interval.is_zero() {
+        return fut.await;
+    }
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failing = false;
+    loop {
+        tokio::select! {
+            out = &mut fut => return out,
+            _ = tick.tick() => {
+                match transport.stream_ack_progress(ids.key, ids.consumer, msg_id).await {
+                    Ok(()) => {
+                        if failing {
+                            tracing::info!(
+                                session = %ids.session, role = %ids.role, msg_id = %msg_id,
+                                "wake_listener: ack-progress heartbeat recovered"
+                            );
+                        }
+                        failing = false;
+                    }
+                    Err(e) => {
+                        if !failing {
+                            tracing::warn!(
+                                session = %ids.session, role = %ids.role, key = %ids.key,
+                                msg_id = %msg_id, error = %e,
+                                heartbeat_secs = interval.as_secs_f64(),
+                                "wake_listener: ack-progress heartbeat failed; the transport may \
+                                 redeliver this message while it runs. A redelivery is skipped \
+                                 once the launch is recorded as completed. Check the transport \
+                                 connection and wake_ack_heartbeat_secs / wake_ack_wait_secs in \
+                                 [whiteboard] of .ta/workflow.toml."
+                            );
+                        }
+                        failing = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Record `status` for this sequence. A write failure is logged, not fatal:
+/// the ack that follows is still the primary guard against redelivery.
+fn record_finished(
+    ids: &ListenerIds<'_>,
+    envelope: &StreamEnvelope,
+    status: CompletedStatus,
+    at: DateTime<Utc>,
+) {
+    let completed = CompletedStore::for_listener(ids.project_root, ids.session, ids.role);
+    let rec = CompletedRecord {
+        session: ids.session.to_string(),
+        role: ids.role.to_string(),
+        key: ids.key.to_string(),
+        msg_id: envelope.msg_id.clone(),
+        payload_sha256: payload_digest(&envelope.payload),
+        status,
+        completed_at: at,
+    };
+    if let Err(e) = completed.record(&rec) {
+        tracing::error!(
+            path = %completed.path().display(),
+            session = %ids.session,
+            role = %ids.role,
+            msg_id = %envelope.msg_id,
+            error = %e,
+            "wake_listener: could not record the finished sequence. If the ack below also fails, \
+             this message will launch again when redelivered. Check that .ta/ is writable."
+        );
+    }
+}
+
+/// Ack a message whose sequence is already recorded, without launching.
+async fn skip_completed(
+    transport: &dyn WhiteboardTransport,
+    store: &AttemptStore,
+    ids: &ListenerIds<'_>,
+    envelope: &StreamEnvelope,
+    rec: &CompletedRecord,
+) -> MessageOutcome {
+    tracing::info!(
+        session = %ids.session,
+        role = %ids.role,
+        key = %ids.key,
+        msg_id = %envelope.msg_id,
+        status = rec.status.as_str(),
+        first_completed_at = %rec.completed_at,
+        "wake_listener: message was already {} at the time shown; acking the redelivery and \
+         NOT launching again. To run it again, delete its entry from .ta/wake-completed/ and \
+         re-send the message.",
+        rec.status.as_str()
+    );
+    match transport
+        .stream_ack(ids.key, ids.consumer, &envelope.msg_id)
+        .await
+    {
+        Ok(()) => {
+            let _ = store.remove(ids.key, &envelope.msg_id);
+            MessageOutcome::SkippedCompleted { acked: true }
+        }
+        Err(e) => {
+            tracing::error!(
+                session = %ids.session,
+                role = %ids.role,
+                msg_id = %envelope.msg_id,
+                error = %e,
+                "wake_listener: could not ack an already-completed message; it will be \
+                 delivered again and skipped again (no launch). Check the transport connection."
+            );
+            MessageOutcome::SkippedCompleted { acked: false }
+        }
     }
 }
 
@@ -379,16 +731,39 @@ where
     // Decide and claim atomically (see ATTEMPTS_LOCK): a sibling listener
     // sharing this role must never launch the same message concurrently.
     enum Begin {
+        Completed(CompletedRecord),
         Launch(AttemptRecord),
         DeadLetter(AttemptRecord, bool),
         Done(MessageOutcome),
     }
+    let completed_store = CompletedStore::for_listener(ids.project_root, ids.session, ids.role);
+    let digest = payload_digest(&envelope.payload);
     let begin = {
         let _g = AttemptStore::lock();
+        let finished = completed_store
+            .load_all()
+            .remove(&AttemptStore::record_key(ids.key, &envelope.msg_id));
         let existing = store
             .load_all()
             .remove(&AttemptStore::record_key(ids.key, &envelope.msg_id));
-        match decide(existing.as_ref(), now, policy) {
+        match finished {
+            Some(rec) if rec.payload_sha256 == digest => Some(Begin::Completed(rec)),
+            Some(rec) => {
+                tracing::warn!(
+                    session = %ids.session,
+                    role = %ids.role,
+                    key = %ids.key,
+                    msg_id = %envelope.msg_id,
+                    first_completed_at = %rec.completed_at,
+                    "wake_listener: this id was recorded as finished but the payload is \
+                     different, so the stream was probably recreated and the id reused. \
+                     Treating it as a NEW message and launching."
+                );
+                None
+            }
+            None => None,
+        }
+        .unwrap_or_else(|| match decide(existing.as_ref(), now, policy) {
             Decision::DeadLetter => {
                 // `existing` is Some whenever decide() says DeadLetter.
                 let mut rec = existing.expect("dead-letter decision implies a record");
@@ -462,9 +837,12 @@ where
                     }
                 }
             }
-        }
+        })
     };
     let mut rec = match begin {
+        Begin::Completed(done) => {
+            return skip_completed(transport, store, ids, envelope, &done).await
+        }
         Begin::Launch(rec) => rec,
         Begin::DeadLetter(rec, first) => {
             return dead_letter(transport, store, ids, envelope, rec, first, now).await
@@ -472,8 +850,19 @@ where
         Begin::Done(outcome) => return outcome,
     };
 
-    match launch().await {
+    let launched = with_ack_progress(
+        transport,
+        ids,
+        &envelope.msg_id,
+        policy.ack_heartbeat,
+        launch(),
+    )
+    .await;
+    match launched {
         Ok(()) => {
+            // Record BEFORE acking: a crash or failed ack between the two
+            // then makes the redelivery a skip, not a second launch.
+            record_finished(ids, envelope, CompletedStatus::Completed, clock());
             if let Err(e) = transport
                 .stream_ack(ids.key, ids.consumer, &envelope.msg_id)
                 .await
@@ -484,7 +873,7 @@ where
                     msg_id = %envelope.msg_id,
                     error = %e,
                     "wake_listener: failed to ack message after successful launch -- \
-                     it will be redelivered and count against its retry cap"
+                     it will be redelivered and skipped (the launch is recorded as completed)"
                 );
                 return MessageOutcome::LaunchSucceeded;
             }
@@ -493,6 +882,55 @@ where
         }
         Err(err) => {
             let failed_at = clock();
+            // A sibling listener may have finished this very message while
+            // this launch ran; then this failure is not a failure.
+            if let Some(done) = completed_store.get(ids.key, &envelope.msg_id) {
+                if done.payload_sha256 == digest {
+                    return skip_completed(transport, store, ids, envelope, &done).await;
+                }
+            }
+            let failure = classify_launch_failure(&err);
+            if failure == LaunchFailure::PhaseAlreadyDone {
+                tracing::info!(
+                    session = %ids.session,
+                    role = %ids.role,
+                    key = %ids.key,
+                    msg_id = %envelope.msg_id,
+                    error = %tail_lines(&err, 3),
+                    "wake_listener: the launch reports its phase is already done, so the work \
+                     this message asked for is finished. Recording the message as completed and \
+                     acking it; it is NOT retried."
+                );
+                record_finished(ids, envelope, CompletedStatus::Completed, failed_at);
+                match transport
+                    .stream_ack(ids.key, ids.consumer, &envelope.msg_id)
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = store.remove(ids.key, &envelope.msg_id);
+                    }
+                    Err(e) => tracing::error!(
+                        msg_id = %envelope.msg_id,
+                        error = %e,
+                        "wake_listener: could not ack the already-done message; it will be acked \
+                         without a launch when redelivered"
+                    ),
+                }
+                return MessageOutcome::PhaseAlreadyDone;
+            }
+            if failure == LaunchFailure::PhaseClaimConflict {
+                tracing::warn!(
+                    session = %ids.session,
+                    role = %ids.role,
+                    key = %ids.key,
+                    msg_id = %envelope.msg_id,
+                    attempt = rec.attempts,
+                    "wake_listener: phase claim conflict. Another run holds the phase this \
+                     launch needs, so this is not a fresh failure of the work itself. Run \
+                     `ta goal list` to find the holder; if it is stuck, `ta goal delete <id>` or \
+                     `ta plan reset <phase>` releases it. Retrying after backoff."
+                );
+            }
             rec.last_error = tail_lines(&err, 40);
             rec.next_eligible_at = failed_at
                 + chrono::Duration::from_std(policy.backoff_after(rec.attempts))
@@ -584,6 +1022,13 @@ async fn dead_letter(
         }
     }
 
+    // Before acking, so a redelivery after a failed ack is skipped.
+    if CompletedStore::for_listener(ids.project_root, ids.session, ids.role)
+        .get(ids.key, &envelope.msg_id)
+        .is_none()
+    {
+        record_finished(ids, envelope, CompletedStatus::DeadLettered, now);
+    }
     match transport
         .stream_ack(ids.key, ids.consumer, &envelope.msg_id)
         .await
@@ -936,5 +1381,601 @@ mod tests {
         let t = tail_lines(&s, 40);
         assert!(t.starts_with("61\n"));
         assert!(t.ends_with("100"));
+    }
+
+    // ---- v0.17.11.28: idempotent wake launches ----
+
+    use async_trait::async_trait;
+    use ta_agent_whiteboard::error::Result as WbResult;
+
+    /// In-memory transport that can fail acks and counts ack-progress calls.
+    struct Spy {
+        inner: InMemoryTransport,
+        fail_acks: AtomicU32,
+        progress: AtomicU32,
+    }
+
+    impl Spy {
+        fn new(fail_acks: u32) -> Self {
+            Self {
+                inner: InMemoryTransport::new(),
+                fail_acks: AtomicU32::new(fail_acks),
+                progress: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WhiteboardTransport for Spy {
+        fn backend_name(&self) -> &str {
+            "spy"
+        }
+        async fn connect(&self) -> WbResult<()> {
+            self.inner.connect().await
+        }
+        async fn kv_put(
+            &self,
+            b: &str,
+            k: &str,
+            v: Vec<u8>,
+            ttl: Option<Duration>,
+        ) -> WbResult<()> {
+            self.inner.kv_put(b, k, v, ttl).await
+        }
+        async fn kv_create(&self, b: &str, k: &str, v: Vec<u8>) -> WbResult<bool> {
+            self.inner.kv_create(b, k, v).await
+        }
+        async fn kv_get(&self, b: &str, k: &str) -> WbResult<Option<Vec<u8>>> {
+            self.inner.kv_get(b, k).await
+        }
+        async fn kv_delete(&self, b: &str, k: &str) -> WbResult<()> {
+            self.inner.kv_delete(b, k).await
+        }
+        async fn kv_list(&self, b: &str) -> WbResult<Vec<(String, Vec<u8>)>> {
+            self.inner.kv_list(b).await
+        }
+        async fn stream_append(&self, s: &str, p: Vec<u8>) -> WbResult<()> {
+            self.inner.stream_append(s, p).await
+        }
+        async fn stream_read_next(&self, s: &str, c: &str) -> WbResult<Option<StreamEnvelope>> {
+            self.inner.stream_read_next(s, c).await
+        }
+        async fn stream_ack(&self, s: &str, c: &str, id: &str) -> WbResult<()> {
+            if self
+                .fail_acks
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(ta_agent_whiteboard::error::WhiteboardError::Stream {
+                    stream: s.to_string(),
+                    detail: "simulated ack failure".to_string(),
+                });
+            }
+            self.inner.stream_ack(s, c, id).await
+        }
+        async fn stream_ack_progress(&self, s: &str, c: &str, id: &str) -> WbResult<()> {
+            self.progress.fetch_add(1, Ordering::SeqCst);
+            self.inner.stream_ack_progress(s, c, id).await
+        }
+        async fn stream_set_ack_wait(&self, s: &str, c: &str, w: Duration) -> WbResult<()> {
+            self.inner.stream_set_ack_wait(s, c, w).await
+        }
+    }
+
+    const CONSUMER: &str = "wake-listener:chief-of-staff";
+
+    fn ids<'a>(dir: &'a Path) -> ListenerIds<'a> {
+        ListenerIds {
+            project_root: dir,
+            session: "sess-1",
+            role: "chief-of-staff",
+            key: "intake",
+            consumer: CONSUMER,
+        }
+    }
+
+    /// Read one message and process it once with a launcher that returns
+    /// `result`. Fresh `AttemptStore` and `LaunchRateGuard` every call, as
+    /// after a daemon restart.
+    async fn process_once(
+        transport: &dyn WhiteboardTransport,
+        dir: &Path,
+        launches: &Arc<AtomicU32>,
+        result: Result<(), String>,
+    ) -> Option<MessageOutcome> {
+        let env = transport
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()?;
+        let store = AttemptStore::for_listener(dir, "sess-1", "chief-of-staff");
+        let mut rate = LaunchRateGuard::default();
+        let launches = launches.clone();
+        Some(
+            process_message(
+                transport,
+                &store,
+                &WakeRetryPolicy::default(),
+                &mut rate,
+                &ids(dir),
+                &env,
+                t0,
+                move || async move {
+                    launches.fetch_add(1, Ordering::SeqCst);
+                    result
+                },
+            )
+            .await,
+        )
+    }
+
+    fn completed(dir: &Path) -> CompletedStore {
+        CompletedStore::for_listener(dir, "sess-1", "chief-of-staff")
+    }
+
+    #[tokio::test]
+    async fn a_launch_longer_than_the_ack_wait_is_not_redelivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"slow".to_vec()).await.unwrap();
+        spy.stream_set_ack_wait("intake", CONSUMER, Duration::from_millis(150))
+            .await
+            .unwrap();
+        let env = spy
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .unwrap();
+        let policy = WakeRetryPolicy {
+            ack_heartbeat: Duration::from_millis(40),
+            ..WakeRetryPolicy::default()
+        };
+        let store = AttemptStore::for_listener(dir.path(), "sess-1", "chief-of-staff");
+        let mut rate = LaunchRateGuard::default();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let launches = Arc::new(AtomicU32::new(0));
+        let l = launches.clone();
+
+        let run = async {
+            let out = process_message(
+                &spy,
+                &store,
+                &policy,
+                &mut rate,
+                &ids(dir.path()),
+                &env,
+                t0,
+                move || async move {
+                    l.fetch_add(1, Ordering::SeqCst);
+                    // Over three times the ack wait.
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok(())
+                },
+            )
+            .await;
+            done.store(true, Ordering::SeqCst);
+            out
+        };
+        let poll = async {
+            let mut redeliveries = 0;
+            while !done.load(Ordering::SeqCst) {
+                if spy
+                    .stream_read_next("intake", CONSUMER)
+                    .await
+                    .unwrap()
+                    .is_some()
+                {
+                    redeliveries += 1;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            redeliveries
+        };
+        let (outcome, redeliveries) = tokio::join!(run, poll);
+        assert_eq!(outcome, MessageOutcome::LaunchSucceeded);
+        assert_eq!(redeliveries, 0, "heartbeats must keep the message leased");
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(spy.progress.load(Ordering::SeqCst) >= 3);
+    }
+
+    #[tokio::test]
+    async fn without_heartbeats_the_same_long_launch_is_redelivered() {
+        // Control for the test above: proves it can fail.
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"slow".to_vec()).await.unwrap();
+        spy.stream_set_ack_wait("intake", CONSUMER, Duration::from_millis(150))
+            .await
+            .unwrap();
+        let env = spy
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .unwrap();
+        let policy = WakeRetryPolicy {
+            ack_heartbeat: Duration::ZERO,
+            ..WakeRetryPolicy::default()
+        };
+        let store = AttemptStore::for_listener(dir.path(), "sess-1", "chief-of-staff");
+        let mut rate = LaunchRateGuard::default();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let run = async {
+            let out = process_message(
+                &spy,
+                &store,
+                &policy,
+                &mut rate,
+                &ids(dir.path()),
+                &env,
+                t0,
+                || async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok(())
+                },
+            )
+            .await;
+            done.store(true, Ordering::SeqCst);
+            out
+        };
+        let poll = async {
+            let mut redeliveries = 0;
+            while !done.load(Ordering::SeqCst) {
+                if spy
+                    .stream_read_next("intake", CONSUMER)
+                    .await
+                    .unwrap()
+                    .is_some()
+                {
+                    redeliveries += 1;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            redeliveries
+        };
+        let (_, redeliveries) = tokio::join!(run, poll);
+        assert!(redeliveries >= 1);
+        assert_eq!(spy.progress.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeats_stop_after_the_launch_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"x".to_vec()).await.unwrap();
+        let env = spy
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .unwrap();
+        let policy = WakeRetryPolicy {
+            ack_heartbeat: Duration::from_millis(20),
+            ..WakeRetryPolicy::default()
+        };
+        let store = AttemptStore::for_listener(dir.path(), "sess-1", "chief-of-staff");
+        let mut rate = LaunchRateGuard::default();
+        let out = process_message(
+            &spy,
+            &store,
+            &policy,
+            &mut rate,
+            &ids(dir.path()),
+            &env,
+            t0,
+            || async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(out, MessageOutcome::LaunchSucceeded);
+        let at_exit = spy.progress.load(Ordering::SeqCst);
+        assert!(at_exit >= 3, "heartbeats ran during the launch: {at_exit}");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(spy.progress.load(Ordering::SeqCst), at_exit);
+    }
+
+    #[tokio::test]
+    async fn a_redelivered_completed_sequence_is_acked_and_not_relaunched() {
+        let dir = tempfile::tempdir().unwrap();
+        // The first ack fails, so the transport redelivers the message.
+        let spy = Spy::new(1);
+        spy.stream_append("intake", b"wake".to_vec()).await.unwrap();
+        let launches = Arc::new(AtomicU32::new(0));
+
+        assert_eq!(
+            process_once(&spy, dir.path(), &launches, Ok(())).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+        // Redelivery: acked and skipped, never launched.
+        assert_eq!(
+            process_once(&spy, dir.path(), &launches, Ok(())).await,
+            Some(MessageOutcome::SkippedCompleted { acked: true })
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(process_once(&spy, dir.path(), &launches, Ok(()))
+            .await
+            .is_none());
+        let rec = completed(dir.path()).get("intake", "0").unwrap();
+        assert_eq!(rec.status, CompletedStatus::Completed);
+        assert_eq!(rec.role, "chief-of-staff");
+    }
+
+    #[tokio::test]
+    async fn a_restart_between_launch_and_ack_does_not_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(1);
+        spy.stream_append("intake", b"wake".to_vec()).await.unwrap();
+        let launches = Arc::new(AtomicU32::new(0));
+        process_once(&spy, dir.path(), &launches, Ok(())).await;
+
+        // "Restart": nothing in memory survives except the .ta/ files, and
+        // the transport (JetStream) still holds the unacked message.
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(completed(dir.path()).path()).unwrap())
+                .unwrap();
+        assert!(on_disk["intake/0"]["completed_at"].is_string());
+        assert_eq!(
+            process_once(&spy, dir.path(), &launches, Err("must not run".into())).await,
+            Some(MessageOutcome::SkippedCompleted { acked: true })
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_redelivered_dead_lettered_sequence_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(1);
+        spy.stream_append("intake", b"bad".to_vec()).await.unwrap();
+        let store = AttemptStore::for_listener(dir.path(), "sess-1", "chief-of-staff");
+        store
+            .put(&AttemptRecord {
+                session: "sess-1".into(),
+                role: "chief-of-staff".into(),
+                key: "intake".into(),
+                msg_id: "0".into(),
+                attempts: 3,
+                first_attempt_at: t0(),
+                last_attempt_at: t0(),
+                next_eligible_at: t0(),
+                last_error: "boom".into(),
+                dead_lettered: false,
+            })
+            .unwrap();
+        let launches = Arc::new(AtomicU32::new(0));
+        // Dead-lettered, but its ack fails.
+        assert_eq!(
+            process_once(&spy, dir.path(), &launches, Ok(())).await,
+            Some(MessageOutcome::DeadLettered)
+        );
+        assert_eq!(
+            completed(dir.path()).get("intake", "0").unwrap().status,
+            CompletedStatus::DeadLettered
+        );
+        assert_eq!(
+            process_once(&spy, dir.path(), &launches, Ok(())).await,
+            Some(MessageOutcome::SkippedCompleted { acked: true })
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        let dl = std::fs::read_to_string(dead_letter_path(dir.path())).unwrap();
+        assert_eq!(
+            dl.lines().count(),
+            1,
+            "dead-letter record shape unchanged, written once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reused_id_with_a_different_payload_is_a_new_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"new content".to_vec())
+            .await
+            .unwrap();
+        completed(dir.path())
+            .record(&CompletedRecord {
+                session: "sess-1".into(),
+                role: "chief-of-staff".into(),
+                key: "intake".into(),
+                msg_id: "0".into(),
+                payload_sha256: payload_digest(b"old content"),
+                status: CompletedStatus::Completed,
+                completed_at: t0(),
+            })
+            .unwrap();
+        let launches = Arc::new(AtomicU32::new(0));
+        assert_eq!(
+            process_once(&spy, dir.path(), &launches, Ok(())).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_launch_reporting_its_phase_already_done_is_completed_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"x".to_vec()).await.unwrap();
+        let launches = Arc::new(AtomicU32::new(0));
+        let out = process_once(
+            &spy,
+            dir.path(),
+            &launches,
+            Err("Phase v0.0.0.1 is already done".into()),
+        )
+        .await;
+        assert_eq!(out, Some(MessageOutcome::PhaseAlreadyDone));
+        assert!(process_once(&spy, dir.path(), &launches, Ok(()))
+            .await
+            .is_none());
+        assert_eq!(
+            completed(dir.path()).get("intake", "0").unwrap().status,
+            CompletedStatus::Completed
+        );
+        assert!(!dead_letter_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn a_claim_failure_after_a_sibling_completed_the_message_is_not_a_failure() {
+        // The live run-5 shape: the message finished, then a second launch
+        // of it failed with "could not be claimed".
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"x".to_vec()).await.unwrap();
+        let env = spy
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = AttemptStore::for_listener(dir.path(), "sess-1", "chief-of-staff");
+        let mut rate = LaunchRateGuard::default();
+        let root = dir.path().to_path_buf();
+        let digest = payload_digest(&env.payload);
+        let out = process_message(
+            &spy,
+            &store,
+            &WakeRetryPolicy::default(),
+            &mut rate,
+            &ids(dir.path()),
+            &env,
+            t0,
+            move || async move {
+                completed(&root)
+                    .record(&CompletedRecord {
+                        session: "sess-1".into(),
+                        role: "chief-of-staff".into(),
+                        key: "intake".into(),
+                        msg_id: "0".into(),
+                        payload_sha256: digest,
+                        status: CompletedStatus::Completed,
+                        completed_at: t0(),
+                    })
+                    .unwrap();
+                Err("Phase v0.0.0.1 could not be claimed: already in progress".to_string())
+            },
+        )
+        .await;
+        assert_eq!(out, MessageOutcome::SkippedCompleted { acked: true });
+        assert!(spy
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_real_claim_conflict_is_still_retried_with_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.stream_append("intake", b"x".to_vec()).await.unwrap();
+        let launches = Arc::new(AtomicU32::new(0));
+        let out = process_once(
+            &spy,
+            dir.path(),
+            &launches,
+            Err("Phase v0.0.0.1 could not be claimed: already in progress".into()),
+        )
+        .await;
+        assert_eq!(out, Some(MessageOutcome::LaunchFailed));
+        let rec = AttemptStore::for_listener(dir.path(), "sess-1", "chief-of-staff")
+            .get("intake", "0")
+            .unwrap();
+        assert!(rec.last_error.contains(PHASE_CLAIM_MARKER));
+        assert!(completed(dir.path()).get("intake", "0").is_none());
+    }
+
+    #[test]
+    fn launch_failures_are_classified() {
+        assert_eq!(
+            classify_launch_failure("Phase v1 is already done"),
+            LaunchFailure::PhaseAlreadyDone
+        );
+        assert_eq!(
+            classify_launch_failure(
+                "Error: Phase v0.0.0.1 could not be claimed: already in progress"
+            ),
+            LaunchFailure::PhaseClaimConflict
+        );
+        assert_eq!(
+            classify_launch_failure("No changes detected"),
+            LaunchFailure::Other
+        );
+    }
+
+    #[test]
+    fn timing_settings_are_derived_and_validated() {
+        let p = WakeRetryPolicy::default();
+        assert_eq!(p.launch_timeout, Duration::from_secs(3600));
+        assert_eq!(p.ack_wait, Duration::from_secs(3660));
+        assert_eq!(p.ack_heartbeat, Duration::from_secs(10));
+        assert!(p.validate_timings().is_ok());
+        // Retry defaults are untouched.
+        assert_eq!(p.max_attempts, 3);
+        assert_eq!(p.max_launches_per_hour, 6);
+
+        let short = WakeRetryPolicy::from_config(&WhiteboardConfig {
+            wake_ack_wait_secs: Some(30),
+            ..Default::default()
+        });
+        let err = short.validate_timings().unwrap_err();
+        assert!(err.contains("wake_ack_wait_secs") && err.contains("wake_launch_timeout_secs"));
+        assert!(err.contains("3660"), "names the minimum: {err}");
+
+        let slow_beat = WakeRetryPolicy::from_config(&WhiteboardConfig {
+            wake_ack_heartbeat_secs: Some(3000),
+            ..Default::default()
+        });
+        assert!(slow_beat
+            .validate_timings()
+            .unwrap_err()
+            .contains("wake_ack_heartbeat_secs"));
+
+        let tight = WakeRetryPolicy::from_config(&WhiteboardConfig {
+            wake_launch_timeout_secs: 20,
+            ..Default::default()
+        });
+        assert_eq!(tight.ack_wait, Duration::from_secs(80));
+        assert!(tight.validate_timings().is_ok());
+
+        let zero = WakeRetryPolicy::from_config(&WhiteboardConfig {
+            wake_launch_timeout_secs: 0,
+            ..Default::default()
+        });
+        assert!(zero
+            .validate_timings()
+            .unwrap_err()
+            .contains("wake_launch_timeout_secs"));
+    }
+
+    #[test]
+    fn completed_store_keeps_only_the_most_recent_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = completed(dir.path());
+        for i in 0..(COMPLETED_RETENTION + 5) {
+            store
+                .record(&CompletedRecord {
+                    session: "sess-1".into(),
+                    role: "chief-of-staff".into(),
+                    key: "intake".into(),
+                    msg_id: format!("seq-{i}"),
+                    payload_sha256: String::new(),
+                    status: CompletedStatus::Completed,
+                    completed_at: t0() + secs(i as i64),
+                })
+                .unwrap();
+        }
+        assert!(store.get("intake", "seq-0").is_none());
+        assert!(store.get("intake", "seq-4").is_none());
+        assert!(store.get("intake", "seq-5").is_some());
+        assert!(store
+            .get("intake", &format!("seq-{}", COMPLETED_RETENTION + 4))
+            .is_some());
+    }
+
+    #[test]
+    fn an_unreadable_completed_file_reads_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = completed(dir.path());
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        std::fs::write(store.path(), "{ not json").unwrap();
+        assert!(store.get("intake", "0").is_none());
     }
 }

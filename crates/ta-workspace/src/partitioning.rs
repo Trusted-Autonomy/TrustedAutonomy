@@ -58,6 +58,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "team-sessions/", // persistent team session state (v0.17.5.1)
     "draft-build-ctx/",
     "wake-attempts/", // per-message wake-on-demand launch attempts (retry cap state): machine-local
+    "wake-completed/", // finished wake-on-demand sequences (redelivery guard): machine-local
     "bin/", // staged shell/CLI credential shim binaries (v0.17.6.7) — a machine-local copy of the `gh` wrapper, never committed
     "memory/", // local memory cache (project-memory/ is the VCS-committed counterpart)
     "link-cache/", // cached remote project manifests (v0.16.1.5)

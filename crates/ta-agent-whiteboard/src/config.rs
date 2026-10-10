@@ -65,6 +65,26 @@ pub struct WhiteboardConfig {
     /// (they are not dropped). Default 6. `0` disables the guard.
     #[serde(default = "default_wake_max_launches_per_hour")]
     pub wake_max_launches_per_hour: u32,
+
+    /// Wake-on-demand listeners: the longest one launch (`ta run`) may take,
+    /// in seconds, before the daemon kills it and counts the attempt as
+    /// failed. Default 3600.
+    #[serde(default = "default_wake_launch_timeout_secs")]
+    pub wake_launch_timeout_secs: u64,
+
+    /// Wake-on-demand listeners: how long the message transport waits for an
+    /// ack before redelivering a message, in seconds. Must be at least
+    /// `wake_launch_timeout_secs` plus 60. Unset (default) derives it as
+    /// `wake_launch_timeout_secs + 60`.
+    #[serde(default)]
+    pub wake_ack_wait_secs: Option<u64>,
+
+    /// Wake-on-demand listeners: how often, in seconds, a running launch
+    /// tells the transport it is still working (JetStream `AckProgress`), so
+    /// the message is not redelivered. Must be at most half of the ack wait.
+    /// Unset (default) derives it as one third of the ack wait, at most 10.
+    #[serde(default)]
+    pub wake_ack_heartbeat_secs: Option<u64>,
 }
 
 impl Default for WhiteboardConfig {
@@ -76,6 +96,9 @@ impl Default for WhiteboardConfig {
             wake_max_attempts: default_wake_max_attempts(),
             wake_backoff_secs: default_wake_backoff_secs(),
             wake_max_launches_per_hour: default_wake_max_launches_per_hour(),
+            wake_launch_timeout_secs: default_wake_launch_timeout_secs(),
+            wake_ack_wait_secs: None,
+            wake_ack_heartbeat_secs: None,
         }
     }
 }
@@ -90,6 +113,10 @@ fn default_wake_backoff_secs() -> Vec<u64> {
 
 fn default_wake_max_launches_per_hour() -> u32 {
     6
+}
+
+fn default_wake_launch_timeout_secs() -> u64 {
+    3600
 }
 
 fn default_transport() -> String {
@@ -167,16 +194,24 @@ mod tests {
         assert_eq!(d.wake_max_attempts, 3);
         assert_eq!(d.wake_backoff_secs, vec![30, 120, 600]);
         assert_eq!(d.wake_max_launches_per_hour, 6);
+        assert_eq!(d.wake_launch_timeout_secs, 3600);
+        assert_eq!(d.wake_ack_wait_secs, None);
+        assert_eq!(d.wake_ack_heartbeat_secs, None);
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
         std::fs::write(
             dir.path().join(".ta/workflow.toml"),
             "[whiteboard]\nenabled = true\nwake_max_attempts = 5\n\
-             wake_backoff_secs = [1, 2]\nwake_max_launches_per_hour = 2\n",
+             wake_backoff_secs = [1, 2]\nwake_max_launches_per_hour = 2\n\
+             wake_launch_timeout_secs = 90\nwake_ack_wait_secs = 200\n\
+             wake_ack_heartbeat_secs = 5\n",
         )
         .unwrap();
         let c = WhiteboardConfig::load(dir.path());
+        assert_eq!(c.wake_launch_timeout_secs, 90);
+        assert_eq!(c.wake_ack_wait_secs, Some(200));
+        assert_eq!(c.wake_ack_heartbeat_secs, Some(5));
         assert_eq!(c.wake_max_attempts, 5);
         assert_eq!(c.wake_backoff_secs, vec![1, 2]);
         assert_eq!(c.wake_max_launches_per_hour, 2);

@@ -19,10 +19,18 @@ struct KvEntry {
     expires_at: Option<Instant>,
 }
 
+#[derive(Default)]
 struct StreamState {
     messages: Vec<Vec<u8>>,
     /// Per-consumer: index of the next message to deliver.
     cursors: HashMap<String, usize>,
+    /// Per-consumer: the delivered-but-unacked message and when its ack
+    /// wait runs out. Until then it is not redelivered, mirroring JetStream.
+    in_flight: HashMap<String, (usize, Instant)>,
+    /// Per-consumer ack wait set by `stream_set_ack_wait`. A consumer with
+    /// none (or zero) redelivers an unacked message on the very next read,
+    /// which is this transport's original, simplest behavior.
+    ack_waits: HashMap<String, Duration>,
 }
 
 #[derive(Default)]
@@ -127,13 +135,7 @@ impl WhiteboardTransport for InMemoryTransport {
 
     async fn stream_append(&self, stream: &str, payload: Vec<u8>) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        let s = inner
-            .streams
-            .entry(stream.to_string())
-            .or_insert_with(|| StreamState {
-                messages: Vec::new(),
-                cursors: HashMap::new(),
-            });
+        let s = inner.streams.entry(stream.to_string()).or_default();
         s.messages.push(payload);
         Ok(())
     }
@@ -149,13 +151,26 @@ impl WhiteboardTransport for InMemoryTransport {
             None => return Ok(None),
         };
         let cursor = *s.cursors.entry(consumer.to_string()).or_insert(0);
-        match s.messages.get(cursor) {
-            Some(payload) => Ok(Some(StreamEnvelope {
-                msg_id: cursor.to_string(),
-                payload: payload.clone(),
-            })),
-            None => Ok(None),
+        let Some(payload) = s.messages.get(cursor) else {
+            return Ok(None);
+        };
+        if let Some((idx, deadline)) = s.in_flight.get(consumer) {
+            if *idx == cursor && Instant::now() < *deadline {
+                // Still within its ack wait: leased to the earlier read.
+                return Ok(None);
+            }
         }
+        let ack_wait = s.ack_waits.get(consumer).copied().unwrap_or_default();
+        if ack_wait.is_zero() {
+            s.in_flight.remove(consumer);
+        } else {
+            s.in_flight
+                .insert(consumer.to_string(), (cursor, Instant::now() + ack_wait));
+        }
+        Ok(Some(StreamEnvelope {
+            msg_id: cursor.to_string(),
+            payload: payload.clone(),
+        }))
     }
 
     async fn stream_ack(&self, stream: &str, consumer: &str, msg_id: &str) -> Result<()> {
@@ -165,9 +180,40 @@ impl WhiteboardTransport for InMemoryTransport {
                 let cursor = s.cursors.entry(consumer.to_string()).or_insert(0);
                 if *cursor == acked_index {
                     *cursor += 1;
+                    s.in_flight.remove(consumer);
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn stream_ack_progress(&self, stream: &str, consumer: &str, msg_id: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(s) = inner.streams.get_mut(stream) {
+            let ack_wait = s.ack_waits.get(consumer).copied().unwrap_or_default();
+            if let (Ok(idx), Some(entry)) = (msg_id.parse::<usize>(), s.in_flight.get_mut(consumer))
+            {
+                if entry.0 == idx {
+                    entry.1 = Instant::now() + ack_wait;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn stream_set_ack_wait(
+        &self,
+        stream: &str,
+        consumer: &str,
+        ack_wait: Duration,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .streams
+            .entry(stream.to_string())
+            .or_default()
+            .ack_waits
+            .insert(consumer.to_string(), ack_wait);
         Ok(())
     }
 }
@@ -312,5 +358,45 @@ mod tests {
         assert!(t.stream_read_next("s", "a").await.unwrap().is_none());
         // "b" never read/acked — still sees the message.
         assert!(t.stream_read_next("s", "b").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn unacked_message_is_leased_for_the_ack_wait_then_redelivered() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        t.stream_set_ack_wait("s", "c", Duration::from_millis(80))
+            .await
+            .unwrap();
+        let first = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let again = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        assert_eq!(first.msg_id, again.msg_id, "redelivery keeps the msg_id");
+    }
+
+    #[tokio::test]
+    async fn ack_progress_extends_the_lease_and_ack_advances() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        t.stream_set_ack_wait("s", "c", Duration::from_millis(100))
+            .await
+            .unwrap();
+        let env = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            t.stream_ack_progress("s", "c", &env.msg_id).await.unwrap();
+            assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        }
+        t.stream_ack("s", "c", &env.msg_id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn without_an_ack_wait_an_unacked_message_is_redelivered_at_once() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_some());
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_some());
     }
 }

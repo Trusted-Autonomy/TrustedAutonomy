@@ -287,6 +287,17 @@ async fn run_listener_loop(
     let consumer = format!("wake-listener:{}", listener.role);
     let attempts = AttemptStore::for_listener(&project_root, &session_id, &listener.role);
     let mut rate = LaunchRateGuard::default();
+    // Refuse to start on timing settings that could let the transport
+    // redeliver a message that is still running (see validate_timings).
+    if let Err(reason) = WakeRetryPolicy::load(&project_root).validate_timings() {
+        tracing::error!(
+            session = %session_id,
+            role = %listener.role,
+            reason = %reason,
+            "wake_listener: listener NOT started because the wake timing settings conflict"
+        );
+        return;
+    }
     if let Err(e) = transport.connect().await {
         tracing::error!(
             role = %listener.role,
@@ -295,6 +306,10 @@ async fn run_listener_loop(
         );
         return;
     }
+
+    // Ack wait last applied to this listener's consumer, per key.
+    let mut applied_ack_wait: Option<Duration> = None;
+    let mut last_timing_warning: Option<std::time::Instant> = None;
 
     loop {
         // Live pause/stop check, re-read fresh every round -- not just once
@@ -332,6 +347,59 @@ async fn run_listener_loop(
         // workflow.toml applies without a daemon restart.
         let policy = WakeRetryPolicy::load(&project_root);
 
+        // A settings edit that breaks the timing rules pauses this listener
+        // (the stream is left unread, nothing is lost) instead of risking a
+        // redelivery of a running launch; fixing the file resumes it.
+        if let Err(reason) = policy.validate_timings() {
+            if last_timing_warning.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                tracing::error!(
+                    session = %session_id,
+                    role = %listener.role,
+                    reason = %reason,
+                    "wake_listener: paused, not reading messages, until the wake timing \
+                     settings are fixed"
+                );
+                last_timing_warning = Some(std::time::Instant::now());
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                _ = shutdown.notified() => return,
+            }
+            continue;
+        }
+        if applied_ack_wait != Some(policy.ack_wait) {
+            let mut all_applied = true;
+            for key in &listener.keys {
+                if let Err(e) = transport
+                    .stream_set_ack_wait(key, &consumer, policy.ack_wait)
+                    .await
+                {
+                    all_applied = false;
+                    tracing::warn!(
+                        session = %session_id,
+                        role = %listener.role,
+                        key = %key,
+                        ack_wait_secs = policy.ack_wait.as_secs(),
+                        error = %e,
+                        "wake_listener: could not set the consumer's ack wait; will retry next \
+                         poll. Until then a launch longer than the transport's default ack wait \
+                         relies on heartbeats alone."
+                    );
+                }
+            }
+            if all_applied {
+                tracing::info!(
+                    session = %session_id,
+                    role = %listener.role,
+                    ack_wait_secs = policy.ack_wait.as_secs(),
+                    heartbeat_secs = policy.ack_heartbeat.as_secs(),
+                    launch_timeout_secs = policy.launch_timeout.as_secs(),
+                    "wake_listener: ack wait set"
+                );
+                applied_ack_wait = Some(policy.ack_wait);
+            }
+        }
+
         for key in &listener.keys {
             let next = tokio::select! {
                 r = transport.stream_read_next(key, &consumer) => r,
@@ -367,6 +435,7 @@ async fn run_listener_loop(
             let payload = envelope.payload.clone();
             let workflow_tag = listener.workflow_tag.clone();
             let msg_id = envelope.msg_id.clone();
+            let launch_timeout = policy.launch_timeout;
             let launch = move || async move {
                 match tokio::task::spawn_blocking(move || {
                     launch_wake_on_demand(
@@ -378,6 +447,7 @@ async fn run_listener_loop(
                         &payload,
                         workflow_tag.as_deref(),
                         &msg_id,
+                        launch_timeout,
                     )
                 })
                 .await
@@ -430,6 +500,7 @@ fn launch_wake_on_demand(
     payload: &[u8],
     workflow_tag: Option<&str>,
     msg_id: &str,
+    launch_timeout: Duration,
 ) -> std::io::Result<()> {
     let mut state = match TeamSessionState::load(project_root, session_id)? {
         Some(s) => s,
@@ -464,7 +535,15 @@ fn launch_wake_on_demand(
     let args = with_intake_file(args, &files.intake);
 
     crate::team_session::ensure_stable_codesign(ta_bin, project_root);
-    let output = run_and_record_launch(project_root, session_id, role, msg_id, ta_bin, &args)?;
+    let output = run_and_record_launch(
+        project_root,
+        session_id,
+        role,
+        msg_id,
+        ta_bin,
+        &args,
+        launch_timeout,
+    )?;
 
     let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
     state.findings.push(RoleFinding {
@@ -492,12 +571,12 @@ fn run_and_record_launch(
     msg_id: &str,
     ta_bin: &Path,
     args: &[String],
+    launch_timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
     let started_at = chrono::Utc::now();
-    let output = std::process::Command::new(ta_bin)
-        .args(args)
-        .current_dir(project_root)
-        .output()?;
+    let mut command = std::process::Command::new(ta_bin);
+    command.args(args).current_dir(project_root);
+    let (output, timed_out) = output_with_timeout(command, launch_timeout)?;
 
     let log_path = launch_log_path(project_root, session_id, role, msg_id, started_at);
     if let Err(e) = write_launch_log(&log_path, ta_bin, args, msg_id, started_at, &output) {
@@ -517,7 +596,16 @@ fn run_and_record_launch(
         );
     }
 
-    if output.status.success() {
+    if timed_out {
+        Err(std::io::Error::other(format!(
+            "wake_listener: ta run for role '{role}' (session '{session_id}', msg {msg_id}) was \
+             killed after {}s without finishing. Output so far: {}. Raise \
+             wake_launch_timeout_secs (and wake_ack_wait_secs if you set it) in [whiteboard] of \
+             .ta/workflow.toml if launches legitimately run this long.",
+            launch_timeout.as_secs(),
+            log_path.display()
+        )))
+    } else if output.status.success() {
         Ok(output)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -530,6 +618,65 @@ fn run_and_record_launch(
             tail_lines(&redact_lines(stderr.trim_end()), STDERR_TAIL_LINES)
         )))
     }
+}
+
+/// Runs `command` to completion like `Command::output`, but kills it if it
+/// is still running after `timeout`. Returns the collected output and
+/// whether it was killed.
+fn output_with_timeout(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<(std::process::Output, bool)> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let deadline = std::time::Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // After a kill, a grandchild may still hold the pipes open, and joining
+    // the readers would then block this launch (and its heartbeats) forever.
+    // Detach them instead; they end when the pipes close.
+    let (stdout, stderr) = if timed_out {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            out.join().unwrap_or_default(),
+            err.join().unwrap_or_default(),
+        )
+    };
+    Ok((
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        },
+        timed_out,
+    ))
 }
 
 /// `.ta/logs/wake-launches/<session>-<role>-<UTC timestamp>-<msg_id prefix>.log`
@@ -999,10 +1146,40 @@ mod tests {
             b"content",
             None,
             "0",
+            Duration::from_secs(60),
         )
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(format!("{err}").contains("no-such-session"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_past_its_timeout_is_killed_with_an_actionable_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("slow-ta.sh");
+        std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let err = run_and_record_launch(
+            tmp.path(),
+            "sess-1",
+            "chief-of-staff",
+            "seq-7",
+            &fake,
+            &[],
+            Duration::from_millis(300),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(err.contains("wake_launch_timeout_secs"), "{err}");
+        assert!(
+            err.contains("seq-7") && err.contains("chief-of-staff"),
+            "{err}"
+        );
     }
 
     #[cfg(unix)]
@@ -1031,6 +1208,7 @@ mod tests {
             "seq-42",
             &fake,
             &["run".to_string(), "--headless".to_string()],
+            Duration::from_secs(60),
         )
         .unwrap_err()
         .to_string();

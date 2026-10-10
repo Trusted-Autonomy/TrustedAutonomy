@@ -207,6 +207,7 @@ memory/work_queue.md
 .ta/nats-server.log
 .ta/nats-server.pid
 .ta/wake-attempts/
+.ta/wake-completed/
 .ta/wake-dead-letter.jsonl
 .ta/daemon.pid
 .ta/daemon.log
