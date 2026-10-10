@@ -31,10 +31,11 @@ pub use parse::{
 };
 pub use query::{
     binary_version, candidate_waves, check_phase_order, check_version_sync,
-    collect_dependency_warnings, detect_missing_status_markers, find_in_progress,
-    find_next_pending, find_phases_needing_done_marker, is_sub_phase, last_completed_phase_id,
-    next_actionable_phase_id, next_actionable_phases, parent_phase_id, parse_semver_id,
-    phase_id_to_semver, warn_unparseable_phase_id_for_bump,
+    collect_dependency_warnings, detect_missing_status_markers, expected_version_from_plan,
+    find_in_progress, find_next_pending, find_phases_needing_done_marker, is_sub_phase,
+    last_completed_phase_id, next_actionable_phase_id, next_actionable_phases, parent_phase_id,
+    parse_semver_id, phase_id_to_semver, warn_unparseable_phase_id_for_bump, BlockingPhase,
+    ExpectedVersion,
 };
 pub use schema::{
     default_doc_search_dirs, default_statuses, PhasePattern, PlanPhase, PlanSchema, PlanStatus,

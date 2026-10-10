@@ -54,6 +54,29 @@ pub enum PlanCommands {
         #[arg(long)]
         kpi: bool,
     },
+    /// Print the workspace version PLAN.md says Cargo.toml should carry.
+    ///
+    /// Uses the same computation as `ta plan status --check-order` and the CI
+    /// version-sync job: the last phase of the contiguous run of done phases,
+    /// mapped to semver. The version alone goes to stdout; diagnostics go to
+    /// stderr.
+    ///
+    /// Exit codes: 0 = version computed (with --check: Cargo.toml matches),
+    /// 1 = --check and Cargo.toml lags the expected version,
+    /// 2 = no expected version could be computed or a file was unreadable,
+    /// 3 = --check and Cargo.toml carries a pinned non-alpha release version
+    ///     (not managed by the sync; only `ta release run` sets those),
+    /// 4 = --check and Cargo.toml is ahead of the expected version (never
+    ///     lowered automatically; needs a human).
+    ExpectedVersion {
+        /// Compare against the `[workspace.package]` version in Cargo.toml and
+        /// exit non-zero (1, 3 or 4) when it is not in sync.
+        #[arg(long)]
+        check: bool,
+        /// Print a JSON object (expected, cargo, in_sync, phase, blocking) instead of the bare version.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the next pending phase and suggest creating a goal for it.
     Next {
         /// Only consider phases whose ID starts with this prefix (e.g. `--filter v0.15`).
@@ -532,6 +555,11 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
                         if warnings.is_empty() {
                             println!("Phase order check: OK (no out-of-order phases detected)");
                         }
+                        if let Some(msg) =
+                            ta_plan::expected_version_from_plan(&phases).blocked_message()
+                        {
+                            println!("WARNING: {}", msg);
+                        }
                         // v0.15.19.4.2: Also report missing status markers.
                         if let Ok(content) =
                             std::fs::read_to_string(config.workspace_root.join("PLAN.md"))
@@ -557,6 +585,13 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
                 }
             }
             result
+        }
+        PlanCommands::ExpectedVersion { check, json } => {
+            let code = expected_version_command(config, *check, *json);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
         }
         PlanCommands::Next { filter } => show_next(config, filter.as_deref()),
         PlanCommands::History => show_history(config),
@@ -1344,34 +1379,33 @@ fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> a
     // v0.17.0.12.3: Always show binary version vs last-completed plan phase and flag drift.
     {
         let binary = binary_version();
-        // Resolved via the dependency graph, not document position
-        // (v0.17.0.12.30) — see `last_completed_phase_id`.
-        let last_done_id = last_completed_phase_id(&phases);
-        let last_done = phases
-            .iter()
-            .find(|p| phase_ids_match(&p.id, &last_done_id) && p.status == PlanStatus::Done);
+        // Same computation as `ta plan expected-version` and the CI version
+        // sync job: last phase of the contiguous run of done phases.
+        let exp = ta_plan::expected_version_from_plan(&phases);
         println!();
-        match last_done {
-            Some(phase) => {
-                let expected = phase_id_to_semver(&phase.id).unwrap_or_else(|| phase.id.clone());
+        match (exp.phase_id.as_deref(), exp.version.as_deref()) {
+            (Some(phase_id), Some(expected)) => {
                 if binary == expected {
                     println!(
                         "Version: {} ✓  (binary matches last completed phase {})",
-                        binary, phase.id
+                        binary, phase_id
                     );
                 } else {
                     println!(
                         "Version: binary={binary}  last-phase={phase_id} (expected {expected})",
                         binary = binary,
-                        phase_id = phase.id,
+                        phase_id = phase_id,
                         expected = expected,
                     );
                     if let Some(warning) = check_version_sync(&phases) {
                         println!("[!] {}", warning);
                     }
+                    if let Some(msg) = exp.blocked_message() {
+                        println!("[!] {}", msg);
+                    }
                 }
             }
-            None => {
+            _ => {
                 println!("Version: {}  (no completed semver phases found)", binary);
             }
         }
@@ -1432,6 +1466,168 @@ pub use ta_plan::{
     check_phase_order, check_version_sync, detect_missing_status_markers,
     find_phases_needing_done_marker, phase_id_to_semver, warn_unparseable_phase_id_for_bump,
 };
+
+/// Read `[workspace.package] version` from `<root>/Cargo.toml`.
+fn read_workspace_version(root: &std::path::Path) -> anyhow::Result<String> {
+    let path = root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path.display(), e))?;
+    let doc: toml::Value = text
+        .parse()
+        .map_err(|e| anyhow::anyhow!("cannot parse {}: {}", path.display(), e))?;
+    doc.get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} has no [workspace.package] version; add one or run from the workspace root",
+                path.display()
+            )
+        })
+}
+
+/// How `Cargo.toml`'s version relates to the version PLAN.md expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionRelation {
+    InSync,
+    /// Cargo.toml is behind PLAN.md: a bump is needed.
+    Lags,
+    /// Cargo.toml is ahead of PLAN.md: not lowered automatically.
+    Ahead,
+    /// Cargo.toml carries a non-alpha release version (rc or stable), which only
+    /// `ta release run` / `scripts/bump-version.sh` set.
+    Pinned,
+}
+
+/// Classify `cargo` (the workspace version) against `expected` (from PLAN.md).
+/// Build metadata (`+...`) is ignored.
+pub(crate) fn classify_cargo_version(
+    cargo: &str,
+    expected: &str,
+) -> Result<VersionRelation, String> {
+    let parse = |label: &str, v: &str| {
+        semver::Version::parse(v)
+            .map(|mut p| {
+                p.build = semver::BuildMetadata::EMPTY;
+                p
+            })
+            .map_err(|e| format!("{label} version '{v}' is not valid semver: {e}"))
+    };
+    let c = parse("Cargo.toml", cargo)?;
+    let e = parse("expected", expected)?;
+    if !c.pre.as_str().starts_with("alpha") {
+        return Ok(VersionRelation::Pinned);
+    }
+    Ok(match c.cmp(&e) {
+        std::cmp::Ordering::Equal => VersionRelation::InSync,
+        std::cmp::Ordering::Less => VersionRelation::Lags,
+        std::cmp::Ordering::Greater => VersionRelation::Ahead,
+    })
+}
+
+/// Implements `ta plan expected-version`. Returns the process exit code
+/// (0 ok, 1 `--check` mismatch, 2 cannot compute). See the subcommand docs.
+fn expected_version_command(config: &GatewayConfig, check: bool, json: bool) -> i32 {
+    let phases = match load_plan(&config.workspace_root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "error: cannot load PLAN.md from {}: {e}. Run from the project root.",
+                config.workspace_root.display()
+            );
+            return 2;
+        }
+    };
+    let expected = ta_plan::expected_version_from_plan(&phases);
+    let Some(version) = expected.version.clone() else {
+        eprintln!(
+            "error: PLAN.md has no completed semver phase, so no expected version can be \
+             computed.{}",
+            expected
+                .blocking
+                .as_ref()
+                .map(|b| format!(" Phase {} ({}) is {}.", b.id, b.title, b.status))
+                .unwrap_or_default()
+        );
+        return 2;
+    };
+
+    let cargo = if check || json {
+        match read_workspace_version(&config.workspace_root) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    let relation = match cargo
+        .as_deref()
+        .map(|c| classify_cargo_version(c, &version))
+    {
+        Some(Ok(r)) => Some(r),
+        Some(Err(e)) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+        None => None,
+    };
+    let in_sync = relation.map(|r| r == VersionRelation::InSync);
+
+    if let Some(msg) = expected.blocked_message() {
+        eprintln!("WARNING: {msg}");
+    }
+    if json {
+        let out = serde_json::json!({
+            "expected": version,
+            "phase": expected.phase_id,
+            "cargo": cargo,
+            "in_sync": in_sync,
+            "blocking": expected.blocking.as_ref().map(|b| serde_json::json!({
+                "id": b.id, "title": b.title, "status": b.status.to_string(),
+            })),
+            "done_after_blocker": expected.done_after_blocker,
+        });
+        println!("{out}");
+    } else {
+        println!("{version}");
+    }
+    let cargo_v = cargo.as_deref().unwrap_or("?");
+    let phase = expected.phase_id.as_deref().unwrap_or("?");
+    match relation {
+        Some(VersionRelation::Lags) if check => {
+            eprintln!(
+                "version lags: Cargo.toml has {cargo_v} but PLAN.md expects {version} \
+                 (last completed phase {phase}). Fix: run ./scripts/bump-version.sh {version} \
+                 and commit, or let the Version Sync workflow open the bump pull request."
+            );
+            1
+        }
+        Some(VersionRelation::Pinned) if check => {
+            eprintln!(
+                "notice: Cargo.toml carries the pinned release version {cargo_v} (not an \
+                 -alpha version), so it is not synced to {version}. Only `ta release run` sets \
+                 release versions; after the release, re-bump with \
+                 ./scripts/bump-version.sh {version}."
+            );
+            3
+        }
+        Some(VersionRelation::Ahead) if check => {
+            eprintln!(
+                "version ahead: Cargo.toml has {cargo_v} but PLAN.md only supports {version} \
+                 (last completed phase {phase}). It is not lowered automatically. Fix: mark the \
+                 finished phases done in PLAN.md (see the blocked-version message above), or \
+                 run ./scripts/bump-version.sh {version} to re-align by hand."
+            );
+            4
+        }
+        _ => 0,
+    }
+}
 
 fn show_next(config: &GatewayConfig, filter: Option<&str>) -> anyhow::Result<()> {
     let phases = load_plan(&config.workspace_root)?;
@@ -11999,5 +12195,82 @@ persona = "strict-reviewer"
             crate::commands::kpi_alignment::compute_phase_alignments(&phases, &content, &kpis);
         let kernel_phase = alignments.iter().find(|a| a.phase_id == "1").unwrap();
         assert_eq!(kernel_phase.best_kpi.as_deref(), Some("Kernel Stability"));
+    }
+}
+
+#[cfg(test)]
+mod expected_version_cli_tests {
+    use super::*;
+
+    #[test]
+    fn classify_in_sync_lags_ahead() {
+        use VersionRelation::*;
+        assert_eq!(
+            classify_cargo_version("0.17.11-alpha.21", "0.17.11-alpha.21"),
+            Ok(InSync)
+        );
+        assert_eq!(
+            classify_cargo_version("0.17.11-alpha.21", "0.17.11-alpha.28"),
+            Ok(Lags)
+        );
+        assert_eq!(
+            classify_cargo_version("0.17.11-alpha.30", "0.17.11-alpha.28"),
+            Ok(Ahead)
+        );
+        // Bare "-alpha" (a top-level phase) sorts below its sub-phases.
+        assert_eq!(
+            classify_cargo_version("0.17.11-alpha", "0.17.11-alpha.1"),
+            Ok(Lags)
+        );
+        assert_eq!(
+            classify_cargo_version("0.17.10-alpha.9", "0.17.11-alpha"),
+            Ok(Lags)
+        );
+    }
+
+    #[test]
+    fn classify_ignores_build_metadata() {
+        assert_eq!(
+            classify_cargo_version("0.17.0-alpha.12.9+abcd", "0.17.0-alpha.12.9+ef01"),
+            Ok(VersionRelation::InSync)
+        );
+    }
+
+    #[test]
+    fn classify_pinned_release_versions_are_not_managed() {
+        assert_eq!(
+            classify_cargo_version("0.14.22-rc.5", "0.17.0-alpha"),
+            Ok(VersionRelation::Pinned)
+        );
+        assert_eq!(
+            classify_cargo_version("1.0.0", "0.17.0-alpha"),
+            Ok(VersionRelation::Pinned)
+        );
+    }
+
+    #[test]
+    fn classify_rejects_invalid_semver() {
+        assert!(classify_cargo_version("not-a-version", "0.1.0-alpha").is_err());
+    }
+
+    #[test]
+    fn read_workspace_version_reads_workspace_package() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"1.2.3-alpha.4\"\n",
+        )
+        .unwrap();
+        assert_eq!(read_workspace_version(dir.path()).unwrap(), "1.2.3-alpha.4");
+    }
+
+    #[test]
+    fn read_workspace_version_errors_are_actionable() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_workspace_version(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("cannot read"), "{err}");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        let err = read_workspace_version(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("[workspace.package]"), "{err}");
     }
 }

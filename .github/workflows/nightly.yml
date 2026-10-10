@@ -41,6 +41,7 @@ jobs:
       head_sha_short: ${{ steps.check.outputs.head_sha_short }}
       trigger_type: ${{ steps.check.outputs.trigger_type }}
       nightly_tag: ${{ steps.check.outputs.nightly_tag }}
+      nightly_version: ${{ steps.version.outputs.nightly_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -92,6 +93,45 @@ jobs:
             echo "New commits detected since last nightly (${LAST_SHA} → ${HEAD_SHA})."
             echo "should_build=true" >> $GITHUB_OUTPUT
           fi
+
+      # Fails the whole run (visibly) when Cargo.toml lags or leads PLAN.md, so
+      # a nightly never ships under a version the plan does not support. Uses
+      # the same code as `ta plan status` (scripts/plan-version.sh).
+      - name: Install Nix
+        if: steps.check.outputs.should_build == 'true'
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Cache cargo registry and target
+        if: steps.check.outputs.should_build == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: nightly-version-check
+          save-if: false
+
+      - name: Verify Cargo.toml matches PLAN.md and stamp the nightly version
+        id: version
+        if: steps.check.outputs.should_build == 'true'
+        env:
+          HEAD_SHA_SHORT: ${{ steps.check.outputs.head_sha_short }}
+        run: |
+          set +e
+          nix develop --command bash -c "scripts/plan-version.sh --check" 2> version.err
+          rc=$?
+          set -e
+          cat version.err
+          case "$rc" in
+            0|3) ;;
+            1) echo "::error title=Cargo.toml lags PLAN.md::The nightly is not published. Merge the open 'chore: sync version' pull request (Version Sync workflow), or run scripts/bump-version.sh, then re-run the nightly."
+               exit 1 ;;
+            4) echo "::error title=Cargo.toml is ahead of PLAN.md::The nightly is not published. See the log above for the fix."
+               exit 1 ;;
+            *) echo "::error title=Could not verify the version against PLAN.md::See the log above. Re-run manually: scripts/plan-version.sh --check"
+               exit 1 ;;
+          esac
+          CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          NIGHTLY_VERSION="${CARGO_VER}+nightly.$(date -u +%Y%m%d).${HEAD_SHA_SHORT}"
+          echo "nightly_version=${NIGHTLY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${NIGHTLY_VERSION}"
 
   build-nightly:
     name: Build ${{ matrix.target }}
@@ -160,15 +200,15 @@ jobs:
       - name: Package binary with docs (Unix)
         if: runner.os != 'Windows'
         env:
-          HEAD_SHA: ${{ needs.check-for-changes.outputs.head_sha }}
+          NIGHTLY_VERSION: ${{ needs.check-for-changes.outputs.nightly_version }}
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} staging/
           cp target/${{ matrix.target }}/release/ta-daemon staging/
           cp target/${{ matrix.target }}/release/ta-agent-ollama staging/ 2>/dev/null || true
-          # Stamp the nightly SHA into USAGE.md before packaging
+          # Stamp <Cargo.toml version>+nightly.<date>.<sha> into USAGE.md before packaging
           if [ -f docs/USAGE.md ]; then
-            sed "s/^\*\*Version\*\*:.*/**Version**: nightly-${HEAD_SHA:0:7}/" \
+            sed "s/^\*\*Version\*\*:.*/**Version**: ${NIGHTLY_VERSION}/" \
               docs/USAGE.md > staging/USAGE.md
           fi
           # Generate USAGE.html
@@ -207,6 +247,7 @@ jobs:
         shell: pwsh
         env:
           HEAD_SHA: ${{ needs.check-for-changes.outputs.head_sha }}
+          NIGHTLY_VERSION: ${{ needs.check-for-changes.outputs.nightly_version }}
         run: |
           $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
           $ShortSha = "$env:HEAD_SHA".Substring(0, [Math]::Min(7, "$env:HEAD_SHA".Length))
@@ -217,7 +258,7 @@ jobs:
             Copy-Item "target/${{ matrix.target }}/release/ta-agent-ollama.exe" staging/
           }
           if (Test-Path "docs/USAGE.md") {
-            (Get-Content "docs/USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: nightly-${ShortSha}" |
+            (Get-Content "docs/USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: $env:NIGHTLY_VERSION" |
               Set-Content "staging/USAGE.md"
           }
           pandoc "staging\USAGE.md" --standalone --embed-resources `
@@ -233,6 +274,7 @@ jobs:
         shell: pwsh
         env:
           HEAD_SHA: ${{ needs.check-for-changes.outputs.head_sha }}
+          NIGHTLY_VERSION: ${{ needs.check-for-changes.outputs.nightly_version }}
         run: |
           dotnet tool install --global wix --version "4.0.6"
           wix extension add WixToolset.UI.wixext/4.0.6
@@ -254,7 +296,7 @@ jobs:
           $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
           $releaseDir = "target\x86_64-pc-windows-msvc\release"
           $stampedMd = "staging-usage.md"
-          (Get-Content "docs\USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: nightly-${ShortSha}" |
+          (Get-Content "docs\USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: $env:NIGHTLY_VERSION" |
             Set-Content $stampedMd -Encoding utf8
           pandoc $stampedMd --standalone --embed-resources `
             --metadata title="Trusted Autonomy Usage Guide" `
@@ -360,6 +402,7 @@ jobs:
           HEAD_SHA_SHORT: ${{ needs.check-for-changes.outputs.head_sha_short }}
           TRIGGER_TYPE: ${{ needs.check-for-changes.outputs.trigger_type }}
           NIGHTLY_TAG: ${{ needs.check-for-changes.outputs.nightly_tag }}
+          NIGHTLY_VERSION: ${{ needs.check-for-changes.outputs.nightly_version }}
           REPO: ${{ github.repository }}
         run: |
           BUILD_DATE=$(date -u +"%Y-%m-%d")
@@ -393,6 +436,7 @@ jobs:
           # Build the full release body (avoid heredoc — unindented content breaks YAML block scalars)
           {
             printf '## Nightly Build -- %s\n\n' "${BUILD_DATE}"
+            printf '**Version**: %s\n' "${NIGHTLY_VERSION}"
             printf '**Commit**: [%s](https://github.com/%s/commit/%s)\n' "${HEAD_SHA_SHORT}" "${REPO}" "${HEAD_SHA}"
             printf '**Built**: %s (%s)\n' "${BUILD_TIMESTAMP}" "${TRIGGER_TYPE}"
             printf '**Branch**: main\n\n'
@@ -456,9 +500,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA_SHORT: ${{ needs.check-for-changes.outputs.head_sha_short }}
           NIGHTLY_TAG: ${{ needs.check-for-changes.outputs.nightly_tag }}
+          NIGHTLY_VERSION: ${{ needs.check-for-changes.outputs.nightly_version }}
         run: |
           BUILD_DATE=$(date -u +"%Y-%m-%d")
-          RELEASE_TITLE="Nightly ${BUILD_DATE} (${HEAD_SHA_SHORT})"
+          RELEASE_TITLE="Nightly ${NIGHTLY_VERSION}"
 
           # Every run creates a brand-new release under a never-reused dated
           # tag (nightly-YYYYMMDD-<shortsha>) -- nothing is ever edited or

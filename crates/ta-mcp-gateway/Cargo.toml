@@ -27,27 +27,27 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 
 # Internal crates
-ta-audit = { path = "../ta-audit", version = "0.17.11-alpha.21" }
-ta-events = { path = "../ta-events", version = "0.17.11-alpha.21" }
-ta-memory = { path = "../ta-memory", version = "0.17.11-alpha.21" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.11-alpha.21" }
-ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.11-alpha.21" }
-ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.11-alpha.21" }
-ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.11-alpha.21" }
-ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.11-alpha.21" }
-ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.21" }
-ta-plan = { path = "../ta-plan", version = "0.17.11-alpha.21" }
-ta-plan-wayfinder = { path = "../ta-plan-wayfinder", version = "0.17.11-alpha.21" }
-ta-policy = { path = "../ta-policy", version = "0.17.11-alpha.21" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.11-alpha.21" }
-ta-workflow = { path = "../ta-workflow", version = "0.17.11-alpha.21" }
-ta-actions = { path = "../ta-actions", version = "0.17.11-alpha.21" }
-ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.21" }
+ta-audit = { path = "../ta-audit", version = "0.17.11-alpha.23" }
+ta-events = { path = "../ta-events", version = "0.17.11-alpha.23" }
+ta-memory = { path = "../ta-memory", version = "0.17.11-alpha.23" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.11-alpha.23" }
+ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.11-alpha.23" }
+ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.11-alpha.23" }
+ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.11-alpha.23" }
+ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.11-alpha.23" }
+ta-goal = { path = "../ta-goal", version = "0.17.11-alpha.23" }
+ta-plan = { path = "../ta-plan", version = "0.17.11-alpha.23" }
+ta-plan-wayfinder = { path = "../ta-plan-wayfinder", version = "0.17.11-alpha.23" }
+ta-policy = { path = "../ta-policy", version = "0.17.11-alpha.23" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.11-alpha.23" }
+ta-workflow = { path = "../ta-workflow", version = "0.17.11-alpha.23" }
+ta-actions = { path = "../ta-actions", version = "0.17.11-alpha.23" }
+ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.23" }
 ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
-ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.21" }
-ta-session = { path = "../ta-session", version = "0.17.11-alpha.21" }
-ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.21" }
-ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.21" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.11-alpha.23" }
+ta-session = { path = "../ta-session", version = "0.17.11-alpha.23" }
+ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.23" }
+ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.23" }
 
 
 [dev-dependencies]
