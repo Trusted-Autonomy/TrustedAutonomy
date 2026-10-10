@@ -12239,7 +12239,8 @@ pre_launch:
     /// argv (and so could skip `--tools ""`) fails this test.
     #[test]
     fn every_direct_argv_site_uses_the_shared_builder() {
-        let src = include_str!("run.rs");
+        // Normalize line endings: Windows checkouts may use CRLF.
+        let src = include_str!("run.rs").replace("\r\n", "\n");
         let production = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
         assert_eq!(
             production.matches(".replace(\"{prompt}\", prompt)").count(),
