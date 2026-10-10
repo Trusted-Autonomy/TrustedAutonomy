@@ -10773,7 +10773,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [x] Deferred items moved/resolved: bounded context (a size limit on question and context), a hosted-model backend, optional feature-gated use from `task-graph` and `decision-gate`, and publishing to crates.io and PyPI are future work tracked in the `typed-ask` repository README ("Planned"), not in this phase. Original note: bounded context (a size limit on question and context); a hosted-model backend so one interface covers local and hosted models; optional feature-gated use from `task-graph` and `decision-gate` (their defaults stay dependency-free); publish to crates.io and PyPI when ready.
 
 ### v0.17.11.22 - Automatic Version Sync (Nightly and Release)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: `Cargo.toml` tracks the last completed plan phase without a human step, however the work was merged. Today the bump fires only inside `ta draft apply --phase`, so work merged as ordinary pull requests (agent or human) never bumps it, and the guard that picks the "last completed phase" stops at the first pending phase, so a single stale or unfinished phase freezes the version for everything after it.
