@@ -57,7 +57,7 @@ fn is_cargo_test_binary_path(exe: &Path) -> bool {
 /// True when the real OS keychain must be unreachable: this crate's own unit
 /// tests (`cfg!(test)`), any cargo test binary in a dependent crate (detected
 /// by its `deps/` location), or `TA_FORBID_REAL_KEYCHAIN` being set.
-fn keychain_guard_active() -> bool {
+pub(crate) fn keychain_guard_active() -> bool {
     cfg!(test)
         || std::env::var_os(FORBID_KEYCHAIN_ENV).is_some()
         || std::env::current_exe()
