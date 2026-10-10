@@ -11,7 +11,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use ta_changeset::{InteractionKind, InteractionRequest, InteractionResponse, Urgency};
@@ -125,6 +125,19 @@ struct AgentLaunchConfig {
     /// prompted (red-team CR-01/CR-13).
     #[serde(skip)]
     restricted_tool_surface: bool,
+
+    /// Set by `execute()` (never read from YAML) for a chat-mode launch.
+    /// For Claude Code it adds `--tools ""` (no built-in tool exists) to
+    /// every argv built from this config, see [`chat_mode_lock_flags`].
+    #[serde(skip)]
+    chat_mode: bool,
+
+    /// Set by `execute()` for a chat-mode launch: the chat-locked MCP config
+    /// (`.ta/mcp-agent-chat.json`). Argv builders that do not derive their
+    /// own MCP config (`launch_agent`, `launch_agent_interactive`) pass it
+    /// with `--strict-mcp-config` so no other MCP server can leak in.
+    #[serde(skip)]
+    chat_mcp_config: Option<PathBuf>,
 }
 
 /// Claude Code flags for a restricted launch. Verified against Claude Code
@@ -155,16 +168,93 @@ fn is_claude_code_launch(config: &AgentLaunchConfig) -> bool {
             .is_some_and(|s| s == "claude")
 }
 
+/// True when the staging workspace's `.claude/settings.local.json` carries
+/// the chat-mode native deny list (written only by a chat-mode launch).
+#[cfg(unix)]
+fn staging_settings_are_chat_mode(staging_path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(staging_path.join(".claude/settings.local.json")) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let deny: Vec<&str> = v["permissions"]["deny"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    [
+        "Bash", "Read", "Write", "Edit", "Agent", "Skill", "WebFetch",
+    ]
+    .iter()
+    .all(|t| deny.contains(t))
+}
+
 /// Extra command-line flags for this launch: [`RESTRICTED_LAUNCH_FLAGS`]
-/// for a restricted Claude Code launch, nothing otherwise.
+/// for a restricted Claude Code launch, plus, for a chat-mode launch,
+/// `--tools ""` ([`ta_goal::chat_mode::CHAT_MODE_BUILTIN_TOOLS_FLAG`]) so NO
+/// Claude Code built-in tool exists. Nothing otherwise.
+///
+/// The `--tools ""` allowlist is the primary chat-mode control. Verified
+/// live (Claude Code 2.1.295): with it the agent's whole tool list is the
+/// `--strict-mcp-config` server's tools; with only `--restricted` /
+/// `--setting-sources local` / a deny list, built-ins such as `ListAgents`,
+/// `SendMessage`, `CronCreate` and `RemoteTrigger` stay callable.
 fn restricted_launch_flags(config: &AgentLaunchConfig) -> Vec<String> {
-    if config.restricted_tool_surface && is_claude_code_launch(config) {
-        RESTRICTED_LAUNCH_FLAGS
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    } else {
-        Vec::new()
+    let mut flags: Vec<String> = Vec::new();
+    if !is_claude_code_launch(config) {
+        return flags;
+    }
+    if config.restricted_tool_surface {
+        flags.extend(RESTRICTED_LAUNCH_FLAGS.iter().map(|s| s.to_string()));
+    }
+    if config.chat_mode {
+        flags.extend(
+            ta_goal::chat_mode::CHAT_MODE_BUILTIN_TOOLS_FLAG
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    flags
+}
+
+/// Argv for the direct (non-RuntimeAdapter) launch paths: `launch_agent`,
+/// `launch_agent_interactive` and `launch_agent_headless`. The template with
+/// `{prompt}` substituted, then the restricted-launch flags, then (chat mode)
+/// the chat MCP lock. Every direct path must build its argv here so a
+/// chat-mode launch can never skip `--tools ""` / `--strict-mcp-config`
+/// (enforced by `every_direct_argv_site_uses_the_shared_builder`).
+fn agent_launch_args(config: &AgentLaunchConfig, prompt: &str) -> std::io::Result<Vec<String>> {
+    let mut args: Vec<String> = config
+        .args_template
+        .iter()
+        .map(|t| t.replace("{prompt}", prompt))
+        .collect();
+    args.extend(restricted_launch_flags(config));
+    args.extend(chat_mcp_lock_flags(config)?);
+    Ok(args)
+}
+
+/// `--strict-mcp-config --mcp-config <chat config>` for argv builders that
+/// do not derive their own MCP config (`launch_agent`,
+/// `launch_agent_interactive`). Empty for non-chat or non-Claude launches.
+/// Fails closed: a chat-mode launch with no chat MCP config is refused
+/// rather than started with whatever MCP servers the machine has.
+fn chat_mcp_lock_flags(config: &AgentLaunchConfig) -> std::io::Result<Vec<String>> {
+    if !config.chat_mode || !is_claude_code_launch(config) {
+        return Ok(Vec::new());
+    }
+    match &config.chat_mcp_config {
+        Some(path) => Ok(vec![
+            "--strict-mcp-config".to_string(),
+            "--mcp-config".to_string(),
+            path.display().to_string(),
+        ]),
+        None => Err(std::io::Error::other(
+            "chat-mode launch has no chat-locked MCP config path, so the agent was not \
+             started: without --strict-mcp-config it could reach MCP servers outside TA. \
+             This is a TA bug; re-run `ta run` so the chat MCP config \
+             (.ta/mcp-agent-chat.json) is written and passed.",
+        )),
     }
 }
 
@@ -275,6 +365,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             // Claude Code does not send heartbeats — disable stale checking (v0.13.14).
             heartbeat_required: false,
             restricted_tool_surface: false,
+            chat_mode: false,
+            chat_mcp_config: None,
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -299,6 +391,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             runtime: Default::default(),
             heartbeat_required: false,
             restricted_tool_surface: false,
+            chat_mode: false,
+            chat_mcp_config: None,
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -356,6 +450,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             runtime: Default::default(),
             heartbeat_required: false,
             restricted_tool_surface: false,
+            chat_mode: false,
+            chat_mcp_config: None,
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -376,6 +472,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             runtime: Default::default(),
             heartbeat_required: false,
             restricted_tool_surface: false,
+            chat_mode: false,
+            chat_mcp_config: None,
         },
     }
 }
@@ -471,6 +569,8 @@ fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> 
         runtime: Default::default(),
         heartbeat_required: false,
         restricted_tool_surface: false,
+        chat_mode: false,
+        chat_mcp_config: None,
     }
 }
 
@@ -3774,6 +3874,17 @@ pub fn execute(
                 config.workspace_root.join(".ta").display()
             )
         })?;
+        // Chat mode closes the built-in tool surface with `--tools ""` and
+        // pins the chat MCP config on EVERY argv built from this config
+        // (see restricted_launch_flags / chat_mcp_lock_flags). Set here, not
+        // inside the settings-injection block above, so no chat launch can
+        // skip it.
+        agent_config.restricted_tool_surface = true;
+        agent_config.chat_mode = true;
+        agent_config.chat_mcp_config = Some(super::chat_launch::agent_mcp_config_path(
+            &config.workspace_root,
+            true,
+        ));
     }
 
     // v0.17.11.8: for a team-session role launch (--team-session-id), deliver
@@ -4102,6 +4213,22 @@ pub fn execute(
     type GuidanceLog = Vec<(String, String)>;
     // Agent token counts are accumulated from headless stream-json output (v0.15.14.2).
     let mut agent_tokens_out = AgentTokens::default();
+    // Audit trail: the agent's EXACT first message (fenced untrusted intake
+    // and trusted candidate_id included), secrets redacted, for every launch.
+    match write_first_message(&config.workspace_root, goal.goal_run_id, &prompt) {
+        Ok(path) => tracing::info!(
+            goal_id = %goal.goal_run_id,
+            path = %path.display(),
+            "recorded the agent's first message"
+        ),
+        Err(e) => tracing::warn!(
+            goal_id = %goal.goal_run_id,
+            dir = %config.workspace_root.join(".ta/logs/goals").display(),
+            error = %e,
+            "could not record the agent's first message (first-message.txt); the launch \
+             continues. Check that .ta/logs/goals is writable"
+        ),
+    }
     // Audit trail: chat-mode goals (the chief-of-staff is the most
     // security-sensitive agent) always keep their transcript and TA tool-call
     // list under .ta/logs/goals/<goal-id>/, outside staging, so it survives
@@ -5276,6 +5403,17 @@ fn execute_resume(
         .ok_or_else(|| anyhow::anyhow!("Goal {} not found for session", session.goal_id))?;
 
     let staging_path = &goal.workspace_path;
+    // Fail closed: a resumed PTY session is relaunched from the agent's plain
+    // config, which carries no chat-mode lock (`--tools ""`, strict MCP) and
+    // not the chat session identity. Refuse to reattach a chat-mode goal.
+    if staging_settings_are_chat_mode(staging_path) {
+        anyhow::bail!(
+            "Goal {} is a chat-mode (read-only) session. `ta session resume` cannot restore \
+             its chat lock (built-in tools disabled, chat-only MCP config), so it was not \
+             relaunched. Start a new chat-mode session with `ta run --chat-mode` instead.",
+            goal.goal_run_id
+        );
+    }
     if !staging_path.exists() {
         // v0.7.5: PTY health check — workspace is gone.
         // Offer to close the session cleanly instead of erroring.
@@ -5375,6 +5513,8 @@ fn execute_resume(
             runtime: Default::default(),
             heartbeat_required: false,
             restricted_tool_surface: false,
+            chat_mode: false,
+            chat_mcp_config: None,
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -5493,12 +5633,7 @@ fn launch_agent(
     prompt: &str,
     pid_callback: Option<&dyn Fn(u32)>,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let mut args: Vec<String> = config
-        .args_template
-        .iter()
-        .map(|t| t.replace("{prompt}", prompt))
-        .collect();
-    args.extend(restricted_launch_flags(config));
+    let args = agent_launch_args(config, prompt)?;
     let mut cmd = resolve_agent_command(&config.command, &args);
     cmd.current_dir(staging_path);
 
@@ -5534,8 +5669,7 @@ fn launch_agent_headless(
     let mut cmd = std::process::Command::new(&config.command);
     cmd.current_dir(staging_path);
 
-    for arg_template in &config.args_template {
-        let arg = arg_template.replace("{prompt}", prompt);
+    for arg in agent_launch_args(config, prompt)? {
         cmd.arg(arg);
     }
 
@@ -5596,12 +5730,7 @@ fn launch_agent_interactive(
     Vec<(InteractionRequest, InteractionResponse)>,
 )> {
     // Build args with template substitution.
-    let mut args: Vec<String> = config
-        .args_template
-        .iter()
-        .map(|t| t.replace("{prompt}", prompt))
-        .collect();
-    args.extend(restricted_launch_flags(config));
+    let args = agent_launch_args(config, prompt)?;
 
     // Launch via PTY.
     let pty_config = pty_capture::PtyLaunchConfig {
@@ -6186,7 +6315,7 @@ fn build_runtime_agent_args(
         //   parent()     = project_root
         // Chat-mode launches use the chat-locked config instead
         // (`.ta/mcp-agent-chat.json`, see commands/chat_launch.rs).
-        let chat_mode = super::chat_launch::env_requests_chat_mode(env);
+        let chat_mode = config.chat_mode || super::chat_launch::env_requests_chat_mode(env);
         let stable_mcp_path = match staging_path
             .parent()
             .and_then(|p| p.parent())
@@ -6208,6 +6337,18 @@ fn build_runtime_agent_args(
         args.push(stable_mcp_path.display().to_string());
     }
     args.extend(restricted_launch_flags(config));
+    // A chat session identified only by the spawn env (not `config.chat_mode`)
+    // still gets the built-in allowlist: no chat argv may lack `--tools ""`.
+    if is_claude_code_launch(config)
+        && super::chat_launch::env_requests_chat_mode(env)
+        && !args.iter().any(|a| a == "--tools")
+    {
+        args.extend(
+            ta_goal::chat_mode::CHAT_MODE_BUILTIN_TOOLS_FLAG
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
     Ok(args)
 }
 
@@ -6621,6 +6762,55 @@ fn transcript_dir_for_goal(
             .join("goals")
             .join(goal_run_id.to_string())
     })
+}
+
+/// File name of the agent's recorded first message, in the goal's log dir.
+const FIRST_MESSAGE_FILE: &str = "first-message.txt";
+
+/// Redact a multi-line prompt without changing its shape: JSON lines are
+/// key-redacted (and re-serialized only when something was actually
+/// redacted, so the recorded text stays byte-exact otherwise); other lines
+/// get token-shaped redaction.
+fn redact_first_message(text: &str) -> String {
+    use ta_mcp_gateway::secret_redact::{redact_json, redact_text};
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) if v.is_object() || v.is_array() => {
+                let mut r = v.clone();
+                redact_json(&mut r);
+                if r == v {
+                    out.push_str(line);
+                } else {
+                    out.push_str(&r.to_string());
+                }
+            }
+            _ => out.push_str(&redact_text(line)),
+        }
+    }
+    out
+}
+
+/// Persist the agent's exact first message, secrets redacted, to
+/// `.ta/logs/goals/<goal-id>/first-message.txt` (outside staging, so it
+/// survives cleanup). Returns the file path.
+fn write_first_message(
+    project_root: &Path,
+    goal_id: uuid::Uuid,
+    prompt: &str,
+) -> std::io::Result<PathBuf> {
+    let dir = project_root
+        .join(".ta")
+        .join("logs")
+        .join("goals")
+        .join(goal_id.to_string());
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(FIRST_MESSAGE_FILE);
+    std::fs::write(&path, redact_first_message(prompt))?;
+    Ok(path)
 }
 
 /// Writes a headless agent's stream-json output, secrets redacted, to
@@ -9696,6 +9886,63 @@ fn auto_commit_ta_jsonl(project_root: &std::path::Path) {
 // Returns `Ok(())` to continue, `Err(...)` to abort. Silently skips when:
 //   - `project_root` has no `.git` ancestor (not a git repo).
 //   - git is not on PATH.
+/// The `git status --porcelain` lines that make a tree dirty: every line
+/// except UNTRACKED (`??`) entries that are machine-local TA runtime state
+/// ([`ta_workspace::partitioning::is_local_ta_runtime_path`]). Tracked
+/// changes are always kept, even under `.ta/`.
+fn dirty_entries_excluding_ta_runtime(porcelain: &str) -> Vec<&str> {
+    porcelain
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| match l.strip_prefix("?? ") {
+            Some(path) => {
+                !ta_workspace::partitioning::is_local_ta_runtime_path(path.trim().trim_matches('"'))
+            }
+            None => true,
+        })
+        .collect()
+}
+
+/// Git collapses a wholly-untracked `.ta/` into one `?? .ta/` porcelain line,
+/// which hides which files are inside. Expand it (`--untracked-files=all`,
+/// scoped to `.ta`) so TA's own runtime files can be told apart from real
+/// changes. Returns `porcelain` unchanged when there is nothing to expand or
+/// the expansion fails.
+fn expand_collapsed_ta_dir(project_root: &std::path::Path, porcelain: &str) -> String {
+    if !porcelain.lines().any(|l| l == "?? .ta/") {
+        return porcelain.to_string();
+    }
+    let expanded = std::process::Command::new("git")
+        .args(["-C", &project_root.to_string_lossy()])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".ta",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .output();
+    match expanded {
+        Ok(o) if o.status.success() => {
+            let mut lines: Vec<String> = porcelain
+                .lines()
+                .filter(|l| *l != "?? .ta/")
+                .map(str::to_string)
+                .collect();
+            lines.extend(
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::to_string),
+            );
+            lines.join("\n")
+        }
+        _ => porcelain.to_string(),
+    }
+}
+
 fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Result<()> {
     // Quick-exit if there is no .git directory at or above project_root.
     let is_git = {
@@ -9741,13 +9988,16 @@ fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Re
         return Ok(()); // git failed for unrelated reason — don't block
     }
 
-    let dirty = String::from_utf8_lossy(&output.stdout);
-    if dirty.trim().is_empty() {
+    let dirty = expand_collapsed_ta_dir(project_root, &String::from_utf8_lossy(&output.stdout));
+    // TA's own untracked runtime files (.ta/wake-attempts/, .ta/logs/, key and
+    // token files, ...) never count as a dirty tree, even in a project whose
+    // ignore block predates them.
+    let files = dirty_entries_excluding_ta_runtime(&dirty);
+    if files.is_empty() {
         return Ok(());
     }
 
     // Build the file list (up to 20 shown).
-    let files: Vec<&str> = dirty.lines().collect();
     let shown = files.len().min(20);
     eprintln!();
     eprintln!(
@@ -11868,6 +12118,277 @@ pre_launch:
         let mut c = builtin_agent_config("claude-code");
         c.restricted_tool_surface = restricted;
         c
+    }
+
+    /// A chat-mode claude config as `execute()` builds it.
+    fn chat_claude_config(project_root: &Path) -> AgentLaunchConfig {
+        let mut c = claude_config(true);
+        c.chat_mode = true;
+        c.chat_mcp_config = Some(super::super::chat_launch::agent_mcp_config_path(
+            project_root,
+            true,
+        ));
+        c
+    }
+
+    /// True when `args` holds `--tools` immediately followed by an empty
+    /// string (the allowlist that disables every built-in tool).
+    fn has_empty_tools_allowlist(args: &[String]) -> bool {
+        args.windows(2)
+            .any(|w| w[0] == "--tools" && w[1].is_empty())
+    }
+
+    /// Security (chat-mode built-in tool leak): EVERY chat-mode claude argv,
+    /// on every launch path, carries `--tools ""` and a strict MCP config
+    /// pointing at the chat-locked config; non-chat launches are unchanged.
+    #[test]
+    fn chat_mode_argv_disables_every_builtin_tool_on_every_launch_path() {
+        let project = TempDir::new().unwrap();
+        let root = project.path();
+        let staging = root.join(".ta").join("staging").join("g1");
+        let chat = chat_claude_config(root);
+        let plan = super::super::chat_launch::plan_chat_mode_launch(
+            &super::super::chat_launch::ChatModeInputs {
+                cli_flag: true,
+                persona_name: None,
+                persona_chat_mode: false,
+                persona_allowed_tools: &[],
+                agent: "claude-code",
+                agent_framework_name: Some("claude-code"),
+                injects_settings: true,
+                macro_goal: false,
+                uses_pty: false,
+            },
+        )
+        .unwrap()
+        .expect("chat mode planned");
+        let env: std::collections::HashMap<String, String> =
+            super::super::chat_launch::chat_mode_agent_env(&plan, &staging)
+                .into_iter()
+                .collect();
+
+        let mut argvs: Vec<(&str, Vec<String>)> = Vec::new();
+        // Runtime path: headless wake launch, plain `ta run --chat-mode`.
+        for headless in [true, false] {
+            argvs.push((
+                "runtime",
+                build_runtime_agent_args(&chat, &staging, "hello", headless, &env).unwrap(),
+            ));
+        }
+        // Runtime path where only the spawn env marks the session as chat.
+        argvs.push((
+            "runtime-env-only",
+            build_runtime_agent_args(&claude_config(true), &staging, "hello", true, &env).unwrap(),
+        ));
+        // Direct paths: interactive PTY, relaunch after verify failure,
+        // follow-up/fix relaunch, legacy headless.
+        argvs.push(("direct", agent_launch_args(&chat, "hello").unwrap()));
+
+        for (label, args) in &argvs {
+            assert!(has_empty_tools_allowlist(args), "{}: {:?}", label, args);
+            assert!(
+                args.contains(&"--strict-mcp-config".to_string()),
+                "{}: {:?}",
+                label,
+                args
+            );
+            let i = args.iter().position(|a| a == "--mcp-config").unwrap();
+            assert!(args[i + 1].ends_with("mcp-agent-chat.json"), "{:?}", args);
+            // One MCP config only: nothing else may add a second source.
+            assert_eq!(args.iter().filter(|a| *a == "--mcp-config").count(), 1);
+            assert_eq!(args.iter().filter(|a| *a == "--tools").count(), 1);
+        }
+
+        // Non-chat launches are unchanged: no `--tools`, restricted or not.
+        for restricted in [true, false] {
+            let cfg = claude_config(restricted);
+            let plain_env = std::collections::HashMap::new();
+            let runtime =
+                build_runtime_agent_args(&cfg, &staging, "hello", true, &plain_env).unwrap();
+            assert!(!runtime.contains(&"--tools".to_string()), "{:?}", runtime);
+            let direct = agent_launch_args(&cfg, "hello").unwrap();
+            assert!(!direct.contains(&"--tools".to_string()), "{:?}", direct);
+            assert!(!direct.contains(&"--strict-mcp-config".to_string()));
+        }
+        assert_eq!(
+            restricted_launch_flags(&claude_config(true)),
+            RESTRICTED_LAUNCH_FLAGS
+        );
+
+        // A non-Claude framework gets no Claude flags even in chat mode.
+        let mut codex = builtin_agent_config("codex");
+        codex.chat_mode = true;
+        assert!(restricted_launch_flags(&codex).is_empty());
+        assert!(chat_mcp_lock_flags(&codex).unwrap().is_empty());
+    }
+
+    /// Fail closed: a chat-mode claude launch with no chat MCP config path
+    /// is refused rather than started with the machine's other MCP servers.
+    #[test]
+    fn chat_mode_direct_launch_without_chat_mcp_config_is_refused() {
+        let mut c = claude_config(true);
+        c.chat_mode = true;
+        c.chat_mcp_config = None;
+        let err = agent_launch_args(&c, "hi").unwrap_err().to_string();
+        assert!(err.contains("strict-mcp-config"), "{}", err);
+    }
+
+    /// Guard: the only places that substitute `{prompt}` into an argv are
+    /// `agent_launch_args` and `build_runtime_agent_args`, both of which
+    /// apply the chat-mode flags. A new launch path that builds its own
+    /// argv (and so could skip `--tools ""`) fails this test.
+    #[test]
+    fn every_direct_argv_site_uses_the_shared_builder() {
+        let src = include_str!("run.rs");
+        let production = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert_eq!(
+            production.matches(".replace(\"{prompt}\", prompt)").count(),
+            2,
+            "a new argv builder must go through agent_launch_args or \
+             build_runtime_agent_args so chat mode keeps `--tools \"\"`"
+        );
+        for needle in ["launch_agent_headless", "launch_agent_interactive"] {
+            assert!(production.contains(needle));
+        }
+        // Each direct launcher calls the shared builder.
+        assert!(
+            production
+                .matches("agent_launch_args(config, prompt)?")
+                .count()
+                >= 3
+        );
+    }
+
+    /// Drift: the built-in deny list is written into the chat settings AND
+    /// the launch applies the allowlist, from the same profile definition.
+    #[test]
+    fn chat_mode_applies_builtin_deny_list_and_allowlist_together() {
+        let plan = super::super::chat_launch::plan_chat_mode_launch(
+            &super::super::chat_launch::ChatModeInputs {
+                cli_flag: true,
+                persona_name: None,
+                persona_chat_mode: false,
+                persona_allowed_tools: &[],
+                agent: "claude-code",
+                agent_framework_name: Some("claude-code"),
+                injects_settings: true,
+                macro_goal: false,
+                uses_pty: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let (allow, deny) =
+            super::super::chat_launch::chat_mode_settings_lists(&plan, None, &[]).unwrap();
+        for t in ta_goal::chat_mode::CHAT_MODE_NATIVE_DENY {
+            assert!(deny.iter().any(|d| d == t), "{} missing from deny", t);
+        }
+        for t in ["ListAgents", "SendMessage", "CronCreate", "RemoteTrigger"] {
+            assert!(deny.iter().any(|d| d == t), "{} missing from deny", t);
+        }
+        assert!(allow.iter().all(|a| a.starts_with("mcp__ta__")));
+        let project = TempDir::new().unwrap();
+        assert!(has_empty_tools_allowlist(
+            &agent_launch_args(&chat_claude_config(project.path()), "p").unwrap()
+        ));
+    }
+
+    /// The agent's exact first message is recorded, redacted, per goal.
+    #[test]
+    fn first_message_file_keeps_fence_and_candidate_id_and_redacts_secrets() {
+        let project = TempDir::new().unwrap();
+        let intake_json = serde_json::json!({
+            "candidate_id": "cand-123",
+            "title": "use ghp_abcdefghijklmnopqrstuvwxyz0123456789 please",
+            "api_key": "hunter2hunter2",
+        })
+        .to_string();
+        let intake = super::super::intake_prompt::parse_intake(&intake_json);
+        let prompt = super::super::intake_prompt::build_agent_prompt(
+            "title",
+            "objective body",
+            Some(&intake),
+        );
+        let goal_id = uuid::Uuid::new_v4();
+        let path = write_first_message(project.path(), goal_id, &prompt).unwrap();
+        assert_eq!(
+            path,
+            project
+                .path()
+                .join(format!(".ta/logs/goals/{goal_id}/first-message.txt"))
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("<<<BEGIN "), "{}", text);
+        assert!(text.contains("<<<END "), "{}", text);
+        assert!(text.contains("- candidate_id: cand-123\n"), "{}", text);
+        assert!(text.contains("objective body"));
+        assert!(!text.contains("ghp_abcdefghijklmnopqrstuvwxyz"), "{}", text);
+        assert!(!text.contains("hunter2hunter2"), "{}", text);
+        // Without secrets the recording is byte-exact.
+        let clean = "title\n\nObjective: x\n{\"b\":1,\"a\":2}\n";
+        assert_eq!(redact_first_message(clean), clean);
+    }
+
+    /// TA's own untracked runtime files never make the tree "dirty", but
+    /// real changes (and tracked `.ta/` files) still do.
+    #[test]
+    fn dirty_check_ignores_ta_runtime_paths_only() {
+        let porcelain = "?? .ta/wake-attempts/\n\
+                         ?? .ta/wake-dead-letter.jsonl\n\
+                         ?? .ta/logs/wake-launches/\n\
+                         ?? .ta/team-sessions/\n\
+                         ?? .ta/broker_root.key\n\
+                         ?? .ta/credentials.json\n\
+                         ?? .ta/tokens/\n";
+        assert!(dirty_entries_excluding_ta_runtime(porcelain).is_empty());
+        let mixed =
+            "?? .ta/wake-attempts/\n M src/lib.rs\n?? notes.txt\n M .ta/wake-dead-letter.jsonl\n";
+        assert_eq!(
+            dirty_entries_excluding_ta_runtime(mixed),
+            vec![
+                " M src/lib.rs",
+                "?? notes.txt",
+                " M .ta/wake-dead-letter.jsonl"
+            ]
+        );
+    }
+
+    /// End to end against real git: a scratch repo whose ignore block
+    /// predates the entries (the reported bug) is not dirty because of
+    /// `.ta/wake-attempts/`.
+    #[test]
+    fn scratch_project_with_old_ignore_block_is_clean_despite_wake_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+        std::fs::create_dir_all(dir.path().join(".ta/wake-attempts")).unwrap();
+        std::fs::write(dir.path().join(".ta/wake-attempts/m.json"), "{}").unwrap();
+        std::fs::write(dir.path().join(".ta/broker_root.key"), "k").unwrap();
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let porcelain = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(!porcelain.trim().is_empty(), "git sees the files as dirty");
+        let expanded = expand_collapsed_ta_dir(dir.path(), &porcelain);
+        assert!(
+            expanded.contains(".ta/wake-attempts/m.json"),
+            "{}",
+            expanded
+        );
+        assert!(dirty_entries_excluding_ta_runtime(&expanded).is_empty());
+        // A real change next to them is still reported.
+        std::fs::write(dir.path().join("src.rs"), "x").unwrap();
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let expanded = expand_collapsed_ta_dir(dir.path(), &String::from_utf8_lossy(&out.stdout));
+        assert_eq!(
+            dirty_entries_excluding_ta_runtime(&expanded),
+            vec!["?? src.rs"]
+        );
     }
 
     #[test]
