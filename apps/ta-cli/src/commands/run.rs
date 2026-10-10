@@ -2066,6 +2066,7 @@ fn build_shadow_experiment_command(
     workflow_tag: Option<&str>,
     persona: Option<&str>,
     engine_workflow: Option<&str>,
+    use_keychain: bool,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(ta_bin);
     cmd.arg("run")
@@ -2128,7 +2129,7 @@ fn build_shadow_experiment_command(
         &format!("cost-experiment-shadow:{title}"),
         credential_scopes,
         CREDENTIAL_TOKEN_TTL_SECS,
-        true,
+        use_keychain,
         &current_env,
     );
     let shadow_env = scoped_credential_env(&current_env, &available, credential_scopes);
@@ -2168,6 +2169,10 @@ fn spawn_shadow_experiment_goal(
     persona: Option<&str>,
     engine_workflow: Option<&str>,
 ) -> std::io::Result<std::process::Child> {
+    // Honors `TA_NO_KEYCHAIN` (and the vault layer enforces it again), the same
+    // way every other `for_project` caller does. A hardcoded `true` here made a
+    // shadow spawn open the real OS keychain even with `TA_NO_KEYCHAIN=1`.
+    let use_keychain = ta_credentials::CredentialsConfig::for_project(workspace_root).use_keychain;
     build_shadow_experiment_command(
         ta_bin,
         workspace_root,
@@ -2180,6 +2185,7 @@ fn spawn_shadow_experiment_goal(
         workflow_tag,
         persona,
         engine_workflow,
+        use_keychain,
     )
     .spawn()
 }
@@ -16078,6 +16084,7 @@ plan_pending_window = 7
 
     #[test]
     fn spawn_shadow_experiment_goal_builds_correct_args() {
+        let dir = tempfile::tempdir().unwrap();
         use uuid::Uuid;
 
         let spec = ExperimentSpawnSpec {
@@ -16088,16 +16095,17 @@ plan_pending_window = 7
         };
         let cmd = build_shadow_experiment_command(
             Path::new("/usr/local/bin/ta"),
-            Path::new("/repo"),
+            dir.path(),
             "Fix the bug",
             "claude-opus-4",
             "Fix the null pointer in parser.rs",
             None,
             &spec,
             &[],
-            None, // workflow_tag = None (covered separately below)
-            None, // persona = None (covered separately below)
-            None, // engine_workflow = None (covered separately below)
+            None,  // workflow_tag = None (covered separately below)
+            None,  // persona = None (covered separately below)
+            None,  // engine_workflow = None (covered separately below)
+            false, // use_keychain: tests must never open the real Keychain
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -16122,7 +16130,7 @@ plan_pending_window = 7
         assert!(args.contains(&"--objective".to_string()));
         assert!(args.contains(&"Fix the null pointer in parser.rs".to_string()));
         assert!(!args.contains(&"--objective-file".to_string()));
-        assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo")));
+        assert_eq!(cmd.get_current_dir(), Some(dir.path()));
         // Credential scoping (review fix): the flag is always present, even
         // when empty: "enforcement on, zero scopes", never legacy full
         // inheritance.
@@ -16157,9 +16165,10 @@ plan_pending_window = 7
             None,
             &spec,
             &[],
-            None, // workflow_tag = None (covered separately below)
-            None, // persona = None (covered separately below)
-            None, // engine_workflow = None (covered separately below)
+            None,  // workflow_tag = None (covered separately below)
+            None,  // persona = None (covered separately below)
+            None,  // engine_workflow = None (covered separately below)
+            false, // use_keychain: tests must never open the real Keychain
         );
 
         let envs: HashMap<String, Option<String>> = cmd
@@ -16184,6 +16193,7 @@ plan_pending_window = 7
 
     #[test]
     fn spawn_shadow_experiment_goal_forwards_objective_file_over_string() {
+        let dir = tempfile::tempdir().unwrap();
         use uuid::Uuid;
 
         // Important #4: when the canonical goal was given `--objective-file`,
@@ -16199,16 +16209,17 @@ plan_pending_window = 7
         };
         let cmd = build_shadow_experiment_command(
             Path::new("/usr/local/bin/ta"),
-            Path::new("/repo"),
+            dir.path(),
             "Fix the bug",
             "claude-opus-4",
             "this string must not be used",
             Some(Path::new("/repo/OBJECTIVE.md")),
             &spec,
             &[],
-            None, // workflow_tag = None (covered separately below)
-            None, // persona = None (covered separately below)
-            None, // engine_workflow = None (covered separately below)
+            None,  // workflow_tag = None (covered separately below)
+            None,  // persona = None (covered separately below)
+            None,  // engine_workflow = None (covered separately below)
+            false, // use_keychain: tests must never open the real Keychain
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -16222,6 +16233,7 @@ plan_pending_window = 7
 
     #[test]
     fn spawn_shadow_experiment_goal_forwards_workflow_tag_when_canonical_goal_has_one() {
+        let dir = tempfile::tempdir().unwrap();
         use uuid::Uuid;
 
         // Important #2: the canonical and shadow halves of a paired-sampling
@@ -16236,7 +16248,7 @@ plan_pending_window = 7
         };
         let cmd = build_shadow_experiment_command(
             Path::new("/usr/local/bin/ta"),
-            Path::new("/repo"),
+            dir.path(),
             "Fix the bug",
             "claude-opus-4",
             "Fix the null pointer in parser.rs",
@@ -16244,8 +16256,9 @@ plan_pending_window = 7
             &spec,
             &[],
             Some("brain-maintenance"),
-            None, // persona = None (covered separately below)
-            None, // engine_workflow = None (covered separately below)
+            None,  // persona = None (covered separately below)
+            None,  // engine_workflow = None (covered separately below)
+            false, // use_keychain: tests must never open the real Keychain
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -16260,6 +16273,7 @@ plan_pending_window = 7
 
     #[test]
     fn spawn_shadow_experiment_goal_omits_workflow_tag_flag_when_canonical_goal_has_none() {
+        let dir = tempfile::tempdir().unwrap();
         use uuid::Uuid;
 
         let spec = ExperimentSpawnSpec {
@@ -16270,7 +16284,7 @@ plan_pending_window = 7
         };
         let cmd = build_shadow_experiment_command(
             Path::new("/usr/local/bin/ta"),
-            Path::new("/repo"),
+            dir.path(),
             "Fix the bug",
             "claude-opus-4",
             "Fix the null pointer in parser.rs",
@@ -16278,8 +16292,9 @@ plan_pending_window = 7
             &spec,
             &[],
             None,
-            None, // persona = None (covered separately below)
-            None, // engine_workflow = None (covered separately below)
+            None,  // persona = None (covered separately below)
+            None,  // engine_workflow = None (covered separately below)
+            false, // use_keychain: tests must never open the real Keychain
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -16293,6 +16308,7 @@ plan_pending_window = 7
 
     #[test]
     fn spawn_shadow_experiment_goal_forwards_persona_and_engine_workflow_when_set() {
+        let dir = tempfile::tempdir().unwrap();
         use uuid::Uuid;
 
         // Review fix: without this, a shadow spawned from a wake-on-demand
@@ -16306,7 +16322,7 @@ plan_pending_window = 7
         };
         let cmd = build_shadow_experiment_command(
             Path::new("/usr/local/bin/ta"),
-            Path::new("/repo"),
+            dir.path(),
             "Fix the bug",
             "claude-opus-4",
             "Fix the null pointer in parser.rs",
@@ -16316,6 +16332,7 @@ plan_pending_window = 7
             None,
             Some("on-call-triage"),
             Some("serial-phases"),
+            false, // use_keychain: tests must never open the real Keychain
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -16335,6 +16352,7 @@ plan_pending_window = 7
 
     #[test]
     fn spawn_shadow_experiment_goal_omits_persona_and_engine_workflow_flags_when_none() {
+        let dir = tempfile::tempdir().unwrap();
         use uuid::Uuid;
 
         let spec = ExperimentSpawnSpec {
@@ -16345,7 +16363,7 @@ plan_pending_window = 7
         };
         let cmd = build_shadow_experiment_command(
             Path::new("/usr/local/bin/ta"),
-            Path::new("/repo"),
+            dir.path(),
             "Fix the bug",
             "claude-opus-4",
             "Fix the null pointer in parser.rs",
@@ -16355,6 +16373,7 @@ plan_pending_window = 7
             None,
             None,
             None,
+            false, // use_keychain: tests must never open the real Keychain
         );
         let args: Vec<String> = cmd
             .get_args()

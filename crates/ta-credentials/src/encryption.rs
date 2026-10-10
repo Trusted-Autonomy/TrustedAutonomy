@@ -34,19 +34,96 @@ pub enum KeyCustody {
     FallbackFile(PathBuf),
 }
 
+/// Environment variable that opts a process out of OS keychain use entirely.
+/// Presence, not value, is what counts (same convention as
+/// `CredentialsConfig::for_project`).
+pub const NO_KEYCHAIN_ENV: &str = "TA_NO_KEYCHAIN";
+
+/// Environment variable that forces the test-time keychain guard on, for
+/// harnesses where the automatic detection in [`keychain_guard_active`]
+/// cannot tell the process is a test (for example a custom test runner).
+pub const FORBID_KEYCHAIN_ENV: &str = "TA_FORBID_REAL_KEYCHAIN";
+
+/// Whether a path looks like a cargo-built test binary: those live in a
+/// `deps` directory (`target/<profile>/deps/<name>-<hash>`). Installed and
+/// `cargo run` binaries never do, so production behavior is unchanged.
+fn is_cargo_test_binary_path(exe: &Path) -> bool {
+    exe.parent()
+        .and_then(Path::file_name)
+        .map(|n| n == "deps")
+        .unwrap_or(false)
+}
+
+/// True when the real OS keychain must be unreachable: this crate's own unit
+/// tests (`cfg!(test)`), any cargo test binary in a dependent crate (detected
+/// by its `deps/` location), or `TA_FORBID_REAL_KEYCHAIN` being set.
+fn keychain_guard_active() -> bool {
+    cfg!(test)
+        || std::env::var_os(FORBID_KEYCHAIN_ENV).is_some()
+        || std::env::current_exe()
+            .map(|exe| is_cargo_test_binary_path(&exe))
+            .unwrap_or(false)
+}
+
+/// Build the panic text for a blocked keychain access. Pure so it is directly
+/// testable.
+fn keychain_guard_message(operation: &str, vault_dir: &Path, test_name: &str, exe: &str) -> String {
+    format!(
+        "test tried to use the real OS keychain ({operation} for vault at {}). \
+         Running in test `{test_name}` (binary {exe}). The real Keychain can \
+         block on an interactive prompt and stall the whole test run. Fix: build \
+         the vault with a tempfile::tempdir() and `CredentialsConfig {{ use_keychain: false, .. }}` \
+         (or pass use_keychain = false to the function under test), or set \
+         {NO_KEYCHAIN_ENV}=1. Production behavior is unaffected by this guard.",
+        vault_dir.display()
+    )
+}
+
+/// Panic loudly if the real keychain is about to be touched while tests run.
+fn guard_real_keychain(operation: &str, vault_dir: &Path) {
+    if !keychain_guard_active() {
+        return;
+    }
+    let thread = std::thread::current();
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    panic!(
+        "{}",
+        keychain_guard_message(
+            operation,
+            vault_dir,
+            thread.name().unwrap_or("<unnamed thread>"),
+            &exe
+        )
+    );
+}
+
 /// Load the vault's age identity, generating and persisting one on first use.
 ///
 /// When `use_keychain` is true, tries the OS keychain first; on any failure
 /// (no backend, locked session, etc.) falls back to a chmod-0600 file at
 /// `<vault_dir>/credentials.key` and logs a loud warning so the gap is
 /// observable outside of `ta doctor`. When `use_keychain` is false, the
-/// keychain is never touched — see `CredentialsConfig::use_keychain` for why
-/// (tests, headless servers).
+/// keychain is never touched. The `TA_NO_KEYCHAIN` environment variable
+/// always wins over a `true` argument, so no caller can bypass it by building
+/// its own config. Under tests the real keychain is unreachable: see
+/// [`guard_real_keychain`].
 pub fn load_or_create_identity(
     vault_dir: &Path,
     use_keychain: bool,
 ) -> Result<(Identity, KeyCustody), VaultError> {
+    let use_keychain = if use_keychain && std::env::var_os(NO_KEYCHAIN_ENV).is_some() {
+        tracing::debug!(
+            vault_dir = %vault_dir.display(),
+            "{NO_KEYCHAIN_ENV} is set; using file-based key custody instead of the OS keychain"
+        );
+        false
+    } else {
+        use_keychain
+    };
     if use_keychain {
+        guard_real_keychain("load_or_create_identity", vault_dir);
         match keyring_load_or_create() {
             Ok(identity) => return Ok((identity, KeyCustody::Keychain)),
             Err(reason) => {
@@ -65,11 +142,14 @@ pub fn load_or_create_identity(
 
 /// Non-mutating probe of current key custody, for `ta doctor`. Returns `None`
 /// when neither a keychain entry nor a fallback file exists yet (no vault
-/// key has been created).
+/// key has been created). Skips the keychain when `TA_NO_KEYCHAIN` is set.
 pub fn probe_key_custody(vault_dir: &Path) -> Option<KeyCustody> {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-        if entry.get_password().is_ok() {
-            return Some(KeyCustody::Keychain);
+    if std::env::var_os(NO_KEYCHAIN_ENV).is_none() {
+        guard_real_keychain("probe_key_custody", vault_dir);
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            if entry.get_password().is_ok() {
+                return Some(KeyCustody::Keychain);
+            }
         }
     }
     let key_path = vault_dir.join(FALLBACK_KEY_FILENAME);
@@ -253,5 +333,50 @@ mod tests {
         assert!(looks_like_plaintext_json(b"  \n{\"a\":1}"));
         assert!(!looks_like_plaintext_json(b"age-encryption.org/v1"));
         assert!(!looks_like_plaintext_json(&[0xa9, 0x1b, 0x00, 0x02]));
+    }
+
+    #[test]
+    fn deps_directory_is_a_test_binary() {
+        assert!(is_cargo_test_binary_path(Path::new(
+            "target/debug/deps/ta_cli-0123abcd"
+        )));
+        assert!(!is_cargo_test_binary_path(Path::new("target/debug/ta")));
+        assert!(!is_cargo_test_binary_path(Path::new("/usr/local/bin/ta")));
+        assert!(!is_cargo_test_binary_path(Path::new("ta")));
+    }
+
+    #[test]
+    fn guard_message_names_the_test_the_path_and_the_fix() {
+        let msg = keychain_guard_message(
+            "load_or_create_identity",
+            Path::new("vault-dir"),
+            "commands::run::tests::some_test",
+            "target/debug/deps/ta_cli-1",
+        );
+        assert!(msg.contains("commands::run::tests::some_test"));
+        assert!(msg.contains("load_or_create_identity"));
+        assert!(msg.contains("vault-dir"));
+        assert!(msg.contains("use_keychain: false"));
+        assert!(msg.contains(NO_KEYCHAIN_ENV));
+        assert!(!msg.contains('\u{2014}'));
+    }
+
+    #[test]
+    #[should_panic(expected = "test tried to use the real OS keychain")]
+    fn real_keychain_is_unreachable_under_cfg_test() {
+        let dir = tempfile::tempdir().unwrap();
+        // `guard_real_keychain` is exercised directly so this test does not
+        // depend on TA_NO_KEYCHAIN, which another test in this crate toggles.
+        guard_real_keychain("test", dir.path());
+    }
+
+    #[test]
+    fn file_custody_never_trips_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, custody) = load_or_create_identity(dir.path(), false).unwrap();
+        assert_eq!(
+            custody,
+            KeyCustody::FallbackFile(dir.path().join(FALLBACK_KEY_FILENAME))
+        );
     }
 }

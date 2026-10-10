@@ -5703,7 +5703,6 @@ name = "pr_sync"
 #### Plan schema change
 
 Phases may include a `#### Human Review` subsection (4th-level heading). Items under it are human-only — an agent must never check them off:
-
 ### v0.15.X — Some Phase <!-- status: done -->
 <!-- status: done -->
 
@@ -10459,7 +10458,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 5. [x] **Resolved via v0.17.10.4.** The new-file half was already proven (item 1, `overlay.rs` tests). The checked-items/corruption half is now covered two ways: (a) removing `apply_plan_patch()` eliminates the confirmed injection point entirely — the sole remaining PLAN.md writer is the already-tested 3-way merge pipeline; (b) a new unconditional post-write consistency hard-check (v0.17.10.4 item 2) provides a defense-in-depth backstop that `bail!`s the apply *before* any commit if the final on-disk PLAN.md has more done-phase/unchecked-item inconsistencies than the pre-apply baseline — closing the "silent" part of this bug class independent of what caused it, current or future. The two original `#[ignore]`d full-pipeline repro tests (`v17_10_3_root_cause_b_repro_variant_a_preflight_branch`/`_variant_b_no_preflight`) remain `#[ignore]`d and are still known not to exercise the real cross-commit remote path (per item 2's history) — extending them to a real bare-origin-remote scenario is deliberately deferred, not required for this item's closure, since the fix here removes the confirmed mechanism directly rather than relying on those tests to prove it.
 
 #### Version: `0.17.10-alpha.3`
-
 ### v0.17.10.4 — Remove Unsafe `apply_plan_patch` Early-Write (Root Cause B Fix) + Post-Write PLAN.md Hard-Check
 <!-- status: done -->
 **Depends on**: v0.17.10.3 (identified this as the most promising unexplored lead for root cause B's silent corruption; this phase confirms and fixes it)
@@ -10478,7 +10476,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 
 > **Focus**: Live runtime coordination between concurrently-running virtual-team agents. Complements `task-graph`'s static, plan-time wave scheduling with a live presence/discovery/handoff layer for cases where conflicts aren't knowable in advance — exactly the class of gap that caused v0.17.10.2's data-loss incident.
-
 ### v0.17.11.1 — TA-Side Plan Storage Abstraction (`PlanStore` trait)
 <!-- status: done -->
 **Depends on**: v0.17.10.3/v0.17.10.4 (apply-pipeline correctness — this phase touches the same PLAN.md write paths those fixes hardened, must land on top of them, not before)
@@ -10497,7 +10494,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Deferred items moved**: call-site wiring of `dyn PlanStore` (item 4), `Done`/`Deferred` transition support in `FilePlanStore` (item 4), a second test-only `PlanStore` implementation + trait-object polymorphism test (item 5), and the `poll_changes`/`ChangeCursor`/`ChangeSet` change-awareness API (item 3) all move to **v0.17.11.1.2** below.
 
 #### Version: `0.17.11.1-alpha`
-
 ### v0.17.11.1.2 — PlanStore Call-Site Wiring + Remaining Transitions
 <!-- status: done -->
 **Depends on**: v0.17.11.1 (`PlanStore` trait + `FilePlanStore`, done)
@@ -10510,7 +10506,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 4. [x] **`poll_changes`/`ChangeCursor`/`ChangeSet` added to the trait**, no longer deferred — the Wayfinder design doc's own trait sketch (§2) requires it for `WayfinderPlanStore::poll_changes` to hit the delta-sync endpoint and diff against a cached cursor, and that integration is now the confirmed next step rather than a hypothetical. `FilePlanStore`'s implementation is honest about being non-granular (new `PlanStoreCapabilities::supports_granular_changes: bool`, `false` for the file backend): it hashes all phase/goal state into one digest and, on a mismatch, reports every phase/goal as changed rather than a true delta — cheap (one read + one directory listing) and correct, just not fine-grained the way a real `updated_since`-filtered Wayfinder query will be. 4 new tests (initial-cursor reports everything, no-op when unchanged, detects a status transition, detects a new goal) plus matching coverage in `InMemoryPlanStore`.
 
 #### Version: `0.17.11.1-alpha.2`
-
 ### v0.17.11.2 — Agent Coordination Whiteboard (`ta-agent-whiteboard`)
 <!-- status: done -->
 **Depends on**: v0.17.10.3 (apply-pipeline correctness — should land first so this phase's own apply isn't at risk of the same bug), v0.13.7/v0.17.0.12.34 (`swarm` workflow + `task-graph` — the static counterpart this complements), v0.17.11.1 (`PlanStore` trait — item 6 below reads goal/phase state through it, not `GoalRunStore` directly, so it never needs rewriting when a non-file backend lands)
@@ -10533,8 +10528,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 10. [x] **Confirm NATS deployment shape on Render — deferred, not verifiable from local dev** (no Render account access this session). Whiteboard's opt-in-by-default design (item 1's deviation (b)) means this does not block v0.17.11.2 from being useful today for local-first/single-daemon coordination — it only blocks relying on the hosted/clustered path in production. **Deferred to whichever future phase first sets `[whiteboard] enabled = true` on a Render-hosted daemon** (plausibly the virtual-team-split/Wayfinder-hosted-deployment work) — must be confirmed before that phase, not before this one closes.
 
 #### Version: `0.17.11.2-alpha`
-
-
 ### v0.17.11.3 — Wayfinder-Backed `PlanStore` (`ta-plan-wayfinder`)
 <!-- status: done -->
 **Depends on**: v0.17.11.1.2 (`PlanStore` trait + `poll_changes`/`ChangeCursor`/`ChangeSet`, done)
@@ -10552,8 +10545,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 9. [x] **`bootstrap_export`**: implemented as a `WayfinderPlanStore`-specific public method (not part of the `PlanStore` trait, never called by any trait method) — calls the owner-gated `/export` endpoint and populates the local cache's `wayfinder_id`/last-pushed state for every already-existing TA-prefixed task, so a subsequent ordinary sync recognizes and updates them instead of creating duplicates. **Deferred**, per the design doc's own scoping ("scope against one real project... before generalizing"): a `ta plan wayfinder bootstrap` CLI command to actually invoke it from the command line. → future phase, once a real project validates the ordinary sync path first.
 
 #### Version: `0.17.11-alpha.3`
-
-
 ### v0.17.11.4 — Daemon Auth & Transport Trust-Boundary Hardening
 <!-- status: done -->
 **Depends on**: none (independent of the `PlanStore`/whiteboard work above — this is `ta-daemon`'s own auth/transport code)
@@ -10570,7 +10561,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 8. [x] **Explicitly out of scope, deferred to the SA milestone below (not silently dropped)**: **TA-06** (per-project/org token scoping — `TokenScope` is instance-global today; real multi-tenant RBAC only matters once a daemon is shared across users/orgs, which is SA's premise, not today's one-operator-per-instance model) and **TA-04's actual deep half** (`ta-sandbox`'s allowlist layer itself gaining OS-level primitives, e.g. for the DB proxy and Windows agent-sandbox paths that do use it — `[sandbox]`'s own OS isolation already exists per item 6 above, so this is narrower than originally stated: extending the same rigor to `ta-sandbox`'s specific consumers, not building OS sandboxing from scratch). → v0.18.0 / v0.18.x.
 
 #### Version: `0.17.11-alpha.4`
-
 ### v0.17.11.5 — Release Artifact Signing
 <!-- status: done -->
 **Depends on**: none
@@ -10585,7 +10575,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 4. [x] **Docs**: new "Verifying a release" section in `docs/USAGE.md` under Option C (manual download) — the one install path that doesn't verify automatically — with the exact `cosign verify-blob` + `sha256sum -c --ignore-missing` commands, including the pinned `--certificate-identity-regexp`/`--certificate-oidc-issuer` values (not a wildcard identity check, which would accept a signature from any GitHub Actions workflow anywhere).
 
 #### Version: `0.17.11-alpha.5`
-
 ### v0.17.11.6 — Virtual-Team `TeamMember` Model-Tier & Local-Tag Schema
 <!-- status: done -->
 **Depends on**: none
@@ -10599,7 +10588,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 5. [x] **Tests**: round-trip (both fields present, and backward-compat with neither present), `resolve_agent_id` (tier hit / unset / declared-but-missing), `find_by_tag`, `assign()` defaults the new fields empty on a fresh member. All four verification gates (`build`/`test --workspace`/`clippy --workspace -- -D warnings`/`fmt --check`) clean at the full-workspace level, not just the touched crates.
 
 #### Version: `0.17.11-alpha.6`
-
 ### v0.17.11.7 — Staged-Resource Conflict Detection (`ta-agent-whiteboard` ↔ `ta-changeset`)
 <!-- status: done -->
 **Depends on**: v0.17.11.2 (`ta-agent-whiteboard`)
@@ -10614,7 +10602,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 5. [x] Stays advisory-only in this phase — no `task-graph` wave-scheduler integration, no blocking of goal launch or draft creation. Explicitly deferred, not silently dropped: task-graph enforcement → future phase (cross-repo, `Trusted-Autonomy/task-graph`); DB resources (`db://`) → future phase (tied to `ta-db-proxy`'s own resource model). All four verification gates (`build`/`test --workspace`/`clippy --workspace -- -D warnings`/`fmt --check`) clean at the full-workspace level.
 
 #### Version: `0.17.11-alpha.7`
-
 ### v0.17.11.8 — Daemon-Hosted Whiteboard Coordination
 <!-- status: done -->
 **Depends on**: v0.17.11.7 (staged-resource conflict detection), v0.17.11.2 (`ta-agent-whiteboard`)
@@ -10638,7 +10625,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **2026-09-14 follow-up review** (this branch sat unpushed for weeks before being reviewed at `/code-review high`): found and fixed two real bugs — every `ta_whiteboard_*` MCP tool handler built its `WhiteboardDaemonClient` against the goal's staging `workspace_root` instead of `session.source_dir` (the real project root), so any project running its daemon on a non-default port would have every whiteboard tool call silently resolve to the wrong port (staging's `.ta/` never contains a copy of the real `daemon.pid`, since `.ta/` is always excluded from the staging copy); and `whiteboard-session.json` (carries a live 24h-TTL bearer token) was written world/group-readable instead of `chmod 0600` like every other secret-bearing file in this codebase. Both fixed with regression tests. **2026-09-14 — fixed**: `token_refresh.rs` (v0.17.11.12) periodically re-mints the whiteboard scope token well before its 24h TTL expires and writes it back into `state.json`, so a long-running session no longer hits the 403. Deliberately its own daemon-startup task, independent of both `team_session.rs`'s rotation loop and `wake_listener.rs` — a session with wake-on-demand listeners and zero rotation stages stops `run_team_session`'s loop after its first iteration, so anchoring refresh there would have silently stopped refreshing exactly the sessions most likely to run long. No other code changes needed: every `ta run` launch already reads the token fresh from `state.json`, not a cached copy.
 
 #### Version: `0.17.11-alpha.8`
-
 ### v0.17.11.9 — Whiteboard Team-Session Data Isolation
 <!-- status: done -->
 **Depends on**: v0.17.11.8 (daemon-hosted whiteboard coordination)
@@ -10655,7 +10641,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 6. The "one daemon hosts one team session" alternative: **resolved**: not chosen. Per-session isolation is implemented, because the red-team report (CR-04, CR-34) shows roles in one session can otherwise read and forge each other's messages.
 
 #### Version: `0.17.11-alpha.9`
-
 ### v0.17.11.13 — `ta credentials update` (In-Place Credential Rotation)
 <!-- status: done -->
 **Depends on**: none (independent of the v0.17.11.9-.12 whiteboard/wake-listener/token-refresh work)
@@ -10669,7 +10654,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 4. [x] `docs/USAGE.md` updated with the new command and the id-prefix note.
 
 **Version note**: `Cargo.toml` is left at `0.17.11-alpha.8` (unchanged, and already current — v0.17.11.8's own merge already bumped it there) — like v0.17.11.8/.10/.11/.12 before it, this phase was implemented directly on a feature branch rather than through `ta draft apply --phase`'s automated version bump, so no further bump is needed here.
-
 ### v0.17.11.14 — `TA_NO_KEYCHAIN` Opt-Out (Headless Credential Vault Hang)
 <!-- status: done -->
 **Depends on**: none — independent fix, found live while building the `ta-virtual-team` installer's `wayfinder-pair.sh` (`docs/superpowers/specs/2026-09-14-virtual-team-install-and-config-design.md`).
@@ -10681,7 +10665,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [x] Tests for both (env var unset -> keychain true; set -> false), each self-contained in one test function so parallel test execution can't interleave the set/remove with another test's read.
 3. [x] `docs/USAGE.md`'s Credential Management section documents the hang and the fix.
 4. [x] **Deliberately not fixed here**: the underlying "OS keychain call blocks forever instead of erroring/timing out" behavior itself — the `keyring` crate's blocking OS call isn't cancelable from Rust without spawning and abandoning a thread, a materially bigger change than an opt-out env var. `load_or_create_identity`'s existing graceful-fallback-on-`Err` path (already correct) was never the bug; a GUI prompt that never resolves to `Err` or `Ok` is.
-
 ### v0.17.11.15 — `ta_wiki_*` MCP Tools (Wayfinder Wiki Retrieval)
 <!-- status: done -->
 **Depends on**: none, independent of the whiteboard/wake-listener/credential work above; grounded against Wayfinder's own real, mostly-shipped wiki design (`wayfinder` repo, `docs/superpowers/specs/2026-08-17-wiki-design.md`), not something invented here.
@@ -10700,7 +10683,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 9. [x] **Real correctness bug found live, root-caused and fixed**: `ta draft apply`'s plan-merge/checkbox-recovery logic incorrectly mutated several *unrelated* phases' status markers and item checkboxes during the first real supervised `ta run` against `ta-virtual-team` (goal `d61f9301`, 2026-09-15). Root cause: `extract_version_header` only recognized `### v0.x.y` version-style headings as section boundaries, so any plain-named heading (`### Phase 1 -- ...`) was silently swallowed into whichever version-style section preceded it. `reconstruct_body` then overwrote every embedded status marker inside that swallowed body with the enclosing section's single status, and `auto_correct_done_phase_items` force-checked whatever unchecked items followed. A second, independent bug surfaced once boundaries were fixed: `reconstruct_body` only ever iterated `source_body`'s lines, so an agent's own added prose had no path into the merged output and was silently dropped. `TrustedAutonomy` PR #620 (merged) fixes both, with 6 new golden-failure tests reproducing the real incident, confirmed failing against the prior code before the fix and passing after. All four verification gates clean at the full-workspace level.
 
 **All four verification gates** (`build --workspace`/`test --workspace`/`clippy --workspace --all-targets -- -D warnings`/`fmt --all -- --check`) clean at the full-workspace level.
-
 ### v0.17.11.16 - Chat-Mode Secure Launch and Real Tool-Surface Enforcement
 <!-- status: done -->
 **Depends on**: none
@@ -10711,7 +10693,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [x] Persona `[capabilities] chat_mode = true` and `ta run --chat-mode`: the agent's own MCP server is locked to the chat session, every tool outside the chat profile is removed from the router, native tools (Bash, Read, Write, Edit, Task and others) are denied.
 3. [x] Persona `allowed_tools` is the real allow-list (intersected with the chat profile, never unioned), and the user's global Claude settings are not merged into a restricted launch.
 4. [x] End-to-end security tests through the real handlers, and hypotheses H1 to H6 and H10 to H14 in `docs/superpowers/specs/security-hypotheses.md`.
-
 ### v0.17.11.17 - Draft-Bundled Wayfinder Task Proposals
 <!-- status: done -->
 **Depends on**: v0.17.11.3
@@ -10721,7 +10702,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [x] Tools `ta_propose_task_update`, `_create`, `_reassign`, `_needs_revision`, `_on_hold`, `_complete`, sharing one capture path and strict input validation. Create requires a `verb`; reassign takes a nullable `assignee_id`.
 2. [x] Apply-time replay through the `ta-plan-wayfinder` client against the project-scoped routes, with a replay log so re-applying cannot repeat an action, and per-action failure isolation.
 3. [x] Needs-revision (Wayfinder `open`) and on-hold (`on_hold` plus reason, optional precursor task and dependency edge) stay distinct.
-
 ### v0.17.11.18 - CoS Security Hardening: Path Escape, Read-Only Classification, Goal Origin
 <!-- status: done -->
 **Depends on**: v0.17.11.16
@@ -10732,7 +10712,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [x] `ta_goal::tool_surface` classifies every registered MCP tool as read-only or mutating (new tools must be classified or a test fails). `ta_ask_human` and `ta_whiteboard_outcome_send` are read-only; `outcome_send` is also marked an untrusted sink.
 3. [x] Persona option `read_only` for the strictest personas.
 4. [x] `GoalRun.origin` and `ta run --origin`; origins `cos` and `chat` are never auto-approved on any path (policy, draft apply, workflow graph, advisor auto), with a visible refusal.
-
 ### v0.17.11.19 - CoS Launch Hardening
 <!-- status: done -->
 **Depends on**: v0.17.11.18
@@ -10742,7 +10721,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [x] The daemon passes `--chat-mode` and `--origin` for CoS-style roles; persona and `team.toml` members accept an `origin`; the launch fails closed on a missing persona or conflicting origins.
 2. [x] Restricted launches run with `--setting-sources local --permission-mode dontAsk`, and every registered TA tool not on the allow-list is explicitly denied. Verified live against Claude Code with a hostile global settings file.
 3. [x] A recorded goal origin cannot be overwritten by the environment.
-
 ### v0.17.11.20 - Infrastructure Path Case-Bypass Fix
 <!-- status: done -->
 **Depends on**: v0.17.11.18
@@ -10751,7 +10729,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 1. [x] One shared `ta_workspace::path_safety` check folds case, trailing dots and spaces, Windows short names and stream syntax, matches infrastructure names in any path component, and is used by staging, diffs, conflict detection and apply.
 2. [x] `ta draft apply` refuses the whole draft before writing anything if one path is infrastructure, and refuses writes that a symlink would carry outside the project.
-
 ### v0.17.11.21 - Local Code Signing: Self-Healing, Test Binaries, `.env.local`
 <!-- status: done -->
 **Depends on**: none
@@ -10761,7 +10738,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [x] PR #638: the daemon and the goal launcher re-sign the binary with the local identity before each spawn.
 2. [x] PR #643 (merged): sign only when the named local identity exists and never ad-hoc, so end users' installed binaries are untouched; a Cargo runner signs every macOS test and `cargo run` binary with the same identity; the identity can be set in a gitignored `.env.local` (`TA_CODESIGN_IDENTITY`) read by the installer, the test runner and the daemon.
 3. [x] Deferred item moved: the same developer-local identity setting for Linux and Windows is a future task (not part of the public-release work in v0.17.12.12, which uses real signing).
-
 ### v0.17.11.23 - Extract `typed-ask` as a Standalone OSS Library with a Python Wheel
 <!-- status: done -->
 **Depends on**: none
@@ -10771,7 +10747,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [x] New public repo `Trusted-Autonomy/typed-ask` (Apache-2.0): core crate with `thiserror` as its only required dependency; the subprocess-and-HTTP `DeciderBackend` for the Decider model server behind an off-by-default `decider` feature; Python wrapper from the same repo (PyO3 and maturin, abi3 wheels, module `typed_ask`, pyo3 kept out of the core); CI on Linux, macOS and Windows green; tag `v0.1.0`.
 2. [x] PR #650 (merged via #649): `ta-workflow` and `ta-policy` depend on the git tag instead of the in-tree crate; `crates/ta-ask` deleted. The adapter code (decision reviewer node, chat classifier glue) stays in TA.
 3. [x] Deferred items moved/resolved: bounded context (a size limit on question and context), a hosted-model backend, optional feature-gated use from `task-graph` and `decision-gate`, and publishing to crates.io and PyPI are future work tracked in the `typed-ask` repository README ("Planned"), not in this phase. Original note: bounded context (a size limit on question and context); a hosted-model backend so one interface covers local and hosted models; optional feature-gated use from `task-graph` and `decision-gate` (their defaults stay dependency-free); publish to crates.io and PyPI when ready.
-
 ### v0.17.11.22 - Automatic Version Sync (Nightly and Release)
 <!-- status: done -->
 **Depends on**: none
@@ -10786,7 +10761,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: S to M.
 
 #### Version: `0.17.11-alpha.22`
-
 ### v0.17.11.24 - Tests Must Never Touch the Real Keychain
 <!-- status: in_progress -->
 **Depends on**: none
@@ -10800,7 +10774,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: S.
 
 #### Version: `0.17.11-alpha.24`
-
 ### v0.17.11.25 - Wake-On-Demand-Only Team Sessions (No Rotation)
 <!-- status: pending -->
 **Depends on**: none
@@ -10815,7 +10788,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: S.
 
 #### Version: `0.17.11-alpha.25`
-
 ### v0.17.11.26 - Live CoS Run Findings: No-Change Chat Goals, Retry Cap, Transcripts, Ports, Daemon Address
 <!-- status: done -->
 **Depends on**: none
@@ -10832,7 +10804,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.11-alpha.26`
-
 ### v0.17.11.27 - Daemon Self-Update When Idle, as a Reusable Library
 <!-- status: pending -->
 **Depends on**: v0.17.11.26 (single pid and port contract)
@@ -10849,7 +10820,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.27`
 
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
-
 ### v0.17.11.28 - Wake Launches Are Idempotent: Ack Progress and Completed-Message Guard
 <!-- status: done -->
 **Depends on**: v0.17.11.26
@@ -10866,7 +10836,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: S to M.
 
 #### Version: `0.17.11-alpha.28`
-
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
 <!-- status: pending -->
 **Depends on**: none
@@ -10882,7 +10851,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M. **Why first**: the rules engine's idea of "attended" depends on it. **Note**: on its own this is a speed bump while agents run as the same OS user; v0.17.12.6 onward makes it a wall.
 
 #### Version: `0.17.12-alpha`
-
 ### v0.17.12.1 - Control-Plane Secrets Out of the Project Tree (CR-03)
 <!-- status: pending -->
 **Depends on**: v0.17.12
@@ -10898,7 +10866,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M. **Source**: sandbox plan phase 1 (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`).
 
 #### Version: `0.17.12-alpha.1`
-
 ### v0.17.12.2 - Role-Bound Outcome Tokens, Daemon-Stamped Messages, NATS Credentials (CR-04, CR-05)
 <!-- status: pending -->
 **Depends on**: v0.17.12.1
@@ -10917,7 +10884,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M to L (now includes the team-session data isolation moved from v0.17.11.9). **Unblocks VT**: V6 (role-verified outcomes) and V7 (NATS auth on by default).
 
 #### Version: `0.17.12-alpha.2`
-
 ### v0.17.12.3 - Atomic Apply, Reversibility Classes and Durable Action Queue
 <!-- status: pending -->
 **Depends on**: v0.17.12.1
@@ -10934,7 +10900,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: L.
 
 #### Version: `0.17.12-alpha.3`
-
 ### v0.17.12.4 - Rules Engine: Owner Rules File, Postures and Effective-Policy Output
 <!-- status: pending -->
 **Depends on**: v0.17.12, v0.17.12.1, v0.17.12.3
@@ -10951,7 +10916,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: L. **Unblocks VT**: V8 (preset overlay and effective-policy view).
 
 #### Version: `0.17.12-alpha.4`
-
 ### v0.17.12.5 - VCS Detection and `ta setup vcs`
 <!-- status: pending -->
 **Depends on**: none
@@ -10966,7 +10930,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M. **Unblocks VT**: V5 (wizard and installer).
 
 #### Version: `0.17.12-alpha.5`
-
 ### v0.17.12.5.1 - Capability Probe and Machine-Readable Install Facts
 <!-- status: pending -->
 **Depends on**: none (land early; small)
@@ -10981,7 +10944,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: S to M. **Unblocks VT**: installer safety check, pairing without secrets on argv, the agreements chain.
 
 #### Version: `0.17.12-alpha.5.1`
-
 ### v0.17.12.6 - Sandbox Launch Plumbing: Out-of-Sandbox Gateway, Trusted Policy Source, Capability Reporting
 <!-- status: pending -->
 **Depends on**: v0.17.12.1
@@ -10997,7 +10959,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: L.
 
 #### Version: `0.17.12-alpha.6`
-
 ### v0.17.12.7 - macOS Seatbelt Profile v2 and Egress Proxy
 <!-- status: pending -->
 **Depends on**: v0.17.12.6
@@ -11010,7 +10971,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.7`
-
 ### v0.17.12.8 - Linux Hardened Sandbox: bubblewrap, Landlock, seccomp
 <!-- status: pending -->
 **Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
@@ -11023,7 +10983,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.8`
-
 ### v0.17.12.9 - Windows AppContainer Parity
 <!-- status: pending -->
 **Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
@@ -11040,7 +10999,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.9`
-
 ### v0.17.12.10 - Default-On Isolation for CoS and Team Roles
 <!-- status: pending -->
 **Depends on**: v0.17.12.4, v0.17.12.7, v0.17.12.8, v0.17.12.9
@@ -11053,7 +11011,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.10`
-
 ### v0.17.12.11 - Remaining Red-Team High Findings
 <!-- status: pending -->
 **Depends on**: v0.17.12.4
@@ -11073,7 +11030,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.11`
-
 ### v0.17.12.12 - Signed Public Releases
 <!-- status: pending -->
 **Depends on**: v0.17.12.2 (so the public build is not shipped with the open Critical findings)
@@ -11121,7 +11077,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 6. [ ] **`ta governed status`**: Shows all active FUSE mounts, session-level governed paths, SHA store sizes, live checkpoints, and the last 10 writes per governed path.
 7. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
-
 ### v0.18.0.4 — SA Horizontal Scaling: Daemon Sharding for Concurrent Load
 <!-- status: pending -->
 
@@ -11135,7 +11090,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [ ] **Cross-shard concerns**: if a real Wayfinder-hosted multi-tenant option is ever built on top of this (see the whiteboard design's deferred section), shard boundaries and tenant boundaries should likely be the same boundary — revisit together, not separately.
 
 > Note: Windows AppContainer parity (formerly v0.18.0.5) moved to v0.17.12.9 so all platforms launch together.
-
 ### v0.18.0.6 - Sandbox Verification Runs and Plugin Subprocesses
 <!-- status: pending -->
 **Depends on**: v0.17.12.10
@@ -11146,7 +11100,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.18.0-alpha.6`
-
 ### v0.18.0.7 - Container Provider: Docker, Podman, Lima (Universal Fallback)
 <!-- status: pending -->
 **Depends on**: v0.17.12.6
@@ -11158,7 +11111,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: L.
 
 #### Version: `0.18.0-alpha.7`
-
 ### v0.18.0.8 - Windows WSL2 Provider and Stricter AppContainer for the CoS
 <!-- status: pending -->
 **Depends on**: v0.17.12.9, v0.18.0.7
@@ -11169,7 +11121,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.18.0-alpha.8`
-
 ### v0.18.0.9 - Multi-Tenant Token Scoping and Peer Identity (TA-06)
 <!-- status: pending -->
 **Depends on**: v0.17.12.10, v0.18.0
@@ -11180,7 +11131,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: L.
 
 #### Version: `0.18.0-alpha.9`
-
 ### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
 <!-- status: pending -->
 
@@ -11301,7 +11251,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.18.3-alpha`
 
 > Items in this section are under active consideration for deferral, scoping reduction, or removal. Review before each release cycle.
-
 ### Shell Mouse Scroll & TUI-Managed Selection
 
 <!-- note: considering dropping the ratatui TUI shell entirely in favor of the web shell as the primary interface -->
@@ -11312,7 +11261,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 - Keep TUI as opt-in with basic mouse support
 
 - Rebuild TUI from scratch with a different library
-
 ### Pivot trigger: completion of v0.17.4
 
 
@@ -11320,7 +11268,6 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 - The full TA feature surface is complete (staging, drafts, governance, IDE plugins, release management, local models, content pipeline).
 
 - TA enters **maintenance mode**: bug fixes, security patches, and minor improvements only. No new feature phases.
-
 ### Why v0.17.2 specifically
 
 |---|---|
@@ -11372,7 +11319,6 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 **Effort**: M.
 
 #### Version: `0.18.3-alpha.1`
-
 ### v0.18.4 — Studio Frontend Migration (Next.js/React/TS/Tailwind) + Visual Plan Graph
 <!-- status: pending -->
 **Depends on**: v0.17.7.4 (workflow graph engine + PLAN.md phase-ordering/dependency-wave data this visualizes), v0.17.0.12.34 (`ta plan waves` — the data source for the graph view)
@@ -11401,7 +11347,6 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 #### Version: `0.18.4-alpha`
 
 ---
-
 ### v0.18.5 - Execution Targets: Remote Runners
 <!-- status: pending -->
 **Depends on**: v0.17.12 (human-credential gate), v0.17.12.2 (role-bound tokens), v0.17.12.3 (action queue), v0.17.12.4 (rules engine), v0.17.12.10 (default-on isolation), v0.17.11.8 (presence `host_id`)
@@ -11429,7 +11374,6 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 **Effort**: L.
 
 #### Version: `0.18.5-alpha`
-
 ### v0.18.5.1 - Mobile Device Pairing and Biometric Approval Credential
 <!-- status: pending -->
 **Depends on**: v0.17.12, v0.17.12.2
@@ -11451,8 +11395,6 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 #### Version: `0.18.5-alpha.1`
 
 ## Projects On Top (separate repos, built on TA)
-
-
 
 ### TA Web UI *(separate project)*
 
@@ -11481,7 +11423,6 @@ A browser-based interface to TA's daemon API, aimed at users who need to start g
 - Constitutional auto-approval active by default
 
 - Domain workflow templates (sw-engineer, email, finance, etc.)
-
 ### Autonomous Infra Ops *(separate project)*
 > Builder intent → best-practice IaC, self-healing with observability.
 
@@ -11507,7 +11448,6 @@ A browser-based interface to TA's daemon API, aimed at users who need to start g
 - **Community sync layer**: Publish anonymized entries to a shared registry (hosted service or federated protocol).
 
 - **Trust model**: Reputation scoring for contributors. Verified solutions (applied successfully N times) ranked higher.
-
 ### Unreal Engine MCP Plugin (`ta-mcp-unreal`)
 
 > **Promoted to versioned phase**: v0.14.16 (Unity connector, `official` backend wrapping `com.unity.mcp-server`, `ta connector install unity`, build/test/scene tools).
