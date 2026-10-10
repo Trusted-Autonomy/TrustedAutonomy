@@ -40,13 +40,28 @@ impl CredentialsConfig {
     /// before this. `TA_NO_KEYCHAIN` mirrors the existing `TA_IS_STAGING`
     /// convention (`ta-mcp-gateway`'s `GatewayConfig::for_project`) —
     /// presence, not value, is what's checked.
+    ///
+    /// Inside a cargo test binary the default is also `false` (see
+    /// [`crate::encryption::keychain_guard_active`]): a test must never open
+    /// the real OS keychain, whichever crate it lives in and whether or not
+    /// `TA_NO_KEYCHAIN` happens to be set in the environment. Installed and
+    /// `cargo run` binaries are unaffected.
     pub fn for_project(project_root: impl AsRef<Path>) -> Self {
         let ta_dir = project_root.as_ref().join(".ta");
         Self {
             vault_path: ta_dir.join("credentials.json"),
-            use_keychain: std::env::var("TA_NO_KEYCHAIN").is_err(),
+            use_keychain: resolve_use_keychain(
+                std::env::var_os("TA_NO_KEYCHAIN").is_some(),
+                crate::encryption::keychain_guard_active(),
+            ),
         }
     }
+}
+
+/// Whether the OS keychain is the default key custody: not when the
+/// environment opts out, and never inside a test binary.
+fn resolve_use_keychain(no_keychain_env_set: bool, test_binary: bool) -> bool {
+    !no_keychain_env_set && !test_binary
 }
 
 impl Default for CredentialsConfig {
@@ -62,25 +77,25 @@ impl Default for CredentialsConfig {
 mod tests {
     use super::*;
 
-    /// `TA_NO_KEYCHAIN` isn't touched by any other test in this crate, and
-    /// both assertions live in one test function (not split across two)
-    /// specifically so a parallel test runner never interleaves this env
-    /// var's set/remove with a read from another test.
+    /// The keychain is the default only in production processes that did not
+    /// opt out: `TA_NO_KEYCHAIN` (presence, not value) and being a test binary
+    /// both turn it off. Pure, so no test mutates process-wide environment.
     #[test]
-    fn for_project_respects_ta_no_keychain_env_var() {
-        std::env::remove_var("TA_NO_KEYCHAIN");
-        let config = CredentialsConfig::for_project("/tmp/does-not-need-to-exist");
-        assert!(
-            config.use_keychain,
-            "use_keychain must default to true when TA_NO_KEYCHAIN is unset"
-        );
+    fn resolve_use_keychain_is_off_for_env_opt_out_and_for_test_binaries() {
+        assert!(resolve_use_keychain(false, false), "production default");
+        assert!(!resolve_use_keychain(true, false), "TA_NO_KEYCHAIN set");
+        assert!(!resolve_use_keychain(false, true), "inside a test binary");
+        assert!(!resolve_use_keychain(true, true));
+    }
 
-        std::env::set_var("TA_NO_KEYCHAIN", "1");
+    /// Every `for_project` caller in a test binary gets a file-key vault, so a
+    /// dependent crate's test can never reach the real keychain through it.
+    #[test]
+    fn for_project_never_defaults_to_the_keychain_under_test() {
         let config = CredentialsConfig::for_project("/tmp/does-not-need-to-exist");
         assert!(
             !config.use_keychain,
-            "TA_NO_KEYCHAIN being set must disable keychain use, regardless of its value"
+            "a test binary must not default to the real OS keychain"
         );
-        std::env::remove_var("TA_NO_KEYCHAIN");
     }
 }

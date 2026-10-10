@@ -221,7 +221,11 @@ mod tests {
         std::env::set_var("TA_NO_KEYCHAIN", "1");
         assert!(!default_use_keychain(dir.path()));
         std::env::remove_var("TA_NO_KEYCHAIN");
-        assert!(default_use_keychain(dir.path()));
+        // Unset in production means "use the keychain" (covered by
+        // `ta_credentials`' `resolve_use_keychain` test). Inside a test binary
+        // the default is deliberately still `false`: a test must never open
+        // the real OS keychain, with or without `TA_NO_KEYCHAIN`.
+        assert!(!default_use_keychain(dir.path()));
 
         match had_var {
             Some(v) => std::env::set_var("TA_NO_KEYCHAIN", v),
