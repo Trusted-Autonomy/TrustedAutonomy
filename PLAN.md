@@ -11048,6 +11048,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [ ] Discord channel access control actually invoked; plugin and channel trust boundaries per the sandbox plan's plugin phase.
 4. [ ] Auto-apply and `--chain` paths: dry-run honored everywhere, no external actions without a human.
 5. [ ] Make `ta_goal_start` stamp origin at creation (today only `ta run --goal-id` does).
+6. [ ] `ta session resume` (`execute_resume`) rebuilds its launch config with `restricted_tool_surface` false, so a resumed persona-restricted interactive session relaunches without the restriction flags (`--setting-sources local`, `--permission-mode dontAsk`, the system-prompt file). Carry the restriction and the delivered context through resume, or refuse to resume restricted goals (chat mode already refuses). If a restricted conversation is ever resumed with changed context, pass `--system-prompt-snapshot off` so the new text is used.
 
 **Effort**: M.
 
