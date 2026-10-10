@@ -140,12 +140,22 @@ pub enum TeamSessionCommands {
     ///
     /// Examples:
     ///   ta team-session start trading-desk --workflow templates/workflows/trading-desk.yaml --objective "Generate income > 2x within 6 months after fees"
+    ///   ta team-session start cos --no-rotation --wake-on-demand chief-of-staff:external-intake
     Start {
         /// Session name (also used as its ID).
         name: String,
-        /// Path to the workflow YAML declaring roles/stages.
+        /// Path to the workflow YAML declaring roles/stages. Required unless
+        /// `--no-rotation` is given together with at least one
+        /// `--wake-on-demand` role.
         #[arg(long)]
-        workflow: String,
+        workflow: Option<String>,
+        /// Run no round-robin rotation: the session only launches its
+        /// `--wake-on-demand` roles when a message arrives. Needs at least
+        /// one `--wake-on-demand` role, and makes `--workflow` optional. If
+        /// `--workflow` is also given, its roles and prompts are still used
+        /// but its stages are ignored.
+        #[arg(long)]
+        no_rotation: bool,
         /// Path to the team.toml binding roles to agents (defaults to `.ta/team.toml`).
         #[arg(long)]
         team_toml: Option<String>,
@@ -200,6 +210,7 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
         TeamSessionCommands::Start {
             name,
             workflow,
+            no_rotation,
             team_toml,
             objective,
             wake_on_demand,
@@ -207,7 +218,8 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
         } => start(
             project_root,
             name,
-            workflow,
+            workflow.as_deref(),
+            *no_rotation,
             team_toml.as_deref(),
             objective,
             wake_on_demand,
@@ -241,10 +253,12 @@ pub fn execute(command: &TeamSessionCommands, project_root: &Path) -> Result<()>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start(
     project_root: &Path,
     name: &str,
-    workflow_path: &str,
+    workflow_path: Option<&str>,
+    no_rotation: bool,
     team_toml: Option<&str>,
     objective: &str,
     wake_on_demand: &[String],
@@ -330,62 +344,110 @@ fn start(
         }
     }
 
-    let workflow_full_path = project_root.join(workflow_path);
-    let definition = WorkflowDefinition::from_file(&workflow_full_path).with_context(|| {
-        format!(
-            "Failed to load workflow YAML at {} for team session '{name}'. Check the --workflow path is correct and the file is valid workflow YAML.",
-            workflow_full_path.display()
-        )
-    })?;
-
-    // Catch stage/role name mismatches (and other structural problems) up
-    // front. Without this, a stage referencing a role name that doesn't
-    // match `roles:` (e.g. a typo or case drift) would silently start the
-    // session anyway: `role_prompts.get(role_name)` below would just never
-    // find that role's entry, and it would run every cycle on undifferentiated
-    // context with no error and no log line to explain why.
-    let validation = ta_workflow::validate::validate_workflow(&definition, Some(project_root));
-    if validation.has_errors() {
-        let details = validation
-            .findings
-            .iter()
-            .filter(|f| f.severity == ta_workflow::validate::ValidationSeverity::Error)
-            .map(|f| match &f.suggestion {
-                Some(s) => format!("  - {}: {} ({})", f.location, f.message, s),
-                None => format!("  - {}: {}", f.location, f.message),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+    let has_listeners = !wake_on_demand_listeners.is_empty();
+    if no_rotation && !has_listeners {
         bail!(
-            "Workflow '{workflow_path}' failed validation: team session '{name}' was not started.\n{details}\n\nRun `ta workflow validate {workflow_path}` for full details."
+            "--no-rotation was given for team session '{name}', but no --wake-on-demand role is \
+             registered, so the session would have nothing to run. Either register a role that \
+             runs on demand (for example `--wake-on-demand chief-of-staff:external-intake`), or \
+             drop --no-rotation and pass --workflow with a workflow that has at least one stage."
+        );
+    }
+    if workflow_path.is_none() && !no_rotation {
+        bail!(
+            "team session '{name}' was not started: no --workflow was given. Either pass \
+             --workflow <path> to a workflow with at least one stage (round-robin rotation), or \
+             pass --no-rotation together with at least one --wake-on-demand <role>:<key> \
+             (wake-on-demand only, no workflow needed)."
         );
     }
 
-    let stage_order = definition
-        .stage_order()
-        .with_context(|| format!("Workflow '{workflow_path}' has a cyclic stage dependency graph — cannot resolve a stage order for team session '{name}'."))?;
+    // `None` here only happens for --no-rotation with a wake-on-demand role
+    // (checked above): no workflow to load, so no role prompts or budget.
+    let definition = match workflow_path {
+        Some(path) => {
+            let workflow_full_path = project_root.join(path);
+            Some(WorkflowDefinition::from_file(&workflow_full_path).with_context(|| {
+                format!(
+                    "Failed to load workflow YAML at {} for team session '{name}'. Check the --workflow path is correct and the file is valid workflow YAML.",
+                    workflow_full_path.display()
+                )
+            })?)
+        }
+        None => None,
+    };
+    let workflow_label = workflow_path.unwrap_or("(none)");
 
-    let stages: Vec<TeamSessionStageConfig> = stage_order
-        .iter()
-        .filter_map(|stage_name| {
-            definition
-                .stages
+    let mut stages: Vec<TeamSessionStageConfig> = Vec::new();
+    if let Some(definition) = &definition {
+        // Catch stage/role name mismatches (and other structural problems) up
+        // front. Without this, a stage referencing a role name that doesn't
+        // match `roles:` (e.g. a typo or case drift) would silently start the
+        // session anyway: `role_prompts.get(role_name)` below would just never
+        // find that role's entry, and it would run every cycle on undifferentiated
+        // context with no error and no log line to explain why.
+        //
+        // An empty `stages:` list is not a validation error here: whether it
+        // is acceptable depends on the session having a wake-on-demand role,
+        // which the explicit check below reports with both ways out.
+        let validation =
+            ta_workflow::validate::validate_wake_only_workflow(definition, Some(project_root));
+        if validation.has_errors() {
+            let details = validation
+                .findings
                 .iter()
-                .find(|s| &s.name == stage_name)
-                .map(|s| TeamSessionStageConfig {
-                    name: s.name.clone(),
-                    roles: s.roles.clone(),
+                .filter(|f| f.severity == ta_workflow::validate::ValidationSeverity::Error)
+                .map(|f| match &f.suggestion {
+                    Some(s) => format!("  - {}: {} ({})", f.location, f.message, s),
+                    None => format!("  - {}: {}", f.location, f.message),
                 })
-        })
-        .collect();
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Workflow '{workflow_label}' failed validation: team session '{name}' was not started.\n{details}\n\nRun `ta workflow validate {workflow_label}` for full details."
+            );
+        }
 
-    if stages.is_empty() {
+        let stage_order = definition
+            .stage_order()
+            .with_context(|| format!("Workflow '{workflow_label}' has a cyclic stage dependency graph: cannot resolve a stage order for team session '{name}'."))?;
+
+        if no_rotation {
+            if !definition.stages.is_empty() {
+                println!(
+                    "[team-session] --no-rotation: ignoring the {} stage(s) in '{workflow_label}'; \
+                     its roles and prompts are still used.",
+                    definition.stages.len()
+                );
+            }
+        } else {
+            stages = stage_order
+                .iter()
+                .filter_map(|stage_name| {
+                    definition
+                        .stages
+                        .iter()
+                        .find(|s| &s.name == stage_name)
+                        .map(|s| TeamSessionStageConfig {
+                            name: s.name.clone(),
+                            roles: s.roles.clone(),
+                        })
+                })
+                .collect();
+        }
+    }
+
+    if stages.is_empty() && !has_listeners {
         bail!(
-            "Workflow '{workflow_path}' declares no stages — team session '{name}' would have nothing to run. Add at least one `stages:` entry to the workflow YAML."
+            "Workflow '{workflow_label}' declares no stages and team session '{name}' has no \
+             --wake-on-demand role, so it would have nothing to run. Either add at least one \
+             `stages:` entry to the workflow YAML, or register a role that runs on demand \
+             (`--wake-on-demand <role>:<key>`, optionally with --no-rotation) to make this a \
+             wake-on-demand-only session."
         );
     }
 
-    let budget = definition.budget.map(|b| {
+    let budget = definition.as_ref().and_then(|d| d.budget.clone()).map(|b| {
         let b = *b;
         BudgetGuardrails {
             metric: b.metric,
@@ -401,10 +463,14 @@ fn start(
     // has to be carried into `TeamSessionConfig` at start time or it never
     // reaches the agent at all (see `role_prompts`' doc comment).
     let role_prompts: std::collections::HashMap<String, String> = definition
-        .roles
-        .iter()
-        .map(|(role_name, role_def)| (role_name.clone(), role_def.prompt.clone()))
-        .collect();
+        .as_ref()
+        .map(|d| {
+            d.roles
+                .iter()
+                .map(|(role_name, role_def)| (role_name.clone(), role_def.prompt.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
     // Minted here with a fixed TTL (WHITEBOARD_TOKEN_TTL_SECS, shared with
@@ -451,7 +517,7 @@ fn start(
         id: name.to_string(),
         config: TeamSessionConfig {
             name: name.to_string(),
-            workflow_path: workflow_path.to_string(),
+            workflow_path: workflow_path.unwrap_or_default().to_string(),
             team_toml_path: team_toml.unwrap_or(".ta/team.toml").to_string(),
             objective: objective.to_string(),
             budget,
@@ -492,10 +558,31 @@ fn start(
                 .join(", ")
         )
     };
+    let shape = if state.stages.is_empty() {
+        "no rotation (wake-on-demand only)".to_string()
+    } else {
+        format!(
+            "{} rotation stage(s) from '{workflow_label}'",
+            state.stages.len()
+        )
+    };
     println!(
-        "[team-session] started '{name}' with {} stage(s) from '{workflow_path}'.{wake_on_demand_note} The daemon supervisor picks it up within ~30s (its periodic session-discovery scan) if it's already running, or immediately on its next startup. Check progress with `ta team-session status {name}`.",
-        state.stages.len()
+        "[team-session] started '{name}' with {shape}.{wake_on_demand_note} The daemon supervisor picks it up within ~30s (its periodic session-discovery scan) if it's already running, or immediately on its next startup. Check progress with `ta team-session status {name}`."
     );
+    if !state.stages.is_empty() {
+        println!(
+            "[team-session] rotation runs at most one cycle per rotation_min_delay_secs \
+             (default 30; set `[team_session] rotation_min_delay_secs` in .ta/workflow.toml)."
+        );
+    }
+    if state.stages.is_empty() && !whiteboard_config.enabled {
+        println!(
+            "[team-session] warning: '{name}' has no rotation and `[whiteboard] enabled = true` is \
+             not set in .ta/workflow.toml, so nothing will ever wake its roles. Enable the \
+             whiteboard there (wake-on-demand listens on its message transport), then the daemon \
+             will pick the listeners up."
+        );
+    }
     Ok(())
 }
 
@@ -682,7 +769,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[],
@@ -707,7 +795,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[
@@ -740,7 +829,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &["chief-of-staff:external-intake".to_string()],
@@ -764,7 +854,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[
@@ -797,7 +888,8 @@ budget:
         let result = start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &["chief-of-staff:external-intake".to_string()],
@@ -826,7 +918,8 @@ budget:
         let result = start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &["chief-of-staff:external-intake".to_string()],
@@ -845,7 +938,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &["chief-of-staff:external-intake,urgent-review".to_string()],
@@ -869,7 +963,8 @@ budget:
         let result = start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &["chief-of-staff-no-colon".to_string()],
@@ -895,7 +990,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[],
@@ -926,7 +1022,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[],
@@ -956,7 +1053,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[],
@@ -984,7 +1082,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[],
@@ -1004,7 +1103,8 @@ budget:
         start(
             dir.path(),
             "sess-1",
-            &workflow_path,
+            Some(&workflow_path),
+            false,
             None,
             "Make money",
             &[],
@@ -1071,9 +1171,28 @@ budget:
     fn start_rejects_a_duplicate_name() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[],
+            &[],
+        )
+        .unwrap();
 
-        let result = start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]);
+        let result = start(
+            dir.path(),
+            "sess-1",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[],
+            &[],
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -1084,7 +1203,8 @@ budget:
         let result = start(
             dir.path(),
             "sess-1",
-            "does-not-exist.yaml",
+            Some("does-not-exist.yaml"),
+            false,
             None,
             "",
             &[],
@@ -1119,7 +1239,8 @@ stages:
         let result = start(
             dir.path(),
             "sess-1",
-            "bad-workflow.yaml",
+            Some("bad-workflow.yaml"),
+            false,
             None,
             "",
             &[],
@@ -1138,7 +1259,17 @@ stages:
     fn pause_resume_stop_write_expected_signal_files() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[],
+            &[],
+        )
+        .unwrap();
 
         execute(
             &TeamSessionCommands::Pause {
@@ -1185,7 +1316,17 @@ stages:
         // directly. Found live, 2026-10-02.
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[],
+            &[],
+        )
+        .unwrap();
 
         execute(
             &TeamSessionCommands::Restart {
@@ -1209,7 +1350,17 @@ stages:
     fn status_reports_persisted_state_before_any_supervisor_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
-        start(dir.path(), "sess-1", &workflow_path, None, "", &[], &[]).unwrap();
+        start(
+            dir.path(),
+            "sess-1",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[],
+            &[],
+        )
+        .unwrap();
 
         // No supervisor-status.json written yet (daemon hasn't run a cycle) —
         // must not error, must fall back to persisted state.json.
@@ -1259,7 +1410,8 @@ stages:
         start(
             dir.path(),
             "trading-desk",
-            "trading-desk.yaml",
+            Some("trading-desk.yaml"),
+            false,
             None,
             "Generate income > 2x within 6 months after fees",
             &[],
@@ -1268,5 +1420,198 @@ stages:
         .unwrap();
 
         status(dir.path(), Some("trading-desk")).unwrap();
+    }
+
+    fn write_empty_stages_workflow(dir: &Path) -> String {
+        std::fs::write(
+            dir.join("wake-only.yaml"),
+            "name: cos\nroles:\n  chief-of-staff:\n    agent: claude-code\n    prompt: \"Triage intake.\"\nstages: []\n",
+        )
+        .unwrap();
+        "wake-only.yaml".to_string()
+    }
+
+    const COS: &str = "chief-of-staff:external-intake";
+
+    #[test]
+    fn no_rotation_with_a_wake_role_needs_no_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        start(
+            dir.path(),
+            "cos",
+            None,
+            true,
+            None,
+            "Triage",
+            &[COS.to_string()],
+            &[],
+        )
+        .unwrap();
+        let state = load_state(dir.path(), "cos").unwrap();
+        assert!(state.stages.is_empty());
+        assert_eq!(state.wake_on_demand_listeners.len(), 1);
+        assert!(state.config.workflow_path.is_empty());
+    }
+
+    #[test]
+    fn no_rotation_ignores_stages_but_keeps_role_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+        start(
+            dir.path(),
+            "cos",
+            Some(&workflow_path),
+            true,
+            None,
+            "",
+            &[COS.to_string()],
+            &[],
+        )
+        .unwrap();
+        let state = load_state(dir.path(), "cos").unwrap();
+        assert!(state.stages.is_empty());
+        assert_eq!(
+            state.config.role_prompts.get("analyst").map(String::as_str),
+            Some("Analyze the market.")
+        );
+    }
+
+    #[test]
+    fn empty_stages_workflow_is_accepted_when_a_wake_role_is_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_empty_stages_workflow(dir.path());
+        start(
+            dir.path(),
+            "cos",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[COS.to_string()],
+            &[],
+        )
+        .unwrap();
+        let state = load_state(dir.path(), "cos").unwrap();
+        assert!(state.stages.is_empty());
+        assert_eq!(
+            state
+                .config
+                .role_prompts
+                .get("chief-of-staff")
+                .map(String::as_str),
+            Some("Triage intake.")
+        );
+    }
+
+    #[test]
+    fn empty_stages_workflow_without_a_wake_role_keeps_the_stage_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_empty_stages_workflow(dir.path());
+        let err = start(
+            dir.path(),
+            "cos",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("stages:"), "{err}");
+        assert!(err.contains("--wake-on-demand"), "{err}");
+        assert!(!state_path(dir.path(), "cos").exists());
+    }
+
+    #[test]
+    fn no_rotation_without_a_wake_role_names_both_ways_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+        let err = start(
+            dir.path(),
+            "cos",
+            Some(&workflow_path),
+            true,
+            None,
+            "",
+            &[],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--no-rotation"), "{err}");
+        assert!(err.contains("--wake-on-demand"), "{err}");
+        assert!(err.contains("--workflow"), "{err}");
+        assert!(!state_path(dir.path(), "cos").exists());
+    }
+
+    #[test]
+    fn missing_workflow_without_no_rotation_names_both_ways_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = start(
+            dir.path(),
+            "cos",
+            None,
+            false,
+            None,
+            "",
+            &[COS.to_string()],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--workflow"), "{err}");
+        assert!(err.contains("--no-rotation"), "{err}");
+        assert!(err.contains("--wake-on-demand"), "{err}");
+        assert!(!state_path(dir.path(), "cos").exists());
+    }
+
+    #[test]
+    fn workflow_with_stages_still_rotates_when_wake_role_is_added_without_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_path = write_role_workflow(dir.path());
+        start(
+            dir.path(),
+            "desk",
+            Some(&workflow_path),
+            false,
+            None,
+            "",
+            &[COS.to_string()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(load_state(dir.path(), "desk").unwrap().stages.len(), 2);
+    }
+
+    #[test]
+    fn start_parses_the_no_rotation_flag() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: TeamSessionCommands,
+        }
+        let cli = Cli::try_parse_from([
+            "ta",
+            "start",
+            "cos",
+            "--no-rotation",
+            "--wake-on-demand",
+            COS,
+        ])
+        .unwrap();
+        match cli.cmd {
+            TeamSessionCommands::Start {
+                workflow,
+                no_rotation,
+                ..
+            } => {
+                assert!(workflow.is_none());
+                assert!(no_rotation);
+            }
+            _ => panic!("expected Start"),
+        }
     }
 }

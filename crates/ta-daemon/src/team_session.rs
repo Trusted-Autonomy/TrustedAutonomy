@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::rotation_policy::RotationPolicy;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ta_policy::business_budget::BudgetGuardrails;
@@ -207,7 +208,7 @@ impl TeamSessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamSessionSupervisorStatus {
     pub id: String,
-    pub status: String, // "active" | "paused" | "suspended" | "stopped"
+    pub status: String, // "active" | "paused" | "suspended" | "stopped" | WAKE_ONLY_STATUS
     pub current_stage: Option<String>,
     pub current_role: Option<String>,
     pub restart_count: u32,
@@ -670,6 +671,25 @@ pub enum CycleOutcome {
     /// A stop-signal was consumed; the session is now `Stopped` and the
     /// caller should stop scheduling further cycles for this id.
     Stopped,
+    /// The session has no rotation stages (a wake-on-demand-only session).
+    /// No goal-run was attempted and none ever will be; the supervisor keeps
+    /// polling only so pause, resume and stop signals are still consumed.
+    NoRotation,
+}
+
+/// Seconds to sleep before the next cycle. `None` means the supervisor loop
+/// should exit. The rotation minimum delay applies only after a successful
+/// cycle (`Advanced`): that is the case that used to sleep zero seconds and
+/// loop tightly on a one-stage workflow. Failures keep their own backoff.
+fn sleep_after_cycle(outcome: &CycleOutcome, min_delay_secs: u64) -> Option<u64> {
+    match outcome {
+        CycleOutcome::Stopped => None,
+        CycleOutcome::Advanced => Some(min_delay_secs),
+        CycleOutcome::Retrying { delay_secs } => Some(*delay_secs),
+        CycleOutcome::Suspended => Some(IDLE_POLL_SECS), // poll for a restart-signal
+        CycleOutcome::Paused => Some(IDLE_POLL_SECS),    // poll for a resume/stop-signal
+        CycleOutcome::NoRotation => Some(IDLE_POLL_SECS), // poll for pause/resume/stop signals
+    }
 }
 
 /// Runs exactly one supervised cycle for team session `id`: checks control
@@ -766,7 +786,30 @@ pub fn run_one_cycle(
     }
 
     if state.stages.is_empty() {
-        return Ok((CycleOutcome::Stopped, tracker));
+        // Wake-on-demand-only session: nothing to rotate. Keep the supervisor
+        // alive (so pause/resume/stop signals are consumed) and launch nothing.
+        let already_reported =
+            read_supervisor_status(project_root, id).is_some_and(|s| s.status == WAKE_ONLY_STATUS);
+        if !already_reported {
+            tracing::info!(
+                session = %id,
+                "team_session: no rotation stages, so this session runs no round-robin \
+                 cycles; its wake-on-demand listeners (if any) launch roles on demand"
+            );
+            write_supervisor_status(
+                project_root,
+                &TeamSessionSupervisorStatus {
+                    id: id.to_string(),
+                    status: WAKE_ONLY_STATUS.to_string(),
+                    current_stage: None,
+                    current_role: None,
+                    restart_count: state.restart_count,
+                    last_cycle_at: None,
+                    updated_at: Utc::now(),
+                },
+            )?;
+        }
+        return Ok((CycleOutcome::NoRotation, tracker));
     }
     let stage_index = state.current_stage_index % state.stages.len();
     let stage = state.stages[stage_index].clone();
@@ -910,20 +953,33 @@ pub fn run_one_cycle(
 
 const IDLE_POLL_SECS: u64 = 5;
 
+/// Supervisor status string for a session with no rotation stages.
+const WAKE_ONLY_STATUS: &str = "wake-on-demand only (no rotation)";
+
 /// Runs the supervised loop for one team session until it's `Stopped` or
 /// the daemon shuts down. Each cycle's actual work (`run_one_cycle`) is
 /// synchronous and runs on a blocking thread via `spawn_blocking`, so an
 /// in-flight `ta run` subprocess is not interrupted by shutdown — only the
 /// next cycle is skipped, matching `connector_supervisor.rs`'s own
 /// "in-flight work finishes, then the loop exits" shutdown behavior.
-async fn run_team_session(
+pub(crate) async fn run_team_session(
     project_root: PathBuf,
     id: String,
     ta_bin: PathBuf,
     shutdown: Arc<tokio::sync::Notify>,
 ) {
     let mut tracker = FailureTracker::default();
+    let mut policy = RotationPolicy::load(&project_root);
+    policy.log_effective(&id);
     loop {
+        // Re-read each cycle so a workflow.toml edit applies without a
+        // daemon restart; the line is logged again only when the value or
+        // its validity changes.
+        let fresh = RotationPolicy::load(&project_root);
+        if fresh != policy {
+            fresh.log_effective(&id);
+            policy = fresh;
+        }
         let pr = project_root.clone();
         let sid = id.clone();
         let bin = ta_bin.clone();
@@ -957,12 +1013,8 @@ async fn run_team_session(
         };
         tracker = next_tracker;
 
-        let sleep_secs = match outcome {
-            CycleOutcome::Stopped => return,
-            CycleOutcome::Advanced => 0,
-            CycleOutcome::Retrying { delay_secs } => delay_secs,
-            CycleOutcome::Suspended => IDLE_POLL_SECS, // poll for a restart-signal
-            CycleOutcome::Paused => IDLE_POLL_SECS,    // poll for a resume/stop-signal
+        let Some(sleep_secs) = sleep_after_cycle(&outcome, policy.min_delay.as_secs()) else {
+            return;
         };
 
         if sleep_secs > 0 {
@@ -2173,5 +2225,169 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restarted_state.status, TeamSessionStatus::Active);
+    }
+
+    #[test]
+    fn sleep_after_cycle_applies_min_delay_only_to_successful_cycles() {
+        assert_eq!(sleep_after_cycle(&CycleOutcome::Advanced, 30), Some(30));
+        assert_eq!(
+            sleep_after_cycle(&CycleOutcome::Retrying { delay_secs: 4 }, 30),
+            Some(4),
+            "failure backoff keeps its own schedule"
+        );
+        assert_eq!(
+            sleep_after_cycle(&CycleOutcome::Paused, 30),
+            Some(IDLE_POLL_SECS)
+        );
+        assert_eq!(
+            sleep_after_cycle(&CycleOutcome::Suspended, 30),
+            Some(IDLE_POLL_SECS)
+        );
+        assert_eq!(
+            sleep_after_cycle(&CycleOutcome::NoRotation, 30),
+            Some(IDLE_POLL_SECS)
+        );
+        assert_eq!(sleep_after_cycle(&CycleOutcome::Stopped, 30), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wake_only_session_runs_zero_rotation_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ta_bin = write_fake_ta_binary(
+            dir.path(),
+            &format!("#!/bin/sh\necho launched >> '{}'\nexit 0\n", log.display()),
+        );
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.save(dir.path()).unwrap();
+
+        for _ in 0..3 {
+            let (outcome, _) =
+                run_one_cycle(dir.path(), "sess-1", &ta_bin, FailureTracker::default()).unwrap();
+            assert_eq!(outcome, CycleOutcome::NoRotation);
+        }
+        assert!(
+            !log.exists(),
+            "a session with no stages must never launch `ta run`"
+        );
+        let status = read_supervisor_status(dir.path(), "sess-1").unwrap();
+        assert_eq!(status.status, WAKE_ONLY_STATUS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wake_only_session_still_honors_pause_resume_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_bin = write_fake_ta_binary(dir.path(), "#!/bin/sh\nexit 0\n");
+        let mut state = TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new());
+        state.save(dir.path()).unwrap();
+
+        signal_pause(dir.path(), "sess-1").unwrap();
+        let (outcome, tracker) =
+            run_one_cycle(dir.path(), "sess-1", &ta_bin, FailureTracker::default()).unwrap();
+        assert_eq!(outcome, CycleOutcome::Paused);
+        let st = TeamSessionState::load(dir.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.status, TeamSessionStatus::Paused);
+
+        signal_resume(dir.path(), "sess-1").unwrap();
+        let (outcome, tracker) = run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
+        assert_eq!(outcome, CycleOutcome::NoRotation);
+        let st = TeamSessionState::load(dir.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.status, TeamSessionStatus::Active);
+
+        signal_stop(dir.path(), "sess-1").unwrap();
+        let (outcome, _) = run_one_cycle(dir.path(), "sess-1", &ta_bin, tracker).unwrap();
+        assert_eq!(outcome, CycleOutcome::Stopped);
+        let st = TeamSessionState::load(dir.path(), "sess-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.status, TeamSessionStatus::Stopped);
+    }
+
+    /// Counts lines in the fake binary's invocation log (0 if never written).
+    #[cfg(unix)]
+    fn invocation_count(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_stage_session_is_rate_limited_by_the_default_delay() {
+        // No workflow.toml: the default (30s) applies. Before the minimum
+        // delay existed this loop launched `ta run` back to back.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ta_bin = write_fake_ta_binary(
+            dir.path(),
+            &format!("#!/bin/sh\necho launched >> '{}'\nexit 0\n", log.display()),
+        );
+        let stages = vec![TeamSessionStageConfig {
+            name: "only".to_string(),
+            roles: vec!["analyst".to_string()],
+        }];
+        TeamSessionState::new("sess-1".to_string(), sample_config(), stages)
+            .save(dir.path())
+            .unwrap();
+
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = tokio::spawn(run_team_session(
+            dir.path().to_path_buf(),
+            "sess-1".to_string(),
+            ta_bin,
+            shutdown,
+        ));
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        handle.abort();
+        assert_eq!(
+            invocation_count(&log),
+            1,
+            "exactly one cycle may run inside the default 30s minimum delay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_min_delay_paces_rotation_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[team_session]\nrotation_min_delay_secs = 1\n",
+        )
+        .unwrap();
+        let log = dir.path().join("invocations.log");
+        let ta_bin = write_fake_ta_binary(
+            dir.path(),
+            &format!("#!/bin/sh\necho launched >> '{}'\nexit 0\n", log.display()),
+        );
+        let stages = vec![TeamSessionStageConfig {
+            name: "only".to_string(),
+            roles: vec!["analyst".to_string()],
+        }];
+        TeamSessionState::new("sess-1".to_string(), sample_config(), stages)
+            .save(dir.path())
+            .unwrap();
+
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = tokio::spawn(run_team_session(
+            dir.path().to_path_buf(),
+            "sess-1".to_string(),
+            ta_bin,
+            shutdown,
+        ));
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        handle.abort();
+        let n = invocation_count(&log);
+        assert!(
+            (2..=3).contains(&n),
+            "a 1s minimum delay allows about one cycle per second (saw {n} in 2.5s)"
+        );
     }
 }
