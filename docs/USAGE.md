@@ -440,6 +440,27 @@ wake_backoff_secs = [30, 120, 600]    # wait after the 1st, 2nd, 3rd... failure 
 wake_max_launches_per_hour = 6        # per listener; 0 turns the limit off
 ```
 
+**A message runs once, even when the role runs long.** The message transport redelivers a message that is not acknowledged within its ack wait, and a role such as the Chief-of-Staff can easily run longer than the transport's default 30 seconds. To keep that from launching a second, paid run, the daemon does three things:
+
+- While a launch runs, it sends an ack-progress heartbeat to the transport every few seconds, which restarts the ack wait. The heartbeat stops when the launch exits.
+- It sets the listener's ack wait to the launch timeout plus 60 seconds, so even a missed heartbeat cannot cause a redelivery of a launch that is still within its limit. A launch still running after `wake_launch_timeout_secs` is killed and counted as a failed attempt.
+- When a launch succeeds (or a message is dead-lettered), the daemon records the message's sequence in `.ta/wake-completed/<session>__<role>.json` before acknowledging it. A message that arrives again with a recorded sequence is acknowledged and skipped, and the daemon log says when it first finished. This also holds across a daemon restart, including a restart between the launch finishing and the acknowledgement. The file keeps the 1000 most recent messages per listener.
+
+If a launch fails because its plan phase is already done (`Phase ... is already done`), the message is recorded as completed and is not retried. If it fails because another run holds the phase (`Phase ... could not be claimed`), that is logged as a phase claim conflict with the commands to release the holder (`ta goal list`, then `ta goal delete <id>` or `ta plan reset <phase>`), and the message is retried after the usual backoff unless it has been completed in the meantime.
+
+These timings are set in the same `[whiteboard]` section:
+
+```toml
+[whiteboard]
+wake_launch_timeout_secs = 3600       # longest one launch may run before it is killed
+wake_ack_wait_secs = 3660             # optional; default is the launch timeout + 60. Never lower than that.
+wake_ack_heartbeat_secs = 10          # optional; default is a third of the ack wait, at most 10. At most half the ack wait.
+```
+
+The daemon refuses to start a listener whose settings conflict (for example an ack wait shorter than the launch timeout plus 60 seconds) and logs an error naming both settings. If you edit the file to a conflicting value while the daemon runs, the listener pauses with the same error and resumes once it is fixed; no message is lost.
+
+To make a message run again on purpose, delete its entry from `.ta/wake-completed/<session>__<role>.json` (or the whole file), then re-send the message. A sequence recorded with a different message body than the one that arrives is treated as a new message, so recreating the stream does not suppress new work.
+
 ### Restricted Launches Ignore Your Global Claude Code Settings
 
 Any launch with a tool restriction (a persona `allowed_tools` list, `read_only = true`, chat mode, or a `max_allowed_tools` ceiling) runs Claude Code with:

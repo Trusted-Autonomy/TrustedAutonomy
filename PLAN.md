@@ -10851,17 +10851,17 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 > **Focus (v0.17.12.x)**: the final v0.17 security release, from the 2026-10-07 red-team of the CoS pipeline (`docs/security/2026-10-07-cos-pipeline-redteam.md`, PR #645). Order matters: first make "a person approved this" unforgeable, then move TA's own secrets out of agent reach, then make messages and applies trustworthy, then build the rules engine on those foundations, then enforce all of it with an OS sandbox. Phases below are ordered by dependency. Marketing or documentation must not claim enforced governance until v0.17.12 through v0.17.12.2 have shipped. All platforms launch together, so Windows isolation (v0.17.12.9) is part of this release. The sandbox plan document (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`) numbers its phases differently; the mapping is plan phase 1 = v0.17.12.1, 2 = v0.17.12.6, 3 = v0.17.12.7, 4 = v0.17.12.8, 5 = v0.17.12.10, and the Windows phase = v0.17.12.9.
 
 ### v0.17.11.28 - Wake Launches Are Idempotent: Ack Progress and Completed-Message Guard
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.11.26
 
 **Goal**: A message that woke a role is processed once, even when the role runs longer than the transport's ack wait. Found in live CoS run 5 (2026-10-10): the Chief-of-Staff ran 40 s, longer than the 30 s ack wait, so NATS redelivered the intake; the daemon launched the same message again right after the first launch succeeded, and the second launch failed (`Phase v0.0.0.1 could not be claimed`) and scheduled a retry. Each extra launch is a real paid agent run.
 
-1. [ ] While a wake launch runs, send ack-progress heartbeats to the transport (JetStream `AckProgress`) at an interval comfortably below the ack wait, so a long run is never redelivered. Stop heartbeating when the launch exits.
-2. [ ] Make the ack wait at least the configured launch timeout plus margin (derive it, or refuse to start the listener with a clear message naming both settings and how to change them).
-3. [ ] Idempotency keyed by stream sequence (and message id): record a completed or dead-lettered sequence on disk in `.ta/` (survives daemon restarts); when a message arrives whose sequence is already recorded, ack it and skip the launch, logging the sequence, role and the time of the first completion. Applies equally to redelivery after a daemon restart.
-4. [ ] A phase-claim failure on a wake launch (`Phase ... could not be claimed`) must not be retried as a fresh launch of work that already completed; distinguish "already done" from a real failure.
-5. [ ] Tests: a launch longer than ack wait is not redelivered (in-memory transport with a short ack wait); a redelivered completed sequence is acked and not relaunched; a restart between launch and ack does not relaunch; heartbeats stop after exit.
-6. [ ] Document the behavior and the settings in `docs/USAGE.md` (ack wait, heartbeat interval, the completed-sequence record, how to clear it).
+1. [x] While a wake launch runs, send ack-progress heartbeats to the transport (JetStream `AckProgress`) at an interval comfortably below the ack wait, so a long run is never redelivered. Stop heartbeating when the launch exits.
+2. [x] Make the ack wait at least the configured launch timeout plus margin (derive it, or refuse to start the listener with a clear message naming both settings and how to change them).
+3. [x] Idempotency keyed by stream sequence (and message id): record a completed or dead-lettered sequence on disk in `.ta/` (survives daemon restarts); when a message arrives whose sequence is already recorded, ack it and skip the launch, logging the sequence, role and the time of the first completion. Applies equally to redelivery after a daemon restart.
+4. [x] A phase-claim failure on a wake launch (`Phase ... could not be claimed`) must not be retried as a fresh launch of work that already completed; distinguish "already done" from a real failure.
+5. [x] Tests: a launch longer than ack wait is not redelivered (in-memory transport with a short ack wait); a redelivered completed sequence is acked and not relaunched; a restart between launch and ack does not relaunch; heartbeats stop after exit.
+6. [x] Document the behavior and the settings in `docs/USAGE.md` (ack wait, heartbeat interval, the completed-sequence record, how to clear it).
 
 **Effort**: S to M.
 
@@ -11066,6 +11066,9 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 4. [ ] Auto-apply and `--chain` paths: dry-run honored everywhere, no external actions without a human.
 5. [ ] Make `ta_goal_start` stamp origin at creation (today only `ta run --goal-id` does).
 6. [ ] `ta session resume` (`execute_resume`) rebuilds its launch config with `restricted_tool_surface` false, so a resumed persona-restricted interactive session relaunches without the restriction flags (`--setting-sources local`, `--permission-mode dontAsk`, the system-prompt file). Carry the restriction and the delivered context through resume, or refuse to resume restricted goals (chat mode already refuses). If a restricted conversation is ever resumed with changed context, pass `--system-prompt-snapshot off` so the new text is used.
+7. [ ] **`ta draft apply --dry-run` must change nothing.** Found 2026-10-10: `ta draft apply <id> --phase <p> --submit --dry-run` copied the draft's files into the source tree on a new feature branch, marked the draft and goal Applied, and auto-cleaned the staging directory; only the commit, push and phase completion were skipped. A dry run must print what would happen and leave files, goal state, draft state and staging untouched. Add a regression test that snapshots the tree and the goal and draft state around a dry run.
+8. [ ] **Plan merge must not rewrite unrelated `PLAN.md` content.** Found 2026-10-10: after applying a draft, `PLAN.md` in the working tree had 60 blank lines removed across unrelated sections (including inside code fences) and the draft's `[x]` item checks were not present, although the draft listed them. The earlier fix (#620) covered heading-style swallowing; this is whitespace and item-state fidelity. Make the merge change only the target phase's status marker and checkbox lines, byte-for-byte elsewhere, with a golden test over the real `PLAN.md`.
+9. [ ] Build artifacts compiled inside a goal's staging directory bake that path into test binaries (`env!("CARGO_MANIFEST_DIR")`), so after staging is auto-cleaned the next `cargo test` in the source tree fails (seen in `ta-actions` paper-trading plugin test). Give goals a separate `CARGO_TARGET_DIR` under staging, or make the staging build not share `target/` with the source tree.
 
 **Effort**: M.
 

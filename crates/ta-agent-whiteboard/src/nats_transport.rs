@@ -41,6 +41,9 @@ pub struct NatsTransport {
     /// broker-assigned ack reply subject) is stashed here between
     /// `stream_read_next` and `stream_ack`.
     ack_pending: Mutex<HashMap<String, Message>>,
+    /// Ack wait requested per `(stream, consumer)` via
+    /// `stream_set_ack_wait`; absent means the server default (30 s).
+    ack_waits: Mutex<HashMap<(String, String), Duration>>,
 }
 
 impl NatsTransport {
@@ -52,6 +55,7 @@ impl NatsTransport {
             streams: Mutex::new(HashMap::new()),
             consumers: Mutex::new(HashMap::new()),
             ack_pending: Mutex::new(HashMap::new()),
+            ack_waits: Mutex::new(HashMap::new()),
         }
     }
 
@@ -146,24 +150,44 @@ impl NatsTransport {
         consumer: &str,
     ) -> Result<Consumer<pull::Config>> {
         let cache_key = (stream.to_string(), consumer.to_string());
+        let wanted = self.ack_waits.lock().await.get(&cache_key).copied();
         {
             let cache = self.consumers.lock().await;
             if let Some(c) = cache.get(&cache_key) {
-                return Ok(c.clone());
+                if wanted.is_none_or(|w| c.cached_info().config.ack_wait == w) {
+                    return Ok(c.clone());
+                }
             }
         }
         let s = self.ensure_stream(stream).await?;
-        let c = s
-            .get_or_create_consumer(
-                consumer,
-                pull::Config {
-                    durable_name: Some(consumer.to_string()),
-                    ack_policy: AckPolicy::Explicit,
-                    ..Default::default()
-                },
-            )
+        let mut config = pull::Config {
+            durable_name: Some(consumer.to_string()),
+            ack_policy: AckPolicy::Explicit,
+            ..Default::default()
+        };
+        if let Some(w) = wanted {
+            config.ack_wait = w;
+        }
+        let mut c = s
+            .get_or_create_consumer(consumer, config.clone())
             .await
             .map_err(|e| stream_err(stream, e))?;
+        // `get_or_create_consumer` returns an existing durable consumer
+        // untouched, so a consumer created earlier with the 30 s default
+        // would keep it. Update it in place when the wanted value differs.
+        if let Some(w) = wanted {
+            if c.cached_info().config.ack_wait != w {
+                c = s.update_consumer(config).await.map_err(|e| {
+                    stream_err(
+                        stream,
+                        format!(
+                            "could not set ack wait to {}s on consumer '{consumer}': {e}",
+                            w.as_secs()
+                        ),
+                    )
+                })?;
+            }
+        }
         self.consumers.lock().await.insert(cache_key, c.clone());
         Ok(c)
     }
@@ -330,6 +354,34 @@ impl WhiteboardTransport for NatsTransport {
                 .await
                 .map_err(|e| stream_err(stream, format!("ack failed: {e}")))?;
         }
+        Ok(())
+    }
+
+    async fn stream_ack_progress(&self, stream: &str, _consumer: &str, msg_id: &str) -> Result<()> {
+        // Clone the delivery handle so the lock is not held across the
+        // network call; the message stays pending until `stream_ack`.
+        let msg = self.ack_pending.lock().await.get(msg_id).cloned();
+        if let Some(msg) = msg {
+            msg.ack_with(async_nats::jetstream::AckKind::Progress)
+                .await
+                .map_err(|e| stream_err(stream, format!("ack progress failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    async fn stream_set_ack_wait(
+        &self,
+        stream: &str,
+        consumer: &str,
+        ack_wait: Duration,
+    ) -> Result<()> {
+        self.ack_waits
+            .lock()
+            .await
+            .insert((stream.to_string(), consumer.to_string()), ack_wait);
+        // Apply now so an already-existing server-side consumer is updated
+        // before the next fetch, and a failure is reported to the caller.
+        self.ensure_consumer(stream, consumer).await?;
         Ok(())
     }
 }

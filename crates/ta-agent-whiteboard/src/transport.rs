@@ -100,4 +100,21 @@ pub trait WhiteboardTransport: Send + Sync {
 
     /// Acknowledge `msg_id`, advancing `consumer`'s cursor past it.
     async fn stream_ack(&self, stream: &str, consumer: &str, msg_id: &str) -> Result<()>;
+
+    /// Tell the transport `msg_id` is still being worked on, restarting its
+    /// ack-wait clock so it is not redelivered while a long job runs
+    /// (JetStream `AckProgress`). Does not acknowledge the message. A no-op
+    /// if `msg_id` is not currently pending.
+    async fn stream_ack_progress(&self, stream: &str, consumer: &str, msg_id: &str) -> Result<()>;
+
+    /// Set how long `consumer` waits for an ack (or ack-progress) before the
+    /// transport redelivers a message. Applies to the named durable consumer
+    /// on `stream`, whether or not it already exists, and takes effect for
+    /// later deliveries. Without a call, the transport's own default applies.
+    async fn stream_set_ack_wait(
+        &self,
+        stream: &str,
+        consumer: &str,
+        ack_wait: Duration,
+    ) -> Result<()>;
 }
