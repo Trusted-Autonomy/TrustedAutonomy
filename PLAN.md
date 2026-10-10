@@ -10817,17 +10817,17 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.25`
 
 ### v0.17.11.26 - Live CoS Run Findings: No-Change Chat Goals, Retry Cap, Transcripts, Ports, Daemon Address
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: Fix what the first live run of the real, daemon-launched Chief-of-Staff found on 2026-10-08. PR `fix/live-cos-run-findings`.
 
-1. [ ] A chat-mode goal that makes no file changes ends as success (exit 0, no draft) instead of failing with "No changes detected in staging workspace". That failure made the wake listener leave the message unacked and relaunch the CoS three times in three minutes (real paid runs).
-2. [ ] Wake listener: per-message attempt tracking persisted on disk, a maximum attempt count (default 3) with exponential backoff, a dead-letter file (`.ta/wake-dead-letter.jsonl`) after the cap, and a per-listener launch-rate guard (default 6 per hour).
-3. [ ] Diagnosability: full stdout and stderr of every wake launch saved under `.ta/logs/wake-launches/`, the stderr tail in the error log; chat-mode goals always keep their agent transcript and TA tool-call list under `.ta/logs/goals/<goal-id>/`.
-4. [ ] `ta daemon start --port N` no longer collides with the port in `daemon.toml` (it passed `--web-port N` as well, so two listeners bound one port).
-5. [ ] Daemon address resolution: the daemon rewrote `.ta/daemon.pid` as `pid=` and `bind=host:port`, while the whiteboard tools only read a `port=` line, so any project not on port 7700 silently talked to the default 7700 daemon (a different project's). One shared pid-file format and reader, fail closed when no usable port is found, and the client verifies the daemon belongs to this project before sending a token.
-6. [ ] **Public, stable contract** (documented in `docs/USAGE.md`, versioned): at most N launches per message (default 3), and the dead-letter file `.ta/wake-dead-letter.jsonl` with its record shape and the `command_failed` event, so the VT poller can surface a dead-lettered message as an escalation instead of leaving a chat unanswered.
+1. [x] A chat-mode goal that makes no file changes ends as success (exit 0, no draft) instead of failing with "No changes detected in staging workspace". That failure made the wake listener leave the message unacked and relaunch the CoS three times in three minutes (real paid runs).
+2. [x] Wake listener: per-message attempt tracking persisted on disk, a maximum attempt count (default 3) with exponential backoff, a dead-letter file (`.ta/wake-dead-letter.jsonl`) after the cap, and a per-listener launch-rate guard (default 6 per hour).
+3. [x] Diagnosability: full stdout and stderr of every wake launch saved under `.ta/logs/wake-launches/`, the stderr tail in the error log; chat-mode goals always keep their agent transcript and TA tool-call list under `.ta/logs/goals/<goal-id>/`.
+4. [x] `ta daemon start --port N` no longer collides with the port in `daemon.toml` (it passed `--web-port N` as well, so two listeners bound one port).
+5. [x] Daemon address resolution: the daemon rewrote `.ta/daemon.pid` as `pid=` and `bind=host:port`, while the whiteboard tools only read a `port=` line, so any project not on port 7700 silently talked to the default 7700 daemon (a different project's). One shared pid-file format and reader, fail closed when no usable port is found, and the client verifies the daemon belongs to this project before sending a token.
+6. [x] **Public, stable contract** (documented in `docs/USAGE.md`, versioned): at most N launches per message (default 3), and the dead-letter file `.ta/wake-dead-letter.jsonl` with its record shape and the `command_failed` event, so the VT poller can surface a dead-lettered message as an escalation instead of leaving a chat unanswered.
 
 **Effort**: M.
 
