@@ -10834,7 +10834,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.26`
 
 ### v0.17.11.27 - Daemon Self-Update When Idle, as a Reusable Library
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.11.26 (single pid and port contract)
 
 **Goal**: Today nothing updates a stale daemon by itself. The only check is in the CLI: `ta shell`, `ta dev` and the terminal UI compare the daemon's reported version and build hash with their own and ask "Restart daemon with the new version? [Y/n]"; non-interactive runs and `--no-version-check` carry on with the stale daemon. That logic lives inside the `ta-cli` binary, so other programs (the VT poller daemon) cannot reuse it. The owner wants both daemons to update themselves when a newer build is installed, with no manual kill.
