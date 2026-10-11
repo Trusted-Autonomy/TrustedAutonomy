@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "ActionContextRecord": {
+      "description": "Records who was acting when an approve, deny or apply was accepted\n(CR-03 item 6).\n\nFor `agent_delegated` the credential holder is the delegating owner,\n`approved_by` / `denied_by` name that holder, and `delegated_signals` says\nwhy the client believed an agent was acting. The `ta` CLI writes a record\nonly for delegated actions; the daemon also writes `direct` records for\nactions that arrived without an agent header. Advisory, for the audit trail.",
+      "properties": {
+        "action": {
+          "description": "`approve`, `deny` or `apply`.",
+          "type": "string"
+        },
+        "actor_context": {
+          "description": "`agent_delegated` or `direct`.",
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "delegated_signals": {
+          "default": [],
+          "description": "Why the action was judged to come from an agent.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "delegating_owner": {
+          "description": "The credential holder who delegated the action.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "actor_context",
+        "delegating_owner",
+        "at"
+      ],
+      "type": "object"
+    },
     "ActionKind": {
       "description": "How an intercepted MCP tool call is classified.",
       "oneOf": [
@@ -1741,6 +1777,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "The Draft Package — a complete, reviewable milestone deliverable.\n\nThis is the central artifact of Trusted Autonomy. Every goal iteration\nproduces one of these for human review.",
   "properties": {
+    "action_contexts": {
+      "description": "Delegation labels for approve, deny and apply actions accepted from a\ndetected agent context (CR-03 item 6). Empty for direct human actions\nand for drafts written before this field existed.",
+      "items": {
+        "$ref": "#/$defs/ActionContextRecord"
+      },
+      "type": "array"
+    },
     "agent_decision_log": {
       "description": "Agent-authored decision log (v0.14.7).\n\nPopulated from `.ta-decisions.json` written by the agent during its run.\nRecords non-obvious implementation choices with alternatives and rationale.\nDistinct from `plan.decision_log` which is extracted from `change_summary.json`.\nShown as the \"Agent Decision Log\" section in `ta draft view`.",
       "items": {

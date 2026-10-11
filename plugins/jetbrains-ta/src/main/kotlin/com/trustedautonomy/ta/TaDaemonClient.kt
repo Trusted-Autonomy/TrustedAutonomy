@@ -73,6 +73,31 @@ fun humanCredential(): String {
     }
 }
 
+/**
+ * Advisory `X-TA-Actor-Context` value when the IDE was launched from an agent
+ * (same environment markers the `ta` CLI checks), else empty. The daemon
+ * records it as `actor_context: agent_delegated` in the audit trail. It is not
+ * a security control: an agent can unset the variables.
+ */
+fun actorContextHeader(env: Map<String, String> = System.getenv()): String {
+    val reasons = mutableListOf<String>()
+    for (name in listOf("TA_AGENT_CONTEXT", "TA_IS_STAGING", "TA_AGENT_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")) {
+        if (!env[name].isNullOrEmpty()) reasons.add("$name is set")
+    }
+    val mode = env["TA_CALLER_MODE"]
+    if (!mode.isNullOrEmpty() && mode != "normal") reasons.add("TA_CALLER_MODE=$mode")
+    if (!env["TA_CHAT_MODE"].isNullOrEmpty()) reasons.add("TA_CHAT_MODE is set")
+    if (reasons.isEmpty()) return ""
+    val encoded = reasons.take(5).map { r ->
+        r.take(60).toByteArray(Charsets.UTF_8).joinToString("") { b ->
+            val c = b.toInt() and 0xFF
+            if (c.toChar().isLetterOrDigit() && c < 128 || c.toChar() in "._-=") c.toChar().toString()
+            else "%%%02X".format(c)
+        }
+    }
+    return "agent_delegated; reasons=" + encoded.joinToString(",")
+}
+
 class TaDaemonClient(
     private val baseUrl: String,
     private val token: String = "",
@@ -94,6 +119,10 @@ class TaDaemonClient(
         val credential = humanCredential()
         if (credential.isNotEmpty()) {
             builder.header("X-TA-Human-Credential", credential)
+        }
+        val actorContext = actorContextHeader()
+        if (actorContext.isNotEmpty()) {
+            builder.header("X-TA-Actor-Context", actorContext)
         }
         return builder
     }

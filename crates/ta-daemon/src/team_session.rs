@@ -32,6 +32,55 @@ pub enum TeamSessionStatus {
     Stopped,
 }
 
+/// Environment for one role launch: a fresh whiteboard token for this role,
+/// in the launched process's environment only (never on disk). Empty when the
+/// session has no whiteboard. A minting failure is logged loudly and the role
+/// launches without whiteboard tools rather than not at all.
+pub fn role_launch_env(
+    project_root: &Path,
+    state: &TeamSessionState,
+    role: &str,
+) -> Vec<(String, String)> {
+    let c = &state.config;
+    if !(c.whiteboard_enabled || c.whiteboard_token.is_some()) {
+        return Vec::new();
+    }
+    let scope = format!("whiteboard:team_session:{}", state.id);
+    let granted = ta_credential_broker::CredentialBroker::open_for_project(project_root)
+        .map_err(|e| e.to_string())
+        .and_then(|broker| {
+            broker
+                .grant(
+                    Uuid::new_v4(),
+                    &format!("{}:{role}", state.id),
+                    vec![scope],
+                    crate::token_refresh::WHITEBOARD_TOKEN_TTL_SECS,
+                )
+                .map_err(|e| e.to_string())
+        });
+    match granted {
+        Ok(g) => vec![
+            ("TA_WHITEBOARD_TOKEN".into(), g.token),
+            ("TA_WHITEBOARD_TEAM_SESSION".into(), state.id.clone()),
+            (
+                "TA_WHITEBOARD_SOURCE_DIR".into(),
+                project_root.display().to_string(),
+            ),
+        ],
+        Err(e) => {
+            tracing::error!(
+                session = %state.id,
+                role = %role,
+                error = %e,
+                "could not mint a whiteboard token for this role launch; the role will run \
+                 without ta_whiteboard_* tools. Check that the TA state directory is writable \
+                 (`ta show state`)"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// One stage of the bound workflow, pre-resolved by the CLI at `start` time
 /// from `WorkflowDefinition::stage_order()` — `ta-daemon` never parses the
 /// workflow YAML itself (see plan Architecture note).
@@ -76,23 +125,21 @@ pub struct TeamSessionConfig {
     /// existed still load.
     #[serde(default)]
     pub role_prompts: std::collections::HashMap<String, String>,
-    /// Biscuit-backed grant scoped to `whiteboard:team_session:<name>`,
-    /// minted at `start()` time when `[whiteboard] enabled = true`. `None`
-    /// when whiteboard coordination is off for this project. Threaded into
-    /// each role's launch so agent processes can call the new
-    /// `ta_whiteboard_*` MCP tools.
+    /// True when the project has `[whiteboard] enabled = true`: each role launch
+    /// then gets its own freshly minted token scoped to
+    /// `whiteboard:team_session:<name>`, handed to the launched process in its
+    /// environment (see [`role_launch_env`]). The token itself is NEVER
+    /// persisted (red-team CR-03). `#[serde(default)]` so state files written
+    /// before this field existed still load.
     #[serde(default)]
+    pub whiteboard_enabled: bool,
+    /// Read-only legacy field: older versions stored the session token here.
+    /// It is still deserialized so such a file can be recognised and scrubbed,
+    /// but is never serialized, so saving a state removes it.
+    #[serde(default, skip_serializing)]
     pub whiteboard_token: Option<String>,
-    /// When `whiteboard_token` expires (v0.17.11.12) — `token_refresh.rs`'s
-    /// periodic task re-mints the token and updates both fields together
-    /// well before this passes, so a long-running session never actually
-    /// hits it. `None` for a session with no whiteboard token, or one
-    /// started before this field existed (`#[serde(default)]`) — the
-    /// refresh task treats a missing expiry on a *present* token as
-    /// "refresh it now" rather than "never expires", so an old session
-    /// self-heals into having a real expiry on its next refresh check
-    /// instead of silently never being refreshed.
-    #[serde(default)]
+    /// Legacy companion of `whiteboard_token`; never serialized.
+    #[serde(default, skip_serializing)]
     pub whiteboard_token_expires_at: Option<DateTime<Utc>>,
 }
 
@@ -462,10 +509,9 @@ pub fn build_ta_run_args(
         context_path.to_string_lossy().to_string(),
         "--team".to_string(),
         role.to_string(),
-        // v0.17.11.8: lets `ta run` deliver `state.config.whiteboard_token`
-        // into this role's staging workspace (see apps/ta-cli/src/commands/
-        // run.rs's `write_whiteboard_session_file`) so the agent's
-        // `ta_whiteboard_*` MCP tools can authenticate.
+        // Names the team session this role belongs to. The whiteboard token
+        // itself is NOT an argument: `role_launch_env` puts a per-role token in
+        // the launched process's environment, never in a file.
         "--team-session-id".to_string(),
         state.id.clone(),
     ];
@@ -801,6 +847,7 @@ pub fn run_one_cycle(
     ensure_stable_codesign(ta_bin, project_root);
     let output = std::process::Command::new(ta_bin)
         .args(&args)
+        .envs(role_launch_env(project_root, &state, &role))
         .current_dir(project_root)
         .output();
 
@@ -1106,6 +1153,7 @@ mod tests {
             objective: "Generate income > 2x within 6 months after fees".to_string(),
             budget: None,
             role_prompts: std::collections::HashMap::new(),
+            whiteboard_enabled: false,
             whiteboard_token: None,
             whiteboard_token_expires_at: None,
         }
@@ -1702,8 +1750,7 @@ mod tests {
     #[test]
     fn build_args_always_includes_team_session_id() {
         // v0.17.11.8: every team-session role launch passes its own
-        // session id so `ta run` can look up `whiteboard_token` from the
-        // real project root and deliver it into the role's staging copy.
+        // session id; the whiteboard token travels in the environment.
         let dir = tempfile::tempdir().unwrap();
         let state = TeamSessionState::new("sess-42".to_string(), sample_config(), sample_stages());
         let stage = &state.stages[0];
@@ -2342,5 +2389,103 @@ mod tests {
             (2..=3).contains(&n),
             "a 1s minimum delay allows about one cycle per second (saw {n} in 2.5s)"
         );
+    }
+}
+
+#[cfg(test)]
+mod control_plane_secret_tests {
+    use super::*;
+
+    fn all_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    all_files(&p, out);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    fn enabled_state() -> TeamSessionState {
+        let cfg = TeamSessionConfig {
+            name: "sess-9".into(),
+            workflow_path: "wf.yaml".into(),
+            team_toml_path: "team.toml".into(),
+            objective: "o".into(),
+            budget: None,
+            role_prompts: Default::default(),
+            whiteboard_enabled: true,
+            whiteboard_token: None,
+            whiteboard_token_expires_at: None,
+        };
+        TeamSessionState::new("sess-9".into(), cfg, Vec::new())
+    }
+
+    /// After a full launch preparation, with the session saved and the
+    /// agent MCP config written, no token and no key exists anywhere under
+    /// the project's `.ta/`.
+    #[test]
+    fn no_token_or_key_appears_in_any_file_under_the_project_ta_dir() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        let mut state = enabled_state();
+        state.save(project.path()).unwrap();
+
+        let env_a = role_launch_env(project.path(), &state, "trader");
+        let env_b = role_launch_env(project.path(), &state, "risk");
+        let tok = |env: &Vec<(String, String)>| {
+            env.iter()
+                .find(|(k, _)| k == "TA_WHITEBOARD_TOKEN")
+                .map(|(_, v)| v.clone())
+                .expect("a token is handed to the launched role")
+        };
+        let (ta, tb) = (tok(&env_a), tok(&env_b));
+        assert_ne!(ta, tb, "one token per role launch");
+        assert!(env_a
+            .iter()
+            .any(|(k, v)| k == "TA_WHITEBOARD_TEAM_SESSION" && v == "sess-9"));
+
+        // Both tokens are real: they verify against the project's broker.
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(project.path()).unwrap();
+        broker
+            .authorize_scope(&ta, "whiteboard:team_session:sess-9")
+            .unwrap();
+
+        // Simulate the launch writing its per-goal files into staging.
+        let staged = project.path().join(".ta/staging/g1/.ta");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(
+            staged.join("mcp-agent.json"),
+            r#"{"mcpServers":{"ta":{"env":{"TA_WHITEBOARD_TOKEN":"${TA_WHITEBOARD_TOKEN:-}"}}}}"#,
+        )
+        .unwrap();
+
+        let mut files = Vec::new();
+        all_files(&project.path().join(".ta"), &mut files);
+        assert!(!files.is_empty());
+        for f in &files {
+            let text = std::fs::read(f).unwrap();
+            let text = String::from_utf8_lossy(&text);
+            assert!(!text.contains(&ta), "token A leaked into {}", f.display());
+            assert!(!text.contains(&tb), "token B leaked into {}", f.display());
+            assert!(
+                f.file_name()
+                    .is_none_or(|n| n != "broker_root.key" && n != "audit.key"),
+                "key file {} must not be in the project tree",
+                f.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_without_a_whiteboard_gets_no_environment() {
+        let project = tempfile::tempdir().unwrap();
+        let mut state = enabled_state();
+        state.config.whiteboard_enabled = false;
+        assert!(role_launch_env(project.path(), &state, "r").is_empty());
     }
 }

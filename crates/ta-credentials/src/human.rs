@@ -34,6 +34,9 @@ pub const STATE_DIR_ENV: &str = "TA_USER_STATE_DIR";
 pub const SECRET_ENV: &str = "TA_HUMAN_CREDENTIAL";
 /// HTTP header carrying the human credential to the daemon.
 pub const CREDENTIAL_HEADER: &str = "x-ta-human-credential";
+/// HTTP header a client sends when it detected an agent context. ADVISORY: it
+/// feeds the audit trail, it is not a security control (an agent can omit it).
+pub const ACTOR_CONTEXT_HEADER: &str = "x-ta-actor-context";
 /// Keychain service name for the human credential item.
 const KEYRING_SERVICE: &str = "trusted-autonomy-human";
 const KEYRING_USER: &str = "human-credential";
@@ -115,7 +118,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn write_private(path: &Path, contents: &str) -> Result<(), HumanCredentialError> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> Result<(), HumanCredentialError> {
     let werr = |source| HumanCredentialError::Write {
         path: path.to_path_buf(),
         source,
@@ -332,6 +335,308 @@ pub fn refusal_message(action: &str, ctx: &AgentContext) -> String {
          make them enforceable.",
         ctx.signals.join("; ")
     )
+}
+
+// ── Agent delegation (interim development mode) ───────────────────────────
+//
+// While a developer has run `ta login --file` and lets a coding assistant
+// approve and apply drafts, the credential is present, so the gate accepts
+// agent-context approvals. That is a delegation, not a direct human action, and
+// it is recorded as one.
+//
+// Labeling convention for `actor_context`:
+//   * `agent_delegated`: accepted from a detected agent context because the
+//     credential holder's credential was present. Always recorded, with the
+//     detection reasons (`delegated_signals`) and the holder as the delegating owner.
+//   * absent (CLI records): a direct human action from a plain terminal. The CLI
+//     deliberately does NOT write `human_direct`, so old and new records read the
+//     same way for direct actions; `ACTOR_HUMAN_DIRECT` exists for display only.
+//   * `direct` (daemon records): the daemon, which sees every request, records
+//     `direct` for approve, deny and apply that arrived without an agent header.
+
+/// `actor_context` value for an action accepted from a detected agent context.
+pub const ACTOR_AGENT_DELEGATED: &str = "agent_delegated";
+/// Display-only name for a direct human action (never persisted; see above).
+pub const ACTOR_HUMAN_DIRECT: &str = "human_direct";
+
+const AGENT_SEEN_FILENAME: &str = "agent-context-seen";
+/// How long after the last sighting of an agent context delegation counts as active.
+pub const DELEGATION_ACTIVE_WINDOW_HOURS: i64 = 24;
+
+/// The credential holder: the OS user who ran `ta login`. Named as the
+/// delegating owner on delegated actions.
+pub fn credential_holder() -> String {
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown-user".to_string())
+}
+
+/// When an agent context was last seen at a gated action, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSighting {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub signals: Vec<String>,
+}
+
+/// Record that an agent context was seen at a gated action (accepted or
+/// refused). Stored in the per-user state directory, mode 0600.
+pub fn record_agent_context_seen(
+    state_dir: &Path,
+    ctx: &AgentContext,
+) -> Result<(), HumanCredentialError> {
+    record_agent_context_seen_at(state_dir, ctx, chrono::Utc::now())
+}
+
+/// As [`record_agent_context_seen`] with a supplied clock.
+pub fn record_agent_context_seen_at(
+    state_dir: &Path,
+    ctx: &AgentContext,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), HumanCredentialError> {
+    let mut body = now.to_rfc3339();
+    for s in &ctx.signals {
+        body.push('\n');
+        body.push_str(&s.replace('\n', " "));
+    }
+    write_private(&state_dir.join(AGENT_SEEN_FILENAME), &body)
+}
+
+/// The last agent-context sighting, if one was recorded and readable.
+pub fn last_agent_context_seen(state_dir: &Path) -> Option<AgentSighting> {
+    let text = std::fs::read_to_string(state_dir.join(AGENT_SEEN_FILENAME)).ok()?;
+    let mut lines = text.lines();
+    let at = chrono::DateTime::parse_from_rfc3339(lines.next()?.trim())
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(AgentSighting {
+        at,
+        signals: lines
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    })
+}
+
+/// The sighting, only when it happened within `window` of `now`.
+pub fn agent_context_seen_within(
+    state_dir: &Path,
+    window: chrono::Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<AgentSighting> {
+    last_agent_context_seen(state_dir).filter(|s| now - s.at <= window && s.at <= now + window)
+}
+
+fn humanize_age(age: chrono::Duration) -> String {
+    let mins = age.num_minutes().max(0);
+    if mins < 1 {
+        "just now".to_string()
+    } else if mins < 60 {
+        format!("{mins} minute(s) ago")
+    } else {
+        format!("{} hour(s) ago", age.num_hours())
+    }
+}
+
+/// The 'agent delegation active' line for `ta login status` and `ta status`:
+/// `Some` only when a credential exists and an agent context was seen within
+/// the last 24 hours. Pure: the caller supplies presence, sighting and clock.
+pub fn delegation_status_line(
+    credential_present: bool,
+    sighting: Option<&AgentSighting>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let sighting = sighting?;
+    if !credential_present
+        || now - sighting.at > chrono::Duration::hours(DELEGATION_ACTIVE_WINDOW_HOURS)
+    {
+        return None;
+    }
+    let reasons = if sighting.signals.is_empty() {
+        "no reasons recorded".to_string()
+    } else {
+        sighting.signals.join("; ")
+    };
+    Some(format!(
+        "agent delegation active: an agent context was seen {} ({reasons}), so approve, deny and \
+         apply from it are accepted on your credential and recorded as agent_delegated. \
+         Run `ta login logout` to switch back to Wayfinder-only approvals.",
+        humanize_age(now - sighting.at)
+    ))
+}
+
+/// True when a credential has been minted (its digest exists). Unlike
+/// [`credential_present`] it never loads the secret, so the daemon can use it
+/// without touching the keychain.
+pub fn credential_digest_present(state_dir: &Path) -> bool {
+    std::fs::read_to_string(state_dir.join(DIGEST_FILENAME))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// The `agent_delegation` object in `GET /api/status`: whether delegation is
+/// active (credential present and an agent context seen in the last 24 hours).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationStatus {
+    pub active: bool,
+    /// RFC 3339 time of the last recorded agent-context approval or sighting.
+    pub last_seen: Option<String>,
+    pub credential_present: bool,
+    /// Why that context was judged to be an agent.
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// Compute [`DelegationStatus`] from a credential flag and the last sighting.
+pub fn delegation_status(
+    credential_present: bool,
+    sighting: Option<&AgentSighting>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> DelegationStatus {
+    let recent =
+        sighting.filter(|s| now - s.at <= chrono::Duration::hours(DELEGATION_ACTIVE_WINDOW_HOURS));
+    DelegationStatus {
+        active: credential_present && recent.is_some(),
+        last_seen: sighting.map(|s| s.at.to_rfc3339()),
+        credential_present,
+        reasons: sighting.map(|s| s.signals.clone()).unwrap_or_default(),
+    }
+}
+
+impl DelegationStatus {
+    /// The 'agent delegation active' line, or `None` when not active. Used by
+    /// the CLI when it got this object from the daemon.
+    pub fn line(&self, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+        let at = chrono::DateTime::parse_from_rfc3339(self.last_seen.as_deref()?)
+            .ok()?
+            .with_timezone(&chrono::Utc);
+        let sighting = AgentSighting {
+            at,
+            signals: self.reasons.clone(),
+        };
+        delegation_status_line(self.credential_present && self.active, Some(&sighting), now)
+    }
+}
+
+// ── Actor-context header (advisory) ──────────────────────────────────────
+//
+// Approvals through the daemon cannot see the client's environment, so clients
+// that detect an agent context say so in `X-TA-Actor-Context`:
+//
+//   agent_delegated; reasons=CLAUDECODE%20is%20set,no%20interactive%20terminal
+//
+// Reasons are percent-encoded (URL-safe), at most `MAX_ACTOR_REASONS` of at
+// most `MAX_ACTOR_REASON_CHARS` characters, and the whole header stays under
+// `MAX_ACTOR_HEADER_BYTES`. Header absent means a direct human action. The
+// daemon ignores a malformed or oversize header (debug log), never errors.
+
+/// Set (to `1`) by the daemon on a `ta draft apply` it spawns for a request it
+/// already labeled, so the headless child does not label or log a sighting for
+/// an action a person took in Studio. Labels are advisory; this does not touch
+/// the approve/deny/apply gate.
+pub const DAEMON_RECORDED_ENV: &str = "TA_ACTOR_CONTEXT_RECORDED_BY_DAEMON";
+
+/// Value token of the header for a delegated action.
+pub const ACTOR_HEADER_VALUE: &str = ACTOR_AGENT_DELEGATED;
+/// Most reasons carried in the header.
+pub const MAX_ACTOR_REASONS: usize = 5;
+/// Longest single reason, in characters, before encoding.
+pub const MAX_ACTOR_REASON_CHARS: usize = 60;
+/// Longest accepted header value, in bytes.
+pub const MAX_ACTOR_HEADER_BYTES: usize = 512;
+
+fn percent_encode_reason(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'=') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode_reason(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The `X-TA-Actor-Context` value for a detected agent context.
+pub fn actor_context_header_value(ctx: &AgentContext) -> String {
+    let mut value = ACTOR_HEADER_VALUE.to_string();
+    let mut first = true;
+    for signal in ctx.signals.iter().take(MAX_ACTOR_REASONS) {
+        let reason: String = signal.chars().take(MAX_ACTOR_REASON_CHARS).collect();
+        let piece = percent_encode_reason(&reason);
+        let prefix = if first { "; reasons=" } else { "," };
+        if value.len() + prefix.len() + piece.len() > MAX_ACTOR_HEADER_BYTES {
+            break;
+        }
+        value.push_str(prefix);
+        value.push_str(&piece);
+        first = false;
+    }
+    value
+}
+
+/// Parse an `X-TA-Actor-Context` value into its reasons. `Err` carries why the
+/// value was rejected (for a debug log); callers ignore such a header.
+pub fn parse_actor_context_header(value: &str) -> Result<Vec<String>, String> {
+    if value.len() > MAX_ACTOR_HEADER_BYTES {
+        return Err(format!(
+            "value is {} bytes, over the {MAX_ACTOR_HEADER_BYTES} byte limit",
+            value.len()
+        ));
+    }
+    let value = value.trim();
+    let (kind, rest) = match value.split_once(';') {
+        Some((k, r)) => (k.trim(), Some(r.trim())),
+        None => (value, None),
+    };
+    if kind != ACTOR_HEADER_VALUE {
+        return Err(format!("unknown actor context '{kind}'"));
+    }
+    let Some(rest) = rest.filter(|r| !r.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let Some(list) = rest.strip_prefix("reasons=") else {
+        return Err("expected 'reasons=<list>' after the actor context".to_string());
+    };
+    let mut reasons = Vec::new();
+    for raw in list.split(',').filter(|r| !r.is_empty()) {
+        let decoded = percent_decode_reason(raw)
+            .ok_or_else(|| "a reason is not valid percent-encoded UTF-8".to_string())?;
+        if decoded.chars().any(char::is_control) {
+            return Err("a reason contains a control character".to_string());
+        }
+        if reasons.len() < MAX_ACTOR_REASONS {
+            reasons.push(decoded.chars().take(MAX_ACTOR_REASON_CHARS).collect());
+        }
+    }
+    Ok(reasons)
+}
+
+/// The same agent-marker detection the plugins use: environment only (no
+/// terminal or working-directory signals). Returns the reasons.
+pub fn agent_markers_from_env(env: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    detect_agent_context_from(env, Path::new(""), true)
+        .map(|c| c.signals)
+        .unwrap_or_default()
 }
 
 // ── Install identity ───────────────────────────────────────────────────────
@@ -749,5 +1054,129 @@ mod tests {
         assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
         assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
         assert!(base64_decode("TW*u").is_none());
+    }
+
+    // ── agent delegation ──
+
+    fn agent() -> AgentContext {
+        AgentContext {
+            signals: vec!["CLAUDECODE is set".into(), "TA_AGENT_ID is set".into()],
+        }
+    }
+
+    #[test]
+    fn agent_sighting_round_trips_with_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        assert!(last_agent_context_seen(dir.path()).is_none());
+        record_agent_context_seen_at(dir.path(), &agent(), now).unwrap();
+        let s = last_agent_context_seen(dir.path()).unwrap();
+        assert_eq!(s.signals, agent().signals);
+        assert!((s.at - now).num_seconds().abs() <= 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("agent-context-seen"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn seen_within_respects_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        record_agent_context_seen_at(dir.path(), &agent(), now - chrono::Duration::hours(1))
+            .unwrap();
+        let day = chrono::Duration::hours(24);
+        assert!(agent_context_seen_within(dir.path(), day, now).is_some());
+        record_agent_context_seen_at(dir.path(), &agent(), now - chrono::Duration::hours(25))
+            .unwrap();
+        assert!(agent_context_seen_within(dir.path(), day, now).is_none());
+    }
+
+    #[test]
+    fn delegation_line_needs_credential_and_a_recent_sighting() {
+        let now = chrono::Utc::now();
+        let recent = AgentSighting {
+            at: now - chrono::Duration::hours(1),
+            signals: agent().signals,
+        };
+        let old = AgentSighting {
+            at: now - chrono::Duration::hours(25),
+            signals: vec![],
+        };
+        let line = delegation_status_line(true, Some(&recent), now).unwrap();
+        assert!(line.starts_with("agent delegation active"), "{line}");
+        assert!(line.contains("1 hour(s) ago"), "{line}");
+        assert!(line.contains("CLAUDECODE is set"), "{line}");
+        assert!(line.contains("ta login logout"), "{line}");
+        assert!(line.contains("Wayfinder-only"), "{line}");
+        assert!(delegation_status_line(false, Some(&recent), now).is_none());
+        assert!(delegation_status_line(true, Some(&old), now).is_none());
+        assert!(delegation_status_line(true, None, now).is_none());
+    }
+
+    #[test]
+    fn credential_holder_is_never_empty() {
+        assert!(!credential_holder().is_empty());
+    }
+
+    #[test]
+    fn actor_header_round_trips_and_is_url_safe() {
+        let ctx = AgentContext {
+            signals: vec![
+                "CLAUDECODE is set".into(),
+                "no interactive terminal (headless launch)".into(),
+            ],
+        };
+        let v = actor_context_header_value(&ctx);
+        assert!(v.starts_with("agent_delegated; reasons="), "{v}");
+        assert!(!v["agent_delegated; ".len()..].contains(' '), "{v}");
+        let back = parse_actor_context_header(&v).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0], "CLAUDECODE is set");
+    }
+
+    #[test]
+    fn actor_header_is_capped_on_both_ends() {
+        let ctx = AgentContext {
+            signals: (0..20).map(|i| format!("{i}{}", "x".repeat(200))).collect(),
+        };
+        let v = actor_context_header_value(&ctx);
+        assert!(v.len() <= MAX_ACTOR_HEADER_BYTES, "{}", v.len());
+        let back = parse_actor_context_header(&v).unwrap();
+        assert!(back.len() <= MAX_ACTOR_REASONS);
+        assert!(back
+            .iter()
+            .all(|r| r.chars().count() <= MAX_ACTOR_REASON_CHARS));
+    }
+
+    #[test]
+    fn malformed_actor_headers_are_rejected_with_a_reason() {
+        for bad in [
+            "human_direct",
+            "agent_delegated; nope=1",
+            "agent_delegated; reasons=%ZZ",
+            "agent_delegated; reasons=%FF%FE",
+            "agent_delegated; reasons=a%0Ab",
+            "",
+        ] {
+            assert!(parse_actor_context_header(bad).is_err(), "{bad}");
+        }
+        let big = format!("agent_delegated; reasons={}", "a".repeat(600));
+        assert!(parse_actor_context_header(&big)
+            .unwrap_err()
+            .contains("over the"));
+        assert_eq!(parse_actor_context_header("agent_delegated"), Ok(vec![]));
+    }
+
+    #[test]
+    fn env_markers_match_the_cli_detection() {
+        let env = |k: &str| (k == "CLAUDECODE").then(|| "1".to_string());
+        assert_eq!(agent_markers_from_env(&env), vec!["CLAUDECODE is set"]);
+        assert!(agent_markers_from_env(&|_| None).is_empty());
     }
 }

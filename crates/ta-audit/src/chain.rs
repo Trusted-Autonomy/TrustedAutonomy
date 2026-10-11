@@ -14,6 +14,9 @@
 // recompute, compare.
 //
 // Key format: 64 lowercase hex characters (32 raw bytes, SHA-256 block size).
+// Key custody: the daemon-only state directory (see ta-credentials `state`),
+// never the project tree, so an agent that can rewrite the ledger cannot also
+// recompute the signatures.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,11 +24,23 @@ use std::path::{Path, PathBuf};
 use ring::{hmac, rand::SystemRandom};
 use sha2::Digest as _;
 
+use ta_credentials::state::{
+    load_or_create_secret, load_secret, ControlSecret, CustodyOpts, ProjectState, StateError,
+    StateLocator,
+};
+
 use crate::error::AuditError;
+
+fn state_err(e: StateError) -> AuditError {
+    AuditError::AttestationFailed(e.to_string())
+}
 
 // ── Key management ─────────────────────────────────────────────────────────────
 
-/// Manage the per-project HMAC key stored in `.ta/audit.key`.
+/// The per-project audit HMAC key. It lives in the daemon-only state
+/// directory (OS keychain or an owner-only file there), not next to the log
+/// it signs. A legacy `.ta/audit.key` is still read in the default posture,
+/// with a loud warning, and refused under `strict`.
 pub struct AuditHmacKey {
     raw: Vec<u8>,
     path: PathBuf,
@@ -58,9 +73,79 @@ impl AuditHmacKey {
         Ok(Self { raw, path })
     }
 
-    /// Standard path for the audit key relative to the project root.
+    /// The OLD in-project path of the audit key. Kept so tools can detect and
+    /// migrate it; new keys are never written here.
     pub fn path_for(project_root: &Path) -> PathBuf {
         project_root.join(".ta").join("audit.key")
+    }
+
+    /// Load the project's audit key from the state directory (or the legacy
+    /// location in the default posture). `Ok(None)` when no key exists.
+    pub fn load_for_project(project_root: &Path) -> Result<Option<Self>, AuditError> {
+        let locator = StateLocator::from_env();
+        let Some(ps) = ProjectState::locate(project_root, &locator).map_err(state_err)? else {
+            // No state directory yet: only a legacy key could exist.
+            let legacy = Self::path_for(project_root);
+            if legacy.is_file() {
+                let ps = ProjectState::open(project_root, &locator).map_err(state_err)?;
+                return Self::load_from_state(&ps, CustodyOpts::from_env(&locator));
+            }
+            return Ok(None);
+        };
+        Self::load_from_state(&ps, CustodyOpts::from_env(&locator))
+    }
+
+    /// Load the project's audit key, generating it in the state directory
+    /// when none exists.
+    pub fn load_or_generate_for_project(project_root: &Path) -> Result<Self, AuditError> {
+        let locator = StateLocator::from_env();
+        let ps = ProjectState::open(project_root, &locator).map_err(state_err)?;
+        Self::load_or_generate_in_state(&ps, CustodyOpts::from_env(&locator))
+    }
+
+    /// [`load_for_project`](Self::load_for_project) with explicit state and custody.
+    pub fn load_from_state(
+        ps: &ProjectState,
+        opts: CustodyOpts,
+    ) -> Result<Option<Self>, AuditError> {
+        match load_secret(ps, ControlSecret::AuditKey, opts).map_err(state_err)? {
+            Some(found) => Self::from_hex(&found.value, &found.origin.describe()).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// [`load_or_generate_for_project`](Self::load_or_generate_for_project) with
+    /// explicit state and custody.
+    pub fn load_or_generate_in_state(
+        ps: &ProjectState,
+        opts: CustodyOpts,
+    ) -> Result<Self, AuditError> {
+        let generated = hex_encode(&Self::generate_key()?);
+        let (found, _created) =
+            load_or_create_secret(ps, ControlSecret::AuditKey, opts, || generated)
+                .map_err(state_err)?;
+        Self::from_hex(&found.value, &found.origin.describe())
+    }
+
+    fn from_hex(hex: &str, location: &str) -> Result<Self, AuditError> {
+        let hex = hex.trim();
+        if hex.len() != 64 {
+            return Err(AuditError::AttestationFailed(format!(
+                "the audit key at {location} has the wrong length {} (expected 64 hex chars). \
+                 Restore it from a backup; if it is lost, delete it and run \
+                 `ta audit ledger checkpoint --create-key` (older signatures will no longer verify)",
+                hex.len()
+            )));
+        }
+        let raw = hex_decode(hex).map_err(|e| {
+            AuditError::AttestationFailed(format!(
+                "the audit key at {location} contains invalid hex: {e}"
+            ))
+        })?;
+        Ok(Self {
+            raw,
+            path: PathBuf::from(location),
+        })
     }
 
     fn generate_key() -> Result<Vec<u8>, AuditError> {

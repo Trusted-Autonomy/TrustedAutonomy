@@ -5688,6 +5688,76 @@ refusing to approve: this looks like an agent context (CLAUDECODE is set; ...) a
 
 The commands the daemon runs for you (`POST /api/cmd`) run without a terminal, so the machine running the daemon must have had `ta login` run on it.
 
+### Letting a Coding Assistant Approve for You (Agent Delegation)
+
+While approvals do not yet happen in Wayfinder, you can run `ta login --file` and let a coding assistant run `ta draft approve`, `ta draft deny` and `ta draft apply` for you. Because your credential is present, the CLI accepts those commands from an agent context. TA records them honestly as delegated, not as something you did by hand.
+
+For every approve, deny and apply accepted from a detected agent context:
+
+- the draft record gains an `action_contexts` entry with `actor_context: agent_delegated`, the action, the detection reasons (`delegated_signals`), the time, and your OS user name as `delegating_owner`;
+- `approved_by` (or `denied_by`) names you, the credential holder, as the delegating owner, whatever identity the agent passed with `--as` or `--reviewer`;
+- the audit log gets an entry for the same action with the same `actor_context`, `delegating_owner` and `delegated_signals` in its metadata.
+
+Actions from a plain terminal through the `ta` CLI carry no `actor_context` at all, so a CLI record without the label is a direct human action. The daemon, which sees every request, records `actor_context: direct` for approvals that reach it without an agent header.
+
+#### Approvals through the daemon
+
+Studio, the shell, the editor plugins, the Discord listener and scripts approve through the daemon (`POST /api/drafts/{id}/approve`, `/deny`, `/apply` and `POST /api/attention/{id}/act`). The daemon cannot see the caller's environment, so a client that detects an agent context says so in an advisory header:
+
+```
+X-TA-Actor-Context: agent_delegated; reasons=CLAUDECODE%20is%20set,TA_CHAT_MODE%20is%20set
+```
+
+- The `ta` CLI, `ta shell` and the other daemon clients in the CLI, the VS Code, Neovim and JetBrains plugins, and the Discord listener send it when their environment carries an agent marker (`TA_AGENT_CONTEXT`, `TA_IS_STAGING`, `TA_AGENT_ID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `TA_CHAT_MODE`, or `TA_CALLER_MODE` other than `normal`). The CLI also counts a `.ta/staging` working directory and a missing terminal.
+- Reasons are percent-encoded, at most five, each at most 60 characters, and the whole value is capped at 512 bytes. A header that is malformed or oversize is ignored (a debug line in the daemon log) and the action is treated as direct. It never makes an approval fail.
+- No header means a direct human action.
+- The header is **advisory, for the audit trail only**. An agent can omit it, so it is not a security control. The credential gate is unchanged: a request without proof of a human is still refused, with or without the header.
+
+For a delegated approve, deny, apply or `/act` the daemon writes `actor_context: agent_delegated` and the reasons next to the credential holder, and `approved_by` (or `denied_by`) names the holder as the delegating owner. For `/act` the same fields land in the attention resolution record and the human-action audit file. An example audit entry (`.ta/audit.jsonl`, other fields such as the hash chain omitted); `agent_id` is the delegating owner:
+
+```json
+{
+  "timestamp": "2026-10-11T09:14:02Z",
+  "agent_id": "michael",
+  "action": "approval",
+  "target_uri": "draft://3f2a9c1e-0000-4000-8000-000000000000",
+  "metadata": {
+    "action": "approve",
+    "actor_context": "agent_delegated",
+    "delegating_owner": "michael",
+    "delegated_signals": ["CLAUDECODE is set", "TA_CHAT_MODE is set"],
+    "source": "daemon",
+    "route": "POST /api/drafts/{id}/approve"
+  }
+}
+```
+
+A background `apply` started by the daemon is labeled once, by the daemon, when the request is accepted.
+
+`GET /api/status` reports the current picture:
+
+```json
+"agent_delegation": {
+  "active": true,
+  "last_seen": "2026-10-11T09:14:02+00:00",
+  "credential_present": true,
+  "reasons": ["CLAUDECODE is set"]
+}
+```
+
+`active` is true while a credential exists and an agent context was seen at an approve, deny or apply in the last 24 hours. `last_seen` is null until one is seen. Like the rest of `/api/status`, it can lag by a few seconds.
+
+`ta login status` and `ta status` show an `agent delegation active` line while a credential exists and an agent context was seen at a gated action in the last 24 hours. They ask the daemon first and fall back to the local sighting file when the daemon is not reachable (or is too old to report the field). The line says how long ago, the reasons, and how to turn delegation off:
+
+```bash
+ta login status
+# Delegation:       agent delegation active: an agent context was seen 1 hour(s) ago (CLAUDECODE is set), ...
+
+ta login logout     # switch back to Wayfinder-only approvals (attention feed and signed assertions)
+```
+
+After `ta login logout`, approve, deny and apply from an agent context are refused until you run `ta login` again. As with the rest of the credential gate, this is advisory while agents run as your OS user.
+
 ### Review Packet: Who Asked, Who Decided, Who Built
 
 Work an agent-side component originates (origin `cos` or `chat`) reaches a reviewer who never saw the request. The review packet tells them. The component launching the goal supplies it:
@@ -5811,6 +5881,75 @@ curl -N 'http://127.0.0.1:7700/api/events?types=attention.created,attention.upda
 ```
 
 `attention.created` and `attention.updated` carry the item as `item`; `attention.resolved` carries `item_id`, `kind` and `project` and is sent exactly once per item. Items that exist when the daemon starts are not replayed as new. The stream is an optimization; polling with `since` is enough.
+
+### Where TA Keeps Its Secrets (the State Directory)
+
+TA's signing keys and tokens are kept **outside your project**, in a per-user state directory, so an agent working in a staging copy cannot read them with `../../`. Nothing secret is written under `<project>/.ta/`.
+
+Print every location for the current project (this also creates the project's state directory on first use):
+
+```bash
+ta show state
+```
+
+**State directory locations** (the `<project-id>` is explained below):
+
+| OS | State root | Project state |
+|---|---|---|
+| macOS | `~/Library/Application Support/TrustedAutonomy` | `<root>/projects/<project-id>/` |
+| Linux | `$XDG_STATE_HOME/trusted-autonomy` (default `~/.local/state/trusted-autonomy`) | `<root>/projects/<project-id>/` |
+| Windows | `%LOCALAPPDATA%\TrustedAutonomy` | `<root>\projects\<project-id>\` |
+
+Set `TA_STATE_DIR` to use a different root (containers, installers that pre-seed a directory). Inside a project's state directory:
+
+| Path | Holds |
+|---|---|
+| `secrets/broker-root-key`, `secrets/audit-key` | The capability-token root key and the audit-log signing key, **only when the OS keychain is not used** (owner-only, mode 0600) |
+| `daemon-tokens.json` | Daemon API bearer tokens |
+| `tokens/` | Approval tokens from `ta token create` |
+| `nats-jetstream/` | NATS JetStream data (point the NATS server's store directory here) |
+| `audit-checkpoints.jsonl` | Signed audit-chain checkpoints |
+| `config-hashes.json` | SHA-256 pins of persona and agent-config files |
+| `project-path` | The project path that owns this directory |
+
+**Key custody.** The root key and audit key go in the OS keychain when one is usable: macOS Keychain, Linux Secret Service, and on Windows the Credential Manager (which stores items protected by DPAPI, scoped to your user account). The keychain service is `trusted-autonomy-control-plane` and the item name is `<project-id>/<broker-root-key|audit-key>`. If the keychain is not usable, TA writes an owner-only file under `secrets/` and prints a warning saying so. Set `TA_NO_KEYCHAIN=1` to skip the keychain entirely (headless Linux, CI). On Windows the state directory sits under your profile, which already restricts access to your account.
+
+**Project id.** The first time a project needs a secret, TA writes a random-salted id such as `p_3f9c...` into `<project>/.ta/project-id` (not a secret; it is git-ignored). Two projects never share a state directory: if you copy a project, the copy gets its own id, and if you move a project, it keeps its id and its keys.
+
+**Daemon pid and port file.** This does not move. The daemon still writes `<project>/.ta/daemon.pid`, with the lines `pid=`, `bind=host:port`, `port=` and `log=`. Installers and tools should keep reading it from there.
+
+#### Moving an existing install out of the project tree
+
+Installs created before this change have keys and tokens inside `.ta/`. TA keeps working with them, but warns every time and tells you what to do:
+
+```bash
+ta doctor            # reports old-location keys, tokens and NATS data
+ta doctor --fix      # moves them to the state directory
+ta daemon restart    # the daemon picks up the new locations
+```
+
+`ta doctor --fix` copies each item, **re-reads the copy to verify it**, and only then removes the old one. If the new location already holds a different value, nothing is deleted: both are kept and you are told which to resolve. It is safe to run again, and every move, conflict or failure is written to the audit log (names and locations only, never the secret). Stop NATS before running it if it was using the old `nats-jetstream` directory. It also removes any bearer token an older version left in `.ta/team-sessions/*/state.json` or in a staging workspace.
+
+**Strict posture.** Under `strict`, TA refuses any old-location secret instead of reading it, and the daemon will not start while one exists. Turn it on with `TA_POSTURE=strict`, or by putting the word `strict` in a file named `posture` in the state root (that file is outside every project, so an agent cannot loosen it from staging). Run `ta doctor --fix` first; `ta doctor` reports old-location secrets as a failure under `strict`.
+
+#### Team-session tokens are never stored
+
+A team session's whiteboard token is no longer saved in `state.json`. When the daemon launches a role it mints a fresh token for that role and passes it in the launched process's environment (`TA_WHITEBOARD_TOKEN`, `TA_WHITEBOARD_TEAM_SESSION`, `TA_WHITEBOARD_SOURCE_DIR`). The agent's MCP config contains only the `${TA_WHITEBOARD_TOKEN:-}` placeholder. No file under `<project>/.ta/` contains a token.
+
+#### Signed audit checkpoints
+
+The goal audit ledger is hash-chained, but someone who can rewrite the file can rewrite the whole chain. When a project has an audit key, TA signs the ledger's head into the state directory every 10 entries, so truncation or rewriting is detected even if the chain was recomputed.
+
+```bash
+ta audit ledger checkpoint --create-key   # create the audit key (kept in the state directory) and sign now
+ta audit ledger checkpoint                # sign the current head on demand
+ta audit ledger verify                    # checks the chain, the HMACs and the signed checkpoints
+ta audit ledger gc --older-than 1y        # records a signed "new epoch" so the shorter ledger is accepted
+```
+
+Persona and agent-config hashes are pinned in `config-hashes.json` in the same directory, outside anything a project file can edit.
+
+**Honest limit.** These locations stop an agent from reaching the secrets through the project tree and keep them out of backups of it. A process running as your own OS user, without the OS sandbox, can still read your state directory or ask the keychain. The sandbox phases make that a wall.
 
 ### Human-Asserted Actions
 
@@ -5983,6 +6122,23 @@ The scanner runs over all staged artifact text content at `ta draft apply` time 
 | `DocExample` | `[info]` | Recognized documentation placeholder (`your_token_here`, `<your_token>`, `...`) | Suppressed by default — never blocks |
 
 This means `export TA_SLACK_BOT_TOKEN=your_token_here` in `USAGE.md` is silently ignored, while a real `xoxb-1234-...` token is flagged as `[error]`.
+
+**Repository secret scan (contributors)**
+
+CI runs a fast pattern scan over every file in the repository and fails on a real-shaped secret (Stripe-style `sk-live-`/`sk_test_` keys, Anthropic and OpenAI keys, GitHub tokens, Slack tokens, AWS key ids, Google API keys, PEM private key blocks) outside an allowlisted path. Run it before pushing:
+
+```bash
+scripts/secret-scan.sh              # scan the repo; prints file:line and the pattern on a hit
+scripts/secret-scan.sh --self-test  # prove the scanner catches a planted secret
+```
+
+Placeholders such as `sk-ant-...`, `ghp_xxx` or `your_token_here` do not match and need no allowlisting. In tests, use a plain sentinel (`FAKE_API_KEY_FOR_TESTS`). When a test must exercise a scanner or redactor with a key-shaped value, build it at runtime so the literal is not in source:
+
+```rust
+let key = format!("{}{}", "sk-ant-api03-", "A".repeat(24));
+```
+
+If a shaped literal must stay verbatim, add its path glob to `scripts/secret-scan.allowlist` with a comment saying why. Lines may use CRLF endings, and `*` matches across `/`. Paths covered by `.gitguardian.yaml` should stay in sync with the allowlist.
 
 **Scan modes** (set via `[security] level` or override):
 

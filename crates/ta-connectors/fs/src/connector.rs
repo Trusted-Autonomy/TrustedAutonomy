@@ -315,6 +315,7 @@ impl<S: ChangeStore> FsConnector<S> {
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            action_contexts: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],

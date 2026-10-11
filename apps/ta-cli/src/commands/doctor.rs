@@ -118,6 +118,41 @@ pub fn execute(
     }
 }
 
+/// Old-location keys, tokens and NATS data inside the project tree, or bearer
+/// tokens left in team-session state. Fails under the `strict` posture.
+fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
+    use ta_credentials::state::Posture;
+    let summary = super::state_secrets::summarize(&config.workspace_root);
+    if summary.is_clean() {
+        return CheckResult::ok(
+            "secrets",
+            "no control-plane keys or tokens in the project tree",
+        );
+    }
+    let mut parts: Vec<String> = summary
+        .legacy
+        .iter()
+        .map(|f| format!("{} ({})", f.path.display(), f.what))
+        .collect();
+    parts.extend(
+        summary
+            .token_files
+            .iter()
+            .map(|f| format!("{} (live bearer token)", f.display())),
+    );
+    let detail = format!(
+        "{} item(s) inside the project tree, reachable by any agent: {}",
+        parts.len(),
+        parts.join("; ")
+    );
+    let fix = "Run: ta doctor --fix   (copies are verified before the old ones are removed)";
+    if summary.posture == Posture::Strict {
+        CheckResult::fail("secrets", detail, fix)
+    } else {
+        CheckResult::warn("secrets", detail, fix)
+    }
+}
+
 fn print_checks(checks: &[CheckResult]) {
     for check in checks {
         let tag = match check.status {
@@ -171,6 +206,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
 
     // 9. VCS + gitignore.
     results.extend(check_vcs(config));
+
+    // 9b. Control-plane secrets must not live in the project tree.
+    results.push(check_control_plane_secrets(config));
 
     // 10. GC health.
     results.extend(check_gc(config));
@@ -917,7 +955,11 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
     let signals = super::health_signals::compute_health_signals(config);
     let vcs_gaps = vcs_gitignore_gaps(config);
     let orphans = find_orphaned_claims(config);
-    let total = signals.len() + usize::from(!vcs_gaps.is_empty()) + orphans.len();
+    let secrets_pending = !super::state_secrets::summarize(&config.workspace_root).is_clean();
+    let total = signals.len()
+        + usize::from(!vcs_gaps.is_empty())
+        + orphans.len()
+        + usize::from(secrets_pending);
 
     if total == 0 {
         println!("No health issues detected — nothing to fix.");
@@ -931,6 +973,14 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
 
     let mut fixed = 0usize;
     let mut skipped = 0usize;
+
+    // Control-plane secrets first: they are the highest-risk finding.
+    if secrets_pending {
+        let (f, s) = super::state_secrets::fix(config, yes)?;
+        fixed += f;
+        skipped += s;
+        println!();
+    }
 
     for signal in &signals {
         let label = match signal.severity {

@@ -167,7 +167,7 @@ mod tests {
         let cred = vault
             .add("GITHUB_TOKEN", "github", "ghp_real_secret", vec![])
             .unwrap();
-        let broker = ta_credential_broker::CredentialBroker::open(&dir.path().join(".ta")).unwrap();
+        let broker = ta_credential_broker::CredentialBroker::open_for_project(dir.path()).unwrap();
         let granted = broker.grant(cred.id, "agent-1", vec![], 3600).unwrap();
 
         std::env::set_var("TA_SESSION_TOKEN_GITHUB_TOKEN", &granted.token);

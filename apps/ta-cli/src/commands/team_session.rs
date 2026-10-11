@@ -14,11 +14,6 @@ use serde::{Deserialize, Serialize};
 use ta_policy::business_budget::BudgetGuardrails;
 use ta_workflow::WorkflowDefinition;
 
-/// Whiteboard scope token TTL, in seconds (24h) — shared with `ta-daemon`'s
-/// `token_refresh.rs` so both the initial mint (here) and every re-mint
-/// agree on the token's lifetime.
-pub(crate) const WHITEBOARD_TOKEN_TTL_SECS: i64 = 86400;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TeamSessionStatus {
@@ -64,19 +59,12 @@ struct TeamSessionConfig {
     /// session-level `objective` and prior findings did.
     #[serde(default)]
     role_prompts: std::collections::HashMap<String, String>,
-    /// Biscuit-backed grant scoped to `whiteboard:team_session:<name>`,
-    /// minted at `start()` time when `[whiteboard] enabled = true`. `None`
-    /// when whiteboard coordination is off for this project. Threaded into
-    /// each role's launch so agent processes can call the new
-    /// `ta_whiteboard_*` MCP tools.
+    /// True when the project has `[whiteboard] enabled = true`. The daemon
+    /// then mints a fresh per-role token at each launch and passes it in the
+    /// launched process's environment; no token is stored (red-team CR-03).
+    /// Mirrors `ta-daemon`'s `TeamSessionConfig.whiteboard_enabled`.
     #[serde(default)]
-    whiteboard_token: Option<String>,
-    /// When `whiteboard_token` expires (v0.17.11.12) — the daemon's
-    /// `token_refresh.rs` re-mints it well before this passes. Mirrors
-    /// `ta-daemon`'s `TeamSessionConfig.whiteboard_token_expires_at`
-    /// field-for-field.
-    #[serde(default)]
-    whiteboard_token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    whiteboard_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,44 +461,11 @@ fn start(
         .unwrap_or_default();
 
     let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
-    // Minted here with a fixed TTL (WHITEBOARD_TOKEN_TTL_SECS, shared with
-    // ta-daemon's token_refresh.rs so both sides agree on the lifetime) --
-    // the daemon's periodic refresh task re-mints it well before it expires
-    // and updates whiteboard_token/whiteboard_token_expires_at together in
-    // state.json, so a long-running session never actually hits the old
-    // "403 after 24h" failure mode (v0.17.11.12).
-    let (whiteboard_token, whiteboard_token_expires_at) = if whiteboard_config.enabled {
-        let broker_dir = project_root.join(".ta");
-        match ta_credential_broker::CredentialBroker::open(&broker_dir) {
-            Ok(broker) => {
-                let scope = format!("whiteboard:team_session:{name}");
-                match broker.grant(
-                    uuid::Uuid::new_v4(),
-                    name,
-                    vec![scope],
-                    WHITEBOARD_TOKEN_TTL_SECS as u64,
-                ) {
-                    Ok(granted) => (
-                        Some(granted.token),
-                        Some(
-                            chrono::Utc::now()
-                                + chrono::Duration::seconds(WHITEBOARD_TOKEN_TTL_SECS),
-                        ),
-                    ),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "team-session: failed to mint whiteboard scope token, whiteboard coordination will be unavailable for this session");
-                        (None, None)
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "team-session: failed to open credential broker, whiteboard coordination will be unavailable for this session");
-                (None, None)
-            }
-        }
-    } else {
-        (None, None)
-    };
+    // No token is minted or stored here (red-team CR-03). The daemon mints a
+    // fresh per-role token at each role launch and hands it to the launched
+    // process in its environment, so nothing token-shaped is ever written to
+    // `state.json`.
+    let whiteboard_enabled = whiteboard_config.enabled;
 
     let now = chrono::Utc::now();
     let state = TeamSessionState {
@@ -522,8 +477,7 @@ fn start(
             objective: objective.to_string(),
             budget,
             role_prompts,
-            whiteboard_token,
-            whiteboard_token_expires_at,
+            whiteboard_enabled,
         },
         stages,
         wake_on_demand_listeners,
@@ -1040,7 +994,7 @@ budget:
     }
 
     #[test]
-    fn start_mints_a_whiteboard_scope_token_when_whiteboard_enabled() {
+    fn start_marks_the_whiteboard_enabled_but_stores_no_token_anywhere() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
         std::fs::write(
@@ -1063,19 +1017,15 @@ budget:
         .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
-        assert!(state.config.whiteboard_token.is_some());
-        let expires_at = state
-            .config
-            .whiteboard_token_expires_at
-            .expect("a minted token must carry an expiry");
-        let expected = chrono::Utc::now() + chrono::Duration::seconds(WHITEBOARD_TOKEN_TTL_SECS);
-        // Allow a few seconds of test-execution slack rather than asserting
-        // exact equality against a clock read at a slightly different instant.
-        assert!((expected - expires_at).num_seconds().abs() < 5);
+        assert!(state.config.whiteboard_enabled);
+        let raw =
+            std::fs::read_to_string(session_dir(dir.path(), "sess-1").join("state.json")).unwrap();
+        assert!(!raw.contains("whiteboard_token"), "{raw}");
+        assert!(!dir.path().join(".ta/broker_root.key").exists());
     }
 
     #[test]
-    fn start_does_not_mint_a_whiteboard_token_when_whiteboard_disabled() {
+    fn start_does_not_enable_the_whiteboard_when_it_is_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let workflow_path = write_role_workflow(dir.path());
 
@@ -1092,8 +1042,7 @@ budget:
         .unwrap();
 
         let state = load_state(dir.path(), "sess-1").unwrap();
-        assert!(state.config.whiteboard_token.is_none());
-        assert!(state.config.whiteboard_token_expires_at.is_none());
+        assert!(!state.config.whiteboard_enabled);
     }
 
     #[test]

@@ -27,6 +27,38 @@ local function human_credential()
   return text ~= "" and text or nil
 end
 
+-- Advisory X-TA-Actor-Context value when nvim was launched from an agent (same
+-- environment markers the `ta` CLI checks), else nil. The daemon records it as
+-- actor_context = agent_delegated in the audit trail. Not a security control.
+local function actor_context()
+  local reasons = {}
+  for _, name in ipairs({ "TA_AGENT_CONTEXT", "TA_IS_STAGING", "TA_AGENT_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT" }) do
+    local v = os.getenv(name)
+    if v and v ~= "" then
+      table.insert(reasons, name .. " is set")
+    end
+  end
+  local mode = os.getenv("TA_CALLER_MODE")
+  if mode and mode ~= "" and mode ~= "normal" then
+    table.insert(reasons, "TA_CALLER_MODE=" .. mode)
+  end
+  local chat = os.getenv("TA_CHAT_MODE")
+  if chat and chat ~= "" then
+    table.insert(reasons, "TA_CHAT_MODE is set")
+  end
+  if #reasons == 0 then
+    return nil
+  end
+  local encoded = {}
+  for i = 1, math.min(#reasons, 5) do
+    local r = reasons[i]:sub(1, 60):gsub("[^%w%._%-=]", function(c)
+      return string.format("%%%02X", string.byte(c))
+    end)
+    table.insert(encoded, r)
+  end
+  return "agent_delegated; reasons=" .. table.concat(encoded, ",")
+end
+
 local function build_args(method, path, body_json)
   local c = cfg()
   local args = {
@@ -44,6 +76,11 @@ local function build_args(method, path, body_json)
   if credential then
     table.insert(args, "-H")
     table.insert(args, "X-TA-Human-Credential: " .. credential)
+  end
+  local actor = actor_context()
+  if actor then
+    table.insert(args, "-H")
+    table.insert(args, "X-TA-Actor-Context: " .. actor)
   end
   if body_json then
     table.insert(args, "-d")

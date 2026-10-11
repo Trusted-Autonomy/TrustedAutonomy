@@ -1822,7 +1822,10 @@ impl TokenScope {
     }
 }
 
-/// Manages bearer tokens stored in `.ta/daemon-tokens.json` (v0.17.0.9).
+/// Manages bearer tokens stored in `daemon-tokens.json` in the per-user TA
+/// state directory (outside the project tree; v0.17.0.9). An old-location
+/// `.ta/daemon-tokens.json` is still read, with a warning, in the default
+/// posture until `ta doctor --fix` moves it.
 ///
 /// Uses an in-process `Mutex<Vec<TokenRecord>>` cache so `validate()` does not
 /// hit disk on every request. Writes use atomic rename (write-to-tmp + rename)
@@ -1845,8 +1848,34 @@ impl Clone for TokenStore {
 impl TokenStore {
     pub fn new(project_root: &Path) -> Self {
         Self {
-            tokens_path: project_root.join(".ta").join("daemon-tokens.json"),
+            tokens_path: Self::resolve_path(project_root),
             cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn resolve_path(project_root: &Path) -> PathBuf {
+        use ta_credentials::state::{
+            resolve_moved_path, MovedItem, Posture, ProjectState, StateLocator,
+        };
+        let locator = StateLocator::from_env();
+        let posture = Posture::resolve(&locator);
+        match ProjectState::open(project_root, &locator) {
+            Ok(ps) => match resolve_moved_path(&ps, MovedItem::DaemonTokens, posture) {
+                Ok(path) => path,
+                Err(e) => {
+                    // Strict posture with an old-location file: do NOT read it.
+                    tracing::error!(error = %e, "daemon API tokens unavailable");
+                    MovedItem::DaemonTokens.new_path(&ps)
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    project = %project_root.display(),
+                    error = %e,
+                    "could not open the TA state directory; falling back to the project path for daemon tokens"
+                );
+                project_root.join(".ta").join("daemon-tokens.json")
+            }
         }
     }
 

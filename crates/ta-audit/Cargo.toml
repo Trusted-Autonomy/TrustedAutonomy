@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 ring = { workspace = true }
 base64 = { workspace = true }
+ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.1" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

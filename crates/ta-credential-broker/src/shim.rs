@@ -116,9 +116,11 @@ pub fn resolve_for_host(
     };
 
     let broker_dir = project_root.join(".ta");
-    let broker = CredentialBroker::open(&broker_dir).map_err(|e| ShimError::BrokerUnavailable {
-        path: broker_dir.display().to_string(),
-        reason: e.to_string(),
+    let broker = CredentialBroker::open_for_project(project_root).map_err(|e| {
+        ShimError::BrokerUnavailable {
+            path: broker_dir.display().to_string(),
+            reason: e.to_string(),
+        }
     })?;
     let grant = broker
         .verify(&session_token)
@@ -180,7 +182,7 @@ mod tests {
         cred_config.use_keychain = false;
         let mut vault = FileVault::open(&cred_config).unwrap();
         let cred = vault.add(name, "github", secret, vec![]).unwrap();
-        let broker = CredentialBroker::open(&project_root.join(".ta")).unwrap();
+        let broker = CredentialBroker::open_for_project(project_root).unwrap();
         (cred.id, broker)
     }
 

@@ -816,11 +816,13 @@ fn resolve_connector_authorization(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| workspace_root.join(".ta"));
-    let Ok(broker) = ta_credential_broker::CredentialBroker::open(&broker_dir) else {
+    let Ok(broker) = ta_credential_broker::CredentialBroker::open_for_project(workspace_root)
+    else {
         return ConnectorAuthorization::Error(McpError::internal_error(
             format!(
                 "connector '{connector_id}' is broker_mediated but the credential broker at \
-                 {} could not be opened",
+                 {} could not be opened. Check that the TA state directory is writable \
+                 (or run `ta doctor`)",
                 broker_dir.display()
             ),
             None,
@@ -1633,11 +1635,13 @@ else:
             .add(
                 "PAPER_API_KEY",
                 "paper-trading",
-                "sk-live-supersecret-do-not-leak",
+                "test-secret-sentinel-do-not-leak",
                 vec!["trade.write".into()],
             )
             .unwrap();
-        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         let granted = broker
             .grant(cred.id, "test-agent", vec!["trade.write".into()], 3600)
             .unwrap();
@@ -1659,7 +1663,7 @@ else:
         let text = serde_json::to_string(&result.content[0]).unwrap();
 
         assert!(
-            !text.contains("sk-live-supersecret-do-not-leak"),
+            !text.contains("test-secret-sentinel-do-not-leak"),
             "the raw secret must never appear in the agent-visible response: {}",
             text
         );
@@ -1673,7 +1677,7 @@ else:
         // tools) must not carry the raw secret either -- only the request
         // payload TA actually captured, which never contained it.
         let log = std::fs::read_to_string(ta_dir.join("action-log.jsonl")).unwrap();
-        assert!(!log.contains("sk-live-supersecret-do-not-leak"));
+        assert!(!log.contains("test-secret-sentinel-do-not-leak"));
     }
 
     #[test]
@@ -1788,11 +1792,13 @@ else:
             .add(
                 "PAPER_API_KEY",
                 "paper-trading",
-                "sk-live-supersecret-do-not-leak",
+                "test-secret-sentinel-do-not-leak",
                 vec![],
             )
             .unwrap();
-        let mut broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let mut broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         let granted = broker.grant(cred.id, "test-agent", vec![], 3600).unwrap();
         broker.revoke(&granted.token_id).unwrap();
 
@@ -1872,11 +1878,13 @@ else:
             .add(
                 "PAPER_API_KEY",
                 "paper-trading",
-                "sk-live-supersecret-do-not-leak",
+                "test-secret-sentinel-do-not-leak",
                 vec!["trade.read".into(), "trade.write".into()],
             )
             .unwrap();
-        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         let granted = broker
             .grant(cred.id, "test-agent", vec!["trade.read".into()], 3600)
             .unwrap();
@@ -2089,7 +2097,7 @@ else:
         assert!(matches!(outcome, ActionOutcome::CapturedForReview));
         let pending = pending.unwrap();
         let serialized = serde_json::to_string(&pending).unwrap();
-        assert!(!serialized.contains("sk-live-supersecret-do-not-leak"));
+        assert!(!serialized.contains("test-secret-sentinel-do-not-leak"));
     }
 
     #[test]

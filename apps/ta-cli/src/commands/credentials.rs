@@ -183,16 +183,6 @@ fn update_credential(config: &GatewayConfig, id_str: &str, secret: &str) -> anyh
     Ok(())
 }
 
-/// Where the broker's root key and revocation denylist live — alongside
-/// `credentials.json`, inside the project's `.ta` dir.
-fn broker_dir(config: &GatewayConfig) -> std::path::PathBuf {
-    cred_config(config)
-        .vault_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| config.workspace_root.join(".ta"))
-}
-
 /// Resolve `id_str` (a credential id or prefix) and mint a biscuit-backed
 /// grant for it via [`ta_credential_broker::CredentialBroker`]. Split out
 /// from `grant_token` so the minted token itself (not just "did this print
@@ -211,7 +201,7 @@ fn mint_grant(
     let creds = vault.list()?;
     let cred = resolve_credential_prefix(&creds, id_str)?.clone();
 
-    let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(config))?;
+    let broker = ta_credential_broker::CredentialBroker::open_for_project(&config.workspace_root)?;
     let granted = broker.grant(cred.id, agent, scopes.to_vec(), ttl_secs)?;
     Ok((cred, granted))
 }
@@ -288,7 +278,9 @@ mod tests {
         // gateway process, which never shares memory with this CLI process),
         // can verify the token purely from what it was handed — no lookup
         // into `vault.tokens` required, unlike the old UUID SessionToken.
-        let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(&config)).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(&config.workspace_root)
+                .unwrap();
         let verified = broker.verify(&granted.token).unwrap();
         assert_eq!(verified.credential_id, cred_id);
         assert_eq!(verified.agent_id, "agent-1");
@@ -372,7 +364,9 @@ mod tests {
         // The grant minted before rotation still verifies — rotation only
         // changes the secret a subsequent `vault.get` returns, not the
         // credential's identity or any already-issued grant.
-        let broker = ta_credential_broker::CredentialBroker::open(&broker_dir(&config)).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(&config.workspace_root)
+                .unwrap();
         let verified = broker.verify(&granted.token).unwrap();
         assert_eq!(verified.credential_id, cred_id);
 

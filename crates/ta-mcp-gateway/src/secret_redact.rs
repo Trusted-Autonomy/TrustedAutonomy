@@ -213,7 +213,12 @@ mod tests {
 
     #[test]
     fn credential_shapes_in_text_are_redacted() {
-        let s = "key sk-ant-api03-abcdefghijklmnop and Bearer abcdefghijkl1234 ok";
+        // Built at runtime so no key-shaped literal sits in source.
+        let s = format!(
+            "key {}abcdefghijklmnop and Bearer abcdefghijkl1234 ok",
+            "sk-ant-api03-"
+        );
+        let s = s.as_str();
         let r = redact_text(s);
         assert!(!r.contains("abcdefghijklmnop"), "{r}");
         assert!(!r.contains("abcdefghijkl1234"), "{r}");

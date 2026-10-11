@@ -680,6 +680,13 @@ struct LedgerEntry {
     action: String,
     /// What the caller was told; returned again to a repeated delivery.
     result: Value,
+    /// `agent_delegated` or `direct` for an action taken through `/act`
+    /// (CR-03 item 6); absent for resolutions TA only observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor_context: Option<String>,
+    /// Why the client judged the context to be an agent (delegated only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    delegated_signals: Vec<String>,
 }
 
 fn attention_dir(root: &Path) -> PathBuf {
@@ -925,6 +932,8 @@ impl AttentionTracker {
                                         "status": "resolved",
                                         "note": "resolved outside the relay endpoint (CLI, Studio, timeout or the underlying state moved on)"
                                     }),
+                                    actor_context: None,
+                                    delegated_signals: Vec::new(),
                                 },
                             );
                         }
@@ -1274,11 +1283,23 @@ pub async fn act(
         .find(|(n, _)| *n == item.project)
         .map(|(_, r)| r.clone())
         .unwrap_or_else(|| state.project_root.clone());
+    // CR-03 item 6: the advisory actor-context header decides the label; the
+    // named human (or the credential holder) is the delegating owner.
+    let claim_proof = match &actor {
+        Actor::Asserted(v) => crate::human_gate::HumanProof {
+            via: crate::human_gate::ProofKind::Assertion,
+            user_id: Some(v.user_id.clone()),
+            email: None,
+        },
+        Actor::Local(kind) => crate::human_gate::HumanProof::anonymous(*kind),
+    };
+    let claim = crate::actor_context::claim_for(&headers, Some(&claim_proof));
     let acting_user = match &actor {
         Actor::Asserted(v) => v.user_id.clone(),
+        Actor::Local(_) if claim.is_delegated() => claim.owner.clone(),
         Actor::Local(_) => "human-credential".to_string(),
     };
-    let result = match perform(&state, &root, &item, &req, &acting_user).await {
+    let result = match perform(&state, &root, &item, &req, &acting_user, &claim).await {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -1308,8 +1329,11 @@ pub async fn act(
             item: resolved_item,
             action: req.action.clone(),
             result: result.clone(),
+            actor_context: Some(claim.actor_context.to_string()),
+            delegated_signals: claim.signals.clone(),
         },
     );
+    crate::actor_context::note_sighting(state.human_gate.state_dir(), &claim);
     let via = match &actor {
         Actor::Local(kind) => format!("{kind:?}").to_lowercase(),
         Actor::Asserted(_) => "assertion".to_string(),
@@ -1322,7 +1346,12 @@ pub async fn act(
         "action": req.action,
         "via": via,
         "user_id": acting_user,
+        "actor_context": claim.actor_context,
     });
+    if claim.is_delegated() {
+        record["delegating_owner"] = json!(claim.owner);
+        record["delegated_signals"] = json!(claim.signals);
+    }
     if let Actor::Asserted(v) = &actor {
         record["email"] = json!(v.email);
         record["kid"] = json!(v.kid);
@@ -1371,6 +1400,7 @@ async fn perform(
     item: &AttentionItem,
     req: &ActRequest,
     actor: &str,
+    claim: &crate::actor_context::ActorClaim,
 ) -> Result<Value, Response> {
     match (item.kind, req.action.as_str()) {
         (AttentionKind::DraftReview, "approve" | "deny") => {
@@ -1398,10 +1428,21 @@ async fn perform(
             };
             let dir = root.join(".ta").join("pr_packages");
             match crate::web::update_draft_status(&dir, uuid, status, None) {
-                Ok(true) => Ok(json!({
+                Ok(true) => {
+                    crate::actor_context::record_draft_action(
+                        &dir,
+                        root,
+                        state.human_gate.state_dir(),
+                        claim,
+                        &req.action,
+                        uuid,
+                        "POST /api/attention/{id}/act",
+                    );
+                    Ok(json!({
                     "draft_id": draft_id,
                     "status": if req.action == "approve" { "approved" } else { "denied" },
-                })),
+                    }))
+                }
                 Ok(false) => Err(error_response(
                     StatusCode::NOT_FOUND,
                     format!("draft {draft_id} for item {} is gone", item.id),
@@ -2450,6 +2491,94 @@ mod tests {
         let all = r.items().await;
         let resolved = all.iter().find(|i| i.id == item.id).unwrap();
         assert_eq!(resolved.status, "resolved");
+    }
+
+    // ── actor_context labeling on /act (CR-03 item 6) ──────────────────────
+
+    const AGENT_HEADER: &str = "agent_delegated; reasons=CLAUDECODE%20is%20set";
+
+    async fn act_labeled(action: &str, header: Option<&str>) -> (Rig, Uuid, Value) {
+        let r = rig();
+        let draft = r.new_draft("alice");
+        let item = r.item(AttentionKind::DraftReview).await;
+        ta_credentials::human::login(r.state_dir.path(), false).unwrap();
+        let secret = ta_credentials::human::load_secret(r.state_dir.path(), false).unwrap();
+        let mut headers = vec![(ta_credentials::human::CREDENTIAL_HEADER, secret.as_str())];
+        if let Some(h) = header {
+            headers.push((ta_credentials::human::ACTOR_CONTEXT_HEADER, h));
+        }
+        let body = if action == "deny" {
+            json!({"action": action, "reason": "no"})
+        } else {
+            json!({"action": action})
+        };
+        let (st, v) = r.act_with(&item.id, body, "127.0.0.1:1", &headers).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        (r, draft, v)
+    }
+
+    #[tokio::test]
+    async fn act_with_the_agent_header_is_labeled_everywhere() {
+        let holder = ta_credentials::human::credential_holder();
+        for action in ["approve", "deny"] {
+            let (r, draft, _) = act_labeled(action, Some(AGENT_HEADER)).await;
+
+            // Attention resolution record (ledger) and the human-action audit.
+            let entries = ledger_read(r.root());
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].actor_context.as_deref(), Some("agent_delegated"));
+            assert_eq!(entries[0].delegated_signals, vec!["CLAUDECODE is set"]);
+            let rec = r.audit_lines().into_iter().next().expect("audit record");
+            assert_eq!(rec["actor_context"], "agent_delegated");
+            assert_eq!(rec["delegating_owner"], holder.as_str());
+            assert_eq!(rec["user_id"], holder.as_str());
+            assert_eq!(rec["delegated_signals"][0], "CLAUDECODE is set");
+
+            // Draft record, approved_by / denied_by and the ta-audit log.
+            let text =
+                std::fs::read_to_string(r.root().join(format!(".ta/pr_packages/{draft}.json")))
+                    .unwrap();
+            let pkg: DraftPackage = serde_json::from_str(&text).unwrap();
+            assert_eq!(pkg.action_contexts.len(), 1, "{action}");
+            assert_eq!(pkg.action_contexts[0].actor_context, "agent_delegated");
+            assert_eq!(pkg.action_contexts[0].delegating_owner, holder);
+            match pkg.status {
+                DraftStatus::Approved { approved_by, .. } => assert_eq!(approved_by, holder),
+                DraftStatus::Denied { denied_by, .. } => assert_eq!(denied_by, holder),
+                other => panic!("unexpected status {other:?}"),
+            }
+            let audit = std::fs::read_to_string(r.root().join(".ta/audit.jsonl")).unwrap();
+            assert!(audit.contains("agent_delegated"), "{audit}");
+            assert!(
+                ta_credentials::human::last_agent_context_seen(r.state_dir.path()).is_some(),
+                "sighting feeds /api/status"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn act_without_the_header_is_direct_and_malformed_header_is_ignored() {
+        for (action, header) in [
+            ("approve", None),
+            ("deny", None),
+            ("approve", Some("agent_delegated; reasons=%ZZ")),
+            ("deny", Some("nonsense")),
+        ] {
+            let (r, draft, _) = act_labeled(action, header).await;
+            let entries = ledger_read(r.root());
+            assert_eq!(entries[0].actor_context.as_deref(), Some("direct"));
+            assert!(entries[0].delegated_signals.is_empty());
+            let rec = r.audit_lines().into_iter().next().unwrap();
+            assert_eq!(rec["actor_context"], "direct");
+            assert!(rec.get("delegating_owner").is_none());
+            assert_eq!(rec["user_id"], "human-credential");
+            let text =
+                std::fs::read_to_string(r.root().join(format!(".ta/pr_packages/{draft}.json")))
+                    .unwrap();
+            let pkg: DraftPackage = serde_json::from_str(&text).unwrap();
+            assert_eq!(pkg.action_contexts[0].actor_context, "direct");
+            assert!(ta_credentials::human::last_agent_context_seen(r.state_dir.path()).is_none());
+        }
     }
 
     #[tokio::test]

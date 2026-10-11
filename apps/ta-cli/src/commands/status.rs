@@ -79,6 +79,16 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         println!("│  Security: {}{}", security_badge.0, overrides_note);
     }
 
+    // CR-03 item 6: say so when a coding assistant is approving on the credential.
+    if let Some(line) = super::login::delegation_line_for_project(
+        &config.workspace_root,
+        &ta_credentials::human::user_state_dir(),
+        ta_credentials::human::default_use_keychain(),
+        chrono::Utc::now(),
+    ) {
+        println!("│  {}", line);
+    }
+
     println!("│");
 
     // Load all goals once.

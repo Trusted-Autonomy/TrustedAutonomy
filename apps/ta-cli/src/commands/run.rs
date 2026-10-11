@@ -3551,6 +3551,10 @@ pub fn execute(
         }
     }
 
+    // Pin the persona and project agent override in the state directory and
+    // warn loudly if either changed since the last launch.
+    super::state_secrets::pin_launch_configs(&config.workspace_root, persona_name, agent);
+
     // Chat-mode launch (persona `chat_mode = true` or `--chat-mode`): resolve
     // before any injection so invalid combinations fail fast. `None` for every
     // normal launch, which then proceeds exactly as before.
@@ -3990,11 +3994,9 @@ pub fn execute(
         ));
     }
 
-    // v0.17.11.8: for a team-session role launch (--team-session-id), deliver
-    // the session's whiteboard token into this goal's staging workspace so
-    // the agent's `ta_whiteboard_*` MCP tools can authenticate. No-op for the
-    // overwhelmingly common non-team-session goal.
-    write_whiteboard_session_file(&config.workspace_root, &staging_path, team_session_id);
+    // For a team-session role launch (--team-session-id) the whiteboard token
+    // arrives in the environment, never in a file. No-op for ordinary goals.
+    check_whiteboard_env(team_session_id);
 
     // v0.13.8 item 12: Memory bridge — context mode.
     // For frameworks with memory.inject = "context", serialize relevant memory
@@ -6281,12 +6283,7 @@ fn load_vault_credentials(
     let Ok(summaries) = vault.list() else {
         return Vec::new();
     };
-    let broker_dir = cred_config
-        .vault_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| project_root.join(".ta"));
-    let Ok(broker) = ta_credential_broker::CredentialBroker::open(&broker_dir) else {
+    let Ok(broker) = ta_credential_broker::CredentialBroker::open_for_project(project_root) else {
         return Vec::new();
     };
     // v0.17.6.3: connectors declared `broker_mediated = true` in
@@ -7911,7 +7908,16 @@ pub(crate) fn write_stable_agent_mcp_config(
     let ta_server = serde_json::json!({
         "command": ta_binary,
         "args": ["serve"],
-        "env": { "TA_IS_STAGING": "1" }
+        // The whiteboard session reaches the gateway through the agent's own
+        // environment (the daemon hands `ta run` a per-role token); the config
+        // holds only the placeholders, so no token is ever written to disk.
+        // `:-` defaults keep the config valid for goals with no session.
+        "env": {
+            "TA_IS_STAGING": "1",
+            "TA_WHITEBOARD_TOKEN": "${TA_WHITEBOARD_TOKEN:-}",
+            "TA_WHITEBOARD_TEAM_SESSION": "${TA_WHITEBOARD_TEAM_SESSION:-}",
+            "TA_WHITEBOARD_SOURCE_DIR": "${TA_WHITEBOARD_SOURCE_DIR:-}"
+        }
     });
 
     let mut servers = serde_json::Map::new();
@@ -7939,142 +7945,51 @@ pub(crate) fn write_stable_agent_mcp_config(
     Ok(())
 }
 
-/// v0.17.11.8: when `team_session_id` is set (a team-session role launch —
-/// see `crates/ta-daemon/src/team_session.rs`'s `build_ta_run_args`), read
-/// that team session's `whiteboard_token` from the *real* project root's
-/// `.ta/team-sessions/<id>/state.json` (this function runs before the agent
-/// is launched against `staging_path`, and always against the true root —
-/// see the call site) and write it to `staging_path/.ta/whiteboard-session.json`
-/// so the agent's `ta_whiteboard_*` MCP tools
-/// (`crates/ta-mcp-gateway/src/tools/whiteboard.rs`) can authenticate. The
-/// written file also carries `source_dir: project_root` (the real project
-/// root, not the staging path) so `ta_whiteboard_presence_register` can
-/// group agents by the same key `whiteboard_check.rs`'s pre-launch conflict
-/// check uses — otherwise two roles staging the same real project would
-/// register presence under two different staging paths and never see each
-/// other.
+/// Team-session role launches receive their whiteboard session in the
+/// environment of this process (`TA_WHITEBOARD_TOKEN`,
+/// `TA_WHITEBOARD_TEAM_SESSION`, `TA_WHITEBOARD_SOURCE_DIR`), minted per role
+/// by the daemon at launch. Nothing is written to disk: the token must never
+/// appear in any file under the project's `.ta/` (red-team CR-03). The agent
+/// forwards it to the `ta serve` MCP gateway via `${TA_WHITEBOARD_TOKEN:-}`
+/// in `mcp-agent.json`.
 ///
-/// Deliberately reads `state.json` directly as loosely-typed JSON rather
-/// than depending on `ta-daemon`'s `TeamSessionState` type: `ta-daemon` has
-/// no library target (only a `main.rs` binary with private-to-the-binary
-/// `pub mod` declarations), so `ta-cli` cannot import it without first
-/// restructuring `ta-daemon` into a lib+bin crate — out of scope here.
-///
-/// `team_session_id: None` (every non-team-session goal, the overwhelming
-/// majority) is a hard no-op: no file is read or written, no other behavior
-/// changes. Any failure (missing/malformed state.json, no token configured)
-/// is logged and treated as "whiteboard coordination unavailable for this
-/// goal" — it never fails the goal run itself.
-fn write_whiteboard_session_file(
-    project_root: &Path,
-    staging_path: &Path,
+/// This only reports, loudly, when a `--team-session-id` launch arrived
+/// without a token; the goal still runs, without `ta_whiteboard_*` tools.
+#[derive(Debug, PartialEq, Eq)]
+enum WhiteboardEnvStatus {
+    NotATeamLaunch,
+    Present,
+    Missing,
+}
+
+fn whiteboard_env_status(
     team_session_id: Option<&str>,
-) {
-    let Some(session_id) = team_session_id else {
-        return;
-    };
-
-    #[derive(serde::Deserialize)]
-    struct PartialTeamSessionConfig {
-        #[serde(default)]
-        whiteboard_token: Option<String>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> WhiteboardEnvStatus {
+    if team_session_id.is_none() {
+        return WhiteboardEnvStatus::NotATeamLaunch;
     }
-    #[derive(serde::Deserialize)]
-    struct PartialTeamSessionState {
-        config: PartialTeamSessionConfig,
-    }
-
-    let state_path = project_root
-        .join(".ta")
-        .join("team-sessions")
-        .join(session_id)
-        .join("state.json");
-
-    let raw = match std::fs::read_to_string(&state_path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            tracing::warn!(
-                team_session = %session_id,
-                path = %state_path.display(),
-                error = %e,
-                "ta run --team-session-id: could not read team-session state; \
-                 ta_whiteboard_* MCP tools will be unavailable for this goal"
-            );
-            return;
-        }
-    };
-
-    let state: PartialTeamSessionState = match serde_json::from_str(&raw) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                team_session = %session_id,
-                path = %state_path.display(),
-                error = %e,
-                "ta run --team-session-id: malformed team-session state.json; \
-                 ta_whiteboard_* MCP tools will be unavailable for this goal"
-            );
-            return;
-        }
-    };
-
-    let Some(token) = state.config.whiteboard_token else {
-        tracing::debug!(
-            team_session = %session_id,
-            "ta run --team-session-id: team session has no whiteboard_token \
-             (whiteboard coordination not enabled) — skipping whiteboard-session.json"
-        );
-        return;
-    };
-
-    let dest_dir = staging_path.join(".ta");
-    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-        tracing::warn!(
-            path = %dest_dir.display(),
-            error = %e,
-            "ta run --team-session-id: failed to create .ta dir in staging for whiteboard-session.json"
-        );
-        return;
-    }
-    let payload = serde_json::json!({
-        "team_session": session_id,
-        "token": token,
-        "source_dir": project_root.display().to_string(),
-    });
-    let dest_path = dest_dir.join("whiteboard-session.json");
-    match std::fs::write(&dest_path, payload.to_string()) {
-        Ok(()) => {
-            // This file carries a live bearer token
-            // (whiteboard:team_session:<name> scope, 24h TTL) -- restrict it
-            // like every other secret-bearing file in this codebase (see
-            // ta-credentials's key/vault files). `#[cfg(unix)]` here (not an
-            // early `return` above it) matters on Windows: an early return
-            // followed by a cfg(unix)-only tail makes that `return` the
-            // function's last statement on non-unix, which clippy flags as
-            // needless_return -- this shape avoids that trap entirely.
-            #[cfg(unix)]
-            write_whiteboard_session_file_permissions(&dest_path);
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %dest_path.display(),
-                error = %e,
-                "ta run --team-session-id: failed to write whiteboard-session.json"
-            );
-        }
+    let set = |k: &str| env(k).is_some_and(|v| !v.trim().is_empty());
+    if set("TA_WHITEBOARD_TOKEN")
+        && set("TA_WHITEBOARD_TEAM_SESSION")
+        && set("TA_WHITEBOARD_SOURCE_DIR")
+    {
+        WhiteboardEnvStatus::Present
+    } else {
+        WhiteboardEnvStatus::Missing
     }
 }
 
-#[cfg(unix)]
-fn write_whiteboard_session_file_permissions(dest_path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(dest_path, std::fs::Permissions::from_mode(0o600)) {
+fn check_whiteboard_env(team_session_id: Option<&str>) {
+    if whiteboard_env_status(team_session_id, &|k| std::env::var(k).ok())
+        == WhiteboardEnvStatus::Missing
+    {
         tracing::warn!(
-            path = %dest_path.display(),
-            error = %e,
-            "ta run --team-session-id: failed to restrict whiteboard-session.json \
-             permissions to 0600 -- the whiteboard token in this file may be readable \
-             by other local users"
+            team_session = ?team_session_id,
+            "ta run --team-session-id: no whiteboard token in the environment (TA_WHITEBOARD_TOKEN, \
+             TA_WHITEBOARD_TEAM_SESSION, TA_WHITEBOARD_SOURCE_DIR). The daemon sets these for each \
+             role when the project has `[whiteboard] enabled = true`; ta_whiteboard_* MCP tools will \
+             be unavailable for this goal. Launch the role through the daemon, or enable the whiteboard."
         );
     }
 }
@@ -10416,12 +10331,22 @@ mod tests {
         assert!(transcript_dir_for_goal(root, id, false, false).is_none());
     }
 
+    /// GitHub-token-shaped string built at runtime so the literal never
+    /// appears contiguously in source (secret-scan hygiene).
+    fn fake_gh_token() -> String {
+        format!("ghp_{}", "abcdefghijklmnopqrstuvwxyz0123456789")
+    }
+
     #[test]
     fn transcript_recorder_keeps_redacted_transcript_and_ta_tool_calls() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join(".ta/logs/goals/g1");
         let mut r = TranscriptRecorder::open(&dir).unwrap();
-        r.record(r#"{"type":"system","subtype":"init","api_key":"sk-ant-api03-zzzzzzzzzzzzzzzz"}"#);
+        // Shape built at runtime so no key-shaped literal sits in source.
+        let fake_key = format!("sk-ant-api03-{}", "z".repeat(16));
+        r.record(&format!(
+            r#"{{"type":"system","subtype":"init","api_key":"{fake_key}"}}"#
+        ));
         r.record(
             &serde_json::json!({
                 "type": "assistant",
@@ -10499,181 +10424,48 @@ mod tests {
     // `crate::commands::test_support` for the full rationale.
     use crate::commands::test_support::HOME_ENV_LOCK;
 
-    // ── write_whiteboard_session_file tests (v0.17.11.8) ────────────────────
-    //
-    // The most important property here: absent `--team-session-id` (the
-    // overwhelming majority of goal runs), this must be a hard no-op — no
-    // file read, no file written, no behavior change from before this flag
-    // existed.
+    // ── whiteboard session delivery (environment only, never a file) ────────
 
     #[test]
-    fn write_whiteboard_session_file_noop_when_team_session_id_absent() {
-        let project_root = tempfile::tempdir().unwrap();
-        let staging = tempfile::tempdir().unwrap();
-
-        write_whiteboard_session_file(project_root.path(), staging.path(), None);
-
-        assert!(
-            !staging.path().join(".ta").exists(),
-            "no .ta dir should be created in staging when --team-session-id is absent"
-        );
-    }
-
-    #[test]
-    fn write_whiteboard_session_file_writes_token_when_present() {
-        let project_root = tempfile::tempdir().unwrap();
-        let staging = tempfile::tempdir().unwrap();
-
-        let state_dir = project_root
-            .path()
-            .join(".ta")
-            .join("team-sessions")
-            .join("sess-1");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("state.json"),
-            serde_json::json!({
-                "id": "sess-1",
-                "config": {
-                    "name": "test-session",
-                    "workflow_path": "wf.yaml",
-                    "team_toml_path": "team.toml",
-                    "objective": "test",
-                    "whiteboard_token": "secret-token-abc",
-                },
-                "stages": [],
-                "status": "active",
-                "current_stage_index": 0,
-                "findings": [],
-                "restart_count": 0,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-1"));
-
-        let written =
-            std::fs::read_to_string(staging.path().join(".ta").join("whiteboard-session.json"))
-                .expect("whiteboard-session.json should have been written");
-        let value: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(value["team_session"], "sess-1");
-        assert_eq!(value["token"], "secret-token-abc");
+    fn whiteboard_env_status_covers_each_launch_shape() {
+        let full = |k: &str| {
+            matches!(
+                k,
+                "TA_WHITEBOARD_TOKEN" | "TA_WHITEBOARD_TEAM_SESSION" | "TA_WHITEBOARD_SOURCE_DIR"
+            )
+            .then(|| "v".to_string())
+        };
+        let none = |_: &str| None;
         assert_eq!(
-            value["source_dir"],
-            project_root.path().display().to_string(),
-            "source_dir must be the real project root, not the staging path, so \
-             ta_whiteboard_presence_register groups agents on the same real project \
-             together (see whiteboard_check.rs's pre-launch conflict check)"
+            whiteboard_env_status(None, &full),
+            WhiteboardEnvStatus::NotATeamLaunch
         );
-        assert_ne!(value["source_dir"], staging.path().display().to_string());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn write_whiteboard_session_file_is_chmod_0600() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let project_root = tempfile::tempdir().unwrap();
-        let staging = tempfile::tempdir().unwrap();
-
-        let state_dir = project_root
-            .path()
-            .join(".ta")
-            .join("team-sessions")
-            .join("sess-1");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("state.json"),
-            serde_json::json!({
-                "id": "sess-1",
-                "config": {
-                    "name": "test-session",
-                    "workflow_path": "wf.yaml",
-                    "team_toml_path": "team.toml",
-                    "objective": "test",
-                    "whiteboard_token": "secret-token-abc",
-                },
-                "stages": [],
-                "status": "active",
-                "current_stage_index": 0,
-                "findings": [],
-                "restart_count": 0,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-1"));
-
-        let dest_path = staging.path().join(".ta").join("whiteboard-session.json");
-        let mode = std::fs::metadata(&dest_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
-            mode, 0o600,
-            "whiteboard-session.json carries a live bearer token and must be \
-             chmod 0600 like every other secret-bearing file in this codebase, \
-             got mode {mode:o}"
+            whiteboard_env_status(Some("s"), &full),
+            WhiteboardEnvStatus::Present
+        );
+        assert_eq!(
+            whiteboard_env_status(Some("s"), &none),
+            WhiteboardEnvStatus::Missing
         );
     }
 
     #[test]
-    fn write_whiteboard_session_file_noop_when_no_token_configured() {
-        let project_root = tempfile::tempdir().unwrap();
-        let staging = tempfile::tempdir().unwrap();
-
-        let state_dir = project_root
-            .path()
-            .join(".ta")
-            .join("team-sessions")
-            .join("sess-2");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("state.json"),
-            serde_json::json!({
-                "id": "sess-2",
-                "config": {
-                    "name": "test-session",
-                    "workflow_path": "wf.yaml",
-                    "team_toml_path": "team.toml",
-                    "objective": "test",
-                },
-                "stages": [],
-                "status": "active",
-                "current_stage_index": 0,
-                "findings": [],
-                "restart_count": 0,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        write_whiteboard_session_file(project_root.path(), staging.path(), Some("sess-2"));
-
-        assert!(!staging
-            .path()
-            .join(".ta")
-            .join("whiteboard-session.json")
-            .exists());
-    }
-
-    #[test]
-    fn write_whiteboard_session_file_noop_when_session_missing() {
-        let project_root = tempfile::tempdir().unwrap();
-        let staging = tempfile::tempdir().unwrap();
-
-        write_whiteboard_session_file(project_root.path(), staging.path(), Some("nonexistent"));
-
-        assert!(!staging
-            .path()
-            .join(".ta")
-            .join("whiteboard-session.json")
-            .exists());
+    fn agent_mcp_config_forwards_the_whiteboard_session_without_holding_a_token() {
+        let project = tempfile::tempdir().unwrap();
+        write_stable_agent_mcp_config(project.path(), None).unwrap();
+        let text = std::fs::read_to_string(project.path().join(".ta/mcp-agent.json")).unwrap();
+        assert!(text.contains("${TA_WHITEBOARD_TOKEN:-}"), "{text}");
+        // Only placeholders: the config must never contain a token value.
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let env = &v["mcpServers"]["ta"]["env"];
+        for k in [
+            "TA_WHITEBOARD_TOKEN",
+            "TA_WHITEBOARD_TEAM_SESSION",
+            "TA_WHITEBOARD_SOURCE_DIR",
+        ] {
+            assert!(env[k].as_str().unwrap().starts_with("${"), "{k}");
+        }
     }
 
     // ── framework_to_launch_config / build_goal_context_text tests ─────────
@@ -12649,7 +12441,7 @@ pre_launch:
         let project = TempDir::new().unwrap();
         let intake_json = serde_json::json!({
             "candidate_id": "cand-123",
-            "title": "use ghp_abcdefghijklmnopqrstuvwxyz0123456789 please",
+            "title": format!("use {} please", fake_gh_token()),
             "api_key": "hunter2hunter2",
         })
         .to_string();
@@ -12672,7 +12464,7 @@ pre_launch:
         assert!(text.contains("<<<END "), "{}", text);
         assert!(text.contains("- candidate_id: cand-123\n"), "{}", text);
         assert!(text.contains("objective body"));
-        assert!(!text.contains("ghp_abcdefghijklmnopqrstuvwxyz"), "{}", text);
+        assert!(!text.contains(&fake_gh_token()[..30]), "{}", text);
         assert!(!text.contains("hunter2hunter2"), "{}", text);
         // Without secrets the recording is byte-exact.
         let clean = "title\n\nObjective: x\n{\"b\":1,\"a\":2}\n";
@@ -13012,7 +12804,7 @@ pre_launch:
         let staging = TempDir::new().unwrap();
         std::fs::write(
             staging.path().join("CLAUDE.md"),
-            "ROLE text ghp_abcdefghijklmnopqrstuvwxyz0123456789 end\n",
+            format!("ROLE text {} end\n", fake_gh_token()),
         )
         .unwrap();
         let id = uuid::Uuid::new_v4();
@@ -13033,7 +12825,7 @@ pre_launch:
         );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("ROLE text"), "{}", text);
-        assert!(!text.contains("ghp_abcdefghijklmnopqrstuvwxyz"), "{}", text);
+        assert!(!text.contains(&fake_gh_token()[..30]), "{}", text);
     }
 
     /// Drift guard: every restricted Claude Code argv that passes
@@ -13772,6 +13564,7 @@ pre_launch:
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            action_contexts: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
@@ -13942,6 +13735,7 @@ pre_launch:
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            action_contexts: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
@@ -15924,7 +15718,9 @@ plan_pending_window = 7
             .as_deref()
             .expect("broker-mediated credential must carry a session token");
 
-        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         let verified = broker.verify(session_token).unwrap();
         assert_eq!(verified.credential_id, cred_id);
         assert_eq!(verified.agent_id, "agent-1");
@@ -15960,7 +15756,9 @@ plan_pending_window = 7
                 .id
         };
 
-        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         let root = broker.grant(cred_id, "swarm-root", scopes, 3600).unwrap();
         (dir, ta_dir, root)
     }
@@ -16008,7 +15806,9 @@ plan_pending_window = 7
         // own token string handed straight through.
         assert_ne!(child_token, root.token);
 
-        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         assert!(broker.authorize_scope(child_token, "repo.read").is_ok());
         // "repo.write" was in the root grant but never requested by this
         // hop — the authorizer itself must reject it, proving this is real
@@ -16054,7 +15854,9 @@ plan_pending_window = 7
 
         std::thread::sleep(std::time::Duration::from_millis(3200));
 
-        let broker = ta_credential_broker::CredentialBroker::open(&ta_dir).unwrap();
+        let broker =
+            ta_credential_broker::CredentialBroker::open_for_project(ta_dir.parent().unwrap())
+                .unwrap();
         // ...but the parent only had ~1 second left, so the child must
         // already be expired.
         assert!(broker.authorize_scope(&child_token, "repo.read").is_err());

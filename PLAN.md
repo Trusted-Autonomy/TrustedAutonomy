@@ -10931,18 +10931,18 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha`
 
 ### v0.17.12.1 - Control-Plane Secrets Out of the Project Tree (CR-03)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12
 
 **Goal**: The keys and tokens that make TA's capability tokens and audit log trustworthy are not files an agent can reach with `../../`.
 
-1. [ ] A daemon-only per-user state directory (macOS Application Support, `$XDG_STATE_HOME`, `%LOCALAPPDATA%`) keyed by a stable project id. Document the exact locations per operating system, including the Windows credential vault (DPAPI or Credential Manager) and the daemon pid and port file, in `docs/USAGE.md` so installers do not guess.
-2. [ ] Move `broker_root.key` and `audit.key` to the OS keychain (file fallback in the state directory with a loud warning; `TA_NO_KEYCHAIN` honored); move `daemon-tokens.json`, `tokens/*` and the NATS JetStream data there too.
-3. [ ] Stop saving team-session bearer tokens in `state.json`; hand them to the launched process by inherited file descriptor or environment, one token per role.
-4. [ ] Signed audit-chain checkpoints in the state directory (CR-42); persona and agent-config hashes stored there.
-5. [ ] `ta doctor --fix` migration with audit entries; the daemon refuses old-location keys under the `strict` posture.
-6. [ ] **Agent-delegated approvals are labeled as such.** While a developer has run `ta login --file` and lets a coding assistant approve and apply drafts (the interim development mode until approvals happen in Wayfinder), the credential is present, so the CLI accepts agent-context approvals. Record that truthfully: every approve, deny and apply accepted from a detected agent context writes `actor_context: agent_delegated` (with the detection reasons) next to the human credential in the audit log and the draft record, and `approved_by` names the credential holder as the delegating owner, not as a direct human action. `ta login status` and `ta status` show a visible "agent delegation active" line while a credential exists and agent markers were seen recently, and the docs name `ta login logout` as the switch back to Wayfinder-only approvals (attention feed and signed assertions). Tests for the label on each action and for the status line.
-7. [ ] Remove the `sk-live-...` style literals from test fixtures across the repo (use plain sentinels) and add a `.gitguardian.yaml` so scanner noise on documented placeholder tokens does not hide real alerts; add a pre-commit or CI secret scan to the required jobs that fails on a real-shaped secret outside an allowlisted fixture path.
+1. [x] A daemon-only per-user state directory (macOS Application Support, `$XDG_STATE_HOME`, `%LOCALAPPDATA%`) keyed by a stable project id. Document the exact locations per operating system, including the Windows credential vault (DPAPI or Credential Manager) and the daemon pid and port file, in `docs/USAGE.md` so installers do not guess.
+2. [x] Move `broker_root.key` and `audit.key` to the OS keychain (file fallback in the state directory with a loud warning; `TA_NO_KEYCHAIN` honored); move `daemon-tokens.json`, `tokens/*` and the NATS JetStream data there too.
+3. [x] Stop saving team-session bearer tokens in `state.json`; hand them to the launched process by inherited file descriptor or environment, one token per role.
+4. [x] Signed audit-chain checkpoints in the state directory (CR-42); persona and agent-config hashes stored there.
+5. [x] `ta doctor --fix` migration with audit entries; the daemon refuses old-location keys under the `strict` posture.
+6. [x] **Agent-delegated approvals are labeled as such.** While a developer has run `ta login --file` and lets a coding assistant approve and apply drafts (the interim development mode until approvals happen in Wayfinder), the credential is present, so the CLI accepts agent-context approvals. Record that truthfully: every approve, deny and apply accepted from a detected agent context writes `actor_context: agent_delegated` (with the detection reasons) next to the human credential in the audit log and the draft record, and `approved_by` names the credential holder as the delegating owner, not as a direct human action. `ta login status` and `ta status` show a visible "agent delegation active" line while a credential exists and agent markers were seen recently, and the docs name `ta login logout` as the switch back to Wayfinder-only approvals (attention feed and signed assertions). Tests for the label on each action and for the status line.
+7. [x] Remove the `sk-live-...` style literals from test fixtures across the repo (use plain sentinels) and add a `.gitguardian.yaml` so scanner noise on documented placeholder tokens does not hide real alerts; add a pre-commit or CI secret scan to the required jobs that fails on a real-shaped secret outside an allowlisted fixture path.
 
 **Effort**: M. **Source**: sandbox plan phase 1 (`docs/superpowers/specs/2026-10-07-os-sandbox-plan.md`).
 

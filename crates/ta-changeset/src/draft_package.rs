@@ -610,6 +610,28 @@ pub struct ApprovalRecord {
     pub approved_at: DateTime<Utc>,
 }
 
+/// Records who was acting when an approve, deny or apply was accepted
+/// (CR-03 item 6).
+///
+/// For `agent_delegated` the credential holder is the delegating owner,
+/// `approved_by` / `denied_by` name that holder, and `delegated_signals` says
+/// why the client believed an agent was acting. The `ta` CLI writes a record
+/// only for delegated actions; the daemon also writes `direct` records for
+/// actions that arrived without an agent header. Advisory, for the audit trail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct ActionContextRecord {
+    /// `approve`, `deny` or `apply`.
+    pub action: String,
+    /// `agent_delegated` or `direct`.
+    pub actor_context: String,
+    /// The credential holder who delegated the action.
+    pub delegating_owner: String,
+    /// Why the action was judged to come from an agent.
+    #[serde(default)]
+    pub delegated_signals: Vec<String>,
+    pub at: DateTime<Utc>,
+}
+
 // ---- Draft Package (top level) ----
 
 /// The Draft Package — a complete, reviewable milestone deliverable.
@@ -676,6 +698,12 @@ pub struct DraftPackage {
     /// to `DraftStatus::Approved`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<ApprovalRecord>,
+
+    /// Delegation labels for approve, deny and apply actions accepted from a
+    /// detected agent context (CR-03 item 6). Empty for direct human actions
+    /// and for drafts written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_contexts: Vec<ActionContextRecord>,
 
     /// AI supervisor review embedded after agent exit (v0.13.17.4).
     /// Present when supervisor is enabled; `None` when disabled or skipped.
@@ -1117,6 +1145,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         vcs_status: None,
         parent_draft_id: None,
         pending_approvals: vec![],
+        action_contexts: vec![],
         supervisor_review: None,
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
@@ -1272,6 +1301,7 @@ mod tests {
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            action_contexts: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],

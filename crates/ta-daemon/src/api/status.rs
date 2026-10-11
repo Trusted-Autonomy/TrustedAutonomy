@@ -87,6 +87,11 @@ pub struct ProjectStatus {
     /// Whether a power assertion (preventing idle sleep) is currently active (v0.13.1.1).
     /// True when there are active goals and `prevent_sleep_during_active_goals` is enabled.
     pub power_assertion_active: bool,
+    /// Agent delegation (CR-03 item 6): `active` is true while a human credential
+    /// exists and an agent context was seen at an approve, deny or apply in the
+    /// last 24 hours. `last_seen` is RFC 3339 or null. `ta logout`
+    /// (`ta login logout`) switches back to Wayfinder-only approvals.
+    pub agent_delegation: ta_credentials::human::DelegationStatus,
     /// Number of community resources with stale or missing caches (v0.14.7).
     /// A resource is "pending" if its cache is older than 30 days or has never been synced.
     pub community_pending_count: usize,
@@ -251,6 +256,15 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
     // Count resources whose cache is missing or older than 30 days.
     let community_pending_count = count_stale_community_resources(&active_root);
 
+    let agent_delegation = {
+        let state_dir = state.human_gate.state_dir();
+        ta_credentials::human::delegation_status(
+            ta_credentials::human::credential_digest_present(state_dir),
+            ta_credentials::human::last_agent_context_seen(state_dir).as_ref(),
+            chrono::Utc::now(),
+        )
+    };
+
     ProjectStatus {
         project: project_name,
         version: version.clone(),
@@ -269,6 +283,7 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
         cursor_style: state.daemon_config.shell.ui.cursor_style.clone(),
         no_heartbeat_alert_secs: state.daemon_config.shell.ui.no_heartbeat_alert_secs,
         power_assertion_active,
+        agent_delegation,
         community_pending_count,
         active_project_path,
         update: crate::self_update::current_report(),
@@ -383,5 +398,62 @@ mod tests {
     fn no_pending_phase() {
         let plan = "### Done\n<!-- status: done -->";
         assert!(find_next_pending_phase(plan).is_none());
+    }
+
+    fn state_with_human_dir(
+        project: &std::path::Path,
+        human_dir: &std::path::Path,
+    ) -> crate::api::AppState {
+        let mut state = crate::api::AppState::new(
+            project.to_path_buf(),
+            crate::config::DaemonConfig::default(),
+        );
+        state.human_gate = crate::human_gate::HumanGate::new(human_dir.to_path_buf());
+        state
+    }
+
+    #[tokio::test]
+    async fn agent_delegation_follows_credential_and_recent_sightings() {
+        use ta_credentials::human;
+        let project = tempfile::tempdir().unwrap();
+        let human_dir = tempfile::tempdir().unwrap();
+        let state = state_with_human_dir(project.path(), human_dir.path());
+
+        // Nothing yet.
+        let d = compute_project_status(&state).await.agent_delegation;
+        assert!(!d.active && !d.credential_present);
+        assert!(d.last_seen.is_none());
+
+        // A recent agent sighting without a credential is not delegation.
+        let ctx = human::AgentContext {
+            signals: vec!["CLAUDECODE is set".into()],
+        };
+        human::record_agent_context_seen(human_dir.path(), &ctx).unwrap();
+        let d = compute_project_status(&state).await.agent_delegation;
+        assert!(!d.active && !d.credential_present);
+        assert!(d.last_seen.is_some());
+
+        // With the credential it is active, with the reasons.
+        human::login(human_dir.path(), false).unwrap();
+        let d = compute_project_status(&state).await.agent_delegation;
+        assert!(d.active && d.credential_present, "{d:?}");
+        assert_eq!(d.reasons, vec!["CLAUDECODE is set"]);
+        assert!(chrono::DateTime::parse_from_rfc3339(d.last_seen.as_deref().unwrap()).is_ok());
+
+        // A stale sighting (25 hours) is not active.
+        human::record_agent_context_seen_at(
+            human_dir.path(),
+            &ctx,
+            chrono::Utc::now() - chrono::Duration::hours(25),
+        )
+        .unwrap();
+        let d = compute_project_status(&state).await.agent_delegation;
+        assert!(!d.active && d.credential_present);
+
+        // The serialized shape is the documented one.
+        let v = serde_json::to_value(compute_project_status(&state).await).unwrap();
+        for key in ["active", "last_seen", "credential_present"] {
+            assert!(v["agent_delegation"].get(key).is_some(), "{key}");
+        }
     }
 }

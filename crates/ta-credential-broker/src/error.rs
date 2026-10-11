@@ -20,6 +20,9 @@ pub enum BrokerError {
         reason: String,
     },
 
+    #[error("{0}")]
+    State(#[from] ta_credentials::state::StateError),
+
     #[error("failed to mint grant: {0}")]
     MintFailed(String),
 

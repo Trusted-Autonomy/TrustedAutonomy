@@ -28,6 +28,9 @@ pub enum AuditAction {
     Error,
     /// A draft was auto-approved by policy (v0.10.15).
     AutoApproval,
+    /// A control-plane secret was moved out of the project tree into the TA
+    /// state directory by `ta doctor --fix`, or the move was refused or failed.
+    SecretMigration,
 }
 
 // ── Decision Observability (v0.3.3) ──

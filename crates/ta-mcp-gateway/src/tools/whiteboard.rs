@@ -2,23 +2,22 @@
 //! team-session goal run to coordinate with its peers via the
 //! daemon-hosted whiteboard (Task 6's `crate::daemon_client::WhiteboardDaemonClient`).
 //!
-//! ## Token source (security-load-bearing — do not change without re-reading
+//! ## Token source (security-load-bearing: do not change without re-reading
 //! this comment)
 //!
-//! Every tool here authenticates using the `team_session`/`token` pair read
-//! from `workspace_root.join(".ta").join("whiteboard-session.json")` — a
-//! file written by `ta run --team-session-id <id>`
-//! (`apps/ta-cli/src/commands/run.rs`'s `write_whiteboard_session_file`)
-//! into this specific goal's staging workspace, using the real project
-//! root's `.ta/team-sessions/<id>/state.json`. That file is the *only*
-//! source: the token is never accepted as an MCP tool-call parameter (an
-//! LLM could simply supply a different team-session's token) and never
-//! read from an environment variable (unreliable/unverified MCP-client env
-//! inheritance — see the Task 7 investigation report). A goal not launched
-//! via `--team-session-id` (or one where the project has no
-//! `[whiteboard] enabled = true`) has no such file, and every tool below
-//! fails with a clear, structured `McpError::invalid_request` — never a
-//! silent no-op and never a caller-supplied substitute.
+//! Every tool here authenticates using the session read from the
+//! environment of this gateway process: `TA_WHITEBOARD_TOKEN`,
+//! `TA_WHITEBOARD_TEAM_SESSION` and `TA_WHITEBOARD_SOURCE_DIR`. The daemon
+//! mints a per-role token at each launch and hands it to `ta run` in its
+//! environment; the agent's MCP config (`.ta/mcp-agent.json`) carries only
+//! the `${TA_WHITEBOARD_TOKEN:-}` placeholder, which the agent expands from
+//! its own environment. No token is ever written to a file under the
+//! project's `.ta/` (red-team CR-03), and the token is never accepted as an
+//! MCP tool-call parameter (an LLM could simply supply a different
+//! team-session's token). A goal not launched as a whiteboard-enabled team
+//! role has no such variables, and every tool below fails with a clear,
+//! structured `McpError::invalid_request`: never a silent no-op and never a
+//! caller-supplied substitute.
 //!
 //! ## Sync-to-async bridging
 //!
@@ -60,45 +59,79 @@ struct WhiteboardSession {
     source_dir: String,
 }
 
-#[derive(Deserialize)]
-struct RawWhiteboardSession {
-    team_session: String,
-    token: String,
-    source_dir: String,
+const ENV_TOKEN: &str = "TA_WHITEBOARD_TOKEN";
+const ENV_TEAM_SESSION: &str = "TA_WHITEBOARD_TEAM_SESSION";
+const ENV_SOURCE_DIR: &str = "TA_WHITEBOARD_SOURCE_DIR";
+
+#[cfg(test)]
+type TestSessions = Mutex<std::collections::HashMap<PathBuf, (String, String, String)>>;
+
+#[cfg(test)]
+fn test_sessions() -> &'static TestSessions {
+    static S: std::sync::OnceLock<TestSessions> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
 }
 
-/// Reads `workspace_root/.ta/whiteboard-session.json` — see this module's
-/// doc comment for why this is the only allowed token source.
-fn load_whiteboard_session(workspace_root: &Path) -> Result<WhiteboardSession, McpError> {
-    let path = workspace_root.join(".ta").join("whiteboard-session.json");
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        McpError::invalid_request(
+/// Test-only: register the session a given workspace root should see, so
+/// tests never mutate the process environment (which is shared by parallel tests).
+#[cfg(test)]
+fn set_test_session(workspace_root: &Path, team_session: &str, token: &str, source_dir: &str) {
+    test_sessions().lock().unwrap().insert(
+        workspace_root.to_path_buf(),
+        (team_session.into(), token.into(), source_dir.into()),
+    );
+}
+
+/// Pure: build the session from an environment lookup.
+fn session_from_env(env: &dyn Fn(&str) -> Option<String>) -> Result<WhiteboardSession, McpError> {
+    let get = |k: &str| {
+        env(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let (Some(token), Some(team_session), Some(source_dir)) =
+        (get(ENV_TOKEN), get(ENV_TEAM_SESSION), get(ENV_SOURCE_DIR))
+    else {
+        return Err(McpError::invalid_request(
             format!(
-                "ta_whiteboard_*: no whiteboard session found at {} ({e}). This goal was not \
-                 launched as part of a team session with whiteboard coordination enabled — \
-                 ta_whiteboard_* tools are only available for goals launched via \
-                 `ta run --team-session-id <id>` where the project's `[whiteboard] enabled = \
-                 true`.",
-                path.display()
+                "ta_whiteboard_*: no whiteboard session in this agent's environment ({ENV_TOKEN}, \
+                 {ENV_TEAM_SESSION} and {ENV_SOURCE_DIR} must all be set). This goal was not \
+                 launched as a role of a team session with whiteboard coordination enabled. \
+                 ta_whiteboard_* tools are only available to roles launched by the daemon for a \
+                 team session where the project's `[whiteboard] enabled = true`. If this IS such a \
+                 role, check that the agent's MCP config forwards the {ENV_TOKEN} variable."
             ),
             None,
-        )
-    })?;
-    let parsed: RawWhiteboardSession = serde_json::from_str(&raw).map_err(|e| {
-        McpError::internal_error(
-            format!(
-                "ta_whiteboard_*: malformed {} ({e}). This file is written by `ta run \
-                 --team-session-id`; if it's corrupted, re-launch the goal.",
-                path.display()
-            ),
-            None,
-        )
-    })?;
+        ));
+    };
     Ok(WhiteboardSession {
-        team_session: parsed.team_session,
-        token: parsed.token,
-        source_dir: parsed.source_dir,
+        team_session,
+        token,
+        source_dir,
     })
+}
+
+/// Reads the whiteboard session for this gateway process; see this module's
+/// doc comment for why the environment is the only allowed token source.
+fn load_whiteboard_session(workspace_root: &Path) -> Result<WhiteboardSession, McpError> {
+    #[cfg(test)]
+    {
+        if let Some((team_session, token, source_dir)) =
+            test_sessions().lock().unwrap().get(workspace_root).cloned()
+        {
+            return Ok(WhiteboardSession {
+                team_session,
+                token,
+                source_dir,
+            });
+        }
+        session_from_env(&|_| None)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = workspace_root;
+        session_from_env(&|k| std::env::var(k).ok())
+    }
 }
 
 fn workspace_root(state: &Arc<Mutex<GatewayState>>) -> Result<PathBuf, McpError> {
@@ -440,45 +473,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_whiteboard_session_errors_clearly_when_file_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_whiteboard_session(dir.path()).unwrap_err();
+    fn session_errors_clearly_when_the_environment_has_no_session() {
+        let err = session_from_env(&|_| None).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("no whiteboard session found"), "{msg}");
-        assert!(msg.contains("--team-session-id"), "{msg}");
+        assert!(msg.contains("TA_WHITEBOARD_TOKEN"), "{msg}");
+        assert!(msg.contains("MCP config"), "{msg}");
+        // A partial environment (token but no session) is also refused.
+        let only_token = |k: &str| (k == ENV_TOKEN).then(|| "t".to_string());
+        assert!(session_from_env(&only_token).is_err());
+        // An empty value (an unexpanded `${VAR:-}` placeholder) counts as unset.
+        let empty = |_: &str| Some(String::new());
+        assert!(session_from_env(&empty).is_err());
     }
 
     #[test]
-    fn load_whiteboard_session_errors_clearly_when_malformed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
-        std::fs::write(dir.path().join(".ta/whiteboard-session.json"), "not json").unwrap();
-        let err = load_whiteboard_session(dir.path()).unwrap_err();
-        assert!(format!("{err}").contains("malformed"));
+    fn session_reads_team_session_token_and_source_dir_from_the_environment() {
+        let env = |k: &str| match k {
+            ENV_TOKEN => Some("tok-abc".to_string()),
+            ENV_TEAM_SESSION => Some("sess-1".to_string()),
+            ENV_SOURCE_DIR => Some("/real/project/root".to_string()),
+            _ => None,
+        };
+        let session = session_from_env(&env).unwrap();
+        assert_eq!(session.team_session, "sess-1");
+        assert_eq!(session.token, "tok-abc");
+        assert_eq!(session.source_dir, "/real/project/root");
     }
 
     #[test]
-    fn load_whiteboard_session_reads_team_session_and_token() {
+    fn a_leftover_session_file_in_the_project_is_never_a_token_source() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
         std::fs::write(
             dir.path().join(".ta/whiteboard-session.json"),
-            serde_json::json!({
-                "team_session": "sess-1",
-                "token": "tok-abc",
-                "source_dir": "/real/project/root",
-            })
-            .to_string(),
+            r#"{"team_session":"s","token":"tok","source_dir":"/x"}"#,
         )
         .unwrap();
-        let session = load_whiteboard_session(dir.path()).unwrap();
-        assert_eq!(session.team_session, "sess-1");
-        assert_eq!(session.token, "tok-abc");
-        assert_eq!(
-            session.source_dir, "/real/project/root",
-            "source_dir must come from the session file (the real project root), \
-             not be derived from the staging workspace_root"
-        );
+        assert!(load_whiteboard_session(dir.path()).is_err());
     }
 
     /// Regression test for a bug where every handler built
@@ -493,16 +524,7 @@ mod tests {
     fn daemon_client_must_resolve_against_source_dir_not_workspace_root() {
         let workspace_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(workspace_root.path().join(".ta")).unwrap();
-        std::fs::write(
-            workspace_root.path().join(".ta/whiteboard-session.json"),
-            serde_json::json!({
-                "team_session": "sess-1",
-                "token": "tok-abc",
-                "source_dir": "placeholder",
-            })
-            .to_string(),
-        )
-        .unwrap();
+        set_test_session(workspace_root.path(), "sess-1", "tok-abc", "placeholder");
         // workspace_root (staging) never has daemon.pid in real usage --
         // deliberately left without one here to match that.
 
@@ -542,7 +564,7 @@ mod tests {
 
     /// End-to-end through the real `ta_whiteboard_outcome_send` handler, the
     /// way a chat-mode chief-of-staff calls it: the handler's workspace_root
-    /// is the STAGING dir, whose `.ta/whiteboard-session.json` names the real
+    /// is the STAGING dir, whose session (from the environment) names the real
     /// project root as `source_dir`, whose `.ta/daemon.pid` was written by
     /// the daemon itself in its `pid=` + `bind=` shape on a non-default
     /// port. The POST must land on that daemon (and therefore not on 7700).
@@ -560,16 +582,12 @@ mod tests {
 
         let staging = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(staging.path().join(".ta")).unwrap();
-        std::fs::write(
-            staging.path().join(".ta/whiteboard-session.json"),
-            serde_json::json!({
-                "team_session": "sess-cos",
-                "token": "tok-cos",
-                "source_dir": project.path().display().to_string(),
-            })
-            .to_string(),
-        )
-        .unwrap();
+        set_test_session(
+            staging.path(),
+            "sess-cos",
+            "tok-cos",
+            &project.path().display().to_string(),
+        );
 
         let mut config = crate::config::GatewayConfig::for_project(staging.path());
         config.credential_vault_use_keychain = false;

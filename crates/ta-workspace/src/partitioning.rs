@@ -97,6 +97,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     // tokens were found untracked and unignored in a project tree (red-team
     // CR-03); `*.key` / `*.pem` below cover broker_root.key, audit.key,
     // credentials.key and any future key file.
+    "project-id", // stable project id for the per-user state directory (not secret, but machine-local)
     "broker_root.key",
     "daemon-tokens.json",
     "tokens/",

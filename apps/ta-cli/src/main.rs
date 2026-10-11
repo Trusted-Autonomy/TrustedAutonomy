@@ -1661,6 +1661,9 @@ fn dispatch_raw(
             no_version_check,
         ),
         Commands::Show { noun, .. } if noun == "install" => commands::login::show_install(),
+        Commands::Show { noun, .. } if noun == "state" => {
+            commands::state_secrets::show_state(project_root)
+        }
         Commands::Show { noun, id, extra } => run_verb_noun(
             "show",
             noun,

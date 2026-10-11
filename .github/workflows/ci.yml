@@ -90,6 +90,13 @@ jobs:
           fi
           echo "OK: versions consistent ($CARGO_VER)"
 
+      - name: Secret scan (real-shaped secrets outside the allowlist)
+        run: |
+          # Pattern-based, no dependencies. The checkout above provides the git
+          # work tree that `git ls-files` needs. Allowlist: scripts/secret-scan.allowlist.
+          ./scripts/secret-scan.sh --self-test
+          ./scripts/secret-scan.sh
+
   lint-and-test:
     name: Lint and Test
     needs: version-check
