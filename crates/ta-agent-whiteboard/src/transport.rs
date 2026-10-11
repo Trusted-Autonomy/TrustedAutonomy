@@ -107,6 +107,33 @@ pub trait WhiteboardTransport: Send + Sync {
     /// if `msg_id` is not currently pending.
     async fn stream_ack_progress(&self, stream: &str, consumer: &str, msg_id: &str) -> Result<()>;
 
+    /// Negative-ack `msg_id` with a delay (JetStream `AckKind::Nak(Some(delay))`):
+    /// the message is not acknowledged and is redelivered no sooner than
+    /// `delay` from now, independent of the consumer's ack wait. This is how a
+    /// failed job is retried on a schedule while the ack wait stays long
+    /// enough for a long-running job. A no-op if `msg_id` is not currently
+    /// pending.
+    async fn stream_nak_delayed(
+        &self,
+        stream: &str,
+        consumer: &str,
+        msg_id: &str,
+        delay: Duration,
+    ) -> Result<()>;
+
+    /// Make messages that an earlier process delivered and never acked
+    /// deliverable again at once, for a restarted consumer that no longer
+    /// holds their delivery handles (so it cannot nak them). Returns how many
+    /// of `msg_ids` were released. The caller still applies its own retry
+    /// schedule when they arrive, and should nak them with the remaining
+    /// delay if they come back too early.
+    async fn stream_recover_pending(
+        &self,
+        stream: &str,
+        consumer: &str,
+        msg_ids: &[String],
+    ) -> Result<usize>;
+
     /// Set how long `consumer` waits for an ack (or ack-progress) before the
     /// transport redelivers a message. Applies to the named durable consumer
     /// on `stream`, whether or not it already exists, and takes effect for

@@ -30,6 +30,7 @@ pub mod messaging_audit;
 pub mod operations;
 pub mod origin;
 pub mod persona;
+pub mod phase_release;
 pub mod phase_selector;
 pub mod reviewer;
 pub mod security;

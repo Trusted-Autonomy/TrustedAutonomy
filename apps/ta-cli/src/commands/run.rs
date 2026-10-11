@@ -2506,6 +2506,45 @@ fn merge_wave_into_integration_dir(
 
 // ── Public API ──────────────────────────────────────────────────
 
+/// Whether this `ta run` is a chat-mode or cos/chat-origin goal, which must
+/// never link, insert or claim a plan phase. Reads the same three sources the
+/// launch itself does: `--chat-mode` (or the spawn environment), the persona's
+/// `chat_mode`, and the origin (`--origin` / `TA_GOAL_ORIGIN`, or the origin
+/// already on a reused goal record). A persona that cannot be loaded here is
+/// reported later by the chat-mode check, so it counts as not chat mode.
+fn launch_never_claims_plan_phase(
+    config: &GatewayConfig,
+    persona_name: Option<&str>,
+    existing_goal_id: Option<&str>,
+) -> bool {
+    let env_chat_mode = std::env::var(ta_mcp_gateway::chat_launch::ENV_CHAT_MODE)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false")
+        })
+        .unwrap_or(false);
+    let persona_chat_mode = persona_name
+        .and_then(|p| ta_goal::PersonaConfig::load(&config.workspace_root, p).ok())
+        .map(|p| p.capabilities.chat_mode)
+        .unwrap_or(false);
+    let env_origin = ta_goal::origin::origin_from_env().ok().flatten();
+    // A reused goal keeps the origin on its record whatever the environment
+    // says (see `origin_to_stamp`), so that is checked too.
+    let recorded_origin = existing_goal_id
+        .and_then(|i| uuid::Uuid::parse_str(i).ok())
+        .and_then(|id| {
+            GoalRunStore::new(&config.goals_dir)
+                .ok()
+                .and_then(|s| s.get(id).ok().flatten())
+        })
+        .and_then(|g| g.origin);
+    let chat_mode =
+        super::chat_launch::cli_chat_mode_requested() || env_chat_mode || persona_chat_mode;
+    ta_goal::origin::goal_never_claims_plan_phase(chat_mode, env_origin.as_deref())
+        || ta_goal::origin::goal_never_claims_plan_phase(false, recorded_origin.as_deref())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     config: &GatewayConfig,
@@ -2580,7 +2619,22 @@ pub fn execute(
     //      error on non-TTY stdin so the caller can retry with --phase)
     //   5. No version token → auto-detect single in_progress phase
     //   6. No in_progress → insert gap phase stub into PLAN.md
-    let phase_owned: Option<String> = {
+    //
+    // Chat-mode and cos/chat-origin goals skip all of it (v0.17.11.30): they
+    // never link, insert or claim a phase and leave PLAN.md untouched.
+    let skip_plan_phase = launch_never_claims_plan_phase(config, persona_name, existing_goal_id);
+    if skip_plan_phase && !quiet {
+        if let Some(requested) = phase.as_deref() {
+            eprintln!(
+                "[warning] Ignoring --phase {requested}: chat-mode and cos/chat-origin goals \
+                 never claim a plan phase, so PLAN.md is left untouched. Run the work as a \
+                 normal goal (no --chat-mode, an origin other than cos/chat) to link a phase."
+            );
+        }
+    }
+    let phase_owned: Option<String> = if skip_plan_phase {
+        None
+    } else {
         let source_root = source
             .map(|p| p.to_owned())
             .unwrap_or_else(|| config.workspace_root.clone());
@@ -2612,7 +2666,7 @@ pub fn execute(
     // When a PLAN.md exists and no phase was resolved, warn or error depending
     // on the `[workflow].require_phase` config (default: "warn").
     // Follow-up runs and --goal-id reuses are exempt (phase already set on goal).
-    if phase.is_none() && follow_up.is_none() && existing_goal_id.is_none() {
+    if phase.is_none() && follow_up.is_none() && existing_goal_id.is_none() && !skip_plan_phase {
         let source_root = source
             .map(|p| p.to_owned())
             .unwrap_or_else(|| config.workspace_root.clone());
@@ -3035,7 +3089,7 @@ pub fn execute(
     // goal + phase were already claimed by an earlier `ta goal start`), or
     // this is a follow-up run (the phase is already in_progress from the
     // parent goal — re-claiming produces a fatal "already claimed" error).
-    let pre_staging_phase_claimed = if follow_up.is_none() {
+    let pre_staging_phase_claimed = if follow_up.is_none() && !skip_plan_phase {
         if let (Some(phase_id), None) = (phase, existing_goal_id) {
             let source_root = source
                 .map(|p| p.to_owned())
@@ -3429,7 +3483,7 @@ pub fn execute(
     // made (no phase, or reused existing goal where phase was already claimed),
     // fall back to the original daemon/direct claim flow. Also skip for follow-up
     // runs: the phase is already in_progress from the parent goal.
-    if !pre_staging_phase_claimed && follow_up.is_none() {
+    if !pre_staging_phase_claimed && follow_up.is_none() && !skip_plan_phase {
         if let Some(ref phase_id) = goal.plan_phase {
             let source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
             match try_daemon_claim_phase(source_root, phase_id, Some(&goal_id)) {
@@ -11201,6 +11255,152 @@ context_inject = "{mode_toml}"
 
         let reloaded = store.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(reloaded.origin.as_deref(), Some("cos"));
+    }
+
+    // ---- v0.17.11.30: chat and cos-origin goals never claim a plan phase ----
+
+    const PLAN_FOR_CLAIM_TESTS: &str = "# Plan\n\n\
+### v0.1.0 - Finished phase\n<!-- status: done -->\n\n\
+### v0.2.0 - Next phase\n<!-- status: pending -->\n";
+
+    /// A project with a PLAN.md and no in-progress phase, so a normal
+    /// `ta run` with no `--phase` inserts an ad-hoc stub and claims it.
+    fn plan_project() -> (TempDir, GatewayConfig) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::write(project.path().join("PLAN.md"), PLAN_FOR_CLAIM_TESTS).unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        (project, config)
+    }
+
+    fn run_no_launch(
+        config: &GatewayConfig,
+        project: &Path,
+        title: &str,
+        phase: Option<&str>,
+        existing_goal_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        execute(
+            config,
+            Some(title),
+            "claude-code",
+            Some(project),
+            "answer the question",
+            phase,
+            None,
+            None,
+            None,
+            None,
+            true,  // no_launch
+            false, // interactive
+            false, // macro_goal
+            None,
+            false,
+            false,
+            true, // quiet
+            existing_goal_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_normal_goal_without_a_phase_does_claim_an_adhoc_phase() {
+        // The control for the two tests below: without the chat/cos rule the
+        // same project does get an in_progress stub in PLAN.md.
+        let (project, config) = plan_project();
+        run_no_launch(&config, project.path(), "Answer a question", None, None).unwrap();
+        let plan = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert_ne!(
+            plan, PLAN_FOR_CLAIM_TESTS,
+            "control run must change PLAN.md"
+        );
+        assert!(plan.contains("status: in_progress"), "{plan}");
+    }
+
+    #[test]
+    fn a_chat_mode_goal_leaves_plan_md_byte_identical_and_claims_nothing() {
+        let (project, config) = plan_project();
+        let _chat = super::super::chat_launch::CliChatModeGuard::set(true);
+        let result = run_no_launch(
+            &config,
+            project.path(),
+            "Answer a question",
+            Some("v0.2.0"),
+            None,
+        );
+        drop(_chat);
+        result.unwrap();
+
+        let plan = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert_eq!(plan, PLAN_FOR_CLAIM_TESTS, "PLAN.md must be untouched");
+        assert!(!project.path().join(".ta/plan_history.jsonl").exists());
+        let goals = GoalRunStore::new(&config.goals_dir)
+            .unwrap()
+            .list()
+            .unwrap();
+        assert_eq!(goals.len(), 1, "the chat goal still records its own state");
+        assert_eq!(goals[0].plan_phase, None, "and links no phase");
+    }
+
+    #[test]
+    fn a_cos_origin_goal_leaves_plan_md_byte_identical_and_claims_nothing() {
+        let (project, config) = plan_project();
+        // Start the goal, stamp its origin as the CoS launch does, then run
+        // against it: the recorded origin (not the environment, which other
+        // tests share) is what must keep it out of the plan.
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "CoS goal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "triage".to_string(),
+                agent: "claude-code".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = store.list().unwrap()[0].clone();
+        goal.origin = Some("cos".to_string());
+        store.save(&goal).unwrap();
+        let before = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+
+        run_no_launch(
+            &config,
+            project.path(),
+            "CoS goal",
+            None,
+            Some(goal.goal_run_id.to_string().as_str()),
+        )
+        .unwrap();
+
+        let plan = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert_eq!(plan, before, "PLAN.md must be untouched");
+        assert!(!plan.contains("in_progress"));
+        let reloaded = store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(reloaded.plan_phase, None);
+    }
+
+    #[test]
+    fn the_chat_rule_reads_chat_mode_the_cos_origin_and_the_recorded_origin() {
+        let (project, config) = plan_project();
+        assert!(!launch_never_claims_plan_phase(&config, None, None));
+        {
+            let _chat = super::super::chat_launch::CliChatModeGuard::set(true);
+            assert!(launch_never_claims_plan_phase(&config, None, None));
+        }
+        assert!(!launch_never_claims_plan_phase(&config, None, None));
+        let _ = project;
     }
 
     #[test]

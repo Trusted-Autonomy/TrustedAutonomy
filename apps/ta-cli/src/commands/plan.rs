@@ -920,7 +920,7 @@ pub fn reset_phase_if_in_progress(
 /// stale entry that blocks the next `ta run` with "already claimed". This
 /// function corrects that. Errors are silently swallowed: the daemon may not
 /// be running, and PLAN.md is already the authoritative source of truth.
-fn release_daemon_phase_claim(project_root: &Path, phase_id: &str) {
+pub(crate) fn release_daemon_phase_claim(project_root: &Path, phase_id: &str) {
     let Ok(client) = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -931,6 +931,45 @@ fn release_daemon_phase_claim(project_root: &Path, phase_id: &str) {
     let url = format!("{}/api/plan/phase/release", daemon_url);
     let body = serde_json::json!({ "phase_id": phase_id });
     let _ = client.post(&url).json(&body).send();
+}
+
+/// Releases a goal's plan-phase claim for the `ta` process: resets PLAN.md
+/// when no work landed and tells the running daemon (v0.17.11.30). Registered
+/// once at startup so `GoalRunStore` can enforce release for every caller.
+pub struct CliPhaseClaimReleaser;
+
+impl ta_goal::phase_release::PhaseClaimReleaser for CliPhaseClaimReleaser {
+    fn release(&self, release: &ta_goal::phase_release::PhaseRelease) {
+        let Some(root) = release.source_dir.as_deref() else {
+            tracing::warn!(
+                goal_id = %release.goal_id,
+                phase = %release.phase_id,
+                "goal has no source directory, so its plan phase cannot be released \
+                 automatically; run `ta plan reset {}`",
+                release.phase_id
+            );
+            return;
+        };
+        if release.reset_plan {
+            let note = format!("phase reset to pending ({})", release.trigger);
+            match reset_phase_if_in_progress(root, &release.phase_id, &note) {
+                Ok(true) => tracing::info!(
+                    goal_id = %release.goal_id,
+                    phase = %release.phase_id,
+                    "phase reset to pending in PLAN.md"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    goal_id = %release.goal_id,
+                    phase = %release.phase_id,
+                    error = %e,
+                    "could not reset the plan phase in PLAN.md; run `ta plan reset {}`",
+                    release.phase_id
+                ),
+            }
+        }
+        release_daemon_phase_claim(root, &release.phase_id);
+    }
 }
 
 /// CLI handler for `ta plan reset <phase-id>`.

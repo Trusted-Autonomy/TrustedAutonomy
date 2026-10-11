@@ -175,9 +175,15 @@ impl NatsTransport {
         // `get_or_create_consumer` returns an existing durable consumer
         // untouched, so a consumer created earlier with the 30 s default
         // would keep it. Update it in place when the wanted value differs.
+        // Start from the consumer's own config so its (immutable) deliver
+        // policy, which a recovery sweep may have set, is not changed.
         if let Some(w) = wanted {
             if c.cached_info().config.ack_wait != w {
-                c = s.update_consumer(config).await.map_err(|e| {
+                let mut update = c.cached_info().config.clone();
+                update.ack_wait = w;
+                let update = <pull::Config as async_nats::jetstream::consumer::FromConsumer>::try_from_consumer_config(update)
+                    .unwrap_or(config);
+                c = s.update_consumer(update).await.map_err(|e| {
                     stream_err(
                         stream,
                         format!(
@@ -367,6 +373,77 @@ impl WhiteboardTransport for NatsTransport {
                 .map_err(|e| stream_err(stream, format!("ack progress failed: {e}")))?;
         }
         Ok(())
+    }
+
+    async fn stream_nak_delayed(
+        &self,
+        stream: &str,
+        _consumer: &str,
+        msg_id: &str,
+        delay: Duration,
+    ) -> Result<()> {
+        // The delivery handle is spent once nak'd, so drop it.
+        let msg = self.ack_pending.lock().await.remove(msg_id);
+        if let Some(msg) = msg {
+            msg.ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
+                .await
+                .map_err(|e| {
+                    stream_err(
+                        stream,
+                        format!("delayed nak ({}s) of {msg_id} failed: {e}", delay.as_secs()),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn stream_recover_pending(
+        &self,
+        stream: &str,
+        consumer: &str,
+        msg_ids: &[String],
+    ) -> Result<usize> {
+        // A restarted process holds no delivery handles, and the server will
+        // not redeliver a pending message until its ack wait runs out (an
+        // hour). The only way to release them is to recreate the durable
+        // consumer starting at the oldest of them. Messages after that point
+        // that were already acked come back too; the caller's completed-
+        // sequence record turns each of those into an ack without a launch.
+        let seqs: Vec<u64> = msg_ids
+            .iter()
+            .filter_map(|m| m.strip_prefix("seq-").and_then(|n| n.parse().ok()))
+            .collect();
+        let Some(&start) = seqs.iter().min() else {
+            return Ok(0);
+        };
+        let s = self.ensure_stream(stream).await?;
+        let key = (stream.to_string(), consumer.to_string());
+        let ack_wait = self.ack_waits.lock().await.get(&key).copied();
+        self.consumers.lock().await.remove(&key);
+        self.ack_pending.lock().await.clear();
+        s.delete_consumer(consumer).await.map_err(|e| {
+            stream_err(
+                stream,
+                format!("could not reset consumer '{consumer}' to recover pending messages: {e}"),
+            )
+        })?;
+        let mut config = pull::Config {
+            durable_name: Some(consumer.to_string()),
+            ack_policy: AckPolicy::Explicit,
+            deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                start_sequence: start,
+            },
+            ..Default::default()
+        };
+        if let Some(w) = ack_wait {
+            config.ack_wait = w;
+        }
+        let c = s
+            .get_or_create_consumer(consumer, config)
+            .await
+            .map_err(|e| stream_err(stream, e))?;
+        self.consumers.lock().await.insert(key, c);
+        Ok(seqs.len())
     }
 
     async fn stream_set_ack_wait(
