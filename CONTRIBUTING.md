@@ -75,6 +75,50 @@ Thank you for your interest in contributing to Trusted Autonomy! This document p
 - Use `tempfile::tempdir()` for filesystem-based tests
 - Tests should be deterministic and isolated
 
+### Hermetic tests and the leftover-process check
+
+A unit test must never run the real `gh`, `ta` or `ta-daemon`. On Windows,
+`cargo test` puts `target\debug` on `PATH`, so a test that spawns one of them
+by name runs the freshly built binary, and anything it leaves behind keeps
+running after the test ends. A Windows CI run once ended with about 7,000
+orphaned `gh` processes and a leftover `ta-daemon`.
+
+How to keep a test hermetic:
+
+- **Inject the command.** Code that shells out takes the program or the whole
+  call as a parameter, and the test passes a stub. Existing hooks:
+  `GitAdapter::with_gh_program(path)` (a nonexistent path behaves like a
+  machine without `gh`), `ta_workflow::step_executor::execute_pr_monitor_tick_with`
+  (injected CI poller), `doctor::execute_with_gh_check`, and
+  `daemon::start_with_binary` (injected daemon lookup).
+- **Or put a stub first on `PATH`** for a child process you start yourself:
+  write a `gh` script into a `tempfile::tempdir()` (see
+  `crates/ta-submit/tests/git_open_review.rs`), `cfg(unix)` because it is a
+  shell script.
+- **Reap every child.** Wait on it, or kill its whole tree on a timeout with
+  `ta_goal::process::kill_process_tree`. A test that starts a daemon holds it
+  in a guard whose `Drop` kills it, and uses an ephemeral port.
+
+CI enforces this. The last step of each required job
+(`scripts/ci-leftover-processes.sh`, or `.ps1` on Windows) lists leftover
+`gh`, `ta-daemon` and `ta` processes and fails when there is any `ta-daemon`
+or more than 5 `gh` or `ta` processes. It runs even if an earlier step failed.
+Run it locally after a test run (on a development machine your own running
+`ta-daemon` and `ta` sessions count too, so read the list rather than the exit
+code):
+
+```bash
+./dev cargo test --workspace
+scripts/ci-leftover-processes.sh
+```
+
+If it fails, run the test binaries one at a time with a fake `gh` first on
+`PATH` that logs its arguments, to find the test that reaches it.
+
+The three channel plugins (`plugins/ta-channel-discord`, `-slack`, `-email`)
+have their own `[workspace]` and are built only by their own CI step. Test one
+locally with `./dev cargo test --manifest-path plugins/ta-channel-slack/Cargo.toml`.
+
 ## Code Quality
 
 ### Before Every Commit

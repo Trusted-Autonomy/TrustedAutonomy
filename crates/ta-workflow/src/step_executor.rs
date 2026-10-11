@@ -316,8 +316,7 @@ fn run_gh_bounded(args: &[&str], timeout: Duration) -> Option<std::process::Outp
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    ta_goal::process::kill_process_tree(&mut child);
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -375,6 +374,18 @@ pub fn execute_pr_monitor_tick(
     elapsed_secs: u64,
     ctx: &StepExecutionContext,
 ) -> StepOutcome {
+    execute_pr_monitor_tick_with(kind, pr_number, elapsed_secs, ctx, &poll_pr_ci_status)
+}
+
+/// [`execute_pr_monitor_tick`] with the CI status source injected, so tests
+/// can drive every route without running the real `gh`.
+pub fn execute_pr_monitor_tick_with(
+    kind: &WorkflowStepKind,
+    pr_number: u64,
+    elapsed_secs: u64,
+    ctx: &StepExecutionContext,
+    poll: &dyn Fn(u64) -> PrCiStatus,
+) -> StepOutcome {
     let (on_pass, on_fail, on_timeout, timeout_str) = match kind {
         WorkflowStepKind::PrMonitor {
             on_pass,
@@ -405,7 +416,7 @@ pub fn execute_pr_monitor_tick(
         }
     }
 
-    match poll_pr_ci_status(pr_number) {
+    match poll(pr_number) {
         PrCiStatus::AllPassed | PrCiStatus::Merged => match on_pass {
             Some(target) => StepOutcome::from_target(target),
             None => StepOutcome::Complete,
@@ -688,19 +699,37 @@ mod tests {
     }
 
     #[test]
-    fn pr_monitor_within_timeout_returns_pending_when_no_gh() {
+    fn pr_monitor_within_timeout_returns_pending_when_ci_pending() {
         let tmp = TempDir::new().unwrap();
         let ctx = StepExecutionContext::new(tmp.path());
         let kind = make_pr_monitor_step("60m", Some("escalate"));
 
-        let outcome = execute_pr_monitor_tick(&kind, 99, 10, &ctx);
-        assert!(matches!(
-            outcome,
-            StepOutcome::Pending
-                | StepOutcome::Next(_)
-                | StepOutcome::Sequence(_)
-                | StepOutcome::Complete
-        ));
+        // Injected poller: the test never reaches the real `gh`.
+        let outcome = execute_pr_monitor_tick_with(&kind, 99, 10, &ctx, &|_| PrCiStatus::Pending);
+        assert_eq!(outcome, StepOutcome::Pending);
+    }
+
+    #[test]
+    fn pr_monitor_routes_on_polled_ci_status() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = StepExecutionContext::new(tmp.path());
+        let kind = WorkflowStepKind::PrMonitor {
+            wait_for: PrWaitCondition::CiPass,
+            timeout: Some("60m".to_string()),
+            on_pass: Some(StepTarget::Single("merge".to_string())),
+            on_fail: Some(StepTarget::Single("fix".to_string())),
+            on_timeout: None,
+            transitions: vec![],
+            entry_actions: vec![],
+        };
+
+        let pass = execute_pr_monitor_tick_with(&kind, 7, 1, &ctx, &|n| {
+            assert_eq!(n, 7, "poller receives the PR number");
+            PrCiStatus::AllPassed
+        });
+        assert_eq!(pass, StepOutcome::Next("merge".to_string()));
+        let fail = execute_pr_monitor_tick_with(&kind, 7, 1, &ctx, &|_| PrCiStatus::Failed);
+        assert_eq!(fail, StepOutcome::Next("fix".to_string()));
     }
 
     #[test]

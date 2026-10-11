@@ -45,7 +45,11 @@ impl CheckResult {
             fix: String::new(),
         }
     }
-    fn warn(name: impl Into<String>, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub(crate) fn warn(
+        name: impl Into<String>,
+        detail: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             status: CheckStatus::Warn,
@@ -73,13 +77,26 @@ pub fn execute(
     fix: bool,
     yes: bool,
 ) -> anyhow::Result<()> {
+    execute_with_gh_check(config, json, fix_denied, fix, yes, &check_gh_cli)
+}
+
+/// [`execute`] with the `gh` check injected, so callers in unit tests never
+/// run the real `gh`.
+pub(crate) fn execute_with_gh_check(
+    config: &GatewayConfig,
+    json: bool,
+    fix_denied: bool,
+    fix: bool,
+    yes: bool,
+    gh_check: &dyn Fn() -> CheckResult,
+) -> anyhow::Result<()> {
     if fix_denied {
         return execute_fix_denied(config);
     }
     if fix {
         return execute_fix(config, yes);
     }
-    let checks = run_all_checks(config);
+    let checks = run_all_checks_with(config, gh_check);
     let fail_count = checks
         .iter()
         .filter(|c| c.status == CheckStatus::Fail)
@@ -172,7 +189,14 @@ fn print_checks(checks: &[CheckResult]) {
 
 // ── Individual checks ────────────────────────────────────────────────────────
 
-fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
+/// Run every doctor check. `gh_check` is injected so unit tests pass a canned
+/// result and never run the real `gh` (or whatever `gh` the test process's
+/// `PATH` resolves to, which on Windows includes the `gh` shim in
+/// `target\debug`).
+fn run_all_checks_with(
+    config: &GatewayConfig,
+    gh_check: &dyn Fn() -> CheckResult,
+) -> Vec<CheckResult> {
     let mut results = Vec::new();
 
     // 1. CLI version (always passes).
@@ -193,7 +217,7 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     results.push(check_agent_binary(&agent_name, &config.workspace_root));
 
     // 5. gh CLI presence and auth.
-    results.push(check_gh_cli());
+    results.push(gh_check());
 
     // 6. Project root.
     results.push(check_project_root(&config.workspace_root));
@@ -476,8 +500,7 @@ fn run_gh_auth_status_bounded(timeout: std::time::Duration) -> bool {
             Ok(Some(status)) => return status.success(),
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    ta_goal::process::kill_process_tree(&mut child);
                     return false;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -2576,7 +2599,9 @@ mod tests {
     fn doctor_json_output_is_valid_json() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        let checks = run_all_checks(&config);
+        let checks = run_all_checks_with(&config, &|| {
+            CheckResult::warn("gh CLI", "stubbed in tests".to_string(), "")
+        });
         let json = serde_json::to_string_pretty(&checks).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
@@ -2643,7 +2668,9 @@ mod tests {
         // doctor() should not panic or error for a minimal project dir.
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        let checks = run_all_checks(&config);
+        let checks = run_all_checks_with(&config, &|| {
+            CheckResult::warn("gh CLI", "stubbed in tests".to_string(), "")
+        });
         // Auth and agent-binary checks legitimately fail in CI (no API key, no
         // claude binary on PATH). Only assert that no *other* checks are Fail.
         let unexpected_failures: Vec<_> = checks

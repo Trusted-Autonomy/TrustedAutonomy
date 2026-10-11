@@ -31,7 +31,23 @@ use std::path::{Path, PathBuf};
 
 const GH_HOST: &str = "github.com";
 
+/// Re-entry marker set on the child this shim launches. A shim started with
+/// this already set was launched (directly or through a chain) by another
+/// shim, which means self-resolution slipped past the path comparison in
+/// `find_real_gh`. Refusing to run ends the chain at depth one instead of
+/// forking processes until the machine is exhausted.
+const REENTRY_ENV: &str = "TA_GH_SHIM_ACTIVE";
+
 fn main() {
+    if std::env::var_os(REENTRY_ENV).is_some() {
+        eprintln!(
+            "ta gh-shim: refusing to run: this wrapper was launched by another ta gh-shim \
+             ({REENTRY_ENV} is set), so 'gh' on PATH resolves back to a wrapper. \
+             Remove the wrapper directory (.ta/bin, target/debug) from PATH or install \
+             the real GitHub CLI (https://cli.github.com)"
+        );
+        std::process::exit(126);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let path_var = std::env::var("PATH").unwrap_or_default();
     let self_dir = std::env::current_exe()
@@ -39,7 +55,8 @@ fn main() {
         .and_then(|p| p.parent().map(Path::to_path_buf));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let real_gh = match find_real_gh(&path_var, self_dir.as_deref(), &cwd) {
+    let self_exe = std::env::current_exe().ok();
+    let real_gh = match find_real_gh(&path_var, self_dir.as_deref(), self_exe.as_deref(), &cwd) {
         Some(p) => p,
         None => {
             eprintln!(
@@ -60,6 +77,7 @@ fn main() {
 
     let mut cmd = std::process::Command::new(&real_gh);
     cmd.args(&args);
+    cmd.env(REENTRY_ENV, "1");
     if let Some(secret) = &secret {
         cmd.env("GH_TOKEN", secret);
     }
@@ -77,22 +95,49 @@ fn main() {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Build a `PATH`-shaped value with `exclude_dir` removed — pure, so it's
-/// directly testable without touching the real process environment.
+/// Canonical form of `p` for identity comparison. On Windows `current_exe`
+/// and `PATH` entries can differ in case, 8.3 short names or a `\\?\` verbatim
+/// prefix, so a plain string comparison misses a match; `canonicalize`
+/// resolves all of those. Falls back to the input when the path cannot be
+/// resolved (the comparison is then no worse than before).
+fn canonical(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Build a `PATH`-shaped value with `exclude_dir` removed. Directories are
+/// compared by canonical path, so the same directory spelled differently is
+/// still excluded. Pure apart from reading the filesystem to canonicalize.
 fn filtered_path(path_var: &str, exclude_dir: Option<&Path>) -> OsString {
+    let exclude = exclude_dir.map(canonical);
     let dirs: Vec<PathBuf> = std::env::split_paths(path_var)
-        .filter(|d| Some(d.as_path()) != exclude_dir)
+        .filter(|d| match &exclude {
+            Some(ex) => canonical(d) != *ex,
+            None => true,
+        })
         .collect();
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
 /// Locate the real `gh` binary on `path_var`, skipping `exclude_dir` (this
-/// wrapper's own directory). Delegates to `which::which_in`, which already
-/// handles `PATHEXT`/executable-bit resolution correctly per platform —
-/// only the exclusion + PATH plumbing around it is this shim's own logic.
-fn find_real_gh(path_var: &str, exclude_dir: Option<&Path>, cwd: &Path) -> Option<PathBuf> {
+/// wrapper's own directory) and any candidate that is this very executable
+/// (`self_exe`), compared by canonical path. Delegates to
+/// `which::which_all`, which already handles `PATHEXT`/executable-bit
+/// resolution per platform (`gh.exe` on Windows); only the exclusion and
+/// PATH plumbing around it is this shim's own logic.
+fn find_real_gh(
+    path_var: &str,
+    exclude_dir: Option<&Path>,
+    self_exe: Option<&Path>,
+    cwd: &Path,
+) -> Option<PathBuf> {
     let candidate_path = filtered_path(path_var, exclude_dir);
-    which::which_in("gh", Some(candidate_path), cwd).ok()
+    let self_exe = self_exe.map(canonical);
+    which::which_in_all("gh", Some(candidate_path), cwd)
+        .ok()?
+        .find(|c| match &self_exe {
+            Some(me) => canonical(c) != *me,
+            None => true,
+        })
 }
 
 #[cfg(test)]
@@ -143,7 +188,7 @@ mod tests {
         make_executable(&real_dir.join("gh"));
 
         let path_var = format!("{}:{}", wrapper_dir.display(), real_dir.display());
-        let found = find_real_gh(&path_var, Some(&wrapper_dir), dir.path()).unwrap();
+        let found = find_real_gh(&path_var, Some(&wrapper_dir), None, dir.path()).unwrap();
         assert_eq!(found, real_dir.join("gh"));
     }
 
@@ -156,6 +201,46 @@ mod tests {
         make_executable(&wrapper_dir.join("gh"));
 
         let path_var = wrapper_dir.display().to_string();
-        assert!(find_real_gh(&path_var, Some(&wrapper_dir), dir.path()).is_none());
+        assert!(find_real_gh(&path_var, Some(&wrapper_dir), None, dir.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_real_gh_skips_own_executable_even_when_dir_exclusion_misses() {
+        let dir = TempDir::new().unwrap();
+        let wrapper_dir = dir.path().join("wrapper");
+        let real_dir = dir.path().join("real");
+        fs::create_dir_all(&wrapper_dir).unwrap();
+        fs::create_dir_all(&real_dir).unwrap();
+        make_executable(&wrapper_dir.join("gh"));
+        make_executable(&real_dir.join("gh"));
+
+        // No dir exclusion at all (as when current_exe and PATH disagree on
+        // spelling): the wrapper is first on PATH but must still be skipped
+        // because it is this executable.
+        let path_var = format!("{}:{}", wrapper_dir.display(), real_dir.display());
+        let me = wrapper_dir.join("gh");
+        let found = find_real_gh(&path_var, None, Some(&me), dir.path()).unwrap();
+        assert_eq!(found, real_dir.join("gh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_real_gh_matches_own_dir_through_a_symlinked_spelling() {
+        let dir = TempDir::new().unwrap();
+        let wrapper_dir = dir.path().join("wrapper");
+        let alias = dir.path().join("alias");
+        let real_dir = dir.path().join("real");
+        fs::create_dir_all(&wrapper_dir).unwrap();
+        fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&wrapper_dir, &alias).unwrap();
+        make_executable(&wrapper_dir.join("gh"));
+        make_executable(&real_dir.join("gh"));
+
+        // PATH names the wrapper dir through the alias; exclusion is given
+        // the direct spelling. Canonical comparison must still exclude it.
+        let path_var = format!("{}:{}", alias.display(), real_dir.display());
+        let found = find_real_gh(&path_var, Some(&wrapper_dir), None, dir.path()).unwrap();
+        assert_eq!(found, real_dir.join("gh"));
     }
 }
