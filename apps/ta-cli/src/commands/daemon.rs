@@ -298,6 +298,22 @@ fn daemon_spawn_args(
 /// If a daemon is already running (live PID or port responding), returns an error.
 /// Stale PID files are cleaned up automatically.
 pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
+    start_with_binary(
+        project_root,
+        port_override,
+        &super::version_guard::find_daemon_binary,
+    )
+}
+
+/// [`start`] with the daemon binary lookup injected. Unit tests pass a lookup
+/// that fails, so a test can never launch a real `ta-daemon`. On Windows the
+/// test runner's `PATH` includes `target\debug`, where the normal lookup
+/// finds a real daemon that the test would then leave running.
+fn start_with_binary(
+    project_root: &Path,
+    port_override: Option<u16>,
+    find_daemon_binary: &dyn Fn() -> anyhow::Result<std::path::PathBuf>,
+) -> anyhow::Result<u32> {
     // Check for existing PID file.
     if let Some(pid) = read_pid(project_root) {
         if is_process_alive(pid) {
@@ -328,7 +344,7 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
         }
     }
 
-    let daemon_bin = super::version_guard::find_daemon_binary()?;
+    let daemon_bin = find_daemon_binary()?;
     ensure_stable_codesign(&daemon_bin, project_root);
 
     // Ensure .ta directory exists.
@@ -1664,18 +1680,24 @@ mod tests {
         // Write a PID file with a PID that's very unlikely to be alive.
         write_pid_file(project, 99999999, 7700).unwrap();
 
-        // start() will fail because ta-daemon binary doesn't exist in test,
-        // but it should have cleaned up the stale PID file first.
-        let result = start(project, None);
-        // We expect either a binary-not-found error or success; the stale PID
-        // should have been cleaned up either way.
-        if result.is_err() {
-            // The stale PID file should be gone.
-            assert!(
-                !pid_path(project).exists() || read_pid(project) != Some(99999999),
-                "Stale PID file should have been removed"
-            );
-        }
+        // The lookup always fails, so no real ta-daemon is ever launched
+        // (it would outlive the test). start() must still clean up the stale
+        // PID file before it reaches the binary lookup.
+        let result = start_with_binary(project, None, &|| {
+            Err(anyhow::anyhow!("ta-daemon lookup disabled in this test"))
+        });
+        let err = result.expect_err("start must fail when no daemon binary is found");
+        // On a machine whose own daemon answers on the default port, start()
+        // refuses earlier with "already responding"; both are fine here.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("lookup disabled") || msg.contains("already responding"),
+            "{msg}"
+        );
+        assert!(
+            !pid_path(project).exists() || read_pid(project) != Some(99999999),
+            "Stale PID file should have been removed"
+        );
     }
 
     #[test]

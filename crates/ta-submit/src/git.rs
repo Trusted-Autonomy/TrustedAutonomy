@@ -29,6 +29,10 @@ pub struct GitAdapter {
     sync_config: SyncConfig,
     /// Plan file name relative to workspace root (default: "PLAN.md").
     plan_file: String,
+    /// Program used for GitHub CLI calls. `gh` (resolved through `PATH`) in
+    /// production; tests point it at a stub or a nonexistent path so they
+    /// never reach the real `gh` (see [`GitAdapter::with_gh_program`]).
+    gh_program: std::ffi::OsString,
 }
 
 /// Strip ANSI escape sequences and ASCII control characters from a string.
@@ -126,10 +130,15 @@ fn truncate_log_excerpt(full: &str) -> String {
 /// if `gh` produces enough output before the process exits (a real risk for
 /// `--log-failed`, which can be many KB). Returns `None` on spawn failure
 /// or timeout (in which case the child is killed).
-fn run_gh_bounded(args: &[&str], cwd: &Path, timeout: Duration) -> Option<std::process::Output> {
+fn run_gh_bounded(
+    program: &std::ffi::OsStr,
+    args: &[&str],
+    cwd: &Path,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     use std::io::Read;
 
-    let mut child = Command::new("gh")
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -160,8 +169,7 @@ fn run_gh_bounded(args: &[&str], cwd: &Path, timeout: Duration) -> Option<std::p
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    ta_goal::process::kill_process_tree(&mut child);
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -200,6 +208,7 @@ impl GitAdapter {
             config: SubmitConfig::default(),
             sync_config: SyncConfig::default(),
             plan_file: "PLAN.md".to_string(),
+            gh_program: std::ffi::OsString::from("gh"),
         }
     }
 
@@ -210,6 +219,7 @@ impl GitAdapter {
             config,
             sync_config: SyncConfig::default(),
             plan_file: "PLAN.md".to_string(),
+            gh_program: std::ffi::OsString::from("gh"),
         }
     }
 
@@ -224,12 +234,21 @@ impl GitAdapter {
             config,
             sync_config,
             plan_file: "PLAN.md".to_string(),
+            gh_program: std::ffi::OsString::from("gh"),
         }
     }
 
     /// Set the plan file name (relative to work_dir). Default: "PLAN.md".
     pub fn with_plan_file(mut self, plan_file: impl Into<String>) -> Self {
         self.plan_file = plan_file.into();
+        self
+    }
+
+    /// Use `program` instead of `gh` for GitHub CLI calls. Hermetic tests
+    /// pass a stub script or a path that does not exist (the adapter then
+    /// behaves as on a machine without `gh`).
+    pub fn with_gh_program(mut self, program: impl Into<std::ffi::OsString>) -> Self {
+        self.gh_program = program.into();
         self
     }
 
@@ -318,9 +337,14 @@ impl GitAdapter {
 
     /// Check if gh CLI is available
     fn has_gh_cli(&self) -> bool {
-        run_gh_bounded(&["--version"], &self.work_dir, Duration::from_secs(5))
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        run_gh_bounded(
+            &self.gh_program,
+            &["--version"],
+            &self.work_dir,
+            Duration::from_secs(5),
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false)
     }
 
     /// Fetch and truncate the failed-step log for one Actions run, used by
@@ -328,6 +352,7 @@ impl GitAdapter {
     /// degrades to a manual-lookup hint rather than propagating an error.
     fn fetch_failed_run_log(&self, run_id: &str) -> Option<String> {
         let output = run_gh_bounded(
+            &self.gh_program,
             &["run", "view", run_id, "--log-failed"],
             &self.work_dir,
             Duration::from_secs(10),
@@ -825,7 +850,7 @@ impl SourceAdapter for GitAdapter {
         // Idempotency check: if a PR already exists for this branch (e.g., from
         // a prior apply attempt that failed after push), return the existing URL
         // rather than failing with "already exists".
-        let existing = Command::new("gh")
+        let existing = Command::new(&self.gh_program)
             .args([
                 "pr",
                 "list",
@@ -871,7 +896,7 @@ impl SourceAdapter for GitAdapter {
                                     "merge" => "--merge",
                                     _ => "--squash",
                                 };
-                                let _ = Command::new("gh")
+                                let _ = Command::new(&self.gh_program)
                                     .args(["pr", "merge", "--auto", merge_flag, &number])
                                     .current_dir(&self.work_dir)
                                     .output();
@@ -896,7 +921,7 @@ impl SourceAdapter for GitAdapter {
         // 256-character limit (prefix is 12 chars, leaving 240 for the body).
         let clean = truncate_title(&strip_ansi_controls(&ctx.title), 240);
         let pr_title = format!("[{}] {}", ctx.shortref(), clean);
-        let output = Command::new("gh")
+        let output = Command::new(&self.gh_program)
             .args([
                 "pr",
                 "create",
@@ -939,7 +964,7 @@ impl SourceAdapter for GitAdapter {
         if let Some(label) = &self.config.git.build_milestone_label {
             // `--force` makes label creation idempotent (updates color/desc
             // if it already exists instead of erroring).
-            let _ = Command::new("gh")
+            let _ = Command::new(&self.gh_program)
                 .args([
                     "label",
                     "create",
@@ -952,7 +977,7 @@ impl SourceAdapter for GitAdapter {
                 ])
                 .current_dir(&self.work_dir)
                 .output();
-            match Command::new("gh")
+            match Command::new(&self.gh_program)
                 .args(["pr", "edit", &pr_number, "--add-label", label])
                 .current_dir(&self.work_dir)
                 .output()
@@ -1002,7 +1027,7 @@ impl SourceAdapter for GitAdapter {
                 pr_number = pr_number,
                 target = target_branch,
             );
-            let auto_merge_output = Command::new("gh")
+            let auto_merge_output = Command::new(&self.gh_program)
                 .args(["pr", "merge", "--auto", merge_flag, &pr_number])
                 .current_dir(&self.work_dir)
                 .output();
@@ -1495,7 +1520,7 @@ impl SourceAdapter for GitAdapter {
             return Ok(None);
         }
 
-        let output = Command::new("gh")
+        let output = Command::new(&self.gh_program)
             .args(["pr", "view", review_id, "--json", "state,statusCheckRollup"])
             .current_dir(&self.work_dir)
             .output();
@@ -1552,7 +1577,7 @@ impl SourceAdapter for GitAdapter {
             "GitAdapter: merging PR"
         );
 
-        let output = Command::new("gh")
+        let output = Command::new(&self.gh_program)
             .args(["pr", "merge", review_id, "--auto", merge_flag])
             .current_dir(&self.work_dir)
             .output()?;
@@ -1617,6 +1642,7 @@ impl SourceAdapter for GitAdapter {
         // any failure here (best-effort, matching check_review's style) —
         // check_failures is read-only diagnostic detail, never a hard error.
         let output = run_gh_bounded(
+            &self.gh_program,
             &["pr", "checks", review_id, "--json", "name,bucket,link"],
             &self.work_dir,
             Duration::from_secs(10),
@@ -3052,7 +3078,9 @@ mod tests {
         // authenticated PR (constitution §1.4: never a hard failure for a
         // read-only diagnostic path).
         let dir = tempdir().unwrap();
-        let adapter = GitAdapter::new(dir.path());
+        // Hermetic: a gh program that cannot exist, so the real `gh` (and any
+        // `gh` shim on PATH) is never run.
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(dir.path().join("no-such-gh"));
         let result = adapter.check_failures("not-a-real-review-id");
         assert!(result.is_ok());
     }

@@ -29,6 +29,7 @@ jobs:
   version-check:
     name: Version consistency
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       # 'false' only when a pull request touches nothing but docs. The heavy
       # steps in the jobs below key off this. The jobs themselves always run,
@@ -37,9 +38,11 @@ jobs:
       code: ${{ steps.changes.outputs.code }}
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Detect docs-only pull request
         id: changes
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
@@ -64,6 +67,7 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "Code changes present: $code"
       - name: Verify Cargo.toml, CLAUDE.md, and .release.toml agree on version
+        timeout-minutes: 5
         run: |
           # Cargo.toml is the single source of truth for semver.
           CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
@@ -91,6 +95,7 @@ jobs:
           echo "OK: versions consistent ($CARGO_VER)"
 
       - name: Secret scan (real-shaped secrets outside the allowlist)
+        timeout-minutes: 5
         run: |
           # Pattern-based, no dependencies. The checkout above provides the git
           # work tree that `git ls-files` needs. Allowlist: scripts/secret-scan.allowlist.
@@ -101,6 +106,9 @@ jobs:
     name: Lint and Test
     needs: version-check
     runs-on: ${{ matrix.os }}
+    # Ceiling for the whole job. Every step below also has its own
+    # timeout-minutes, so a hung step ends at its own limit, not here.
+    timeout-minutes: 90
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -109,14 +117,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Docs-only change, skipping build and test
         if: env.CODE != 'true'
         run: echo "Only docs changed (see Version consistency job); code checks not required."
+        timeout-minutes: 2
 
       - name: Install Nix
         if: env.CODE == 'true'
         uses: DeterminateSystems/nix-installer-action@main
+        timeout-minutes: 15
 
       # Fast failure first: formatting needs no compilation.
       - name: Check formatting
@@ -130,6 +141,7 @@ jobs:
         with:
           key: ${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        timeout-minutes: 15
 
       - name: Build all crates
         if: env.CODE == 'true'
@@ -145,6 +157,33 @@ jobs:
         if: env.CODE == 'true'
         run: nix develop --command bash -c "cargo clippy --workspace --all-targets -- -D warnings"
         timeout-minutes: 15
+
+      # The three channel plugins each have their own [workspace], so none of
+      # the workspace steps above build them. A plugin manifest that cannot
+      # parse once shipped because nothing compiled it. Ubuntu is enough: the
+      # plugins are platform independent. They have their own target dirs and
+      # a separate cache key; this adds no required check name.
+      - name: Cache standalone plugin builds
+        if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: standalone-plugins
+          workspaces: |
+            plugins/ta-channel-discord
+            plugins/ta-channel-slack
+            plugins/ta-channel-email
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+        timeout-minutes: 15
+
+      - name: Test standalone plugins (discord, slack, email)
+        if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
+        run: |
+          for plugin in ta-channel-discord ta-channel-slack ta-channel-email; do
+            echo "::group::cargo test --manifest-path plugins/$plugin/Cargo.toml"
+            nix develop --command bash -c "cargo test --manifest-path plugins/$plugin/Cargo.toml" || { echo "::endgroup::"; echo "FAILED: plugins/$plugin. Re-run: nix develop --command cargo test --manifest-path plugins/$plugin/Cargo.toml"; exit 1; }
+            echo "::endgroup::"
+          done
+        timeout-minutes: 20
 
       # Pull requests smoke-test the debug binary already built above. The
       # optimized release build runs on pushes to main (and in the release and
@@ -164,20 +203,37 @@ jobs:
         run: nix develop --command bash -c "./target/release/ta --version"
         timeout-minutes: 5
 
+      # Regression guard: a test run must not leave gh, ta-daemon or ta
+      # processes behind (a Windows run once left about 7,000 gh processes).
+      # Runs even when an earlier step failed so the leftovers are listed
+      # next to the original failure; it never masks that failure because it
+      # only adds its own red step. Skipped on docs-only changes.
+      - name: Check for leftover gh, ta-daemon and ta processes
+        if: always() && env.CODE == 'true'
+        run: |
+          ./scripts/ci-leftover-processes.sh --self-test
+          ./scripts/ci-leftover-processes.sh
+        timeout-minutes: 5
+
   # Windows build verification (v0.9.1)
   windows-build:
     name: Windows Build
     needs: version-check
     runs-on: windows-latest
+    # A healthy run takes under 20 minutes; a run that reaches this ceiling is
+    # hung (see the leftover-process check at the end of the job).
+    timeout-minutes: 60
     env:
       CODE: ${{ needs.version-check.outputs.code }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Docs-only change, skipping build and test
         if: env.CODE != 'true'
         run: echo "Only docs changed (see Version consistency job); code checks not required."
+        timeout-minutes: 2
 
       - name: Show Rust toolchain
         if: env.CODE == 'true'
@@ -187,6 +243,7 @@ jobs:
         # No install step needed. This just makes the resolved version visible
         # in CI logs instead of relying on silent auto-resolution.
         run: rustc --version && cargo --version
+        timeout-minutes: 10
 
       - name: Cache cargo registry and target
         if: env.CODE == 'true'
@@ -194,6 +251,7 @@ jobs:
         with:
           key: windows-latest
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        timeout-minutes: 15
 
       - name: Build all crates
         if: env.CODE == 'true'
@@ -223,4 +281,14 @@ jobs:
       - name: Test ta-cli --version (release)
         if: env.CODE == 'true' && github.event_name == 'push'
         run: target\release\ta.exe --version
+        timeout-minutes: 5
+
+      # Regression guard (see the same step in the Lint and Test job). On
+      # Windows `cargo test` puts target\debug on PATH, so a test that spawns
+      # `gh`, `ta` or `ta-daemon` by name runs the freshly built binary and can
+      # leave it behind.
+      - name: Check for leftover gh, ta-daemon and ta processes
+        if: always() && env.CODE == 'true'
+        shell: pwsh
+        run: ./scripts/ci-leftover-processes.ps1
         timeout-minutes: 5

@@ -4480,7 +4480,21 @@ mod tests {
 
         let config = GatewayConfig::for_project(dir.path());
         // doctor::execute returns Err only on hard failures (not warnings).
-        let _ = crate::commands::doctor::execute(&config, false, false, false, false);
+        // The gh check is stubbed: this test must never run the real `gh`.
+        let _ = crate::commands::doctor::execute_with_gh_check(
+            &config,
+            false,
+            false,
+            false,
+            false,
+            &|| {
+                crate::commands::doctor::CheckResult::warn(
+                    "gh CLI",
+                    "stubbed in tests".to_string(),
+                    "",
+                )
+            },
+        );
     }
 
     // ── v0.15.13.5: delete resets in_progress plan phase ──────────────

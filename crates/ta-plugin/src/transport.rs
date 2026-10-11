@@ -301,6 +301,12 @@ mod truncate_tests {
 mod tests {
     use super::*;
 
+    /// Upper bound for mock calls that are expected to succeed. The mock
+    /// answers immediately, so the limit is never reached on a healthy run;
+    /// it only has to outlast a heavily loaded shared CI runner (a 5 second
+    /// bound once timed out on a busy macOS runner).
+    const MOCK_OK_TIMEOUT: Duration = Duration::from_secs(60);
+
     fn write_mock_script(dir: &Path, body: &str) -> String {
         let path = dir.join("mock-plugin.sh");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -324,7 +330,7 @@ mod tests {
             &[],
             dir.path(),
             "{\"method\":\"ping\"}",
-            Duration::from_secs(5),
+            MOCK_OK_TIMEOUT,
         )
         .unwrap();
         assert_eq!(result, "{\"ok\":true,\"result\":{}}");
@@ -346,7 +352,7 @@ mod tests {
             &[],
             dir.path(),
             &req,
-            Duration::from_secs(5),
+            MOCK_OK_TIMEOUT,
         )
         .unwrap();
         assert!(resp.ok);
@@ -364,7 +370,7 @@ mod tests {
             &[],
             dir.path(),
             "{}",
-            Duration::from_secs(5),
+            MOCK_OK_TIMEOUT,
         )
         .unwrap_err();
         match err {
@@ -376,7 +382,10 @@ mod tests {
     #[test]
     fn call_raw_kills_on_timeout() {
         let dir = tempfile::tempdir().unwrap();
-        let script = write_mock_script(dir.path(), "sleep 5\necho '{\"ok\":true,\"result\":{}}'");
+        let script = write_mock_script(
+            dir.path(),
+            "exec sleep 5\necho '{\"ok\":true,\"result\":{}}'",
+        );
         let err = call_raw(
             "mock",
             "ping",
