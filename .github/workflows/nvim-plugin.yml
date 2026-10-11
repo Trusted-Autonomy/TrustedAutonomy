@@ -59,8 +59,13 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
             TAG="${{ inputs.tag }}"
-          else
+          elif [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
             TAG="${GITHUB_REF#refs/tags/}"
+          else
+            # Pull requests and branch pushes have no tag: package a clearly
+            # labelled development build with a name that is safe as a file name
+            # (github.ref on a PR is refs/pull/N/merge, which contains slashes).
+            TAG="nvim-vdev-${GITHUB_SHA::7}"
           fi
           VERSION="${TAG#nvim-v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
