@@ -93,11 +93,15 @@ Claims:
   "item_id": "att_01HX...",
   "project_id": "wayfinder-demo",
   "aud": "<TA install id>",
+  "role": "admin",
+  "sole_approver": false,
   "jti": "<single-use random id>",
   "iat": 1791700000,
   "exp": 1791700060
 }
 ```
+
+`role` (optional string) names the Wayfinder role the signer checked the user against. `sole_approver` (optional boolean, default false) is set to true only when Wayfinder has verified that the user is the only eligible approver for the item and the owner's policy allows self-approval in that case (see rule 8).
 
 Verification (all must hold, otherwise refuse with the specific reason):
 
@@ -107,12 +111,17 @@ Verification (all must hold, otherwise refuse with the specific reason):
 4. `action` and `item_id` match the request being made; `project_id` matches the item's project.
 5. `exp` is at most 60 seconds after `iat`, not expired, `iat` not more than 30 seconds in the future.
 6. `jti` has not been seen: TA keeps a replay cache covering at least twice the maximum lifetime.
-7. The mapped user is allowed to act on the item (named user, member of the role, or maintainer for `any_maintainer`).
+7. The signer is allowed to act on the item. TA has no copy of Wayfinder's roster, so Wayfinder is the authority on role membership (it refuses to sign unless the user holds the role in that project) and TA verifies the claims against a minimal floor:
+   - `waiting_on.type = user`: `claims.user_id` equals `waiting_on.value`.
+   - `waiting_on.type = role`: `claims.role` equals `waiting_on.value`. For human approvals the role names are Wayfinder roles (owner, admin, member); TA's own roles (implementer, chief-of-staff) are for agent routing only and never appear in a human approval item.
+   - `waiting_on.type = any_maintainer`: `claims.role` is one of the `maintainer_roles` configured on the registered key (default `owner` and `admin`). A member can never approve an `any_maintainer` item, even if Wayfinder mistakenly signs.
+   The local human credential path (CLI, Studio) counts as a maintainer.
+8. No self-approval, as defence in depth. For items with origin `cos` or `chat`, TA rejects an assertion whose `user_id` equals `provenance.requester.id`, except when `claims.sole_approver` is true. Wayfinder sets `sole_approver` only when no other eligible approver exists in the project and the owner's policy permits it; TA records `self_approved: true` with the user, item and time in the audit log. Without this exception a solo owner would be locked out of approving work their own chat message started. The default policy is deny when another eligible approver exists.
 
 Key management:
 
 - Wayfinder holds a dedicated assertion key, separate from its Biscuit root key, so a leak of one does not forge the other.
-- Pairing registers Wayfinder's public key with TA (`ta keys add --kid <kid> --pub <file>` or the pairing script); rotation adds a new `kid` before retiring the old one.
+- Pairing registers Wayfinder's public key with TA (`ta keys add --kid <kid> --pub <file> [--maintainer-roles owner,admin]` or the pairing script); rotation adds a new `kid` before retiring the old one.
 - The verification mechanism sits behind a trait in TA so the exact scheme can change without touching the routes.
 
 ## 6. What the poller supplies at launch (review packet inputs)
@@ -142,3 +151,8 @@ The poller takes `reason` from an optional `reason` string in the delegate detai
 
 - While agents run as the same operating-system user as the person, the local credential is a speed bump, not a wall; the OS sandbox phases (v0.17.12.6 onward) make it a wall. The relay assertion does not have this weakness for actions that originate in Wayfinder, because the signing key never reaches the machine.
 - Until v0.17.12 through v0.17.12.2 ship, nothing may claim enforced human review externally.
+
+## 9. Assignment and resolution notes
+
+- TA raises `draft_review` items as `waiting_on = any_maintainer`, `agent_question` items for the asking goal's requester when known (otherwise `any_maintainer`), and never invents a Wayfinder role. Who an item is shown to (named users, project owner escalation when nobody holds a role) is decided by Wayfinder from its roster; TA enforces only the floor in rule 7.
+- First valid action wins. Any later assertion for an item that is already resolved returns the original result and does not act.
