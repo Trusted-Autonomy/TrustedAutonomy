@@ -94,14 +94,14 @@ Claims:
   "project_id": "wayfinder-demo",
   "aud": "<TA install id>",
   "role": "admin",
-  "sole_approver": false,
+  "self_approval_permitted": false,
   "jti": "<single-use random id>",
   "iat": 1791700000,
   "exp": 1791700060
 }
 ```
 
-`role` (optional string) names the Wayfinder role the signer checked the user against. `sole_approver` (optional boolean, default false) is set to true only when Wayfinder has verified that the user is the only eligible approver for the item and the owner's policy allows self-approval in that case (see rule 8).
+`role` (optional string) names the Wayfinder role the signer checked the user against. `self_approval_permitted` (optional boolean, default false) is set to true only when the acting user is the requester of the item AND (the project has a single eligible approver, or the project owner has enabled `allow_self_approval` and the organization does not forbid it). Wayfinder computes this from its roster at signing time, so adding a second approver flips it back at once. See rule 8.
 
 Verification (all must hold, otherwise refuse with the specific reason):
 
@@ -116,7 +116,7 @@ Verification (all must hold, otherwise refuse with the specific reason):
    - `waiting_on.type = role`: `claims.role` equals `waiting_on.value`. For human approvals the role names are Wayfinder roles (owner, admin, member); TA's own roles (implementer, chief-of-staff) are for agent routing only and never appear in a human approval item.
    - `waiting_on.type = any_maintainer`: `claims.role` is one of the `maintainer_roles` configured on the registered key (default `owner` and `admin`). A member can never approve an `any_maintainer` item, even if Wayfinder mistakenly signs.
    The local human credential path (CLI, Studio) counts as a maintainer.
-8. No self-approval, as defence in depth. For items with origin `cos` or `chat`, TA rejects an assertion whose `user_id` equals `provenance.requester.id`, except when `claims.sole_approver` is true. Wayfinder sets `sole_approver` only when no other eligible approver exists in the project and the owner's policy permits it; TA records `self_approved: true` with the user, item and time in the audit log. Without this exception a solo owner would be locked out of approving work their own chat message started. The default policy is deny when another eligible approver exists.
+8. No self-approval by default, as defence in depth. For items with origin `cos` or `chat`, TA rejects an assertion whose `user_id` equals `provenance.requester.id` unless `claims.self_approval_permitted` is true. Whenever a self-approval is accepted, TA records `self_approved: true` with the user, item and time in the audit log. There is no hard ban: a solo owner whose own chat message started the work must be able to approve it, and a project owner may enable `allow_self_approval` (an audited, owner-only Wayfinder setting that an organization policy can force off). The default is deny whenever two or more eligible approvers exist. The scope is agent-originated items only. The rule protects the independence of review (catching a request that does not match the human's intent or contains injected text, a hijacked session that both requests and approves, and four-eyes compliance), not agent autonomy: agents are stopped because the assertion needs a human Wayfinder session.
 
 Key management:
 
