@@ -41,6 +41,7 @@ use std::io::{self, BufRead, Write};
 
 use serde::{Deserialize, Serialize};
 
+mod human_credential;
 mod listener;
 mod payload;
 mod progress;

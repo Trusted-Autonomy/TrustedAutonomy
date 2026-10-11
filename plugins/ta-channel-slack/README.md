@@ -141,8 +141,10 @@ Because inbound callbacks are not yet implemented, reviewers respond through one
    ```bash
    curl -X POST http://localhost:7700/api/interactions/{interaction_id}/respond \
      -H "Content-Type: application/json" \
-     -d '{"response": "approved"}'
+     -H "X-TA-Human-Credential: $TA_HUMAN_CREDENTIAL" \
+     -d '{"answer": "approved"}'
    ```
+   The daemon only accepts answers from a caller that presents the human credential created by `ta login` (use `ta login --file` so a script can read it). Without it the call is refused with a message that says to run `ta login`.
 
 The `interaction_id` is included in every Slack message as part of the embed footer.
 

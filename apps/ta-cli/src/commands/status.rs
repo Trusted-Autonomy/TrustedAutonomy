@@ -793,6 +793,7 @@ mod tests {
             store_path: std::path::PathBuf::new(),
             source_dir: None,
             plan_phase: None,
+            request_provenance: None,
             parent_goal_id: None,
             source_snapshot: None,
             is_macro: false,

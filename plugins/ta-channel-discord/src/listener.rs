@@ -319,7 +319,9 @@ async fn run_session(
     // Skip the first immediate tick.
     heartbeat_timer.tick().await;
 
-    let http_client = reqwest::Client::new();
+    // Presents the human credential (`ta login --file`) the daemon requires for
+    // approve, deny, commands and answers.
+    let http_client = crate::human_credential::client();
     let cmd_url = format!("{}/api/cmd", daemon_url);
     let interactions_url = format!("{}/api/interactions", daemon_url);
     let goal_input_base_url = format!("{}/api/goals", daemon_url);

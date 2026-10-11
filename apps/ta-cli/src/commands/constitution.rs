@@ -1498,6 +1498,7 @@ fn create_constitution_amend_draft(
         store_path: store_path.clone(),
         source_dir: None,
         plan_phase: None,
+        request_provenance: None,
         parent_goal_id: None,
         source_snapshot: None,
         is_macro: false,
@@ -1646,6 +1647,7 @@ fn create_constitution_amend_draft(
         goal_shortref: Some(review_id_str[..8].to_string()),
         draft_seq: 1,
         plan_phase: None,
+        request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
     };
@@ -2281,6 +2283,7 @@ fn create_review_draft(
         store_path: store_path.clone(),
         source_dir: None, // legacy path — no overlay diff
         plan_phase: None,
+        request_provenance: None,
         parent_goal_id: None,
         source_snapshot: None,
         is_macro: false,
@@ -2462,6 +2465,7 @@ fn create_review_draft(
         goal_shortref: Some(review_id_str[..8].to_string()),
         draft_seq: 1,
         plan_phase: None,
+        request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
     };

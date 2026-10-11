@@ -44,8 +44,13 @@ pub struct RespondResponse {
 pub async fn respond(
     State(state): State<Arc<AppState>>,
     Path(interaction_id): Path<String>,
+    proof: Option<axum::Extension<crate::human_gate::HumanProof>>,
     Json(body): Json<RespondRequest>,
 ) -> impl IntoResponse {
+    // The named human when the call carried a verified assertion, else "api".
+    let responder = proof
+        .and_then(|axum::Extension(p)| p.user_id)
+        .unwrap_or_else(|| "api".to_string());
     // Parse the UUID — return 400 on malformed input.
     let id = match Uuid::parse_str(&interaction_id) {
         Ok(id) => id,
@@ -63,18 +68,39 @@ pub async fn respond(
         }
     };
 
-    let now = Utc::now();
-    let answer_text = body.answer.clone();
+    deliver_answer(&state, &state.project_root, id, body.answer, &responder).await;
+    tracing::info!(
+        interaction_id = %id,
+        responder = %responder,
+        "Interaction answered"
+    );
+    Json(RespondResponse {
+        interaction_id: id.to_string(),
+        status: "delivered".to_string(),
+    })
+    .into_response()
+}
 
+/// Deliver a human's answer to a pending question, by both routes: the answer
+/// file the file-based `ta_ask_human` tool polls, and the in-process
+/// `QuestionRegistry`. Shared by `respond` and `POST /api/attention/{id}/act`.
+///
+/// A missing registry entry is expected (the question came from the
+/// file-based MCP tool), so this does not fail; file-write problems are logged
+/// with the path and what they affect.
+pub(crate) async fn deliver_answer(
+    state: &AppState,
+    root: &std::path::Path,
+    id: Uuid,
+    answer_text: String,
+    responder: &str,
+) {
+    let now = Utc::now();
     // ── Write answer file for the file-based MCP tool polling ────
     // The ta_ask_human handler polls .ta/interactions/answers/<id>.json.
     // We write this unconditionally so the MCP tool always gets the answer,
     // regardless of whether a QuestionRegistry entry exists.
-    let answers_dir = state
-        .project_root
-        .join(".ta")
-        .join("interactions")
-        .join("answers");
+    let answers_dir = root.join(".ta").join("interactions").join("answers");
 
     if let Err(e) = std::fs::create_dir_all(&answers_dir) {
         tracing::warn!(
@@ -86,7 +112,7 @@ pub async fn respond(
         let answer_path = answers_dir.join(format!("{}.json", id));
         let answer_json = serde_json::json!({
             "text": &answer_text,
-            "responder_id": "api",
+            "responder_id": responder,
             "answered_at": now.to_rfc3339(),
         });
         match serde_json::to_string(&answer_json) {
@@ -119,39 +145,18 @@ pub async fn respond(
     // ── Deliver via QuestionRegistry (for in-process waiters) ─────
     let answer = HumanAnswer {
         text: answer_text,
-        responder_id: "api".to_string(),
+        responder_id: responder.to_string(),
         answered_at: now,
     };
-
-    match state.question_registry.answer(id, answer).await {
-        Ok(()) => {
-            tracing::info!(
-                interaction_id = %id,
-                responder = "api",
-                "Interaction answered"
-            );
-            Json(RespondResponse {
-                interaction_id: id.to_string(),
-                status: "delivered".to_string(),
-            })
-            .into_response()
-        }
-        Err(_returned_answer) => {
-            // The QuestionRegistry has no matching entry. This is expected
-            // when the question was written by the file-based MCP tool
-            // (ta_ask_human) rather than registered in-process. The answer
-            // file has already been written above, so the tool will receive
-            // the response on its next poll iteration.
-            tracing::info!(
-                interaction_id = %id,
-                "No in-process registry entry for interaction (file-based answer already written)"
-            );
-            Json(RespondResponse {
-                interaction_id: id.to_string(),
-                status: "delivered".to_string(),
-            })
-            .into_response()
-        }
+    if state.question_registry.answer(id, answer).await.is_err() {
+        // Expected when the question was written by the file-based MCP tool
+        // (ta_ask_human) rather than registered in-process. The answer file
+        // has already been written above, so the tool will receive the
+        // response on its next poll iteration.
+        tracing::info!(
+            interaction_id = %id,
+            "No in-process registry entry for interaction (file-based answer already written)"
+        );
     }
 }
 

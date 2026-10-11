@@ -1007,7 +1007,7 @@ fn goal_input(config: &GatewayConfig, id: &str, text: &str) -> anyhow::Result<()
     let daemon_url = super::daemon::resolve_daemon_url(&config.workspace_root, None);
     let url = format!("{}/api/goals/{}/input", daemon_url, id);
 
-    let client = reqwest::blocking::Client::builder()
+    let client = super::human_auth::blocking_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;

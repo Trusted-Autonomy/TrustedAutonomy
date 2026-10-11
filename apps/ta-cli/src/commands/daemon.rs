@@ -384,11 +384,11 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
 
     // Try graceful shutdown via HTTP.
     // The shutdown endpoint requires X-TA-Admin-Confirm: shutdown (v0.17.0.9)
-    // to prevent accidental shutdown by agent subprocesses. Auth is bypassed for
-    // loopback, so no Bearer token is needed from the CLI.
+    // to prevent accidental shutdown by agent subprocesses. Shutdown is a gated
+    // route: the CLI presents the human credential from `ta login`.
     // Use a 10s timeout: the daemon is known alive (drain check already passed),
     // so 3s was too short — a busy daemon handling drain cleanup could miss it.
-    let client = reqwest::blocking::Client::builder()
+    let client = super::human_auth::blocking_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
@@ -402,6 +402,14 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
             eprintln!(
                 "Warning: shutdown rate-limited (tried too recently). \
                  Falling back to SIGTERM."
+            );
+            false // fall through to PID kill
+        }
+        Ok(r) if r.status() == reqwest::StatusCode::FORBIDDEN => {
+            // Shutdown is a gated route: it needs the human credential.
+            eprintln!(
+                "Warning: the daemon refused the shutdown request (403): run `ta login` so \
+                 the CLI can present a human credential. Falling back to SIGTERM."
             );
             false // fall through to PID kill
         }

@@ -5410,13 +5410,15 @@ TA supports three built-in authentication modes for the HTTP API and MCP connect
 
 #### No-op (default)
 
-By default, TA trusts loopback connections without requiring any credentials:
+By default, TA trusts loopback connections for read-only routes without requiring any credentials:
 
 ```toml
 [auth]
 require_token = false
 local_bypass  = true
 ```
+
+`local_bypass` covers read-only routes only. The routes that approve, deny, apply, run commands or answer an agent need a human credential even from loopback (see "Human Credential: Who May Approve, Deny, Apply and Answer" below).
 
 #### Local identity (`[[auth.users]]`)
 
@@ -5542,6 +5544,397 @@ git_mode = "inherit-read"   # override for this machine only
 ```
 VCS:      isolated (git)
 ```
+
+### Human Credential: Who May Approve, Deny, Apply and Answer
+
+An agent with a shell can call the daemon on `127.0.0.1:7700`. If loopback were trusted for everything, that agent could approve and apply its own draft. So the routes that change what ships need proof that a person is acting.
+
+**Be clear about what this is.** While agents run as the same OS user as you, this is a speed bump, not a wall: an agent that can read your credential file (or that you talk into a keychain prompt) can present it. The OS sandbox work (the sandbox phases of the plan) is what turns it into a wall. Treat it as one layer, not as isolation.
+
+#### Create the credential
+
+Run once, in your own terminal:
+
+```bash
+ta login
+```
+
+The credential is a random secret held outside every project tree:
+
+- in the OS keychain (an item bound to the signed `ta` binary) where one is available, otherwise
+- in a mode-0600 file in the per-user directory `~/.config/ta/human/credential` (set `TA_USER_STATE_DIR` to move it; on Windows the directory under your profile carries a user-only ACL).
+
+A digest of it is stored next to it so the daemon can verify requests without touching the keychain. Running `ta login` again replaces the credential and invalidates the old one.
+
+```bash
+ta login status     # is a credential present, where, is an agent context detected
+ta login logout     # remove it
+ta login --file     # hold it in the 0600 file (editor plugins and scripts cannot read the keychain)
+ta login open       # open the web UI signed in (the credential travels in the URL fragment)
+```
+
+#### What needs it
+
+The gate is deny-by-default. Every request that is not a read (anything other than GET, HEAD or OPTIONS) needs proof of a human, loopback included, unless the route is on the short agent-allowed list below. A route added later is therefore protected until someone classifies it on purpose; a test fails the build if a route is registered without being classified.
+
+Routes that need proof of a human:
+
+| Route | What it does |
+|---|---|
+| `POST /api/cmd` | run a command |
+| `POST /api/input` | run a command |
+| `POST /api/shutdown` | stop the daemon |
+| `POST /api/drafts/{id}/approve` | approve a draft |
+| `POST /api/drafts/{id}/deny` | deny a draft |
+| `POST /api/drafts/{id}/apply` | apply a draft |
+| `POST /api/drafts/{id}/dialog` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/interactions/{id}/respond` | answer an agent / send input |
+| `POST /api/goals/{id}/input` | answer an agent / send input |
+| `POST /api/workflow/{id}/input` | answer an agent / send input |
+| `POST /api/goals/{id}/message` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/goal/start` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/agent/start` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `DELETE /api/agent/{id}` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/projects` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `DELETE /api/projects/{name}` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/office/reload` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/project/new` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/project/open` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/project/browse` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/project/init` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/plan/phase/add` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/plan/generate` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/plan/new` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/persona/save` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/workflow/generate` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/workflow/save` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/workflow/{id}/run` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `DELETE /api/workflow/{id}` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `PUT /api/settings/{section}` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `PUT /api/setup/progress` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/settings/agent/validate` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/settings/notifications/test` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/settings/vcs/check` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/advisor/message` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/advisor/inject` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/advisor/history` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/advisor/dialog` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/context/upload` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/team/assign` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `DELETE /api/team/{role}` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `POST /api/memory` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+| `DELETE /api/memory/{key}` | change project, plan, persona, team, workflow, settings, memory or daemon state |
+
+Routes that stay open to agents or carry their own authentication, each with the reason it is open:
+
+| Route | Why it is open |
+|---|---|
+| `POST /api/agent/ask` | agent coordination: an agent asks the project's advisor agent a question; the reply is the only effect |
+| `POST /api/plan/phase/claim` | agent coordination: an agent claims a plan phase so two agents do not build the same one |
+| `POST /api/plan/phase/release` | agent coordination: an agent gives a claimed plan phase back |
+| `POST /api/whiteboard/presence` | agent coordination: an agent registers its presence on the shared whiteboard |
+| `POST /api/whiteboard/handoff/send` | agent coordination: an agent hands work to another role |
+| `POST /api/whiteboard/handoff/receive` | agent coordination: an agent picks up a handoff addressed to it |
+| `POST /api/whiteboard/tasks/claim` | agent coordination: an agent claims a whiteboard task |
+| `POST /api/whiteboard/tasks/complete` | agent coordination: an agent marks its claimed task complete |
+| `POST /api/whiteboard/outcome/send` | agent coordination: the chief-of-staff publishes an outcome for the poller to report back |
+| `POST /api/webhooks/github` | webhook: keeps its own HMAC signature authentication and is served outside the auth middleware |
+| `POST /api/webhooks/vcs` | webhook: keeps its own HMAC signature authentication and is served outside the auth middleware |
+| `POST /api/attention/{id}/act` | accepts the local human credential or a signed human assertion in the body; a relay token alone is refused by the handler |
+
+Read-only routes keep the loopback bypass. The lists live in the daemon's `human_gate` module (`GATED_ROUTES`, `AGENT_ALLOWED`, `SELF_AUTHENTICATING`) and this table is checked against them by a test.
+
+A request to a gated route is accepted when it carries one of:
+
+1. the human credential in the `X-TA-Human-Credential` header (the `ta` CLI, shell, `ta login open` web UI, and the VS Code, JetBrains, Neovim and Discord integrations send it for you once you have run `ta login`; for the editor plugins and Discord use `ta login --file` or set `TA_HUMAN_CREDENTIAL`);
+2. a caller that is not on loopback and presents a Write or Admin bearer token, exactly as before.
+
+A signed human assertion is accepted at one place only, `POST /api/attention/{id}/act` (see "Human-Asserted Actions" below). A relay (service-account) token is never enough on its own.
+
+A refusal says what to do:
+
+```json
+{
+  "error": "POST /api/persona/save refused: trying to change project or daemon state needs proof of a human and the request carries none. Loopback callers are no longer trusted for anything that changes state, so an agent with a shell cannot do this.",
+  "hint": "Run `ta login` once in your own terminal, then send the credential in the x-ta-human-credential header (the ta CLI and shell do this automatically). To restore the old behaviour on a throwaway machine set `[auth] local_bypass_mutating = true` in daemon.toml (unsafe: any local process, including an agent, could then change state).",
+  "setting": "[auth] local_bypass_mutating"
+}
+```
+
+To restore the old behavior on a machine you do not care about, set `local_bypass_mutating = true` under `[auth]`. Do not do this where an agent runs.
+
+**Limits, stated plainly.** While agents run as the same OS user as you, the credential is a speed bump, not a wall: an agent that can read the 0600 credential file (or that you talk into a keychain prompt) can present it. The OS sandbox phases of the plan are what turn it into a wall. A signed assertion does not share that weakness for actions that start in another system, because its signing key never reaches this machine. Nothing here should be described as enforced human review until those phases ship.
+
+#### Host header allowlist
+
+The daemon refuses requests whose `Host` header is not `localhost`, `*.localhost`, an IP address, or a name listed in `allowed_hosts`. This blocks DNS-rebinding, where a web page's own domain is pointed at `127.0.0.1`. If you reach the daemon through a name (a reverse proxy, a tunnel), list it:
+
+```toml
+[server]
+allowed_hosts = ["ta.example.com"]
+```
+
+A daemon deliberately bound to a LAN address with no `allowed_hosts` keeps accepting any Host, because rebinding is a loopback problem.
+
+#### `ta draft approve`, `deny` and `apply` under an agent
+
+The CLI refuses these three when it detects an agent context and no human credential is present. Detection is advisory: it looks at markers an agent launch normally carries (`TA_AGENT_CONTEXT`, `TA_IS_STAGING`, `TA_AGENT_ID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `TA_CALLER_MODE` other than `normal`, `TA_CHAT_MODE`), a working directory inside `.ta/staging/`, and a launch with no terminal on either stdin or stdout. An agent can unset environment variables, so this stops accidents and casual attempts, not a determined one. `ta draft apply --dry-run` is not gated.
+
+This also stops a coding assistant working on your repo from approving drafts itself. That is intended. The refusal tells you the human path:
+
+```
+refusing to approve: this looks like an agent context (CLAUDECODE is set; ...) and no human credential is present. A person must run `ta login` once in their own terminal, then run the command themselves (inside a coding assistant: `! ta draft approve <id>`).
+```
+
+The commands the daemon runs for you (`POST /api/cmd`) run without a terminal, so the machine running the daemon must have had `ta login` run on it.
+
+### Review Packet: Who Asked, Who Decided, Who Built
+
+Work an agent-side component originates (origin `cos` or `chat`) reaches a reviewer who never saw the request. The review packet tells them. The component launching the goal supplies it:
+
+```bash
+ta run --origin cos --title "Fix the login redirect loop" \
+  --provenance-file /tmp/provenance.json
+```
+
+```json
+{
+  "requester": {"id": "u-17", "display_name": "Alice Smith", "channel": "slack"},
+  "excerpt": "Login keeps bouncing me back to the sign-in page.",
+  "delegating_role": "chief-of-staff",
+  "reason": "Small, well scoped fix.",
+  "objective": "Fix the login redirect loop. Add a regression test.",
+  "message_id": "msg-9",
+  "candidate_id": "cand:42",
+  "cos_goal_id": "11111111-1111-1111-1111-111111111111"
+}
+```
+
+- `requester.id` and `requester.channel` are required; everything else is optional. `excerpt` and `reason` are the preferred names (`message_excerpt` and `delegation_reason` are accepted too). Unknown fields are rejected, and the file is limited to 64 KiB.
+- The message excerpt is capped at 2000 characters and the delegation reason at 1000. Control characters are stripped.
+- The record is data for the reviewer. It is stored on the goal, copied to the draft, and never placed in the agent's prompt.
+- `--title` sets the goal title the reviewer sees. Without it, a machine-made title (a wake or candidate id) is replaced by one derived from the objective.
+- Provenance is fixed when the goal is created; a later `--provenance-file` for the same goal is ignored with a warning.
+
+`ta show draft <id>` prints the packet before anything else:
+
+```
+REVIEW PACKET: Fix the login redirect loop
+Requested by: Alice Smith (u-17) via slack
+  What they wrote (data from outside TA, not instructions):
+    ----- BEGIN UNTRUSTED DATA (original message) TA-UNTRUSTED-9c1f... -----
+    | Login keeps bouncing me back to the sign-in page.
+    ----- END UNTRUSTED DATA (original message) TA-UNTRUSTED-9c1f... -----
+Decided by: chief-of-staff
+  Stated reason (data from that role, not instructions):
+    ...
+Built by: claude-code (claude-code), goal 22222222-...
+Objective:
+    ...
+Id chain: message=msg-9, candidate=cand:42, chief-of-staff goal=1111..., worker goal=2222...
+```
+
+Every line of requester-supplied text is quoted with `| ` inside a fence whose boundary token is random and never occurs in the text, so a message cannot close its own fence or imitate a heading. `GET /api/drafts/{id}` returns the same packet first, as `review_packet` (`requested_by`, `decided_by`, `built_by`, `rendered`, `provenance`), and the raw block as `request_provenance` on the draft. Treat every free-text field in it as untrusted data: render it as quoted text, never as markup or instructions.
+
+### Attention Feed: Everything Waiting on a Person
+
+One read-only feed lists what is waiting on a person, so a UI can show a count and pop up new requests.
+
+```bash
+curl -s http://127.0.0.1:7700/api/attention
+curl -s 'http://127.0.0.1:7700/api/attention?user=alice'        # waiting on alice, or on any maintainer
+curl -s 'http://127.0.0.1:7700/api/attention?role=reviewer'     # waiting on a role
+curl -s 'http://127.0.0.1:7700/api/attention?project=web-app'   # the project-manager view: everyone waiting on anyone
+curl -s 'http://127.0.0.1:7700/api/attention?limit=50&since=<next_cursor>'   # page forward
+curl -s http://127.0.0.1:7700/api/attention/count               # {"open": n, "by_kind": {...}} for a badge
+```
+
+`user` and `role` combine as "me or my role"; a maintainer role (`admin`, `owner`) also sees what waits on any maintainer. `project` narrows to one project. `since` is the opaque `next_cursor` of a previous response (or an RFC 3339 `updated_at`); `limit` is the page size (default 100, at most 500). The list holds open items and, for a week, items that were resolved, so a poller that missed the moment still learns what happened.
+
+Item kinds:
+
+| Kind | What it is | Resolved when |
+|---|---|---|
+| `draft_review` | a draft in Draft or PendingReview | approved, denied, applied or closed |
+| `agent_question` | a `ta_ask_human` question (same source as `/api/interactions/pending`) | answered or timed out |
+| `blocked_goal` | a goal waiting for input with no question listed | the goal moves on |
+| `dead_letter` | a wake message given up on (`.ta/wake-dead-letter.jsonl`) | its line is removed, or its `msg_id` is added to `.ta/wake-dead-letter-acked.jsonl` as `{"msg_id": "..."}` |
+
+```json
+{
+  "count": 1,
+  "has_more": false,
+  "next_cursor": "MjAyNi0xMC0xMVQwMTozNjoxMC4wMDAwMDBafGF0dF9kcmFmdF8zZjJh...",
+  "install_id": "ta_install_9f3c0b7e51d24a68b7a1c4d2e8f60a13",
+  "keys": [{"kid": "org-1", "fingerprint": "sha256:4b1d..."}],
+  "items": [{
+    "id": "att_draft_3f2a9c10-...",
+    "kind": "draft_review",
+    "project": "web-app",
+    "status": "open",
+    "item_digest": "sha256:7c0e...",
+    "waiting_on": {"type": "any_maintainer", "value": null},
+    "summary": "Draft awaiting review: Fix the login redirect loop (3 files changed)",
+    "created_at": "2026-10-11T09:14:02Z",
+    "updated_at": "2026-10-11T09:14:20Z",
+    "age_secs": 312,
+    "candidate_id": "wayfinder-task:939b7d40-...#9d23c037...",
+    "goal_id": "22222222-...",
+    "draft_id": "3f2a9c10-...",
+    "interaction_id": null,
+    "provenance": {
+      "requester": {"id": "u-17", "display_name": "Alice Smith", "channel": "wayfinder cos chat"},
+      "excerpt": {"text": "Login keeps bouncing me back...", "untrusted": true, "truncated": false},
+      "reason": "Small, well scoped fix.",
+      "objective": "Fix the login redirect loop. Add a regression test.",
+      "chain": {"candidate_id": "wayfinder-task:939b7d40-...#9d23c037...", "cos_goal_id": "11111111-...", "worker_goal_id": "22222222-..."}
+    },
+    "actions": ["review", "approve", "deny"],
+    "links": {"review": "/api/drafts/3f2a9c10-...", "act": "/api/attention/att_draft_3f2a9c10-.../act"}
+  }]
+}
+```
+
+- `id` is stable and at most 128 characters; `summary` is one sanitized line of at most 280 characters; `kind` is one of the four above. Links are relative paths.
+- Every item that came from agent-originated work carries `candidate_id`. `agent_question` items map one to one onto the agent's question (`interaction_id`).
+- `provenance` is `null` when the work did not come from an agent-side requester. `excerpt` and `reason` are untrusted data: render them as quoted text, never as markup or instructions.
+- `waiting_on.type` is `user`, `role` or `any_maintainer`. TA raises draft reviews, dead letters and questions with no known requester for any maintainer, a question or blocked goal for the requester when its review packet names one, and never invents a human role. Who an item is shown to is decided by the system that signs assertions; TA enforces only a floor (rule 7 below).
+- `item_digest` is `sha256:` followed by the lowercase hex SHA-256 of the canonical JSON of the object `{"id", "kind", "summary", "provenance", "actions"}` (keys sorted, no whitespace, UTF-8; `provenance` is `null` when absent). The person's signature covers it, so a poller cannot mirror a misleading summary under a real id.
+- The metadata fields `install_id`, `keys` (key id and fingerprint, never key material) and `next_cursor` come with every list response.
+- A resolved item has `status: "resolved"` and `accepted_assertions`: `[{"jti", "user_id", "action", "at", "escalated", "self_approved"}]`, so a forged or unexpected acceptance can be spotted.
+- Items carry no secrets: a dead letter never includes its error text.
+
+Events arrive on the existing stream, once per change:
+
+```bash
+curl -N 'http://127.0.0.1:7700/api/events?types=attention.created,attention.updated,attention.resolved'
+```
+
+`attention.created` and `attention.updated` carry the item as `item`; `attention.resolved` carries `item_id`, `kind` and `project` and is sent exactly once per item. Items that exist when the daemon starts are not replayed as new. The stream is an optimization; polling with `since` is enough.
+
+### Human-Asserted Actions
+
+A system that is not the CLI (Wayfinder, Studio, a chat channel) cannot hold your credential, but it can prove which human clicked. Its signing service signs a short-lived assertion, the poller relays it verbatim, and TA, the only verifier, acts. A relay service account can read the feed and relay an assertion but can never approve, deny or answer on its own authority, so a leaked poller token approves nothing.
+
+```
+person in the signing system  ->  signing service (signs the assertion)  ->  queue
+poller (relays verbatim, cannot sign)  ->  TA daemon (verifies the assertion, acts)
+```
+
+#### Pair the install
+
+```bash
+ta show install                                  # this install's id and registered key ids
+ta keys add --kid org-1 --pub ./org-1.pub        # register the signing key (base64 32-byte Ed25519 public key)
+ta keys add --kid org-1 --pub ./org-1.pub --maintainer-roles owner,admin --role-order member,admin,owner
+ta keys list                                     # kid and fingerprint, never key material
+ta keys remove --kid org-1
+```
+
+The install id is generated on first start and kept in the per-user state directory (`~/.config/ta/human/install-id`, never in a project). The signer puts it in the `aud` claim. The key registry is `~/.config/ta/human/assertion-keys.json`; the daemon reads it on each request, so no restart is needed. There is one `kid` per organization, so rotation is: add the new `kid`, switch the signer, then remove the old one. `--maintainer-roles` (default `admin,owner`) names the roles that may act on an "any maintainer" item. `--role-order` (default `member,admin,owner`, lowest first) makes a higher role satisfy a lower one.
+
+Give the poller's token the scope `relay` in `.ta/daemon-tokens.json` (`read` and `write` tokens keep their meaning). A relay token can read the feed and call `act`, and counts as a human for nothing.
+
+#### The assertion
+
+Compact form, three base64url (no padding) segments joined by dots: `header.claims.signature`. The signature is Ed25519 over the ASCII bytes of `header.claims` (the first two segments, dot included).
+
+Header:
+
+```json
+{"alg": "EdDSA", "kid": "org-1"}
+```
+
+Claims:
+
+```json
+{
+  "user_id": "user-123",
+  "email": "michael@example.com",
+  "action": "approve",
+  "item_id": "att_draft_3f2a9c10-...",
+  "project_id": "web-app",
+  "aud": "ta_install_9f3c0b7e51d24a68b7a1c4d2e8f60a13",
+  "role": "admin",
+  "escalated": false,
+  "self_approval_permitted": false,
+  "item_digest": "sha256:7c0e...",
+  "jti": "5b1f9c2e-6d3a-4e07-9a52-0c8f1e4d7a90",
+  "iat": 1791700000,
+  "exp": 1791700060
+}
+```
+
+For `answer`, add `"answer_sha256": "sha256:<hex of the UTF-8 answer text>"`. `role` is the role the signer checked the user against. `self_approval_permitted` defaults to false and is set only when the acting user is the requester of the item and either they are the sole eligible approver or the project owner allowed self-approval. Unknown claims are ignored (the signature still covers them) and logged at debug level, so the signer can add claims without a TA release.
+
+TA checks all of these and refuses with the specific reason when one fails:
+
+1. `kid` is registered, and 2. the algorithm is exactly `EdDSA` and the signature is valid. (An unknown `kid`, a wrong algorithm and a bad signature all give the same message, so a probe learns nothing about which keys exist.)
+3. `aud` is this install's id.
+4. `action`, `item_id` and `project_id` match the request and the item.
+5. `exp` is at most 60 seconds after `iat`, has not passed, and `iat` is not more than 30 seconds in the future.
+6. `jti` has not been used. TA keeps a replay cache of used ids for 5 minutes (more than twice the maximum lifetime) and persists it in the per-user state directory (`assertion-replay.jsonl`), so a daemon restart does not reopen the window. An assertion that is refused for any other reason does not use up its `jti`.
+7. The signer may act on the item: for `waiting_on.type = user`, `user_id` equals the value; for `role`, `role` satisfies the named role by rank (an `owner` can act on an `admin` item); for `any_maintainer`, `role` is one of the key's maintainer roles. A member can never act on an "any maintainer" item, even if the signer mistakenly signs. Whoever holds the role is the signing system's call; TA verifies only this floor. The local credential counts as a maintainer.
+8. No self-approval of agent-originated work (items with a review packet) by default: `approve` or `deny` by the item's requester is refused unless `self_approval_permitted` is true. An accepted self-approval is recorded with `self_approved: true`, the user, item and time in the audit log. Answers are exempt, because a question waits on its requester.
+9. Bound to what the person saw: for `approve` and `deny`, `item_digest` must equal the item's current digest, otherwise TA refuses with "item changed, refresh and review again" and acts on nothing; for `answer`, `answer_sha256` must equal the SHA-256 of the relayed `answer`, so a stolen poller token cannot swap an answer.
+10. Escalation: when the signer escalates to a higher role because nobody holds the named one, `role` is the role the person actually holds with `"escalated": true`; TA accepts it under rule 7 and records `escalated: true`.
+
+#### Act on an item
+
+```bash
+curl -s -X POST http://127.0.0.1:7700/api/attention/att_draft_3f2a9c10-.../act \
+  -H "Authorization: Bearer $RELAY_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action": "approve", "assertion": "eyJhbGciOiJFZERTQSIs...eyJ1c2VyX2lkIjoi...c2lnbmF0dXJl"}'
+```
+
+`action` is `approve`, `deny` (optional `reason`) or `answer` (with `answer`). Approve and deny apply to `draft_review` items, answer to `agent_question` items. Apply, command execution and shutdown are not available here; they need the credential on their own routes. Instead of an assertion, the call may carry the local human credential (`X-TA-Human-Credential`), which is how the CLI and Studio use the same endpoint.
+
+Success:
+
+```json
+{
+  "status": "resolved",
+  "acted": true,
+  "item_id": "att_draft_3f2a9c10-...",
+  "action": "approve",
+  "result": {"draft_id": "3f2a9c10-...", "status": "approved"},
+  "accepted_assertion": {"jti": "5b1f9c2e-...", "user_id": "user-123", "action": "approve", "at": "2026-10-11T09:20:41Z", "escalated": false, "self_approved": false}
+}
+```
+
+The item moves to `resolved` and `attention.resolved` is sent once. The draft records the asserting user (`approved_by: "user-123"`); an answer records the user as `responder_id`. Every accepted action is also written to `.ta/attention/audit.jsonl` with the user, item, action, key id, `jti`, `escalated` and `self_approved`.
+
+The first valid action wins, and repeated delivery is safe. If the item is already resolved, TA acts on nothing and returns the original result (to the same assertion again, `replayed` is true):
+
+```json
+{
+  "status": "already_resolved",
+  "acted": false,
+  "replayed": true,
+  "item_id": "att_draft_3f2a9c10-...",
+  "original_action": "approve",
+  "original_result": {"draft_id": "3f2a9c10-...", "status": "approved"},
+  "resolved_at": "2026-10-11T09:20:41Z",
+  "accepted_assertions": [{"jti": "5b1f9c2e-...", "user_id": "user-123", "action": "approve", "at": "2026-10-11T09:20:41Z", "escalated": false, "self_approved": false}]
+}
+```
+
+(A caller with neither the credential nor a signature TA can verify gets nothing: it is refused, so a probe cannot read resolutions.)
+
+A refusal states what happened, what was attempted and what to do, with a machine-readable `reason`:
+
+```json
+{
+  "error": "POST /api/attention/att_draft_3f2a9c10-.../act refused: item changed, refresh and review again. The assertion's item_digest is not the item's current digest, so nothing was done.",
+  "hint": "Fix the assertion and retry; nothing was done.",
+  "reason": "item_changed"
+}
+```
+
+`reason` is one of `no_proof`, `assertion_malformed`, `assertion_rejected`, `wrong_audience`, `claim_mismatch`, `expired`, `not_yet_valid`, `bad_lifetime`, `replayed`, `not_permitted`, `self_approval`, `item_changed`, `answer_changed`. Without any proof (including a relay token alone) the answer is HTTP 403 with `reason: "no_proof"`.
+
+The verification mechanism is behind one trait (`AssertionVerifier` in the daemon's `assertion` module), so a different scheme can replace Ed25519 without touching any route.
 
 ### Security Levels (`[security]`)
 

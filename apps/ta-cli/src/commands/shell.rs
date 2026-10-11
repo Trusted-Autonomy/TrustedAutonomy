@@ -63,7 +63,7 @@ pub fn execute(
 
     // Version guard check (v0.10.10).
     if !no_version_check {
-        let client = reqwest::Client::new();
+        let client = super::human_auth::async_client();
         let _guard = super::version_guard::check_daemon_version(
             &client,
             &base_url,
@@ -95,15 +95,17 @@ pub fn open_web_shell(project_root: &Path, daemon_url: Option<&str>) -> anyhow::
 
     // Check if daemon is reachable; auto-start if not.
     let rt = tokio::runtime::Runtime::new()?;
-    let status = rt.block_on(async { fetch_status(&reqwest::Client::new(), &base_url).await });
+    let status =
+        rt.block_on(async { fetch_status(&super::human_auth::async_client(), &base_url).await });
 
     if status.version.is_empty() || status.version == "?" {
         eprintln!("Daemon not running — starting...");
         match super::daemon::ensure_running(project_root) {
             Ok(()) => {
                 // Re-check after start.
-                let status =
-                    rt.block_on(async { fetch_status(&reqwest::Client::new(), &base_url).await });
+                let status = rt.block_on(async {
+                    fetch_status(&super::human_auth::async_client(), &base_url).await
+                });
                 if status.version.is_empty() || status.version == "?" {
                     anyhow::bail!(
                         "Daemon started but not reachable at {base_url}. Check logs: ta daemon log"
@@ -130,8 +132,9 @@ pub fn open_web_shell(project_root: &Path, daemon_url: Option<&str>) -> anyhow::
             match super::daemon::restart(project_root, None) {
                 Ok(_pid) => {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    let status = rt
-                        .block_on(async { fetch_status(&reqwest::Client::new(), &base_url).await });
+                    let status = rt.block_on(async {
+                        fetch_status(&super::human_auth::async_client(), &base_url).await
+                    });
                     eprintln!("Daemon restarted (v{}).", status.version);
                 }
                 Err(e) => {
@@ -176,7 +179,7 @@ async fn run_shell(
     attach_session: Option<String>,
     project_root: &Path,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    let client = super::human_auth::async_client();
 
     // Fetch initial status for the header.
     let mut status = fetch_status(&client, &base_url).await;

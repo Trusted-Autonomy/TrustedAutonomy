@@ -57,6 +57,22 @@ data class ActionResponse(
     val message: String = "",
 )
 
+/**
+ * The human credential created by `ta login --file` (or TA_HUMAN_CREDENTIAL).
+ * The daemon requires it for approve, deny, apply, commands and answers.
+ * Empty when the user has not run `ta login`.
+ */
+fun humanCredential(): String {
+    System.getenv("TA_HUMAN_CREDENTIAL")?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    val dir = System.getenv("TA_USER_STATE_DIR")?.takeIf { it.isNotBlank() }
+        ?: (System.getProperty("user.home") + "/.config/ta/human")
+    return try {
+        java.io.File(dir, "credential").readText().trim()
+    } catch (e: java.io.IOException) {
+        ""
+    }
+}
+
 class TaDaemonClient(
     private val baseUrl: String,
     private val token: String = "",
@@ -74,6 +90,10 @@ class TaDaemonClient(
             .header("Accept", "application/json")
         if (token.isNotBlank()) {
             builder.header("Authorization", "Bearer $token")
+        }
+        val credential = humanCredential()
+        if (credential.isNotEmpty()) {
+            builder.header("X-TA-Human-Credential", credential)
         }
         return builder
     }

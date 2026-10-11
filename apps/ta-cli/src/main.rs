@@ -498,6 +498,42 @@ enum Commands {
         /// `candidate_id` is stated outside the fence as a value TA parsed.
         #[arg(long)]
         intake_file: Option<PathBuf>,
+        /// Review-packet provenance (JSON) for a goal an agent-side component
+        /// originated: who asked (id, display name, channel), a capped excerpt
+        /// of their message, the delegating role's reason, the objective and
+        /// the id chain. Stored on the goal, copied to its draft and shown
+        /// first in `ta show draft`. Treated as data for the reviewer, never
+        /// as instructions: it is size-capped, parsed by code with unknown
+        /// fields rejected, and never placed in the agent's prompt.
+        #[arg(long, value_name = "PATH")]
+        provenance_file: Option<PathBuf>,
+        /// Readable goal title supplied by the caller (shown to the reviewer
+        /// instead of a synthetic one). When the positional title is a plan
+        /// phase ID, this is the title the draft carries.
+        #[arg(long = "title", value_name = "TEXT")]
+        title_flag: Option<String>,
+    },
+    /// Create the human credential that approve/deny/apply and the daemon require.
+    ///
+    /// Run once in your own terminal. The credential is held in the OS keychain
+    /// (or a mode-0600 file in ~/.config/ta/human), never in a project tree.
+    /// Subcommands: status, logout, keys.
+    Login {
+        /// Hold the credential in the owner-only file instead of the OS
+        /// keychain, so editor plugins and scripts can read it.
+        #[arg(long)]
+        file: bool,
+        #[command(subcommand)]
+        command: Option<commands::login::LoginCommands>,
+    },
+    /// Manage the public keys allowed to sign human assertions (add, list, remove).
+    ///
+    /// Keys live in the per-user state directory (~/.config/ta/human), never in
+    /// a project. `ta show install` prints this install's id, which the signing
+    /// system must use as the assertion audience.
+    Keys {
+        #[command(subcommand)]
+        command: commands::login::KeyCommands,
     },
     /// Review and manage draft packages.
     #[command(hide = true)]
@@ -1593,6 +1629,10 @@ fn dispatch_raw(
             }
             commands::goal::execute(command, config)
         }
+        Commands::Login { file, command } => {
+            commands::login::execute(command.as_ref(), *file, project_root)
+        }
+        Commands::Keys { command } => commands::login::keys(command),
         Commands::Draft { command } => {
             if warn_legacy {
                 print_deprecation_notice("draft", command);
@@ -1620,6 +1660,7 @@ fn dispatch_raw(
             project_root,
             no_version_check,
         ),
+        Commands::Show { noun, .. } if noun == "install" => commands::login::show_install(),
         Commands::Show { noun, id, extra } => run_verb_noun(
             "show",
             noun,
@@ -1728,6 +1769,8 @@ fn dispatch_raw(
             auto_cancel_after_draft,
             origin,
             intake_file,
+            provenance_file,
+            title_flag,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -1771,6 +1814,30 @@ fn dispatch_raw(
             }
             let _intake_file_guard =
                 commands::intake_prompt::CliIntakeFileGuard::set(intake_file.clone());
+            // `--provenance-file` / `--title`: validated now so a bad record
+            // fails the launch before any staging exists, then carried by a
+            // guard. Same single-goal restriction as `--intake-file`.
+            if let Some(path) = provenance_file {
+                if phases.is_some()
+                    || workflow.as_deref() == Some("serial-phases")
+                    || !sub_goals.is_empty()
+                {
+                    anyhow::bail!(
+                        "--provenance-file cannot be combined with --phases/--workflow \
+                         serial-phases or --sub-goals: those spawn separate sub-goal launches \
+                         that would not carry the record. Launch it as a single `ta run` goal."
+                    );
+                }
+                commands::review_packet::validate_provenance_file(path)?;
+            }
+            let _review_packet_guard = commands::review_packet::CliReviewPacketGuard::set(
+                provenance_file.clone(),
+                title_flag.clone(),
+            );
+            let title = &match (title.as_ref(), title_flag.as_deref()) {
+                (None, Some(t)) => commands::review_packet::clean_title(t),
+                _ => title.clone(),
+            };
 
             // Paired cost-experiment shadow-goal bypass flags (v0.17.x,
             // internal/hidden): bundle the four `--experiment-shadow-*`

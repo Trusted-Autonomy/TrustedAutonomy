@@ -166,6 +166,7 @@ fn make_draft_package() -> DraftPackage {
         goal_shortref: None,
         draft_seq: 0,
         plan_phase: None,
+        request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
     }

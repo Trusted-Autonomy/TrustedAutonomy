@@ -895,7 +895,7 @@ pub fn run(
 
     // Version guard check (v0.10.10).
     if !no_version_check {
-        let client = reqwest::Client::new();
+        let client = super::human_auth::async_client();
         let _guard = super::version_guard::check_daemon_version(
             &client,
             &base_url,
@@ -949,7 +949,7 @@ async fn run_tui(
     attach_session: Option<String>,
     project_root: std::path::PathBuf,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    let client = super::human_auth::async_client();
 
     // Check daemon connectivity before entering TUI mode.
     let mut initial_status = super::shell::fetch_status(&client, &base_url).await;

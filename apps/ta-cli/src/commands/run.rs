@@ -304,12 +304,16 @@ struct PreLaunchConfig {
 
 /// Try to load agent config from YAML files, falling back to hard-coded defaults.
 fn agent_launch_config(agent_id: &str, source_dir: Option<&Path>) -> AgentLaunchConfig {
-    // Try YAML configs in priority order.
-    if let Some(config) = load_agent_yaml(agent_id, source_dir) {
-        return config;
-    }
-    // Fall back to built-in defaults.
-    builtin_agent_config(agent_id)
+    // Try YAML configs in priority order, then the built-in defaults.
+    let mut config =
+        load_agent_yaml(agent_id, source_dir).unwrap_or_else(|| builtin_agent_config(agent_id));
+    // Marks every agent TA launches so `ta draft approve/deny/apply` can tell it
+    // is running under an agent (advisory; see ta_credentials::human).
+    config
+        .env
+        .entry("TA_AGENT_CONTEXT".to_string())
+        .or_insert_with(|| "1".to_string());
+    config
 }
 
 /// Search for an agent YAML config in standard locations.
@@ -3281,6 +3285,11 @@ pub fn execute(
                 }
             }
         }
+
+        // CR-02 item 6: review-packet provenance and the caller's readable
+        // title (`ta run --provenance-file / --title`). Data for the reviewer
+        // only; nothing here reaches the agent's prompt.
+        super::review_packet::stamp_goal(&mut updated_goal, quiet)?;
 
         // Generic cost-classification tag (v0.17.x cost-experiment
         // framework): `--workflow-tag`, opaque to TA core. Set only when the
@@ -13771,6 +13780,7 @@ pre_launch:
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
         };
@@ -13940,6 +13950,7 @@ pre_launch:
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
         };

@@ -427,41 +427,40 @@ fn reload_office(config: Option<&str>, project_root: &std::path::Path) -> Result
     Ok(())
 }
 
-/// Make an HTTP request to the daemon API using curl.
+/// Make an HTTP request to the daemon API, presenting the human credential
+/// (`ta login`) because adding and removing projects changes daemon state.
 fn daemon_api_request(method: &str, url: &str, body: Option<&serde_json::Value>) -> Result<String> {
-    let mut cmd = std::process::Command::new("curl");
-    cmd.arg("-s")
-        .arg("-f") // fail on HTTP errors
-        .arg("-X")
-        .arg(method);
-
+    let client = super::human_auth::blocking_client_builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Cannot build an HTTP client for {url}: {e}."))?;
+    let http_method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Unsupported HTTP method '{method}': {e}."))?;
+    let mut request = client.request(http_method, url);
     if let Some(body) = body {
-        cmd.arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-d")
-            .arg(body.to_string());
+        request = request.json(body);
     }
-
-    cmd.arg(url);
-
-    let output = cmd.output().map_err(|e| {
+    let response = request.send().map_err(|e| {
         anyhow::anyhow!(
-            "Cannot run curl: {}. Is the office daemon running? \
-             Start it with `ta office start --config office.yaml`.",
-            e
+            "Cannot reach the daemon at {url}: {e}. Is the office daemon running? \
+             Start it with `ta office start --config office.yaml`."
         )
     })?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if status.is_success() {
+        Ok(text)
+    } else if status == reqwest::StatusCode::FORBIDDEN {
         anyhow::bail!(
-            "Daemon API request failed ({} {}): {}. \
+            "Daemon API request refused ({method} {url}): {}. \
+             Changing projects needs the human credential: run `ta login` once in your own terminal, then retry.",
+            text.trim()
+        )
+    } else {
+        anyhow::bail!(
+            "Daemon API request failed ({method} {url}, HTTP {status}): {}. \
              Is the office daemon running?",
-            method,
-            url,
-            stderr.trim()
+            text.trim()
         )
     }
 }

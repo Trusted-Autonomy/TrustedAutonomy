@@ -6,6 +6,27 @@ local function cfg()
   return require("ta").config
 end
 
+-- The human credential created by `ta login --file` (or TA_HUMAN_CREDENTIAL).
+-- The daemon requires it for approve, deny, apply, commands and answers.
+local function human_credential()
+  local env = os.getenv("TA_HUMAN_CREDENTIAL")
+  if env and env ~= "" then
+    return env
+  end
+  local dir = os.getenv("TA_USER_STATE_DIR")
+  if not dir or dir == "" then
+    dir = (os.getenv("HOME") or "") .. "/.config/ta/human"
+  end
+  local f = io.open(dir .. "/credential", "r")
+  if not f then
+    return nil
+  end
+  local text = f:read("*a") or ""
+  f:close()
+  text = text:gsub("%s+$", "")
+  return text ~= "" and text or nil
+end
+
 local function build_args(method, path, body_json)
   local c = cfg()
   local args = {
@@ -18,6 +39,11 @@ local function build_args(method, path, body_json)
   if c.api_token and c.api_token ~= "" then
     table.insert(args, "-H")
     table.insert(args, "Authorization: Bearer " .. c.api_token)
+  end
+  local credential = human_credential()
+  if credential then
+    table.insert(args, "-H")
+    table.insert(args, "X-TA-Human-Credential: " .. credential)
   end
   if body_json then
     table.insert(args, "-d")
