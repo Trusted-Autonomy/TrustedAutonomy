@@ -16615,7 +16615,10 @@ fn run() {
         .unwrap();
 
         // Files should be copied.
-        let readme = std::fs::read_to_string(project.path().join("README.md")).unwrap();
+        // Git on Windows may check files out with CRLF line endings.
+        let readme = std::fs::read_to_string(project.path().join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n");
         assert_eq!(readme, "# No submit\n");
 
         // v0.17.11.29: --no-submit on a protected branch switches to a feature branch

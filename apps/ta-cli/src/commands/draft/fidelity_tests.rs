@@ -318,8 +318,11 @@ fn apply_without_submit_on_a_protected_branch_never_writes_onto_it() {
         "the change leaked onto the protected branch"
     );
     // The change sits uncommitted on the feature branch.
+    // Git on Windows may check files out with CRLF line endings.
     assert_eq!(
-        std::fs::read_to_string(project.path().join("src.txt")).unwrap(),
+        std::fs::read_to_string(project.path().join("src.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "new\n"
     );
     assert!(git(project.path(), &["status", "--porcelain"]).contains("src.txt"));

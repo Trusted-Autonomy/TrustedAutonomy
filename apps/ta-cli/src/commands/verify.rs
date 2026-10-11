@@ -1030,7 +1030,7 @@ mod tests {
              echo test alpha::finishes ... ok & \
              echo test beta::starts_and_hangs ... & \
              echo test gamma::slow has been running for over 60 seconds & \
-             ping -n 31 -w 1000 127.0.0.1"
+             ping -n 31 -w 1000 127.0.0.1 > nul"
         }
     }
 

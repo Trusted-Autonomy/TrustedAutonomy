@@ -11106,6 +11106,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 7. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 8. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 9. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
+10. [ ] The legacy whole-document PLAN.md merge (`ta_changeset::plan_merge::merge_plan_md`, used only when an apply has no target phase) is not CRLF-faithful: on a CRLF checkout (Windows) a merge of identical inputs changes line endings. Make it byte-preserving like the scoped merge, or route every apply through the scoped merge; add a CRLF golden test.
 
 **Effort**: M.
 
