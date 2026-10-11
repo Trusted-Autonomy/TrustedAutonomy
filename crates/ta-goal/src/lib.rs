@@ -32,6 +32,7 @@ pub mod origin;
 pub mod persona;
 pub mod phase_release;
 pub mod phase_selector;
+pub mod provenance;
 pub mod reviewer;
 pub mod security;
 pub mod social_audit;

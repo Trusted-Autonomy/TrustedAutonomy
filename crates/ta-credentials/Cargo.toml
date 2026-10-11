@@ -20,6 +20,8 @@ tracing = { workspace = true }
 age = { workspace = true }
 keyring = { workspace = true }
 toml = { workspace = true }
+rand = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -33,12 +33,15 @@
 //! ```
 
 mod api;
+pub mod assertion;
+pub mod attention;
 pub mod channel_dispatcher;
 pub mod channel_listener_manager;
 mod config;
 pub mod config_watcher;
 pub mod connector_supervisor;
 pub mod external_channel;
+pub mod human_gate;
 pub mod notification_dispatcher;
 pub mod office;
 pub mod phase_claim;

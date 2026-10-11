@@ -49,6 +49,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "events/",
     "sessions/",
     "interactions/",
+    "attention/",
     "pr_packages/",
     "review/",
     "backups/",

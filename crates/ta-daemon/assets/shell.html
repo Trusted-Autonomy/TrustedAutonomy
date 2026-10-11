@@ -134,6 +134,29 @@ body {
 </div>
 
 <script>
+// Human credential (CR-02): `ta login open` hands it over in the URL fragment (never
+// sent to the server). It is kept for this tab only and attached to this page's
+// requests. It is not part of the served page.
+(function () {
+  try {
+    var m = /(?:^#|&)ta_cred=([^&]+)/.exec(location.hash || '');
+    if (m) {
+      sessionStorage.setItem('ta_human_credential', decodeURIComponent(m[1]));
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+    var cred = sessionStorage.getItem('ta_human_credential');
+    if (cred && window.fetch) {
+      var origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        init = init || {};
+        var h = new Headers(init.headers || (input && input.headers) || {});
+        if (!h.has('X-TA-Human-Credential')) h.set('X-TA-Human-Credential', cred);
+        init.headers = h;
+        return origFetch.call(this, input, init);
+      };
+    }
+  } catch (e) { /* credential unavailable: actions will be refused with "run ta login" */ }
+})();
 (function() {
   'use strict';
 

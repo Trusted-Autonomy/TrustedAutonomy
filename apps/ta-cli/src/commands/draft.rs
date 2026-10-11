@@ -715,6 +715,8 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             reviewer_as,
             force_override,
         } => {
+            // CR-02: an agent must not approve its own draft.
+            super::human_auth::require_human_for("approve")?;
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
             let identity = reviewer_as.as_deref().unwrap_or(reviewer.as_str());
             approve_package(config, &resolved, identity, *force_override)
@@ -725,6 +727,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             reviewer,
             file,
         } => {
+            super::human_auth::require_human_for("deny")?;
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
             if let Some(file_path) = file {
                 deny_artifact(config, &resolved, reason, reviewer, file_path)
@@ -760,6 +763,12 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
                 return Ok(());
+            }
+
+            // CR-02: an agent must not apply its own draft. A dry run changes
+            // nothing, so it stays open.
+            if !*dry_run {
+                super::human_auth::require_human_for("apply")?;
             }
 
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
@@ -2525,6 +2534,7 @@ pub(crate) fn build_package(
         goal_shortref: None,        // Set below with display_id (v0.14.7.3).
         draft_seq: 0,               // Set below with display_id (v0.14.7.3).
         plan_phase: goal.plan_phase.clone(), // Inherit from GoalRun (v0.15.15.2).
+        request_provenance: goal.request_provenance.clone(), // Review packet (CR-02 item 6).
         plan_md_base: None,         // Set below if plan_base.md exists in staging (v0.15.24.5).
         rebuilt_from: rebuild_provenance.clone(), // v0.17.6.3.1.
     };
@@ -3280,6 +3290,7 @@ fn build_memory_only_draft(
         goal_shortref: None,
         draft_seq: 0,
         plan_phase: None,
+        request_provenance: goal.request_provenance.clone(),
         plan_md_base: None,
         rebuilt_from: rebuild_provenance.clone(), // v0.17.6.3.1.
     };
@@ -3914,6 +3925,27 @@ pub(crate) fn auto_approve_refusal_for_draft(
     }
 }
 
+/// The review packet text for a draft that carries provenance: a titled block
+/// with Requested by / Decided by / Built by, the objective and the id chain.
+/// Free text from the requester is fenced as untrusted data.
+pub(crate) fn render_review_packet_for(pkg: &DraftPackage) -> Option<String> {
+    let p = pkg.request_provenance.as_ref()?;
+    let built_by = format!(
+        "{} ({}), goal {}",
+        pkg.agent_identity.agent_id,
+        pkg.agent_identity.agent_type,
+        p.ids
+            .worker_goal_id
+            .as_deref()
+            .unwrap_or(pkg.goal.goal_id.as_str())
+    );
+    Some(format!(
+        "REVIEW PACKET: {}\n{}\n",
+        pkg.goal.title,
+        ta_goal::provenance::render_review_packet(p, &built_by)
+    ))
+}
+
 fn view_package_json(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
@@ -3936,6 +3968,14 @@ fn view_package(
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
+
+    // Review packet (CR-02 item 6): who asked, who decided, who built, first.
+    // Plain-text formats only; json/html carry the same block in the data.
+    if !matches!(format_str, "json" | "html") {
+        if let Some(packet) = render_review_packet_for(&pkg) {
+            println!("{}", packet);
+        }
+    }
 
     // H9: say up front when this draft can never be auto-approved because
     // of where its goal came from.
@@ -20063,3 +20103,6 @@ fn run() {
         );
     }
 }
+
+#[cfg(test)]
+mod review_packet_tests;

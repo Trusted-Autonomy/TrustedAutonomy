@@ -911,6 +911,37 @@
       ],
       "type": "object"
     },
+    "IdChain": {
+      "description": "The chain of ids from the request to the worker goal.",
+      "properties": {
+        "candidate_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cos_goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worker_goal_id": {
+          "description": "The goal that built the work. Stamped by `ta run` from the goal record.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "IgnoredArtifact": {
       "description": "A gitignored artifact encountered during `ta draft apply --submit` (v0.13.17.5).\n\nClassified as either known-safe (silently dropped) or unexpected (requires attention).",
       "properties": {
@@ -1186,6 +1217,52 @@
       ],
       "type": "object"
     },
+    "RequestProvenance": {
+      "description": "The provenance block stored on a goal and its draft.",
+      "properties": {
+        "delegating_role": {
+          "description": "The role that decided to take the work on (e.g. `chief-of-staff`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delegation_reason": {
+          "description": "That role's stated reason, capped. Untrusted text like the excerpt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ids": {
+          "$ref": "#/$defs/IdChain",
+          "default": {}
+        },
+        "message_excerpt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UntrustedExcerpt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "objective": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requester": {
+          "$ref": "#/$defs/Requester"
+        }
+      },
+      "required": [
+        "requester"
+      ],
+      "type": "object"
+    },
     "RequestedAction": {
       "properties": {
         "action": {
@@ -1201,6 +1278,29 @@
       "required": [
         "action",
         "targets"
+      ],
+      "type": "object"
+    },
+    "Requester": {
+      "description": "Who asked.",
+      "properties": {
+        "channel": {
+          "description": "Where the request arrived (e.g. `slack`, `wayfinder`, `email`).",
+          "type": "string"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "channel"
       ],
       "type": "object"
     },
@@ -1481,6 +1581,35 @@
       ],
       "type": "string"
     },
+    "UntrustedExcerpt": {
+      "description": "A capped excerpt of the requester's original message, with the metadata a\nrenderer needs to fence it. `untrusted` is always true.",
+      "properties": {
+        "original_chars": {
+          "description": "Length of the original in characters, before the cap.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "True when the original was longer than the cap.",
+          "type": "boolean"
+        },
+        "untrusted": {
+          "default": true,
+          "description": "Always true: this is data from outside TA, never instructions.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated",
+        "original_chars"
+      ],
+      "type": "object"
+    },
     "ValidationEntry": {
       "description": "Result of one `required_checks` entry run after agent exit (v0.13.17).",
       "properties": {
@@ -1722,6 +1851,17 @@
         }
       ],
       "description": "Rebuild provenance (v0.17.6.3.1).\n\n`Some` when this draft was produced by rebuilding from `pr_ready`/`approved`\n(the agent process had already exited) rather than from a live `Running`/\n`Finalizing` goal. `None` for a normal first build. See `RebuildProvenance`."
+    },
+    "request_provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RequestProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Review-packet provenance copied from the goal at `ta draft build` time\n(CR-02 item 6): who asked, what they wrote (capped, untrusted data),\nthe delegating role's reason and the id chain. Shown first in\n`ta show draft` and returned by the draft API. `None` for drafts\nwhose goal carried none."
     },
     "review_requests": {
       "$ref": "#/$defs/ReviewRequests"

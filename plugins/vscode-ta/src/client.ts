@@ -1,7 +1,28 @@
 import * as http from 'http';
 import * as https from 'https';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { URL } from 'url';
+
+/**
+ * The human credential created by `ta login --file` (or TA_HUMAN_CREDENTIAL).
+ * The daemon requires it for approve, deny, apply, commands and answers.
+ * Returns '' when the user has not run `ta login`.
+ */
+export function humanCredential(): string {
+  const fromEnv = (process.env.TA_HUMAN_CREDENTIAL || '').trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  const dir = process.env.TA_USER_STATE_DIR || path.join(os.homedir(), '.config', 'ta', 'human');
+  try {
+    return fs.readFileSync(path.join(dir, 'credential'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
 
 export interface HealthResponse {
   status: string;
@@ -111,6 +132,10 @@ export class TaClient {
       };
       if (auth && this.token) {
         headers['Authorization'] = `Bearer ${this.token}`;
+      }
+      const credential = auth ? humanCredential() : '';
+      if (credential) {
+        headers['X-TA-Human-Credential'] = credential;
       }
       if (payload) {
         headers['Content-Length'] = Buffer.byteLength(payload).toString();
