@@ -10887,7 +10887,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.29`
 
 ### v0.17.11.30 - Chat Goals Never Claim a Plan Phase; Wake Retries Use an Explicit Delayed Nak
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.11.28
 
 **Goal**: Fix the two blockers found in live Chief-of-Staff run 6 (2026-10-10). (1) A chat-mode or cos-origin goal auto-linked and claimed a plan phase (an ad-hoc `v0.0.0.N` stub marked `in_progress` and committed to `PLAN.md`) and never released it when the chat session finished with "no draft needed", so the next launch that linked the same phase failed with "Phase ... could not be claimed: already in progress (unknown goal)" and the delegated worker exited 1 within a second. (2) After v0.17.11.28 raised the ack wait to the launch timeout plus a margin (3660 s), failed wake launches were no longer retried: the retry design left the message unacked and relied on ack-wait expiry to redeliver it, which now takes an hour, and a daemon restart does not redeliver either. Bug 2 is a regression from v0.17.11.28.
