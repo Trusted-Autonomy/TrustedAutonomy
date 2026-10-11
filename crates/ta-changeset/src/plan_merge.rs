@@ -308,8 +308,14 @@ pub fn merge_plan_md(base: &str, staging: &str, source: &str) -> MergeResult {
         merged_output.push(merged_sec.raw_body.clone());
     }
 
+    let mut merged = merged_output.join("\n");
+    // `str::lines()` swallowed the final newline when the document was parsed.
+    if source.ends_with('\n') {
+        merged.push('\n');
+    }
+
     MergeResult {
-        merged: merged_output.join("\n"),
+        merged,
         silent_fixes,
         agent_additions,
         conflicts,
@@ -707,7 +713,11 @@ fn reconstruct_body(
     let mut lines: Vec<String> = Vec::new();
     let mut item_idx = 0;
 
-    for line in source_body.lines() {
+    // `split('\n')`, not `lines()`: `lines()` drops a trailing empty element, which
+    // silently removed one blank line from the end of every section it rebuilt
+    // (the blank line before the next heading). `raw_body` was built by joining
+    // `content.lines()` with "\n", so splitting on "\n" restores it exactly.
+    for line in source_body.split('\n') {
         let trimmed = line.trim();
 
         // Replace status marker.

@@ -27,6 +27,7 @@ pub mod milestone_draft;
 pub mod multi_channel;
 pub mod output_renderers;
 pub mod plan_merge;
+pub mod plan_scoped;
 pub mod plugin;
 pub mod plugin_resolver;
 pub mod pr_package;

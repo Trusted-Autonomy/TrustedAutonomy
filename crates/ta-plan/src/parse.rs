@@ -266,7 +266,48 @@ pub fn update_phase_status(content: &str, phase_id: &str, new_status: PlanStatus
     update_phase_status_with_schema(content, phase_id, new_status, &PlanSchema::default_schema())
 }
 
+/// True for lines that open or close a fenced code block (``` or ~~~), per line.
+fn fenced_line_flags(lines: &[&str]) -> Vec<bool> {
+    let run = |line: &str| -> Option<(char, usize, bool)> {
+        let s = line.trim_end_matches(['\n', '\r']).trim_start_matches(' ');
+        let ch = s.chars().next()?;
+        if ch != '`' && ch != '~' {
+            return None;
+        }
+        let n = s.chars().take_while(|&c| c == ch).count();
+        if n < 3 {
+            return None;
+        }
+        Some((ch, n, s[n..].trim().is_empty()))
+    };
+    let mut out = vec![false; lines.len()];
+    let mut open: Option<(char, usize)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        match (open, run(line)) {
+            (None, Some((ch, n, _))) => {
+                open = Some((ch, n));
+                out[i] = true;
+            }
+            (Some((och, on)), Some((ch, n, bare_rest))) => {
+                out[i] = true;
+                if ch == och && n >= on && bare_rest {
+                    open = None;
+                }
+            }
+            (Some(_), None) => out[i] = true,
+            (None, None) => {}
+        }
+    }
+    out
+}
+
 /// Update a phase's status using a provided schema.
+///
+/// Byte-preserving: every line other than the target phase's status marker is
+/// returned exactly as it was (line endings, blank lines, trailing spaces, code
+/// fences). Only the first heading outside a code fence that matches `phase_id`
+/// is considered, and only its own marker line is replaced, so a look-alike or
+/// duplicated heading elsewhere in the document is never touched.
 pub fn update_phase_status_with_schema(
     content: &str,
     phase_id: &str,
@@ -284,69 +325,53 @@ pub fn update_phase_status_with_schema(
         Err(_) => return content.to_string(),
     };
 
-    let lines: Vec<&str> = content.lines().collect();
-    let mut result = Vec::with_capacity(lines.len());
-    let mut i = 0;
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let fenced = fenced_line_flags(&lines);
 
-    while i < lines.len() {
-        let line = lines[i];
+    // Locate the first non-fenced heading that names the target phase.
+    let heading_idx = lines.iter().enumerate().find_map(|(i, line)| {
+        if fenced[i] {
+            return None;
+        }
         let trimmed = line.trim();
+        compiled_patterns.iter().find_map(|pattern| {
+            let caps = pattern.captures(trimmed)?;
+            let parsed_id = caps.get(1)?.as_str().trim();
+            phase_ids_match(parsed_id, phase_id).then_some(i)
+        })
+    });
+    let Some(i) = heading_idx else {
+        return content.to_string();
+    };
 
-        // Check if this line is the target phase header.
-        // Normalize comparison: "v0.4.0" matches "0.4.0" and vice versa.
-        let mut is_target = false;
-        for pattern in &compiled_patterns {
-            if let Some(caps) = pattern.captures(trimmed) {
-                if let Some(id_match) = caps.get(1) {
-                    let parsed_id = id_match.as_str().trim();
-                    if phase_ids_match(parsed_id, phase_id) {
-                        is_target = true;
-                        break;
-                    }
-                }
-            }
+    // Find the marker, skipping up to 3 blank lines between header and marker.
+    let mut j = i + 1;
+    let mut blank_count = 0;
+    while j < lines.len() && blank_count <= 3 {
+        let next = lines[j].trim();
+        if next.is_empty() {
+            blank_count += 1;
+            j += 1;
+            continue;
         }
-
-        result.push(line.to_string());
-
-        // If this is the target phase, find and replace the status marker,
-        // skipping over blank lines (up to 3) between the header and the marker.
-        if is_target {
-            let mut j = i + 1;
-            let mut blank_count = 0;
-            while j < lines.len() && blank_count <= 3 {
-                let next = lines[j].trim();
-                if next.is_empty() {
-                    blank_count += 1;
-                    j += 1;
-                    continue;
-                }
-                if status_re.is_match(next) {
-                    // Emit the blank lines we skipped, then the replacement marker.
-                    for blank_line in &lines[(i + 1)..j] {
-                        result.push(blank_line.to_string());
-                    }
-                    result.push(format!("<!-- status: {} -->", new_status));
-                    i = j + 1;
-                    break;
-                }
-                // Non-blank, non-status line — no marker found; leave as-is.
-                break;
-            }
-            if i == j + 1 {
-                continue;
-            }
+        if !fenced[j] && status_re.is_match(next) {
+            let eol = if lines[j].ends_with("\r\n") {
+                "\r\n"
+            } else if lines[j].ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            let mut out = String::with_capacity(content.len() + 16);
+            out.push_str(&lines[..j].concat());
+            out.push_str(&format!("<!-- status: {} -->{}", new_status, eol));
+            out.push_str(&lines[j + 1..].concat());
+            return out;
         }
-
-        i += 1;
+        // Non-blank, non-status line: no marker found; leave as-is.
+        break;
     }
-
-    let mut out = result.join("\n");
-    // Preserve trailing newline: `str::lines()` strips it, join() doesn't restore it.
-    if content.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    content.to_string()
 }
 
 /// Read and parse PLAN.md from a project directory.
@@ -403,5 +428,60 @@ mod tests {
             .find(|p| phase_ids_match(&p.id, "v0.17.10.1"))
             .expect("v0.17.10.1 should exist in the real plan");
         assert_eq!(v17_10_1.status, PlanStatus::Done);
+    }
+
+    fn differing_lines(a: &str, b: &str) -> Vec<usize> {
+        let al: Vec<&str> = a.split_inclusive('\n').collect();
+        let bl: Vec<&str> = b.split_inclusive('\n').collect();
+        assert_eq!(al.len(), bl.len(), "line count must not change");
+        (0..al.len()).filter(|&i| al[i] != bl[i]).collect()
+    }
+
+    #[test]
+    fn update_phase_status_changes_only_the_marker_line() {
+        let doc = "# T\r\n\r\n### v1.0.0 - A\r\n<!-- status: pending -->\r\n\r\n\r\n1. [ ] x  \r\n\r\n### v1.0.1 - B\r\n<!-- status: pending -->\r\n";
+        let out = update_phase_status(doc, "v1.0.0", PlanStatus::Done);
+        assert_eq!(differing_lines(doc, &out), vec![3]);
+        assert!(out.contains("<!-- status: done -->\r\n"));
+        assert!(out.ends_with("<!-- status: pending -->\r\n"));
+    }
+
+    #[test]
+    fn update_phase_status_ignores_fenced_look_alike_headings_and_duplicates() {
+        let doc = "```\n### v1.0.0 - In a fence\n<!-- status: pending -->\n```\n\n### v1.0.0 - Real\n<!-- status: pending -->\n\n### v1.0.0 - Dup\n<!-- status: pending -->\n";
+        let out = update_phase_status(doc, "v1.0.0", PlanStatus::Done);
+        assert_eq!(differing_lines(doc, &out), vec![6]);
+    }
+
+    #[test]
+    fn update_phase_status_does_not_match_a_longer_id() {
+        let doc = "### v1.0.10 - A\n<!-- status: pending -->\n";
+        assert_eq!(update_phase_status(doc, "v1.0.1", PlanStatus::Done), doc);
+    }
+
+    /// Golden: on the real PLAN.md, marking any phase changes at most that phase's one
+    /// marker line and never the line count, blank lines or any other byte.
+    #[test]
+    fn update_phase_status_on_real_plan_changes_at_most_one_line() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let plan_path = manifest_dir.join("../../PLAN.md");
+        let original = std::fs::read_to_string(&plan_path).expect("read real PLAN.md");
+        let tmp = tempfile::tempdir().unwrap();
+        let copy = tmp.path().join("PLAN.md");
+        std::fs::write(&copy, &original).unwrap();
+        let content = std::fs::read_to_string(&copy).unwrap();
+        let phases = parse_plan(&content);
+        assert!(phases.len() > 50);
+        for p in phases.iter().take(400) {
+            let out = update_phase_status(&content, &p.id, PlanStatus::InProgress);
+            let diff = differing_lines(&content, &out);
+            assert!(
+                diff.len() <= 1,
+                "phase {} changed {} lines: {:?}",
+                p.id,
+                diff.len(),
+                diff
+            );
+        }
     }
 }

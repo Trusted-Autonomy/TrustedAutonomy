@@ -1221,9 +1221,9 @@ fn run_plan_review(
     // v0.15.19.4.2: Emit [plan] heartbeat lines for coverage status.
     emit_plan_heartbeat_lines(&merge_result.merged, &coverage_gaps);
 
-    // v0.15.24.1: Per-item completion verification and auto-correction.
-    // For the current phase, check each item for code coverage. Unchecked items
-    // that have code coverage are auto-corrected to [x] in the staging PLAN.md.
+    // v0.15.24.1: Per-item completion verification.
+    // For the current phase, check each item for code coverage and report unchecked
+    // items that have it. v0.17.11.29: report only, never written into the draft.
     let merged_after_autocorrect = if let Some(phase_id) = plan_phase {
         let completion =
             ta_goal::verify_phase_completion(&merge_result.merged, &diff_content, phase_id);
@@ -1235,8 +1235,12 @@ fn run_plan_review(
             println!("{}", item.status_line());
         }
         if completion.auto_corrected_count > 0 {
+            // v0.17.11.29: report only. Writing `[x]` into the draft for items the agent did
+            // not check records completion nobody claimed, and apply never auto-checks.
             println!(
-                "[review] Auto-corrected {} unchecked item(s) where code was found.",
+                "[review] {} unchecked item(s) have matching code in the diff but the agent \
+                 did not check them. They stay unchecked in the draft; check them yourself \
+                 if you agree they are done.",
                 completion.auto_corrected_count
             );
             for item in completion.items.iter().filter(|i| i.auto_corrected) {
@@ -1244,19 +1248,8 @@ fn run_plan_review(
                     println!("  {}", note);
                 }
             }
-            let corrected = ta_goal::auto_correct_plan_md(&merge_result.merged, &completion);
-            // Write auto-corrected PLAN.md back to staging so the draft includes corrections.
-            if let Err(e) = std::fs::write(&staging_plan, &corrected) {
-                tracing::warn!(
-                    path = %staging_plan.display(),
-                    error = %e,
-                    "reviewer: failed to write auto-corrected PLAN.md to staging"
-                );
-            }
-            corrected
-        } else {
-            merge_result.merged.clone()
         }
+        merge_result.merged.clone()
     } else {
         merge_result.merged.clone()
     };
@@ -1352,26 +1345,6 @@ fn collect_diff_content(
         }
         let sourced = source_path.join(&rel);
         if let Ok(s) = std::fs::read_to_string(&sourced) {
-            content.push_str(&s);
-        }
-    }
-    content
-}
-
-/// Collect content from all non-PLAN.md artifacts that were applied to target_dir.
-/// Used for auto-check coverage during apply (v0.15.19.4.2).
-fn collect_apply_diff_content(artifacts: &[Artifact], target_dir: &std::path::Path) -> String {
-    let mut content = String::new();
-    for artifact in artifacts {
-        let Some(rel) = safe_rel_path(&artifact.resource_uri) else {
-            continue;
-        };
-        let rel_str = rel.to_string_lossy();
-        if rel_str == "PLAN.md" || rel_str.ends_with("/PLAN.md") {
-            continue; // Skip PLAN.md itself — we're checking code against plan items.
-        }
-        let path = target_dir.join(&rel);
-        if let Ok(s) = std::fs::read_to_string(&path) {
             content.push_str(&s);
         }
     }
@@ -6307,6 +6280,327 @@ fn refuse_infrastructure_artifacts(pkg: &DraftPackage) -> anyhow::Result<()> {
     );
 }
 
+/// Say when the version apply sets differs from the phase id's own semver (a later phase is
+/// already done, or an earlier one is still open), so the value never looks arbitrary.
+fn note_version_choice(phase_id: &str, chosen: &str) {
+    if let Some(own) = super::plan::phase_id_to_semver(phase_id) {
+        if own != chosen {
+            eprintln!(
+                "[version] Phase {} maps to {}, but PLAN.md's contiguous-done version is {} \
+                 (the value `ta plan expected-version` reports); using that. To pin another \
+                 value, run ./scripts/bump-version.sh <version>.",
+                phase_id, own, chosen
+            );
+        }
+    }
+}
+
+/// Plan phase ids an apply targets: the `--phase` override (comma separated), else the
+/// goal's linked phase, else none.
+fn resolve_apply_phase_ids(phase_override: Option<&str>, goal_phase: Option<&str>) -> Vec<String> {
+    if let Some(override_phases) = phase_override {
+        override_phases
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if let Some(phase) = goal_phase {
+        vec![phase.to_string()]
+    } else {
+        vec![]
+    }
+}
+
+/// Branches seen by the pre-flight (see [`ensure_off_protected_branch`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BranchPreflight {
+    /// The branch checked out before the pre-flight (restored after a submit).
+    original_branch: Option<String>,
+    /// The branch the apply will write on.
+    working_branch: Option<String>,
+}
+
+/// Make sure the working tree is on a non-protected branch BEFORE any file is written.
+///
+/// `ta run` and `ta draft apply --submit` both create the feature branch through
+/// `SourceAdapter::prepare`; this does the same for `--no-submit`, so an apply can never
+/// leave uncommitted changes in the working tree of `main`. When the branch cannot be
+/// created or switched to, nothing has been written yet and the error says how to proceed.
+fn ensure_off_protected_branch(
+    adapter: &dyn ta_submit::SourceAdapter,
+    ctx: &CommitContext,
+    submit_config: &ta_submit::SubmitConfig,
+    will_commit: bool,
+    draft_ref: &str,
+) -> anyhow::Result<BranchPreflight> {
+    if adapter.name() == "none" {
+        return Ok(BranchPreflight::default());
+    }
+    let branch = adapter
+        .current_branch()
+        .unwrap_or_else(|_| "unknown".to_string());
+    let protected = adapter.protected_submit_targets();
+    if !protected.iter().any(|b| b == &branch) {
+        eprintln!(
+            "[apply] VCS pre-flight: already on branch '{}' (not protected) -- ok.",
+            branch
+        );
+        return Ok(BranchPreflight {
+            original_branch: Some(branch.clone()),
+            working_branch: Some(branch),
+        });
+    }
+
+    eprintln!(
+        "[apply] On protected branch '{}'{} -- creating a feature branch before writing any files...",
+        branch,
+        if will_commit {
+            ""
+        } else {
+            " and --no-submit was given"
+        }
+    );
+    // NOTE (v0.15.24.1): do NOT auto-commit .ta/*.jsonl files here; dirty audit/history
+    // files carry over to the feature branch and are included in the apply commit.
+    if let Err(e) = adapter.prepare(ctx, submit_config) {
+        anyhow::bail!(
+            "VCS pre-flight failed: could not create a feature branch before writing files.\n\
+             Aborted with no changes made to the source tree (it is still on protected branch '{branch}').\n\
+             VCS error: {e}\n\
+             \n\
+             Applying onto a protected branch is refused, with or without --submit. What to do:\n\
+             1. Make sure the working tree is clean enough to switch branches (`git status`),\n\
+             2. or switch to a feature branch yourself (`git switch -c <name>`),\n\
+             then re-run:\n  ta draft apply {draft_ref}"
+        );
+    }
+    adapter.verify_not_on_protected_target().map_err(|e| {
+        anyhow::anyhow!(
+            "VCS pre-flight: prepare() succeeded but the working tree is still on a protected branch.\n\
+             Aborted with no changes made. Check the VCS adapter configuration \
+             ([submit] in .ta/workflow.toml), or switch to a feature branch yourself and re-run \
+             `ta draft apply {draft_ref}`.\n\
+             Error: {e}"
+        )
+    })?;
+    let new_branch = adapter
+        .current_branch()
+        .unwrap_or_else(|_| "unknown".to_string());
+    eprintln!(
+        "[apply] Switched to feature branch '{}' -- proceeding with file writes.",
+        new_branch
+    );
+    if !will_commit {
+        eprintln!(
+            "[apply] Changes will be written to '{}' and left UNCOMMITTED there ('{}' is untouched). \
+             Review with `git diff`, then commit on this branch, or re-run with --submit.",
+            new_branch, branch
+        );
+    }
+    Ok(BranchPreflight {
+        original_branch: Some(branch),
+        working_branch: Some(new_branch),
+    })
+}
+
+/// `ta draft apply --dry-run`: print what an apply would do and change NOTHING.
+///
+/// This runs before the apply lock, auto-approval, branch creation, file copies, plan
+/// updates, goal and draft state changes and staging cleanup, so the working tree,
+/// branches, `.ta/` state and staging directory are exactly as they were.
+#[allow(clippy::too_many_arguments)]
+fn dry_run_apply_preview(
+    config: &GatewayConfig,
+    package_id: Uuid,
+    target: Option<&str>,
+    git_commit: bool,
+    git_push: bool,
+    git_review: bool,
+    skip_verify: bool,
+    phase_override: Option<&str>,
+    skip_plan_merge: bool,
+) -> anyhow::Result<()> {
+    let pkg = load_package(config, package_id)?;
+    println!(
+        "[dry-run] Draft {} \"{}\" ({} artifact(s)). Nothing below is executed.",
+        package_id,
+        pkg.goal.title,
+        pkg.changes.artifacts.len()
+    );
+
+    match &pkg.status {
+        DraftStatus::PendingReview => {
+            println!("[dry-run] Status: pending review -- apply would auto-approve it first.")
+        }
+        DraftStatus::Approved { .. } => println!("[dry-run] Status: approved."),
+        other => println!(
+            "[dry-run] Status: {:?} -- a real apply would be REFUSED (must be PendingReview or \
+             Approved). Run `ta draft view {}` to see why.",
+            other, package_id
+        ),
+    }
+
+    let goal_store = GoalRunStore::new(&config.goals_dir)?;
+    let goals = goal_store.list()?;
+    let Some(goal) = goals.iter().find(|g| g.pr_package_id == Some(package_id)) else {
+        println!(
+            "[dry-run] No goal found for draft {} -- a real apply would fail. \
+             Check `ta goal list`.",
+            package_id
+        );
+        println!("\n[dry-run] No changes were made. Remove --dry-run to execute.");
+        return Ok(());
+    };
+    let target_dir = match target {
+        Some(t) => std::path::PathBuf::from(t),
+        None => goal
+            .source_dir
+            .clone()
+            .unwrap_or_else(|| config.workspace_root.clone()),
+    };
+
+    if goal.state.can_transition_to(&GoalRunState::Applied) {
+        println!(
+            "[dry-run] Goal {}: {} -> applied (would transition).",
+            &goal.goal_run_id.to_string()[..8],
+            goal.state
+        );
+    } else {
+        println!(
+            "[dry-run] Goal {} is in state '{}', which cannot move to applied -- a real apply \
+             would be REFUSED. Check `ta goal status {}`.",
+            &goal.goal_run_id.to_string()[..8],
+            goal.state,
+            &goal.goal_run_id.to_string()[..8]
+        );
+    }
+    if goal.workspace_path.exists() {
+        println!(
+            "[dry-run] Staging {} exists and would be removed only after a successful real apply.",
+            goal.workspace_path.display()
+        );
+    } else {
+        println!(
+            "[dry-run] Staging {} no longer exists -- a real apply would fail. Re-run the goal.",
+            goal.workspace_path.display()
+        );
+    }
+
+    println!(
+        "[dry-run] Would copy {} file(s) into {}:",
+        pkg.changes.artifacts.len(),
+        target_dir.display()
+    );
+    for a in &pkg.changes.artifacts {
+        println!("  {:?}  {}", a.change_type, a.resource_uri);
+    }
+
+    // Branch handling, as the real pre-flight would do it.
+    let wf = ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+    let adapter = ta_submit::select_adapter(&target_dir, &wf.submit);
+    if adapter.name() == "none" {
+        println!("[dry-run] VCS: no adapter detected; files would be copied with no VCS steps.");
+    } else {
+        let branch = adapter
+            .current_branch()
+            .unwrap_or_else(|_| "unknown".to_string());
+        if adapter
+            .protected_submit_targets()
+            .iter()
+            .any(|b| b == &branch)
+        {
+            println!(
+                "[dry-run] Branch: on protected branch '{}' -- would create a feature branch \
+                 (prefix '{}') BEFORE writing any file{}.",
+                branch,
+                wf.submit.git.branch_prefix,
+                if git_commit {
+                    ""
+                } else {
+                    ", leaving the changes uncommitted there"
+                }
+            );
+        } else {
+            println!(
+                "[dry-run] Branch: on '{}' (not protected) -- would write there.",
+                branch
+            );
+        }
+    }
+
+    // PLAN.md: exactly what the real merge and status update would produce.
+    let phase_ids = resolve_apply_phase_ids(phase_override, goal.plan_phase.as_deref());
+    let plan_path = target_dir.join("PLAN.md");
+    if phase_ids.is_empty() {
+        println!(
+            "[dry-run] PLAN.md: no phase is linked, so PLAN.md and the version are untouched."
+        );
+    } else if let Ok(on_disk) = std::fs::read_to_string(&plan_path) {
+        let plan_in_draft = pkg
+            .changes
+            .artifacts
+            .iter()
+            .any(|a| a.resource_uri == "fs://workspace/PLAN.md");
+        let mut planned = on_disk.clone();
+        if plan_in_draft && !skip_plan_merge {
+            if let Ok(staging_plan) = std::fs::read_to_string(goal.workspace_path.join("PLAN.md")) {
+                let (merged, reports) =
+                    super::draft_plan::merge_draft_plan(&on_disk, &staging_plan, &phase_ids);
+                for r in &reports {
+                    for line in super::draft_plan::describe_merge(r) {
+                        println!("[dry-run] {line}");
+                    }
+                }
+                planned = merged;
+            }
+        }
+        let (final_plan, outcomes) = super::draft_plan::finalize_phases(&planned, &phase_ids);
+        for o in &outcomes {
+            println!("[dry-run] {}", super::draft_plan::describe_outcome(o, true));
+        }
+        if final_plan == on_disk {
+            println!("[dry-run] PLAN.md: would be left byte-for-byte unchanged.");
+        }
+        let last = phase_ids.last().map(String::as_str).unwrap_or("");
+        match super::draft_plan::version_after_apply(&final_plan, last) {
+            Some(v) => println!(
+                "[dry-run] Version: would set {} (current {}), the same value as `ta plan expected-version`.",
+                v,
+                read_cargo_version(&target_dir).unwrap_or_else(|| "unknown".to_string())
+            ),
+            None => println!("[dry-run] Version: not computable from PLAN.md; would be left alone."),
+        }
+    } else {
+        println!(
+            "[dry-run] PLAN.md: {} not readable; phase status and version would be skipped.",
+            plan_path.display()
+        );
+    }
+
+    if git_commit && adapter.name() != "none" {
+        println!(
+            "[dry-run] Submit workflow preview (adapter: {}):",
+            adapter.name()
+        );
+        println!("  Stage:  adapter.prepare() -- create working branch/changelist");
+        println!("  Commit: adapter.commit() -- stage changes for the configured VCS");
+        if git_push {
+            println!("  Submit: adapter.push() -- submit/push to remote");
+        }
+        if git_review {
+            println!("  Review: adapter.open_review() -- create PR/review request");
+        }
+        if !wf.verify.commands.is_empty() && !skip_verify {
+            println!(
+                "  Verify: {} pre-submit check(s) would run first",
+                wf.verify.commands.len()
+            );
+        }
+    }
+    println!("\n[dry-run] No changes were made. Remove --dry-run to execute.");
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_package(
     config: &GatewayConfig,
@@ -6326,6 +6620,22 @@ fn apply_package(
     skip_plan_merge: bool,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
+
+    // --dry-run is read-only end to end: it must not take the lock, auto-approve, create a
+    // branch, copy files, touch goal/draft state or clean staging (v0.17.11.29).
+    if dry_run {
+        return dry_run_apply_preview(
+            config,
+            package_id,
+            target,
+            git_commit,
+            git_push,
+            git_review,
+            skip_verify,
+            phase_override,
+            skip_plan_merge,
+        );
+    }
 
     // Acquire the apply lock before doing any work. Prevents concurrent applies
     // and signals to co-developer processes (including AI assistants) that git
@@ -6944,101 +7254,24 @@ fn apply_package(
     // Capture the working branch BEFORE any pre-flight branch switching so
     // restore_state() at the end of the submit workflow can return the user
     // to their original branch (e.g., main) after the feature-branch commit.
-    let mut original_branch: Option<String> = None;
-    let mut preflight_branch: Option<String> = None;
-    if git_commit {
+    //
+    // v0.17.11.29: this runs for --no-submit too. A protected branch is never written to,
+    // with or without a commit; `--no-submit` leaves the changes uncommitted on the
+    // feature branch instead of in the working tree of `main`.
+    let (original_branch, preflight_branch) = {
         use ta_submit::{select_adapter, WorkflowConfig};
         let wf_path = target_dir.join(".ta/workflow.toml");
         let wf_config = WorkflowConfig::load_or_default(&wf_path);
         let adapter = select_adapter(&target_dir, &wf_config.submit);
-
-        if adapter.name() != "none" {
-            let branch = adapter
-                .current_branch()
-                .unwrap_or_else(|_| "unknown".to_string());
-            // Record original branch before pre-flight may switch to a feature branch.
-            original_branch = Some(branch.clone());
-            let protected = adapter.protected_submit_targets();
-            let on_protected = protected.iter().any(|b| b == &branch);
-
-            if on_protected {
-                eprintln!(
-                    "[apply] On protected branch '{}' — creating feature branch before writing any files...",
-                    branch
-                );
-                // NOTE (v0.15.24.1): Do NOT auto-commit .ta/*.jsonl files here.
-                // Committing them as standalone commits to main before branching causes
-                // orphan commits that conflict with concurrent PR merges. Instead, dirty
-                // audit/history files carry over to the feature branch via `git checkout -b`
-                // and are included in the apply commit by auto_stage_critical_files().
-                if let Err(e) = adapter.prepare(&CommitContext::from(goal), &wf_config.submit) {
-                    // Roll back staged PLAN.md if pre-flight fails.
-                    let _ = git_in(&target_dir, &["restore", "--staged", "PLAN.md"]).status();
-                    let _ = git_in(&target_dir, &["restore", "PLAN.md"]).status();
-                    return Err(anyhow::anyhow!(
-                        "VCS pre-flight failed: could not create feature branch before writing files.\n\
-                         Aborted with no changes made to the source tree.\n\
-                         Branch was: '{}'\n\
-                         VCS error: {}\n\
-                         \n\
-                         Ensure the working tree is clean (git status), then re-run:\n\
-                         ta draft apply {}",
-                        branch,
-                        e,
-                        id
-                    ));
-                }
-                // Double-check we're off the protected branch before proceeding.
-                adapter.verify_not_on_protected_target().map_err(|e| {
-                    anyhow::anyhow!(
-                        "VCS pre-flight: prepare() succeeded but still on protected branch.\n\
-                         Aborted with no changes made. Check the VCS adapter configuration.\n\
-                         Error: {}",
-                        e
-                    )
-                })?;
-                let new_branch = adapter
-                    .current_branch()
-                    .unwrap_or_else(|_| "unknown".to_string());
-                eprintln!(
-                    "[apply] Switched to feature branch '{}' — proceeding with file writes.",
-                    new_branch
-                );
-                // Record the prepared feature branch so the submit-failure error
-                // handler can reference it by name.
-                preflight_branch = Some(new_branch);
-            } else {
-                eprintln!(
-                    "[apply] VCS pre-flight: already on branch '{}' (not protected) — ok.",
-                    branch
-                );
-                // Already on the right branch; record it so the error handler
-                // can confirm the branch name if submit fails later.
-                preflight_branch = Some(branch);
-            }
-        }
-    } else {
-        // Not submitting — warn if on a protected branch so the user knows they
-        // must not manually commit the resulting changes to main.
-        use ta_submit::{select_adapter, WorkflowConfig};
-        let wf_path = target_dir.join(".ta/workflow.toml");
-        let wf_config = WorkflowConfig::load_or_default(&wf_path);
-        let adapter = select_adapter(&target_dir, &wf_config.submit);
-        if adapter.name() != "none" {
-            let branch = adapter
-                .current_branch()
-                .unwrap_or_else(|_| "unknown".to_string());
-            let protected = adapter.protected_submit_targets();
-            if protected.iter().any(|b| b == &branch) {
-                eprintln!(
-                    "\nWarning: applying without VCS submit on protected branch '{branch}'.\n\
-                     Changes will be written to your working tree on '{branch}'.\n\
-                     Do NOT commit these changes to '{branch}' directly.\n\
-                     To auto-commit to a feature branch, re-run with `ta draft apply --submit`.\n"
-                );
-            }
-        }
-    }
+        let pre = ensure_off_protected_branch(
+            adapter.as_ref(),
+            &CommitContext::from(goal),
+            &wf_config.submit,
+            git_commit,
+            id,
+        )?;
+        (pre.original_branch, pre.working_branch)
+    };
 
     // ── Transactional rollback guard (v0.12.2.2) ─────────────────────────────
     // Snapshot working-tree files before any writes so we can restore them
@@ -7281,6 +7514,10 @@ fn apply_package(
         // overwrite them with an older staging copy.
         //
         // Default protected files when no policy is configured (hardcoded seed):
+        // Target plan phase(s), needed both by the PLAN.md merge below and by the pre-copy
+        // version gate, before any file is written.
+        let phase_ids_for_precopy: Vec<String> =
+            resolve_apply_phase_ids(phase_override, goal.plan_phase.as_deref());
         const DEFAULT_PROTECTED_FILES: &[&str] = &["PLAN.md", "docs/USAGE.md"];
         let workflow_config =
             ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
@@ -7352,6 +7589,51 @@ fn apply_package(
                                 if let (Some(staging_str), Some(source_str)) =
                                     (staging_content, source_content)
                                 {
+                                    // v0.17.11.29: with a target phase, the draft's PLAN.md is
+                                    // merged by the phase-scoped merge: only that phase's own item
+                                    // checkmarks can change, on top of the PLAN.md on disk. Nothing
+                                    // else in the file (blank lines, code fences, other phases,
+                                    // human-gate checkboxes) is rewritten.
+                                    if !phase_ids_for_precopy.is_empty() {
+                                        let on_disk = std::fs::read_to_string(&source_path)
+                                            .unwrap_or_else(|_| source_str.clone());
+                                        let (merged, reports) = super::draft_plan::merge_draft_plan(
+                                            &on_disk,
+                                            &staging_str,
+                                            &phase_ids_for_precopy,
+                                        );
+                                        for r in &reports {
+                                            for line in super::draft_plan::describe_merge(r) {
+                                                eprintln!("{line}");
+                                            }
+                                        }
+                                        if merged != on_disk {
+                                            std::fs::write(&source_path, merged.as_bytes())
+                                                .map_err(|e| {
+                                                    anyhow::anyhow!(
+                                                        "Could not write the merged PLAN.md to {}: {}. \
+                                                         Nothing else was changed in PLAN.md; fix the \
+                                                         permissions and re-run `ta draft apply {}`.",
+                                                        source_path.display(),
+                                                        e,
+                                                        &package_id.to_string()[..8]
+                                                    )
+                                                })?;
+                                            eprintln!(
+                                                "[plan-merge] PLAN.md: carried the draft's checkmarks for \
+                                                 phase(s) {}; no other line changed.",
+                                                phase_ids_for_precopy.join(", ")
+                                            );
+                                        } else {
+                                            eprintln!(
+                                                "[plan-merge] PLAN.md: nothing to carry over for phase(s) {}; \
+                                                 the file is byte-for-byte unchanged.",
+                                                phase_ids_for_precopy.join(", ")
+                                            );
+                                        }
+                                        continue;
+                                    }
+
                                     // v0.15.28.1: Diagnostic tracing — SHA of each version.
                                     use sha2::Digest as _;
                                     let base_sha = pkg
@@ -7487,7 +7769,6 @@ fn apply_package(
                                             // status markers are missing, abort and dump the
                                             // failed merge for inspection.
                                             use ta_changeset::plan_merge::{
-                                                auto_correct_done_phase_items,
                                                 check_done_phase_item_consistency,
                                                 validate_plan_merge,
                                             };
@@ -7544,14 +7825,11 @@ fn apply_package(
 
                                             // v0.15.29.2: Auto-correct unchecked items in done
                                             // phases before writing to source.
-                                            let (final_merged, corrections) =
-                                                auto_correct_done_phase_items(&merge_result.merged);
-                                            for (phase_id, item_num) in &corrections {
-                                                eprintln!(
-                                                    "[plan] auto-checked item {} in {} (phase is done; checkmark lost in merge)",
-                                                    item_num, phase_id
-                                                );
-                                            }
+                                            // v0.17.11.29: never auto-check items. A done phase with an
+                                            // unchecked item is reported above as a warning; silently
+                                            // checking it would record work (or a human sign-off) that
+                                            // nobody did.
+                                            let final_merged = merge_result.merged.clone();
 
                                             if let Err(e) = std::fs::write(
                                                 &source_path,
@@ -7677,21 +7955,6 @@ fn apply_package(
             guarded
         };
 
-        // Compute phase IDs early so the pre-copy gate can use them.
-        // (The canonical `phase_ids` binding is computed later after apply for non-VCS path,
-        // but we need the phase ID here before any file writes.)
-        let phase_ids_for_precopy: Vec<String> = if let Some(override_phases) = phase_override {
-            override_phases
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else if let Some(ref phase) = goal.plan_phase {
-            vec![phase.clone()]
-        } else {
-            vec![]
-        };
-
         // v0.15.15.7: Pre-copy version validation gate with auto-patch.
         // Validate version BEFORE writing any files. If the staging Cargo.toml (or CLAUDE.md)
         // does not match the phase's expected version, attempt an in-place auto-patch so the
@@ -7702,7 +7965,17 @@ fn apply_package(
                 .last()
                 .map(String::as_str)
                 .unwrap_or("");
-            if let Some(expected_ver) = super::plan::phase_id_to_semver(last_phase) {
+            // v0.17.11.29: the expected version is the contiguous-done version PLAN.md will
+            // report once these phases are done, not the phase id's own semver.
+            let expected_version_for_gate = {
+                let on_disk =
+                    std::fs::read_to_string(target_dir.join("PLAN.md")).unwrap_or_default();
+                let (after, _) =
+                    super::draft_plan::finalize_phases(&on_disk, &phase_ids_for_precopy);
+                super::draft_plan::version_after_apply(&after, last_phase)
+            };
+            if let Some(expected_ver) = expected_version_for_gate {
+                note_version_choice(last_phase, &expected_ver);
                 let staging_cargo = goal.workspace_path.join("Cargo.toml");
                 if staging_cargo.exists() {
                     if let Err(e) = validate_staging_version(&goal.workspace_path, &expected_ver) {
@@ -8032,134 +8305,21 @@ fn apply_package(
     if !git_commit && !phase_ids.is_empty() {
         let plan_path = target_dir.join("PLAN.md");
         if plan_path.exists() {
-            // v0.15.19.4.2: Auto-check PLAN.md items with coverage matches before phase status update.
-            let diff_content_for_check =
-                collect_apply_diff_content(&pkg.changes.artifacts, &target_dir);
-            let plan_before_check = std::fs::read_to_string(&plan_path)?;
-            let plan_after_check =
-                auto_check_covered_items(&plan_before_check, &diff_content_for_check);
-            if plan_after_check != plan_before_check {
-                std::fs::write(&plan_path, &plan_after_check)?;
-            }
-
-            let mut content = std::fs::read_to_string(&plan_path)?;
-            let mut last_phase_id = String::new();
-
-            for phase in &phase_ids {
-                let phases_before = super::plan::parse_plan(&content);
-                let old_status = phases_before
-                    .iter()
-                    .find(|p| super::plan::phase_ids_match(&p.id, phase))
-                    .map(|p| p.status.clone())
-                    .unwrap_or(super::plan::PlanStatus::Pending);
-
-                eprintln!(
-                    "[plan-update] goal phase_id={:?}, matched plan id={:?}, old_status={:?}",
-                    phase,
-                    phases_before
-                        .iter()
-                        .find(|p| super::plan::phase_ids_match(&p.id, phase))
-                        .map(|p| &p.id),
-                    old_status,
-                );
-
-                // v0.17.10.1 item 1: only force status to `done` when the draft's
-                // own diff content actually shows the phase complete. Otherwise
-                // leave whatever the draft itself wrote (status marker + item
-                // states) — forcing `done` here would silently paper over
-                // incomplete work with no reviewer able to tell.
-                if ta_changeset::plan_merge::phase_has_unchecked_items(&content, phase) {
-                    eprintln!(
-                        "[plan-update] WARNING: phase {} has unchecked item(s) in its own \
-                         diff content — skipping the force-done status bump. Leaving the \
-                         draft's own status marker and item states as written. If this \
-                         phase is genuinely complete, mark it done manually.",
-                        phase
-                    );
-                    last_phase_id = phase.clone();
-                    continue;
-                }
-
-                let updated = super::plan::update_phase_status(
-                    &content,
-                    phase,
-                    super::plan::PlanStatus::Done,
-                );
-
-                let changed = updated != content;
-                eprintln!(
-                    "[plan-update] content changed={}, writing to {}",
-                    changed,
-                    plan_path.display()
-                );
-
-                content = updated;
-                println!("Updated PLAN.md: Phase {} -> done", phase);
-
-                // Record history.
-                let _ = super::plan::record_history(
-                    &target_dir,
-                    phase,
-                    &old_status,
-                    &super::plan::PlanStatus::Done,
-                );
-                last_phase_id = phase.clone();
-            }
-
-            // v0.15.24.3: Normalise stray --- horizontal rules inserted by agents.
-            let normalised = super::plan::normalize_plan_horizontal_rules(&content);
-            if normalised != content {
-                eprintln!(
-                    "[plan-update] Normalised {} stray horizontal-rule(s) in PLAN.md",
-                    content
-                        .matches("---")
-                        .count()
-                        .saturating_sub(normalised.matches("---").count())
-                );
-                content = normalised;
-            }
-
-            std::fs::write(&plan_path, &content)?;
-
-            // v0.15.30.6: Auto-correct unchecked items in done phases AFTER status update.
-            // update_phase_status runs before auto_correct_done_phase_items in the 3-way merge
-            // block, so the merge may have left a phase as in_progress (skipped by auto_correct)
-            // before update_phase_status promotes it to done. Re-running here guarantees items
-            // are checked regardless of merge order.
-            {
-                use ta_changeset::plan_merge::auto_correct_done_phase_items;
-                let current = std::fs::read_to_string(&plan_path)?;
-                let (corrected, corrections) = auto_correct_done_phase_items(&current);
-                if !corrections.is_empty() {
-                    for (phase_id, item_num) in &corrections {
-                        eprintln!(
-                            "[plan] auto-checked item {} in {} (done phase had unchecked item after status update)",
-                            item_num, phase_id
-                        );
-                    }
-                    std::fs::write(&plan_path, corrected.as_bytes())?;
-                }
-
-                // Hard validation: fail apply if any done phase still has unchecked items.
-                use ta_changeset::plan_merge::check_done_phase_item_consistency;
-                let final_content = std::fs::read_to_string(&plan_path)?;
-                let issues = check_done_phase_item_consistency(&final_content);
-                if !issues.is_empty() {
-                    for issue in &issues {
-                        eprintln!("[plan] ERROR: [{}] {}", issue.section_id, issue.description);
-                    }
-                    anyhow::bail!(
-                        "PLAN.md apply aborted: {} done phase(s) have unchecked items after auto-correct.\n\
-                         This indicates a merge corruption that auto-correct could not fix.\n\
-                         Run `ta plan fix-markers --apply` to repair, or mark items [x] manually.",
-                        issues.len()
-                    );
-                }
-            }
+            // v0.17.11.29: apply never checks items for you and never rewrites anything
+            // outside the target phase's own marker. Phases whose own items are all checked
+            // are marked done; the rest are held and their open items are named.
+            let completion = super::draft_plan::complete_phases_on_disk(&target_dir, &phase_ids)?;
+            let content = completion.content;
+            let last_phase_id = completion.last_phase_id;
 
             // Auto-bump workspace version to match the completed phase.
             // Agents should NOT set the version — this is the single authority.
-            if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
+            // v0.17.11.29: the value is the contiguous-done version from PLAN.md (the same
+            // computation as `ta plan expected-version`), not the phase id's own semver, so a
+            // later phase that is already done does not leave the version lagging.
+            if let Some(new_ver) = super::draft_plan::version_after_apply(&content, &last_phase_id)
+            {
+                note_version_choice(&last_phase_id, &new_ver);
                 match bump_workspace_version(&target_dir, &new_ver) {
                     Ok(BumpResult::Bumped(bumped)) => {
                         // Collect human-readable file names for the confirmation line.
@@ -8437,122 +8597,17 @@ fn apply_package(
                 if !phase_ids.is_empty() {
                     let plan_path = target_dir.join("PLAN.md");
                     if plan_path.exists() {
-                        let mut content = std::fs::read_to_string(&plan_path)?;
-                        let mut last_phase_id = String::new();
-
-                        for phase in &phase_ids {
-                            let phases_before = super::plan::parse_plan(&content);
-                            let old_status = phases_before
-                                .iter()
-                                .find(|p| super::plan::phase_ids_match(&p.id, phase))
-                                .map(|p| p.status.clone())
-                                .unwrap_or(super::plan::PlanStatus::Pending);
-
-                            eprintln!(
-                                "[plan-update] goal phase_id={:?}, matched plan id={:?}, old_status={:?}",
-                                phase,
-                                phases_before
-                                    .iter()
-                                    .find(|p| super::plan::phase_ids_match(&p.id, phase))
-                                    .map(|p| &p.id),
-                                old_status,
-                            );
-
-                            // v0.17.10.1 item 1: only force status to `done` when the
-                            // draft's own diff content actually shows the phase complete.
-                            // Otherwise leave whatever the draft itself wrote (status
-                            // marker + item states) — forcing `done` here would silently
-                            // paper over incomplete work with no reviewer able to tell.
-                            if ta_changeset::plan_merge::phase_has_unchecked_items(&content, phase)
-                            {
-                                eprintln!(
-                                    "[plan-update] WARNING: phase {} has unchecked item(s) in \
-                                     its own diff content — skipping the force-done status \
-                                     bump. Leaving the draft's own status marker and item \
-                                     states as written. If this phase is genuinely complete, \
-                                     mark it done manually.",
-                                    phase
-                                );
-                                last_phase_id = phase.clone();
-                                continue;
-                            }
-
-                            let updated = super::plan::update_phase_status(
-                                &content,
-                                phase,
-                                super::plan::PlanStatus::Done,
-                            );
-
-                            let changed = updated != content;
-                            eprintln!(
-                                "[plan-update] content changed={}, writing to {}",
-                                changed,
-                                plan_path.display()
-                            );
-
-                            content = updated;
-                            println!("Updated PLAN.md: Phase {} -> done", phase);
-
-                            let _ = super::plan::record_history(
-                                &target_dir,
-                                phase,
-                                &old_status,
-                                &super::plan::PlanStatus::Done,
-                            );
-                            last_phase_id = phase.clone();
-                        }
-
-                        // v0.15.24.3: Normalise stray --- horizontal rules.
-                        let normalised = super::plan::normalize_plan_horizontal_rules(&content);
-                        if normalised != content {
-                            eprintln!(
-                                "[plan-update] Normalised stray horizontal-rule(s) in PLAN.md (VCS path)"
-                            );
-                            content = normalised;
-                        }
-
-                        std::fs::write(&plan_path, &content)?;
-
-                        // v0.15.30.6: Auto-correct unchecked items in done phases AFTER status
-                        // update (VCS path). Mirrors the non-VCS fix — same root cause.
-                        {
-                            use ta_changeset::plan_merge::auto_correct_done_phase_items;
-                            let current = std::fs::read_to_string(&plan_path)?;
-                            let (corrected, corrections) = auto_correct_done_phase_items(&current);
-                            if !corrections.is_empty() {
-                                for (phase_id, item_num) in &corrections {
-                                    eprintln!(
-                                        "[plan] auto-checked item {} in {} (done phase had unchecked item after status update)",
-                                        item_num, phase_id
-                                    );
-                                }
-                                std::fs::write(&plan_path, corrected.as_bytes())?;
-                                // Stage the corrected PLAN.md so adapter.commit() includes it.
-                                let _ = git_in(&target_dir, &["add", "PLAN.md"]).output();
-                            }
-
-                            // Hard validation: fail apply if any done phase still has unchecked items.
-                            use ta_changeset::plan_merge::check_done_phase_item_consistency;
-                            let final_content = std::fs::read_to_string(&plan_path)?;
-                            let issues = check_done_phase_item_consistency(&final_content);
-                            if !issues.is_empty() {
-                                for issue in &issues {
-                                    eprintln!(
-                                        "[plan] ERROR: [{}] {}",
-                                        issue.section_id, issue.description
-                                    );
-                                }
-                                anyhow::bail!(
-                                    "PLAN.md apply aborted: {} done phase(s) have unchecked items after auto-correct.\n\
-                                     This indicates a merge corruption that auto-correct could not fix.\n\
-                                     Run `ta plan fix-markers --apply` to repair, or mark items [x] manually.",
-                                    issues.len()
-                                );
-                            }
-                        }
+                        // v0.17.11.29: same phase-scoped completion as the non-VCS path.
+                        let completion =
+                            super::draft_plan::complete_phases_on_disk(&target_dir, &phase_ids)?;
+                        let content = completion.content;
+                        let last_phase_id = completion.last_phase_id;
 
                         // Auto-bump workspace version to match the completed phase.
-                        if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
+                        if let Some(new_ver) =
+                            super::draft_plan::version_after_apply(&content, &last_phase_id)
+                        {
+                            note_version_choice(&last_phase_id, &new_ver);
                             match bump_workspace_version(&target_dir, &new_ver) {
                                 Ok(BumpResult::Bumped(bumped)) => {
                                     let bumped_names: Vec<String> = bumped
@@ -12924,6 +12979,9 @@ fn release_phase_claim_via_daemon(workspace_root: &std::path::Path, phase_id: &s
 }
 
 #[cfg(test)]
+mod fidelity_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -16560,18 +16618,19 @@ fn run() {
         let readme = std::fs::read_to_string(project.path().join("README.md")).unwrap();
         assert_eq!(readme, "# No submit\n");
 
-        // No ta/ branches should exist — only the initial main branch.
-        let branches = clear_git_env(
+        // v0.17.11.29: --no-submit on a protected branch switches to a feature branch
+        // before writing, so the change is never left uncommitted on main.
+        let current = clear_git_env(
             std::process::Command::new("git")
-                .args(["branch", "--list", "ta/*"])
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .current_dir(project.path()),
         )
         .output()
         .unwrap();
-        let branch_list = String::from_utf8_lossy(&branches.stdout);
+        let current = String::from_utf8_lossy(&current.stdout).trim().to_string();
         assert!(
-            branch_list.trim().is_empty(),
-            "Expected no ta/ branch with --no-submit"
+            current.starts_with("ta/"),
+            "Expected --no-submit to leave the tree on a ta/ feature branch, got {current}"
         );
     }
 
