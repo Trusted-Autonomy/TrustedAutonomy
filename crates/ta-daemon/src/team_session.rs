@@ -588,7 +588,7 @@ pub fn build_ta_run_args(
 // daemon's own one-time startup. `apps/ta-cli/src/commands/daemon.rs` has
 // the matching fix for `ta-daemon` itself (`ensure_stable_codesign`); this
 // is the same fix, duplicated rather than shared across the `ta-cli`/
-// `ta-daemon` crate boundary, for whichever binary `ta_bin` resolves to
+// `ta-daemon` crate boundary (now shared via `ta-lifecycle`), for whichever binary `ta_bin` resolves to
 // here (`ta`, not `ta-daemon`). See that file's module comment for the
 // full rationale: a bare `cargo build` produces a fresh, unsigned binary
 // every time, so without this, every single poll cycle could get a fresh
@@ -596,63 +596,16 @@ pub fn build_ta_run_args(
 //
 // Best-effort and bounded: never blocks a cycle on a signing failure or a
 // slow/locked Keychain -- each attempt is capped at a short timeout.
-#[cfg(target_os = "macos")]
 pub(crate) fn ensure_stable_codesign(binary_path: &Path, project_root: &Path) {
-    const IDENTIFIER: &str = "com.trustedautonomy.ta";
-    const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
-
+    // Local-dev only: signs when the named local identity exists, never
+    // ad-hoc (see `ta_lifecycle::codesign`).
     let identity = ta_workspace::local_dev::codesign_identity(project_root);
-
-    // Local-dev only. Sign when the named identity exists in this user's
-    // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
-    // function also runs on end users' machines (who do not have the dev
-    // certificate), and re-signing their installed release binary ad-hoc
-    // on every launch would rewrite it and, once releases carry a real
-    // Developer ID signature, replace that signature. `codesign` fails fast
-    // without touching the file when the identity is absent.
-    let _ = run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT);
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn ensure_stable_codesign(_binary_path: &Path, _project_root: &Path) {}
-
-#[cfg(target_os = "macos")]
-fn run_codesign_with_timeout(
-    binary_path: &Path,
-    identity: &str,
-    identifier: &str,
-    timeout: Duration,
-) -> bool {
-    let mut child = match std::process::Command::new("codesign")
-        .arg("--force")
-        .arg("--sign")
-        .arg(identity)
-        .arg("--identifier")
-        .arg(identifier)
-        .arg(binary_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => return false,
-        }
-    }
+    let _ = ta_lifecycle::ensure_stable_codesign(
+        &ta_lifecycle::SystemCodesign,
+        binary_path,
+        &identity,
+        ta_lifecycle::CLI_IDENTIFIER,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1326,6 +1326,9 @@ pub async fn serve_daemon_api(
     // delivery between ta_whiteboard_* tool calls and this watcher.
     crate::wake_listener::start(&app_state, shutdown.clone());
 
+    // Periodic self-update check (`[daemon] auto_update`, default "ask").
+    crate::self_update::start(&app_state, shutdown.clone());
+
     // Auto-spawn agent supervisor (runs in background, shares the same AppState).
     let supervisor_shutdown = shutdown.clone();
     tokio::spawn(crate::api::agent::auto_spawn_supervisor(

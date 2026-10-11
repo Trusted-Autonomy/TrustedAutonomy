@@ -48,6 +48,7 @@ pub mod prompt_optimizer_supervisor;
 pub mod question_registry;
 pub mod rotation_policy;
 pub mod router;
+pub mod self_update;
 pub mod team_session;
 pub mod token_refresh;
 pub mod transport;
@@ -71,6 +72,7 @@ use ta_mcp_gateway::{GatewayConfig, TaGatewayServer};
 #[command(
     name = "ta-daemon",
     version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("TA_GIT_HASH"), ")"),
     about = "Trusted Autonomy MCP server and HTTP API daemon"
 )]
 struct Cli {

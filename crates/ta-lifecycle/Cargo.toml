@@ -1,0 +1,20 @@
+[package]
+name = "ta-lifecycle"
+version.workspace = true
+edition = "2021"
+description = "Daemon self-update lifecycle for Trusted Autonomy: build comparison, idle detection, drain-aware restart, restart-loop guard"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "autonomy", "daemon", "lifecycle"]
+categories = ["development-tools"]
+
+# Deliberately tiny: std plus serde. No HTTP client, no dependency on ta-cli
+# or ta-daemon, so the VT poller daemon (a separate repository) can depend on
+# this crate by git revision and supply its own transport behind the traits.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -15,6 +15,7 @@ members = [
     "crates/ta-audit",
     "crates/ta-changeset",
     "crates/ta-daemon",
+    "crates/ta-lifecycle",
     "crates/ta-goal",
     "crates/ta-mcp-gateway",
     "crates/ta-policy",

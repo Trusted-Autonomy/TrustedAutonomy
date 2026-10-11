@@ -5271,6 +5271,7 @@ dependencies = [
  "ta-governed-paths",
  "ta-init",
  "ta-intake",
+ "ta-lifecycle",
  "ta-mcp-gateway",
  "ta-mediation",
  "ta-memory",
@@ -5489,6 +5490,7 @@ dependencies = [
  "ta-extension",
  "ta-goal",
  "ta-init",
+ "ta-lifecycle",
  "ta-mcp-gateway",
  "ta-memory",
  "ta-output-schema",
@@ -5651,6 +5653,15 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ta-lifecycle"
+version = "0.17.11-alpha.26"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -51,6 +51,7 @@ ta-session = { path = "../ta-session", version = "0.17.11-alpha.26" }
 ta-advisor = { path = "../ta-advisor", version = "0.17.11-alpha.26" }
 ta-data-spec = { path = "../ta-data-spec", version = "0.17.11-alpha.26" }
 ta-init = { path = "../ta-init", version = "0.17.11-alpha.26" }
+ta-lifecycle = { path = "../ta-lifecycle", version = "0.17.11-alpha.26" }
 ta-agent-whiteboard = { path = "../ta-agent-whiteboard", version = "0.17.11-alpha.26" }
 ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.11-alpha.26" }
 which = "7"

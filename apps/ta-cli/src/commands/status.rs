@@ -275,6 +275,15 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         }
     }
 
+    // ── DAEMON UPDATE ─────────────────────────────────────────────────────
+    // Only shown when a newer installed build is waiting (see
+    // `[daemon] auto_update` in docs/USAGE.md). Quick, best-effort lookup:
+    // a daemon that is down or slow simply shows nothing here.
+    if let Some(line) = fetch_pending_update_line(&config.workspace_root) {
+        println!("│");
+        println!("│  Daemon update: {}", line);
+    }
+
     // ── RECENT COMPLETIONS ────────────────────────────────────────────────
     if !recent_completions.is_empty() {
         println!("│");
@@ -439,6 +448,9 @@ fn deep_status(config: &GatewayConfig) -> anyhow::Result<()> {
                 println!("│    Power:   sleep prevented (active goal in progress)");
             } else {
                 println!("│    Power:   no assertion (no active goals)");
+            }
+            if let Some(line) = outstanding_update_message(&json) {
+                println!("│    Update:  {}", line);
             }
         }
         _ => {
@@ -676,8 +688,57 @@ fn list_pending_draft_ids(pr_packages_dir: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The one-line "update pending" message from a daemon `/api/status`
+/// payload, or `None` when no newer installed build is waiting.
+pub(crate) fn outstanding_update_message(status: &serde_json::Value) -> Option<String> {
+    let report: ta_lifecycle::UpdateReport =
+        serde_json::from_value(status.get("update")?.clone()).ok()?;
+    report.is_update_outstanding().then_some(report.message)
+}
+
+/// Ask the running daemon whether an update is pending (1.5s budget).
+fn fetch_pending_update_line(workspace_root: &std::path::Path) -> Option<String> {
+    let url = format!(
+        "{}/api/status",
+        super::daemon::resolve_daemon_url(workspace_root, None)
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    outstanding_update_message(&resp.json::<serde_json::Value>().ok()?)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_update_is_shown_and_up_to_date_is_not() {
+        let pending = ta_lifecycle::UpdateOutcome::Pending {
+            running: ta_lifecycle::BuildIdentity::new("1.0.0", Some("aaa")),
+            target: ta_lifecycle::BuildIdentity::new("1.0.0", Some("bbb")),
+            blockers: vec!["2 running goals".into()],
+        }
+        .report(ta_lifecycle::AutoUpdateMode::WhenIdle, 1);
+        let json = serde_json::json!({ "version": "1.0.0", "update": pending });
+        let line = outstanding_update_message(&json).unwrap();
+        assert!(
+            line.starts_with("update pending, waiting for 2 running goals"),
+            "{line}"
+        );
+
+        let ok = ta_lifecycle::UpdateOutcome::UpToDate {
+            running: ta_lifecycle::BuildIdentity::new("1.0.0", Some("aaa")),
+            recovered: None,
+        }
+        .report(ta_lifecycle::AutoUpdateMode::WhenIdle, 1);
+        assert!(outstanding_update_message(&serde_json::json!({ "update": ok })).is_none());
+        assert!(outstanding_update_message(&serde_json::json!({ "version": "1" })).is_none());
+    }
+
     use super::*;
 
     #[test]

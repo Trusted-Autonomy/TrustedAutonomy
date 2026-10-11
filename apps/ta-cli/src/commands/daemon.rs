@@ -6,13 +6,10 @@
 // Shared helpers (`ensure_running`, `start`, `stop`, `restart`) are used by
 // `shell.rs` and `version_guard.rs` to eliminate duplicated daemon spawn logic.
 
+use clap::Subcommand;
 use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(target_os = "macos")]
-use std::time::Duration;
-
-use clap::Subcommand;
 
 // ─── macOS code signing (self-healing, best-effort) ─────────────────────────
 //
@@ -20,86 +17,27 @@ use clap::Subcommand;
 // macOS Keychain's "Always Allow" grant (keyed to the signing identity, not
 // the file path) survives rebuilds -- but that signing only happens when
 // install_local.sh itself runs. A normal dev loop (`cargo build` then
-// `ta daemon restart` directly, skipping install_local.sh) produces a fresh,
-// unsigned `target/debug/ta-daemon` every time, so every iteration gets a
-// fresh Keychain prompt regardless of whether the stable cert exists.
+// `ta daemon restart` directly) produces a fresh, unsigned
+// `target/debug/ta-daemon` every time, so we re-sign immediately before every
+// spawn, whichever command built it.
 //
-// Fix: re-sign the daemon binary here, immediately before every spawn,
-// so this is correct no matter which command built it. Mirrors
-// install_local.sh's own `ta_codesign` function (same identity env var,
-// same identifier) but only signs when the named local identity exists:
-// there is no ad-hoc fallback, because this code also runs on end users'
-// machines, where it must leave the installed release binary untouched.
-// It does not call `security find-identity` first (a separate
-// Keychain-enumeration call can itself block waiting for an unlock); it
-// tries the named identity directly, and `codesign` fails fast without
-// modifying the file when that identity is absent.
-//
-// Best-effort and bounded: a signing failure, a missing `codesign` binary,
-// or a hung/slow Keychain prompt must never block the daemon from starting
-// -- each attempt is capped at a short timeout and failures are silently
-// ignored, exactly like `install_local.sh`'s own `|| true` fallback.
-#[cfg(target_os = "macos")]
+// The signing rules live in `ta_lifecycle::codesign` so the daemon's
+// auto-restart and this CLI share one implementation: only the named local
+// identity is used, never ad-hoc (`-`), never a new Keychain identity, always
+// the stable identifier, bounded by a short timeout. When the identity is
+// absent (every end user's machine) nothing is touched.
 fn ensure_stable_codesign(binary_path: &Path, project_root: &Path) {
-    const IDENTIFIER: &str = "com.trustedautonomy.ta-daemon";
-    const CODESIGN_TIMEOUT: Duration = Duration::from_secs(5);
-
     let identity = ta_workspace::local_dev::codesign_identity(project_root);
-
-    // Local-dev only. Sign when the named identity exists in this user's
-    // Keychain; otherwise do nothing. Deliberately NO ad-hoc fallback: this
-    // function also runs on end users' machines (who do not have the dev
-    // certificate), and re-signing their installed release binary ad-hoc
-    // on every launch would rewrite it and, once releases carry a real
-    // Developer ID signature, replace that signature. `codesign` fails fast
-    // without touching the file when the identity is absent.
-    let _ = run_codesign_with_timeout(binary_path, &identity, IDENTIFIER, CODESIGN_TIMEOUT);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ensure_stable_codesign(_binary_path: &Path, _project_root: &Path) {}
-
-/// Run `codesign --force --sign <identity> --identifier <identifier>
-/// <binary_path>`, killing it if it doesn't finish within `timeout`.
-/// Returns whether it exited successfully. Never panics or blocks past
-/// the timeout -- a Keychain prompt the caller isn't interactively present
-/// for must not hang daemon startup indefinitely.
-#[cfg(target_os = "macos")]
-fn run_codesign_with_timeout(
-    binary_path: &Path,
-    identity: &str,
-    identifier: &str,
-    timeout: Duration,
-) -> bool {
-    let mut child = match Command::new("codesign")
-        .arg("--force")
-        .arg("--sign")
-        .arg(identity)
-        .arg("--identifier")
-        .arg(identifier)
-        .arg(binary_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => return false,
-        }
+    let outcome = ta_lifecycle::ensure_stable_codesign(
+        &ta_lifecycle::SystemCodesign,
+        binary_path,
+        &identity,
+        ta_lifecycle::DAEMON_IDENTIFIER,
+    );
+    // Silent for interactive use (end users have no dev certificate); an
+    // automatic restart started by the daemon says what happened in its log.
+    if std::env::var_os("TA_DAEMON_SELF_UPDATE").is_some() {
+        eprintln!("{}", outcome.log_line(binary_path));
     }
 }
 
@@ -251,34 +189,7 @@ fn remove_pid_file(project_root: &Path) {
 
 /// Check whether a process with the given PID is alive.
 pub fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(windows)]
-    {
-        // Use `tasklist /FI "PID eq <pid>"` to check if the process exists.
-        // The output contains the PID number if the process is alive.
-        Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|o| {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                // tasklist prints "INFO: No tasks are running..." when not found,
-                // or the process line containing the PID when found.
-                stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
-            })
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
-    }
+    ta_lifecycle::process_is_alive(pid)
 }
 
 /// `[server] bind` and `[server] port` from `.ta/daemon.toml`, defaulting
@@ -623,71 +534,63 @@ pub fn force_restart(project_root: &Path, port_override: Option<u16>) -> anyhow:
 /// is clean or stops responding (already exited is also fine).
 ///
 /// Times out after `DRAIN_TIMEOUT_SECS` and returns an error explaining what is
-/// still blocking so the user knows whether to wait or use `--force`.
+/// still blocking so the user knows whether to wait or use `--force`. The
+/// polling loop itself is `ta_lifecycle::wait_for_idle`, shared with the
+/// daemon's automatic self-update and the VT poller.
 const DRAIN_TIMEOUT_SECS: u64 = 30;
 const DRAIN_POLL_SECS: u64 = 2;
 
+/// `/api/drain/status` over HTTP, as a `ta_lifecycle::DrainSource`.
+struct HttpDrainSource {
+    client: reqwest::blocking::Client,
+    url: String,
+}
+
+impl ta_lifecycle::DrainSource for HttpDrainSource {
+    fn drain_status(&self) -> Result<Option<ta_lifecycle::DrainSnapshot>, String> {
+        match self.client.get(&self.url).send() {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<serde_json::Value>()
+                .map(|j| ta_lifecycle::DrainSnapshot::from_json(&j))
+                .map_err(|e| format!("unreadable drain status from {}: {e}", self.url)),
+            // Daemon stopped responding: already exited or unreachable.
+            _ => Ok(None),
+        }
+    }
+}
+
 fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<()> {
     let base_url = resolve_daemon_url(project_root, port_override);
-    let drain_url = format!("{}/api/drain/status", base_url);
-
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // Cannot build client — proceed without drain check.
+    let source = HttpDrainSource {
+        client: match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return Ok(()), // Cannot build client: proceed without drain check.
+        },
+        url: format!("{}/api/drain/status", base_url),
     };
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DRAIN_TIMEOUT_SECS);
+    let opts = ta_lifecycle::DrainWaitOptions {
+        timeout: std::time::Duration::from_secs(DRAIN_TIMEOUT_SECS),
+        poll_interval: std::time::Duration::from_secs(DRAIN_POLL_SECS),
+    };
     eprintln!("Checking for active work before restart...");
-
-    loop {
-        match client.get(&drain_url).send() {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(json) = resp.json::<serde_json::Value>() {
-                    let status = json["status"].as_str().unwrap_or("draining");
-                    let active_goals = json["active_goals"].as_u64().unwrap_or(0);
-                    let active_sessions = json["active_sessions"].as_u64().unwrap_or(0);
-
-                    if status == "clean" {
-                        eprintln!("  No active work — restarting.");
-                        return Ok(());
-                    }
-
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() {
-                        let mut what: Vec<String> = Vec::new();
-                        if active_goals > 0 {
-                            what.push(format!("{} running goal(s)", active_goals));
-                        }
-                        if active_sessions > 0 {
-                            what.push(format!("{} active agent session(s)", active_sessions));
-                        }
-                        return Err(anyhow::anyhow!(
-                            "Drain timed out after {}s — still waiting on: {}.\n\
-                             Use `ta daemon restart --force` to interrupt active work.",
-                            DRAIN_TIMEOUT_SECS,
-                            what.join(", ")
-                        ));
-                    }
-
-                    eprintln!(
-                        "  Waiting: {} running goal(s), {} active session(s) \
-                         ({}s remaining before timeout)...",
-                        active_goals,
-                        active_sessions,
-                        remaining.as_secs()
-                    );
-                }
-            }
-            _ => {
-                // Daemon stopped responding — already exited or unreachable.
-                return Ok(());
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_secs(DRAIN_POLL_SECS));
-    }
+    ta_lifecycle::wait_for_idle(
+        &source,
+        &ta_lifecycle::SystemClock,
+        &opts,
+        &mut |snap, remaining| {
+            eprintln!(
+                "  Waiting: {} ({}s remaining before timeout)...",
+                snap.blockers().join(", "),
+                remaining
+            );
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    eprintln!("  No active work: restarting.");
+    Ok(())
 }
 
 /// Ensure the daemon is running. If it's already responding, return Ok.
@@ -898,6 +801,9 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     println!("  Active agents:  {}", active_count);
                     println!("  Pending drafts: {}", pending_drafts);
                     println!("  Log:            {}", log_path(project_root).display());
+                    if let Some(line) = super::status::outstanding_update_message(&json) {
+                        println!("  Update:         {}", line);
+                    }
 
                     // Show per-goal details when there are active goals.
                     if let Some(agents) = active_agents {

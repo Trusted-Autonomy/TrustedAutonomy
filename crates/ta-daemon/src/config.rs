@@ -150,6 +150,78 @@ pub struct DaemonConfig {
     /// ```
     #[serde(default)]
     pub meridian: MeridianConfig,
+
+    /// Daemon self-update settings.
+    ///
+    /// ```toml
+    /// [daemon]
+    /// auto_update = "ask"            # "when_idle" | "ask" | "never"
+    /// update_check_interval_secs = 300
+    /// ```
+    #[serde(default)]
+    pub daemon: DaemonSettings,
+}
+
+/// Default seconds between self-update checks.
+pub const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 300;
+
+/// `[daemon]` section of `.ta/daemon.toml`.
+///
+/// `auto_update` decides what the daemon does when a newer `ta-daemon` is
+/// installed next to it:
+///
+/// * `"ask"` (default): never restarts by itself. It reports "update
+///   available" in `ta status` and the status API; the CLI's existing prompt
+///   (`ta shell`, `ta dev`) or `ta daemon restart` applies it. Conservative
+///   default: no process restarts without a person, exactly as before this
+///   setting existed, and the daemon never blocks waiting for an answer.
+/// * `"when_idle"`: restarts onto the new build as soon as nothing is running
+///   (no goals, sessions, wake launches or draft apply). Never interrupts work.
+/// * `"never"`: no self-check at all.
+///
+/// An invalid value logs a warning naming the accepted values and falls back
+/// to `"ask"`; it does not discard the rest of `daemon.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonSettings {
+    #[serde(deserialize_with = "lenient_auto_update")]
+    pub auto_update: ta_lifecycle::AutoUpdateMode,
+    /// Seconds between checks (default 300). `0` is treated as the default.
+    pub update_check_interval_secs: u64,
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            auto_update: ta_lifecycle::AutoUpdateMode::default(),
+            update_check_interval_secs: DEFAULT_UPDATE_CHECK_INTERVAL_SECS,
+        }
+    }
+}
+
+impl DaemonSettings {
+    pub fn check_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(if self.update_check_interval_secs == 0 {
+            DEFAULT_UPDATE_CHECK_INTERVAL_SECS
+        } else {
+            self.update_check_interval_secs
+        })
+    }
+}
+
+fn lenient_auto_update<'de, D>(d: D) -> Result<ta_lifecycle::AutoUpdateMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(d)?;
+    Ok(raw.parse().unwrap_or_else(|e: String| {
+        tracing::warn!(
+            value = %raw,
+            "[daemon] auto_update in daemon.toml is invalid ({e}); using \"ask\". \
+             Fix the value in .ta/daemon.toml."
+        );
+        ta_lifecycle::AutoUpdateMode::default()
+    }))
 }
 
 /// Meridian analytics configuration in `.ta/daemon.toml`.
@@ -2268,6 +2340,44 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_update_defaults_to_the_conservative_ask() {
+        let cfg: DaemonConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.daemon.auto_update, ta_lifecycle::AutoUpdateMode::Ask);
+        assert_eq!(cfg.daemon.check_interval().as_secs(), 300);
+    }
+
+    #[test]
+    fn auto_update_accepts_each_documented_value() {
+        for (raw, want) in [
+            ("when_idle", ta_lifecycle::AutoUpdateMode::WhenIdle),
+            ("ask", ta_lifecycle::AutoUpdateMode::Ask),
+            ("never", ta_lifecycle::AutoUpdateMode::Never),
+        ] {
+            let cfg: DaemonConfig =
+                toml::from_str(&format!("[daemon]\nauto_update = \"{raw}\"\n")).unwrap();
+            assert_eq!(cfg.daemon.auto_update, want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_auto_update_falls_back_to_ask_without_discarding_other_settings() {
+        let cfg: DaemonConfig = toml::from_str(
+            "[server]\nport = 7733\n[daemon]\nauto_update = \"always\"\nupdate_check_interval_secs = 60\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.daemon.auto_update, ta_lifecycle::AutoUpdateMode::Ask);
+        assert_eq!(cfg.server.port, 7733);
+        assert_eq!(cfg.daemon.check_interval().as_secs(), 60);
+    }
+
+    #[test]
+    fn zero_check_interval_means_the_default() {
+        let cfg: DaemonConfig =
+            toml::from_str("[daemon]\nupdate_check_interval_secs = 0\n").unwrap();
+        assert_eq!(cfg.daemon.check_interval().as_secs(), 300);
+    }
 
     #[test]
     fn port_flag_sets_the_api_port_and_starts_no_second_listener() {
