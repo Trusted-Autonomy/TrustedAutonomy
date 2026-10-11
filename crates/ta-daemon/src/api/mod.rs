@@ -65,6 +65,17 @@ pub struct AppState {
     pub daemon_config: DaemonConfig,
     pub shell_config: ShellConfig,
     pub token_store: TokenStore,
+    /// Proof-of-human check for approve, deny, apply, commands and answers
+    /// (CR-02). Credentials live in the per-user state directory, never in a
+    /// project tree.
+    pub human_gate: crate::human_gate::HumanGate,
+    /// `Host` header allowlist (CR-36).
+    pub host_policy: crate::human_gate::HostPolicy,
+    /// Diffs the attention feed into `attention.*` events (CR-02 item 7).
+    pub attention: crate::attention::AttentionTracker,
+    /// Serializes `POST /api/attention/{id}/act` so the first valid action on
+    /// an item wins even when two assertions arrive at once.
+    pub act_lock: tokio::sync::Mutex<()>,
     pub agent_sessions: agent::AgentSessionManager,
     pub goal_output: goal_output::GoalOutputManager,
     /// Stdin handles for background agent processes (v0.10.18.5).
@@ -140,6 +151,10 @@ impl AppState {
             events_dir: ta_dir.join("events"),
             goals_dir: ta_dir.join("goals"),
             token_store: TokenStore::new(&project_root),
+            human_gate: crate::human_gate::HumanGate::new(ta_credentials::human::user_state_dir()),
+            host_policy: crate::human_gate::HostPolicy::from_server(&daemon_config.server),
+            attention: crate::attention::AttentionTracker::new(),
+            act_lock: tokio::sync::Mutex::new(()),
             shell_config,
             agent_sessions: agent::AgentSessionManager::new(max_sessions),
             goal_output: goal_output::GoalOutputManager::new(),
@@ -442,6 +457,11 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/workflow/{id}/input", post(workflow::workflow_input))
         // Interaction routes — human responses to agent questions.
         .route("/api/interactions/pending", get(interactions::list_pending))
+        // One feed of everything waiting on a person (CR-02 item 7).
+        .route("/api/attention", get(crate::attention::list))
+        .route("/api/attention/count", get(crate::attention::count))
+        // The relay endpoint: credential or a signed human assertion.
+        .route("/api/attention/{id}/act", post(crate::attention::act))
         .route(
             "/api/interactions/{id}/respond",
             post(interactions::respond),

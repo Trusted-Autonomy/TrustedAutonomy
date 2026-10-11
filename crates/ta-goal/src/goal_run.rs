@@ -466,6 +466,14 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 
+    /// Review-packet provenance: who asked, what they wrote (capped, always
+    /// untrusted data), the delegating role's reason and the id chain
+    /// (CR-02 item 6). Set once at creation by `ta run --provenance-file`;
+    /// copied onto the goal's draft and shown first in `ta show draft`.
+    /// `None` (every earlier record) is unchanged behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_provenance: Option<crate::provenance::RequestProvenance>,
+
     /// Memory entry IDs written during this goal run (v0.15.13.2).
     ///
     /// Populated by `ta draft build` when it detects an empty overlay diff but
@@ -654,6 +662,7 @@ impl GoalRun {
             vcs_isolation: None,
             initiated_by: None,
             origin: None,
+            request_provenance: None,
             memory_entries_created: Vec::new(),
             created_at: now,
             updated_at: now,

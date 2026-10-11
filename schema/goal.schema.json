@@ -264,6 +264,135 @@
           "type": "object"
         }
       ]
+    },
+    "IdChain": {
+      "description": "The chain of ids from the request to the worker goal.",
+      "properties": {
+        "candidate_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cos_goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worker_goal_id": {
+          "description": "The goal that built the work. Stamped by `ta run` from the goal record.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RequestProvenance": {
+      "description": "The provenance block stored on a goal and its draft.",
+      "properties": {
+        "delegating_role": {
+          "description": "The role that decided to take the work on (e.g. `chief-of-staff`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delegation_reason": {
+          "description": "That role's stated reason, capped. Untrusted text like the excerpt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ids": {
+          "$ref": "#/$defs/IdChain",
+          "default": {}
+        },
+        "message_excerpt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UntrustedExcerpt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "objective": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requester": {
+          "$ref": "#/$defs/Requester"
+        }
+      },
+      "required": [
+        "requester"
+      ],
+      "type": "object"
+    },
+    "Requester": {
+      "description": "Who asked.",
+      "properties": {
+        "channel": {
+          "description": "Where the request arrived (e.g. `slack`, `wayfinder`, `email`).",
+          "type": "string"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "channel"
+      ],
+      "type": "object"
+    },
+    "UntrustedExcerpt": {
+      "description": "A capped excerpt of the requester's original message, with the metadata a\nrenderer needs to fence it. `untrusted` is always true.",
+      "properties": {
+        "original_chars": {
+          "description": "Length of the original in characters, before the cap.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "True when the original was longer than the cap.",
+          "type": "boolean"
+        },
+        "untrusted": {
+          "default": true,
+          "description": "Always true: this is data from outside TA, never instructions.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated",
+        "original_chars"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://trustedautonomy.dev/schema/goal.v1.schema.json",
@@ -436,6 +565,17 @@
         "string",
         "null"
       ]
+    },
+    "request_provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RequestProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Review-packet provenance: who asked, what they wrote (capped, always\nuntrusted data), the delegating role's reason and the id chain\n(CR-02 item 6). Set once at creation by `ta run --provenance-file`;\ncopied onto the goal's draft and shown first in `ta show draft`.\n`None` (every earlier record) is unchanged behavior."
     },
     "role": {
       "description": "Workflow role this goal fulfills (v0.9.8.2).",

@@ -1021,6 +1021,17 @@ pub struct ServerConfig {
     /// Serve the web UI at /ui (default: true). Set to false to disable the dashboard (v0.14.8).
     #[serde(default = "default_true")]
     pub web_ui: bool,
+    /// Extra `Host` header values the daemon accepts (CR-36), beyond
+    /// `localhost`, `*.localhost` and IP literals. Needed when the daemon is
+    /// reached through a DNS name (a reverse proxy, a tunnel, a LAN name).
+    /// Entries are bare host names without a port.
+    ///
+    /// ```toml
+    /// [server]
+    /// allowed_hosts = ["ta.example.com"]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -1033,6 +1044,7 @@ impl Default for ServerConfig {
             tls_cert_path: None,
             tls_key_path: None,
             web_ui: true,
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -1041,7 +1053,17 @@ impl Default for ServerConfig {
 #[serde(default)]
 pub struct AuthConfig {
     pub require_token: bool,
+    /// Skip bearer-token auth for loopback callers. Applies to read-only
+    /// routes only; the mutating routes listed in `api::auth::gated_routes`
+    /// (approve, deny, apply, command execution, answering an agent question)
+    /// need a human credential regardless (see `local_bypass_mutating`).
     pub local_bypass: bool,
+    /// Escape hatch: also let loopback callers use the mutating routes without
+    /// a human credential. Default `false`. Turning this on lets any process
+    /// on this machine, including an agent with a shell, approve and apply its
+    /// own drafts through the daemon. Only for throwaway sandboxes.
+    #[serde(default)]
+    pub local_bypass_mutating: bool,
     /// Named users for `LocalIdentityMiddleware` (v0.14.5).
     ///
     /// When non-empty, authenticated requests are matched against these entries
@@ -1097,6 +1119,7 @@ impl Default for AuthConfig {
         Self {
             require_token: false,
             local_bypass: true,
+            local_bypass_mutating: false,
             users: Vec::new(),
             api_keys: Vec::new(),
             trusted_proxies: Vec::new(),
@@ -1773,12 +1796,23 @@ pub struct TokenRecord {
 #[serde(rename_all = "snake_case")]
 pub enum TokenScope {
     Read,
+    /// Service-account scope for relays (the Wayfinder poller): may read the
+    /// attention feed and call the relay endpoints (whiteboard, state
+    /// changes), but is never accepted as a human for approve, deny, apply or
+    /// answer. A relayed human action must carry that human's own assertion.
+    Relay,
     Write,
     Admin,
 }
 
 impl TokenScope {
     pub fn allows_write(&self) -> bool {
+        matches!(self, Self::Relay | Self::Write | Self::Admin)
+    }
+
+    /// Whether a bare token of this scope can stand in for a human on the
+    /// gated routes (remote callers only; see `api::auth`). `Relay` cannot.
+    pub fn counts_as_human(&self) -> bool {
         matches!(self, Self::Write | Self::Admin)
     }
 

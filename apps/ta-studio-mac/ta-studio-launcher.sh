@@ -19,4 +19,5 @@ if ! check_daemon; then
   done
 fi
 
-open "http://localhost:${PORT}"
+# `ta login open` signs the UI in with the human credential; fall back to a plain open.
+ta login open 2>/dev/null || open "http://localhost:${PORT}"

@@ -448,6 +448,27 @@ pub enum SessionEvent {
         score: f64,
         summary: String,
     },
+
+    /// Something new is waiting on a person (CR-02 item 7): a draft awaiting
+    /// review, an agent question, a goal blocked on a person, or a dead-lettered
+    /// wake message. `item` is the attention item exactly as `GET /api/attention`
+    /// returns it (no secrets).
+    #[serde(rename = "attention.created")]
+    AttentionCreated { item: serde_json::Value },
+
+    /// An item already in the attention feed changed (summary, who it waits on,
+    /// or the actions available).
+    #[serde(rename = "attention.updated")]
+    AttentionUpdated { item: serde_json::Value },
+
+    /// An item left the attention feed (answered, approved, denied, timed out,
+    /// acknowledged). Emitted exactly once per item.
+    #[serde(rename = "attention.resolved")]
+    AttentionResolved {
+        item_id: String,
+        kind: String,
+        project: String,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -505,6 +526,9 @@ impl SessionEvent {
             Self::PrCheckFailed { .. } => "pr_check_failed",
             Self::ReviewCompleted { .. } => "review_completed",
             Self::GraphDecisionEscalated { .. } => "graph_decision_escalated",
+            Self::AttentionCreated { .. } => "attention.created",
+            Self::AttentionUpdated { .. } => "attention.updated",
+            Self::AttentionResolved { .. } => "attention.resolved",
         }
     }
 

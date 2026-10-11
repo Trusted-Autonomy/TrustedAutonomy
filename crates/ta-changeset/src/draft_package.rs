@@ -746,6 +746,14 @@ pub struct DraftPackage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_phase: Option<String>,
 
+    /// Review-packet provenance copied from the goal at `ta draft build` time
+    /// (CR-02 item 6): who asked, what they wrote (capped, untrusted data),
+    /// the delegating role's reason and the id chain. Shown first in
+    /// `ta show draft` and returned by the draft API. `None` for drafts
+    /// whose goal carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_provenance: Option<ta_goal::provenance::RequestProvenance>,
+
     /// PLAN.md content at staging-creation time (v0.15.24.5).
     ///
     /// Captured from `<staging>/.ta/plan_base.md` at `ta draft build` time.
@@ -1117,6 +1125,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         goal_shortref: Some(goal_shortref.to_string()),
         draft_seq,
         plan_phase: None,
+        request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
     }
@@ -1271,6 +1280,7 @@ mod tests {
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
         }
