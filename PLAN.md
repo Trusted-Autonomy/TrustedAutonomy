@@ -11121,10 +11121,10 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 10. [ ] The legacy whole-document PLAN.md merge (`ta_changeset::plan_merge::merge_plan_md`, used only when an apply has no target phase) is not CRLF-faithful: on a CRLF checkout (Windows) a merge of identical inputs changes line endings. Make it byte-preserving like the scoped merge, or route every apply through the scoped merge; add a CRLF golden test.
 11. [ ] The phase-scoped plan merge matches a checked item by its full text, so an agent that appends implementation notes to an item when it checks it (seen in v0.17.11.27) gets the checkmark refused and the phase left not done. Match by item number plus a stable prefix, or tell agents to flip the box only; add a test with an item that gained a trailing note.
 12. [ ] **`ta doctor --fix` must be scriptable.** It asks one interactive y/N question per finding and the list of findings changes as fixes apply, so piped answers land on the wrong fix (seen twice on 2026-10-10: one `y` answered only the first of three prompts, and another run rewrote a tracked `.gitignore`). Add `--yes` (apply every non-destructive fix), `--fix <finding-id>` (apply only the named fixes, stable ids), `--dry-run`, and never rewrite a tracked file without naming it; destructive fixes (removing failed-goal staging) stay opt-in even with `--yes`.
-13. [ ] **Flaky timing test:** `ta-plugin` `transport::tests::call_json_deserializes_response` uses a 5 s timeout around a shell mock and timed out once on a loaded macOS CI runner (passed on re-run, unrelated code). Raise the limit or make the mock event-driven so shared runners cannot flake it.
+13. [x] Moved to v0.17.12.13 (CI Reliability).
 14. [ ] **Goal build artifacts need a disk budget.** The per-goal `CARGO_TARGET_DIR` inside staging (v0.17.11.29) fixed baked staging paths but each goal now builds a full debug tree: 38 GB for the CR-02 goal on a machine with 4.5 GB free, and the staging cap warning ("staging exceeds 5.0 GB cap (currently 50.9 GB)") fires on every run. Cut it: build goal targets with `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0` (as CI does), or share one cache for registry dependencies across goals (workspace crates still rebuild per staging path), enforce a configurable per-goal and total budget with a clear message, and delete a goal's target directory as soon as its draft is built. Also report staging size per goal in `ta doctor`.
-15. [ ] **CI must build and test the standalone plugin crates.** `plugins/ta-channel-discord`, `ta-channel-slack` and `ta-channel-email` each have their own `[workspace]` and are not built by the workspace CI jobs, so the CR-02 merge shipped a Discord plugin manifest that could not parse (`tempfile = { workspace = true }`), found only when `install_local.sh` ran. Add a CI step on all three required jobs (or a required companion job) that runs `cargo test --manifest-path` for each standalone plugin, with its own cache key, and keep the required check names unchanged.
-16. [ ] **Windows CI leaks thousands of `gh` processes.** Even a passing Windows run ends with about 7,000 orphaned `gh` processes (6,974 in the 2026-10-11 08:41 push run) and a leftover `ta-daemon`; a longer failed run (2026-10-11 02:24, release build) ended with 23,040. The same pressure is the likely cause of the runner hangs in teardown and mid-clippy (08:10 run, 68 minutes, no failing step). Find what spawns `gh` repeatedly (candidates: `ta-submit` git adapter, `ta-workspace` link cache, `ta-release` GitHub adapter, the `gh_shim` binary resolving itself on `PATH`, a daemon left running by a test), make tests never spawn the real `gh` (fake binary on `PATH` or injected runner), wait on and kill every child, and add a final CI step that lists remaining `gh`, `ta-daemon` and `ta` processes and fails above a small limit.
+15. [x] Moved to v0.17.12.13 (CI Reliability).
+16. [x] Moved to v0.17.12.13 (CI Reliability).
 17. [ ] **Rerouted user-targeted items verify under the escalated claim.** Implement rule 7 of the attention contract for viewer reroutes: for `type=user` items accept `claims.escalated: true` with a `role` at or above the key's `escalation_min_role` (new `ta keys add --escalation-min-role`, default `member`), only for approve, deny and answer, audit the original assignee, and refuse when the role claim is absent. Tests for accept, refuse (role too low, claim absent, wrong action) and the audit record.
 
 **Effort**: M.
@@ -11150,6 +11150,22 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.12`
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
+### v0.17.12.13 - CI Reliability: Windows Process Leak, Standalone Plugin Builds, Flaky Timing Test
+<!-- status: pending -->
+**Depends on**: none
+
+**Goal**: A Windows CI run should not take an hour or die. Evidence from 2026-10-11: even passing Windows runs end with about 7,000 orphaned `gh` processes (6,974 in the 08:41 push run) and a leftover `ta-daemon`; a longer failed run (02:24, release build) ended with 23,040, and four Windows jobs this day ran 54 to 68 minutes and died mid-clippy or in teardown with no failing step. Pull requests that touch plugin code also shipped a manifest CI never built. This phase is ordered last by number only; it is urgent and independent of the security release.
+
+1. [ ] **Windows CI leaks thousands of `gh` processes.** Find what spawns `gh` repeatedly during the Windows test run (candidates: the `ta-submit` git adapter, the `ta-workspace` link cache, the `ta-release` GitHub adapter, `ta-workflow` step_executor, the `gh_shim` binary resolving itself on `PATH` and re-executing, or a `ta-daemon` left running by a test). Reproduce the count locally with a process counter around the relevant tests, make tests never spawn the real `gh` (a fake `gh` on `PATH` or an injected command runner), wait on and kill every child, and ensure no test leaves a `ta-daemon` or `ta` process behind.
+2. [ ] **Regression guard.** A final step on the Windows job (and the Linux and macOS jobs) lists remaining `gh`, `ta-daemon` and `ta` processes and fails above a small limit, printing the process list; target Windows job time under 20 minutes.
+3. [ ] **CI builds and tests the standalone plugin crates.** `plugins/ta-channel-discord`, `ta-channel-slack` and `ta-channel-email` each have their own `[workspace]` and are not built by the workspace jobs, so a Discord plugin manifest that could not parse shipped through CR-02. Run `cargo test --manifest-path` for each in CI (separate cache key) without changing the three required check names.
+4. [ ] **Flaky timing test.** `ta-plugin` `transport::tests::call_json_deserializes_response` uses a 5 second timeout around a shell mock and timed out once on a loaded macOS runner. Raise the limit or make the mock event-driven.
+
+**Moved here from v0.17.12.11 (items 13, 15 and 16 there).**
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.13`
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
 
