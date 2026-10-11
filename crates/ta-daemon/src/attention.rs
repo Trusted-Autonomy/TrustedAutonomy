@@ -1455,7 +1455,10 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    const SECRET_TAIL: &str = "Authorization: Bearer sk-live-SECRET-1234";
+    /// A unique marker standing in for an error tail that must never reach the
+    /// feed. Deliberately not shaped like a credential, so secret scanners do not
+    /// flag the test source; the test only needs a string it can search for.
+    const SECRET_TAIL: &str = "upstream error: LEAK-CHECK-SENTINEL-93f1 (never expose)";
 
     fn draft_json(
         id: Uuid,
@@ -1776,10 +1779,10 @@ mod tests {
         write_dead_letter(dir.path(), "m-2", "implementer");
         let json = serde_json::to_string(&items(dir.path())).unwrap();
         assert!(
-            !json.contains("sk-live"),
+            !json.contains("LEAK-CHECK-SENTINEL"),
             "error tails must never reach the feed: {json}"
         );
-        assert!(!json.contains("Bearer"));
+        assert!(!json.contains("last_error_tail"));
     }
 
     #[test]

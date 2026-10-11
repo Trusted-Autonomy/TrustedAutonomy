@@ -119,7 +119,7 @@ Verification (all must hold, otherwise refuse with the specific reason):
 5. `exp` is at most 60 seconds after `iat`, not expired, `iat` not more than 30 seconds in the future.
 6. `jti` has not been seen: TA keeps a replay cache covering at least twice the maximum lifetime.
 7. The signer is allowed to act on the item. TA has no copy of Wayfinder's roster, so Wayfinder is the authority on role membership (it refuses to sign unless the user holds the role in that project) and TA verifies the claims against a minimal floor:
-   - `waiting_on.type = user`: `claims.user_id` equals `waiting_on.value`.
+   - `waiting_on.type = user`: `claims.user_id` equals `waiting_on.value`, with one exception. Viewers are observers and nothing may be addressed to them: when the named user is a viewer, Wayfinder reroutes the item at intake to the nearest eligible role (members and up) and raises an ops issue. For that rerouted case TA accepts an assertion whose `user_id` differs from `waiting_on.value` only if `claims.escalated` is true and `claims.role` ranks at or above the key's `escalation_min_role` (set at `ta keys add --escalation-min-role`, default `member`). The exception applies to `type=user` items and to approve, deny and answer only, never to apply, commands or shutdown, and never when the `role` claim is absent. TA records `escalated: true` and the original `waiting_on.value` it was rerouted from in the audit log.
    - `waiting_on.type = role`: `claims.role` equals `waiting_on.value`. For human approvals the role names are Wayfinder roles (owner, admin, member); TA's own roles (implementer, chief-of-staff) are for agent routing only and never appear in a human approval item.
    - `waiting_on.type = any_maintainer`: `claims.role` is one of the `maintainer_roles` configured on the registered key (default `owner` and `admin`). A member can never approve an `any_maintainer` item, even if Wayfinder mistakenly signs.
    The local human credential path (CLI, Studio) counts as a maintainer.
@@ -168,3 +168,6 @@ The poller takes `reason` from an optional `reason` string in the delegate detai
 
 - TA raises `draft_review` items as `waiting_on = any_maintainer`, `agent_question` items for the asking goal's requester when known (otherwise `any_maintainer`), and never invents a Wayfinder role. Who an item is shown to (named users, project owner escalation when nobody holds a role) is decided by Wayfinder from its roster; TA enforces only the floor in rule 7.
 - First valid action wins. Any later assertion for an item that is already resolved returns the original result and does not act.
+
+- An approval intent that expires undelivered (15 minutes by default in Wayfinder) is never signed, and the item is re-notified once to the user. The claim lease is 90 seconds, so no assertion that still verifies survives a lapsed claim. TA does not need to know about leases; the 60 second assertion lifetime in rule 5 already bounds it.
+

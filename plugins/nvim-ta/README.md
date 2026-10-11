@@ -9,6 +9,20 @@ staged diffs, and approve or deny changes without leaving your editor.
 - `curl` available on `PATH`
 - `ta` daemon running (`>= 0.16.6`) — start with `ta shell` or `ta run "<goal>"`
 
+## Signing in (approve, deny and apply)
+
+Reading status and starting goals need nothing extra. Approving, denying and applying changes
+needs proof that a person is acting. Run this once in your own terminal:
+
+```bash
+ta login --file
+```
+
+The plugin reads the credential from `TA_HUMAN_CREDENTIAL` or from `~/.config/ta/human/credential`
+(`$XDG_CONFIG_HOME/ta/human/credential` when that is set) and sends it with every request. If it is
+missing, the daemon refuses those calls and the message says to run `ta login`. See "Human
+Credential" in `docs/USAGE.md`.
+
 ## Installation
 
 ### lazy.nvim
