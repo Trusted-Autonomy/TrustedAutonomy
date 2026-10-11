@@ -2169,8 +2169,27 @@ When a VCS adapter is detected (e.g., Git), `ta draft apply` automatically runs 
 ```bash
 ta draft apply <draft-id>              # auto-submits when VCS detected
 ta draft apply <draft-id> --no-submit  # copy files only, no VCS ops
-ta draft apply <draft-id> --dry-run    # preview what would happen
+ta draft apply <draft-id> --dry-run    # preview what would happen, changes nothing
 ```
+
+**Dry run changes nothing.** `--dry-run` prints what an apply would do (files, the branch it would create, the PLAN.md checkmarks it would carry, the phase status and the version it would set, the verification it would run) and then stops. It does not take the apply lock, approve the draft, create a branch, copy a file, touch PLAN.md, move the goal or the draft to Applied, or delete staging. Run it as often as you like; a real apply afterwards behaves exactly as the preview said.
+
+**Apply never writes onto a protected branch.** Before any file is written, apply switches to (or creates) a feature branch if you are on a protected branch such as `main` or `master`. This holds with `--no-submit` too: the changes are then left uncommitted on the feature branch and `main` is untouched. If the branch cannot be created, apply stops before writing anything and tells you why:
+
+```
+VCS pre-flight failed: could not create a feature branch before writing files.
+Aborted with no changes made to the source tree (it is still on protected branch 'main').
+```
+
+Fix the cause it names (usually a stale `.git/index.lock` or a working tree that cannot switch branches) or switch to a feature branch yourself (`git switch -c my-branch`), then re-run `ta draft apply`.
+
+**PLAN.md: only the target phase changes.** With `--phase` (or a goal linked to a phase), apply changes exactly two things in `PLAN.md`: the checkmarks of that phase's own numbered items that the draft checked, and that phase's `<!-- status: ... -->` marker. Every other byte is left alone: blank lines, code fences, other phases, and the checkboxes in them (including human-gate items such as sign-offs, which apply never checks). Apply never checks an item on your behalf. If the phase still has unchecked items when you apply, it stays at its current status and the open items are listed:
+
+```
+[plan-merge] Phase v0.17.11.29: 2 item(s) were not completed by the draft and stay unchecked: item 6 "..."; item 7 "...". Finish them, or move them to a named future phase (Deferred Items Policy), then mark the phase done.
+```
+
+The version apply sets is the one `ta plan expected-version` reports (the last phase of the unbroken run of done phases), so it does not lag when a later phase is already done.
 
 When a draft includes a version bump tied to a plan phase, `ta draft apply` prints an info line rather than a warning:
 
@@ -2465,6 +2484,21 @@ run = "./dev 'cargo test --workspace'"
 timeout_secs = 900
 ```
 
+A step that prints nothing for too long is reported as hung instead of waiting forever. The limit defaults to 300 seconds of silence and is configurable globally or per command (`0` disables it):
+
+```toml
+# .ta/workflow.toml
+[verify]
+no_output_timeout_secs = 600   # default 300; 0 turns the hang check off
+
+[[verify.commands]]
+run = "./dev 'cargo test --workspace'"
+timeout_secs = 1800
+no_output_timeout_secs = 900   # this command may be quiet for 15 minutes
+```
+
+When the limit is hit, the step and everything it started are killed and the report names the step (for example `2/4`), the test binary that was running, the tests that started and never finished, the last lines of output, and the exact setting to change. A failing step lists the failing test names, and a timing table at the end shows how long every step took.
+
 Both formats are supported. Verification output is streamed in real time with command labels (e.g., `[cargo] Compiling...`), and a heartbeat is emitted every `heartbeat_interval_secs` so you know the process is still running. If a command times out, the error includes the last 20 lines of output and a suggestion to increase the timeout.
 
 When a command fails in block mode, TA shows the full command output (stdout + stderr) with the exit code, then offers to re-enter the agent immediately:
@@ -2499,6 +2533,8 @@ ta draft apply <draft-id> --skip-verify
 If pre-submit verification fails during `ta draft apply`, the changes are already applied to your project but not committed. You can fix the issues and re-run the apply, skip verification, or revert with `git checkout -- .`.
 
 In warn mode (`on_failure = "warn"`), the draft is created but carries verification warnings visible in `ta draft view`.
+
+**Goals build in their own target directory.** For Rust projects, `ta run` sets `CARGO_TARGET_DIR` to `<staging>/target` for the agent and for verification, so build artifacts compiled in a goal's staging directory never land in your project's `target/` (they bake the staging path into test binaries, which then fail once staging is cleaned). The first build in a goal is a cold build and the directory is removed with staging. To use a different location, set `CARGO_TARGET_DIR` in `[agent_env]` of `.ta/workflow.toml` and TA leaves it alone.
 
 `ta init` generates a pre-populated `[verify]` section for Rust projects. Other project types get commented-out examples.
 
@@ -3703,7 +3739,7 @@ ta draft apply <id> --auto-repair
 
 Coverage gaps never block apply — they are informational reminders that a plan item may not yet be implemented.
 
-**Protected files**: `PLAN.md` is never overwritten wholesale on apply — instead, `ta draft apply` performs a 3-way merge (agent additions vs. source history) so both the agent's new phase sections and any items added to source since the goal started are preserved in the final result.
+**Protected files**: `PLAN.md` is never overwritten wholesale on apply. With a target phase, apply carries only that phase's own checkmarks onto the PLAN.md already on disk and leaves every other line alone. Without a target phase, `ta draft apply` performs a 3-way merge (agent additions vs. source history) so both the agent's new phase sections and any items added to source since the goal started are preserved.
 
 **Note**: this review is not `ta doctor`. `ta doctor` validates your runtime environment (auth, daemon health, agent binary). The plan review is a draft-lifecycle gate that runs automatically — you do not need to invoke it manually.
 
@@ -3729,17 +3765,17 @@ When a `plan_phase` is set on the goal, the reviewer produces a per-item complet
 | `code:?` | No matching code tokens found |
 | `[auto-corrected]` | Item was unchecked but code was found — reviewer corrected the checkbox |
 
-If the reviewer auto-corrects any items, the staging PLAN.md is updated immediately so the draft includes the corrected checkboxes. Auto-corrections appear in `ta draft view` under the plan review section.
+If the reviewer finds unchecked items that already have matching code, it reports them (they appear in `ta draft view` under the plan review section) but does not check them. The draft keeps exactly the checkmarks the agent made; check the items yourself if you agree they are done.
 
-### Plan Auto-Correction
+### Plan Coverage Reporting
 
-`ta draft build` and `ta draft apply` automatically reconcile PLAN.md item state with code coverage — you do not need to rely on agents to check boxes correctly.
+`ta draft build` compares PLAN.md items with code coverage and reports the result. It never changes your checkboxes: the draft's PLAN.md carries only the checkmarks the agent made, and `ta draft apply` carries only those (see "PLAN.md: only the target phase changes" above).
 
-#### Auto-check during build
+#### Coverage during build
 
-When `ta draft build` runs, uncovered `[ ]` items in the active phase are checked against the artifact diffs. If a token from the item description is found in the changed code, the item is upgraded to `[x]` in the plan patch that `ta draft apply` will use. This runs **whether or not the agent included PLAN.md in its draft**.
+When `ta draft build` runs, unchecked `[ ]` items in the active phase are checked against the artifact diffs. If a token from the item description is found in the changed code, the item is reported as covered in the review. This runs **whether or not the agent included PLAN.md in its draft**.
 
-When PLAN.md is not in the draft artifacts, `ta draft build` auto-generates a synthetic plan patch from the code artifact diff:
+When PLAN.md is not in the draft artifacts, `ta draft build` records a synthetic plan patch from the code artifact diff for the reviewer to read:
 
 ```
 [review] Auto-generated plan patch from code coverage (no PLAN.md in draft).
@@ -3752,15 +3788,9 @@ You will also see per-item coverage heartbeats in the build log:
 [plan] v0.15.19.4 item 2: not found (gap) — Supervisor verdict — phase ID in header
 ```
 
-#### Auto-check during apply
+#### During apply
 
-`ta draft apply` re-runs coverage against the applied diff before updating PLAN.md. Items that are `[ ]` in the draft but covered in the diff are silently upgraded:
-
-```
-[apply] Auto-checked item 3 (coverage match): Coverage checker: auto-mark items [x] i…
-```
-
-If an item is `[x]` but no coverage is found and the item is not already in source, a warning is emitted so you can verify manually.
+`ta draft apply` does not check items for you. Unchecked items in the target phase stay unchecked, the phase status is not set to done while any remain, and the open items are named in the output so you can finish them or move them to a named future phase.
 
 #### Source-verification for PLAN.md-only drafts
 

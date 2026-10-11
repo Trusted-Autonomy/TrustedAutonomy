@@ -10868,23 +10868,41 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.28`
 
 ### v0.17.11.29 - Draft Apply Fidelity: Plan Merge Touches Only the Target Phase, Dry Run Is a Dry Run
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: `ta draft apply` must change exactly what the draft says and nothing else, and `--dry-run` must change nothing. Every TA-built draft since 2026-10-10 has needed a hand repair of `PLAN.md` after apply, and the last one flipped four unrelated human-gate checkboxes to done, which falsely records human sign-offs. This is the process-fidelity fix that lets the TA flow be used without manual cleanup; it comes before v0.17.11.27.
 
-1. [ ] **Plan merge changes only the target phase.** After apply, `PLAN.md` must be byte-for-byte identical to the pre-apply file except the target phase's `<!-- status: ... -->` marker and the checkbox state of that phase's own numbered items. Find the writer (the plan-merge path in `ta draft apply --phase`, plus the earlier PLAN.md write site documented in this file) and stop it rewriting anything else: no blank-line removal anywhere (including inside code fences), no checkbox change in any other phase, no reordering. Golden tests over a copy of the real `PLAN.md` and over a fixture with look-alike phase headings; a property test that every line outside the target phase block is unchanged.
-2. [ ] **A draft's own `PLAN.md` edits are honored.** When a draft includes item checkmarks for the target phase, apply must carry them; when the phase has items the agent could not complete, leave them unchecked and say which (Deferred Items Policy), never auto-check.
-3. [ ] **`ta draft apply --dry-run` changes nothing.** Observed 2026-10-10: it copied files into the source tree on a new feature branch, marked the draft and goal Applied and deleted the staging directory. A dry run prints what it would do and leaves files, branches, goal state, draft state and staging untouched. Regression test that snapshots the tree, branches, goal and draft state around a dry run.
-4. [ ] **Apply never leaves uncommitted changes on a protected branch.** `--no-submit` applied straight onto `main`'s working tree. Switch to (or create) the feature branch before writing any file, and refuse with an actionable message if that is impossible.
-5. [ ] **Goals build in their own target directory.** Artifacts compiled inside a goal's staging directory bake that path into test binaries (`env!("CARGO_MANIFEST_DIR")`), so after staging is auto-cleaned the next `cargo test` in the source tree fails (seen in the `ta-actions` paper-trading plugin test). Give each goal its own `CARGO_TARGET_DIR`, or stop sharing `target/` between staging and the source tree.
-6. [ ] **Verification output is diagnosable.** The pre-submit verification prints which command failed, the failing test names, and how long each step ran; a step with no output for a configured time is reported as hung (with the last test names that started) instead of waiting forever, and says how to raise or disable the limit.
-7. [ ] **The version a phase apply sets is the contiguous-done version.** Apply sets the version from the phase id (`alpha.25`) even when later phases are already done, which `ta plan expected-version` then reports as lagging. Use the same function so apply lands on the right value the first time.
+1. [x] **Plan merge changes only the target phase.** After apply, `PLAN.md` must be byte-for-byte identical to the pre-apply file except the target phase's `<!-- status: ... -->` marker and the checkbox state of that phase's own numbered items. Find the writer (the plan-merge path in `ta draft apply --phase`, plus the earlier PLAN.md write site documented in this file) and stop it rewriting anything else: no blank-line removal anywhere (including inside code fences), no checkbox change in any other phase, no reordering. Golden tests over a copy of the real `PLAN.md` and over a fixture with look-alike phase headings; a property test that every line outside the target phase block is unchanged.
+2. [x] **A draft's own `PLAN.md` edits are honored.** When a draft includes item checkmarks for the target phase, apply must carry them; when the phase has items the agent could not complete, leave them unchecked and say which (Deferred Items Policy), never auto-check.
+3. [x] **`ta draft apply --dry-run` changes nothing.** Observed 2026-10-10: it copied files into the source tree on a new feature branch, marked the draft and goal Applied and deleted the staging directory. A dry run prints what it would do and leaves files, branches, goal state, draft state and staging untouched. Regression test that snapshots the tree, branches, goal and draft state around a dry run.
+4. [x] **Apply never leaves uncommitted changes on a protected branch.** `--no-submit` applied straight onto `main`'s working tree. Switch to (or create) the feature branch before writing any file, and refuse with an actionable message if that is impossible.
+5. [x] **Goals build in their own target directory.** Artifacts compiled inside a goal's staging directory bake that path into test binaries (`env!("CARGO_MANIFEST_DIR")`), so after staging is auto-cleaned the next `cargo test` in the source tree fails (seen in the `ta-actions` paper-trading plugin test). Give each goal its own `CARGO_TARGET_DIR`, or stop sharing `target/` between staging and the source tree.
+6. [x] **Verification output is diagnosable.** The pre-submit verification prints which command failed, the failing test names, and how long each step ran; a step with no output for a configured time is reported as hung (with the last test names that started) instead of waiting forever, and says how to raise or disable the limit.
+7. [x] **The version a phase apply sets is the contiguous-done version.** Apply sets the version from the phase id (`alpha.25`) even when later phases are already done, which `ta plan expected-version` then reports as lagging. Use the same function so apply lands on the right value the first time.
 
 **Moved here from v0.17.12.11 (items 7, 8 and 9 there).**
 **Effort**: M.
 
 #### Version: `0.17.11-alpha.29`
+
+### v0.17.11.30 - Chat Goals Never Claim a Plan Phase; Wake Retries Use an Explicit Delayed Nak
+<!-- status: pending -->
+**Depends on**: v0.17.11.28
+
+**Goal**: Fix the two blockers found in live Chief-of-Staff run 6 (2026-10-10). (1) A chat-mode or cos-origin goal auto-linked and claimed a plan phase (an ad-hoc `v0.0.0.N` stub marked `in_progress` and committed to `PLAN.md`) and never released it when the chat session finished with "no draft needed", so the next launch that linked the same phase failed with "Phase ... could not be claimed: already in progress (unknown goal)" and the delegated worker exited 1 within a second. (2) After v0.17.11.28 raised the ack wait to the launch timeout plus a margin (3660 s), failed wake launches were no longer retried: the retry design left the message unacked and relied on ack-wait expiry to redeliver it, which now takes an hour, and a daemon restart does not redeliver either. Bug 2 is a regression from v0.17.11.28.
+
+1. [ ] **Chat and cos-origin goals never claim a plan phase.** No auto-link, no ad-hoc stub insertion, no `in_progress` marker, no "mark phase in_progress" commit for any goal with `chat_mode` or an origin in `NO_AUTO_APPROVE_ORIGINS`; they still run, record their own goal state and leave `PLAN.md` byte-for-byte untouched.
+2. [ ] **Every terminal state releases a phase claim.** A goal that does hold a claim releases it on completion without a draft, denial, close, failure, deletion and daemon-observed process death, enforced at one place (not left to each caller). The claim-failure message names the holding goal id and state and the two ways out (finish or close that goal, or release the claim with the documented command), instead of "unknown goal".
+3. [ ] **`ta doctor` finds orphaned claims.** Detect `in_progress` phases (especially ad-hoc `v0.0.0.N` stubs) with no live goal and offer to reset them to pending (or remove the ad-hoc stub), with the exact PLAN.md lines shown first.
+4. [ ] **Wake retries use an explicit nak with delay.** Add a delayed negative-ack to the `WhiteboardTransport` trait (JetStream `AckKind::Nak(Some(delay))`; modelled in the in-memory transport) and use it in `wake_retry` for the 30 s, 2 m and 10 m backoff, so retry timing no longer depends on the ack wait. Heartbeats and the long ack wait from v0.17.11.28 stay.
+5. [ ] **Pending messages survive a daemon restart.** At listener start, messages that were left pending by an earlier run (attempt record present, retry due, no completed record) are retried or nak'd so none is stranded; an attempt that exceeded the cap is dead-lettered as today. Log what was recovered, with counts and message ids.
+6. [ ] Tests: a chat-mode and a cos-origin goal leave PLAN.md byte-identical and create no claim; every terminal state releases a claim; the claim-failure message names the holder; the doctor check finds and fixes a planted orphan; a failed launch is retried after 30 s, 2 m and 10 m with a 3660 s ack wait (in-memory transport with controllable time); a restart recovers pending messages; the dead-letter cap still applies. Windows-safe, tempdir, no real Keychain.
+7. [ ] Document the retry timing, the restart recovery and the chat-goal rule in `docs/USAGE.md`.
+
+**Effort**: M. **Unblocks**: the delegated implementer worker in the live CoS loop.
+
+#### Version: `0.17.11-alpha.30`
 
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
 <!-- status: pending -->
@@ -11088,6 +11106,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 7. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 8. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 9. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
+10. [ ] The legacy whole-document PLAN.md merge (`ta_changeset::plan_merge::merge_plan_md`, used only when an apply has no target phase) is not CRLF-faithful: on a CRLF checkout (Windows) a merge of identical inputs changes line endings. Make it byte-preserving like the scoped merge, or route every apply through the scoped merge; add a CRLF golden test.
 
 **Effort**: M.
 

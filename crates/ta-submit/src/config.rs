@@ -1740,6 +1740,12 @@ pub struct VerifyCommand {
 
     /// Per-command timeout in seconds. If omitted, `default_timeout_secs` is used.
     pub timeout_secs: Option<u64>,
+
+    /// Per-command no-output limit in seconds (v0.17.11.29). If the command prints
+    /// nothing for this long it is reported as hung and killed. `0` disables the
+    /// limit for this command. If omitted, `[verify] no_output_timeout_secs` is used.
+    #[serde(default)]
+    pub no_output_timeout_secs: Option<u64>,
 }
 
 /// Pre-draft verification gate configuration.
@@ -1774,9 +1780,28 @@ pub struct VerifyConfig {
     /// A progress message is emitted every N seconds. Default: 30.
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
+
+    /// How long a verification command may print nothing before it is reported as hung
+    /// and killed (v0.17.11.29). Default: 300 seconds. `0` disables the limit. A
+    /// command's own `no_output_timeout_secs` overrides this.
+    #[serde(default)]
+    pub no_output_timeout_secs: Option<u64>,
 }
 
+/// Default no-output limit for verification commands, in seconds.
+pub const DEFAULT_VERIFY_NO_OUTPUT_TIMEOUT_SECS: u64 = 300;
+
 impl VerifyConfig {
+    /// Resolve the no-output limit for a command: the command's own value, else
+    /// `[verify] no_output_timeout_secs`, else 300. `None` means the limit is disabled.
+    pub fn command_no_output_timeout(&self, cmd: &VerifyCommand) -> Option<u64> {
+        let secs = cmd
+            .no_output_timeout_secs
+            .or(self.no_output_timeout_secs)
+            .unwrap_or(DEFAULT_VERIFY_NO_OUTPUT_TIMEOUT_SECS);
+        (secs > 0).then_some(secs)
+    }
+
     /// Effective default timeout: `default_timeout_secs` if set, else legacy `timeout`.
     pub fn effective_default_timeout(&self) -> u64 {
         self.default_timeout_secs.unwrap_or(self.timeout)
@@ -1797,6 +1822,7 @@ impl Default for VerifyConfig {
             timeout: default_verify_timeout(),
             default_timeout_secs: None,
             heartbeat_interval_secs: default_heartbeat_interval(),
+            no_output_timeout_secs: None,
         }
     }
 }
@@ -1828,6 +1854,7 @@ where
             CommandItem::Simple(s) => VerifyCommand {
                 run: s,
                 timeout_secs: None,
+                no_output_timeout_secs: None,
             },
             CommandItem::Structured(c) => c,
         })
@@ -2411,11 +2438,73 @@ timeout_secs = 900
             commands: vec![VerifyCommand {
                 run: "test".to_string(),
                 timeout_secs: None,
+                no_output_timeout_secs: None,
             }],
             default_timeout_secs: Some(600),
             ..Default::default()
         };
         assert_eq!(config.command_timeout(&config.commands[0]), 600);
+    }
+
+    #[test]
+    fn no_output_timeout_resolution_order() {
+        let mut config = VerifyConfig::default();
+        let plain = VerifyCommand {
+            run: "a".to_string(),
+            timeout_secs: None,
+            no_output_timeout_secs: None,
+        };
+        assert_eq!(config.command_no_output_timeout(&plain), Some(300));
+        config.no_output_timeout_secs = Some(45);
+        assert_eq!(config.command_no_output_timeout(&plain), Some(45));
+        let own = VerifyCommand {
+            no_output_timeout_secs: Some(900),
+            ..plain.clone()
+        };
+        assert_eq!(config.command_no_output_timeout(&own), Some(900));
+        let off = VerifyCommand {
+            no_output_timeout_secs: Some(0),
+            ..plain
+        };
+        assert_eq!(config.command_no_output_timeout(&off), None);
+        config.no_output_timeout_secs = Some(0);
+        assert_eq!(
+            config.command_no_output_timeout(&VerifyCommand {
+                run: "b".to_string(),
+                timeout_secs: None,
+                no_output_timeout_secs: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn no_output_timeout_parses_from_workflow_toml() {
+        let toml_text = r#"
+[verify]
+no_output_timeout_secs = 120
+
+[[verify.commands]]
+run = "cargo test"
+no_output_timeout_secs = 600
+
+[[verify.commands]]
+run = "cargo fmt --check"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml_text).unwrap();
+        assert_eq!(config.verify.no_output_timeout_secs, Some(120));
+        assert_eq!(
+            config
+                .verify
+                .command_no_output_timeout(&config.verify.commands[0]),
+            Some(600)
+        );
+        assert_eq!(
+            config
+                .verify
+                .command_no_output_timeout(&config.verify.commands[1]),
+            Some(120)
+        );
     }
 
     #[test]

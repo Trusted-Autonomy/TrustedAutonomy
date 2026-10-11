@@ -4019,26 +4019,31 @@ pub fn execute(
         }
     }
 
-    // Redirect `cargo build` / `cargo test` in staging back to the source project's
-    // target directory so agent builds reuse the existing cache and create no new
-    // disk usage in staging. Without this, each goal that runs cargo accumulates
-    // 3-7 GB of fresh build artifacts in staging even though source already has
-    // a warm target/ cache.
+    // Give the goal its own cargo target directory inside its staging directory.
     //
-    // Gated on: (1) workspace has a Cargo.toml, (2) CARGO_TARGET_DIR not already set,
-    // (3) source dir is known. Config override: set CARGO_TARGET_DIR explicitly in
-    // workflow.toml [agent_env] to point elsewhere (e.g., a shared sccache dir).
+    // This used to redirect `CARGO_TARGET_DIR` to the SOURCE project's `target/` so agent
+    // builds reused its warm cache. That shared directory is the bug: artifacts compiled in
+    // staging bake the staging path into test binaries (`env!("CARGO_MANIFEST_DIR")`) and
+    // cargo fingerprints, so once staging was auto-cleaned the next `cargo test` in the
+    // source tree failed. A per-goal target dir is removed together with staging and never
+    // touches the source tree's `target/` (cold first build, correct artifacts). `target/` is
+    // excluded from the staging diff, so it never appears in a draft.
+    //
+    // Gated on: (1) workspace has a Cargo.toml, (2) CARGO_TARGET_DIR not already set.
+    // Config override: set CARGO_TARGET_DIR explicitly in workflow.toml [agent_env] (e.g. a
+    // shared sccache dir) and that value is used as is.
     if let Some(ref src_dir) = goal.source_dir {
         let has_cargo_toml =
             src_dir.join("Cargo.toml").exists() || staging_path.join("Cargo.toml").exists();
         if has_cargo_toml && !agent_config.env.contains_key("CARGO_TARGET_DIR") {
+            let goal_target = super::verify::goal_target_dir(&staging_path);
             agent_config.env.insert(
                 "CARGO_TARGET_DIR".to_string(),
-                src_dir.join("target").display().to_string(),
+                goal_target.display().to_string(),
             );
             tracing::debug!(
-                target_dir = %src_dir.join("target").display(),
-                "Redirecting CARGO_TARGET_DIR to source project cache"
+                target_dir = %goal_target.display(),
+                "Using a per-goal CARGO_TARGET_DIR inside staging"
             );
         }
     }
@@ -4644,7 +4649,7 @@ pub fn execute(
 
         if !workflow_config.verify.commands.is_empty() {
             let mut result =
-                super::verify::run_verification(&workflow_config.verify, &staging_path);
+                super::verify::run_verification_in_staging(&workflow_config.verify, &staging_path);
 
             if !result.passed {
                 match workflow_config.verify.on_failure {
@@ -4781,7 +4786,7 @@ pub fn execute(
                                     }
 
                                     // Re-run verification after the fix.
-                                    let recheck = super::verify::run_verification(
+                                    let recheck = super::verify::run_verification_in_staging(
                                         &workflow_config.verify,
                                         &staging_path,
                                     );
@@ -4920,8 +4925,10 @@ pub fn execute(
                         }
 
                         // Re-run verification after the fix.
-                        let recheck =
-                            super::verify::run_verification(&workflow_config.verify, &staging_path);
+                        let recheck = super::verify::run_verification_in_staging(
+                            &workflow_config.verify,
+                            &staging_path,
+                        );
                         if !recheck.passed {
                             println!();
                             println!("Verification STILL failing after agent fix session.");
