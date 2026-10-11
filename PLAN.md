@@ -10915,8 +10915,18 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [ ] Host-header allowlist on the daemon (CR-36) and a clear error that names what to do ("run `ta login`").
 4. [ ] `ta draft approve/apply` refuses when it detects an agent context and no human credential.
 5. [ ] Tests: an agent-style loopback call without the credential is refused; the CLI path still works; plugin and Studio paths keep working.
+6. [ ] **Review packet for agent-originated work.** Every goal and draft with origin `cos` or `chat` carries a provenance block stored on the goal and returned by the draft API: who asked (the human and the channel), a capped excerpt of their original message (fenced and labeled as untrusted data), the delegating role's stated reason, the objective, and the chain of ids (message or candidate id, Chief-of-Staff goal, worker goal). `ta show draft` and the draft API put it at the top ("Requested by / Decided by / Built by"), with a readable title derived from the objective instead of a synthetic one. The poller supplies the fields at launch; TA never trusts them as instructions.
+7. [ ] **One attention feed.** `GET /api/attention` lists everything waiting on a person: drafts awaiting review, agent questions from `ta_ask_human` (built on the existing pending-questions registry and `/api/interactions/pending`), goals blocked on a person, and dead-lettered wake messages. Each item has a stable id, kind, project, who it is waiting on (a named user, a role, or any maintainer), age, a one-line summary, the provenance block and the actions available. Filters by user and by project (the project-manager view: everyone waiting on anyone in the project), a count endpoint for badges, and events on `/api/events` (`attention.created`, `attention.updated`, `attention.resolved`) so a UI can pop up a new agent request as it arrives.
+8. [ ] **Acting on an item needs a human.** Approve, deny and answer calls arriving from another surface (Wayfinder, Studio, a channel) carry a short-lived assertion of the human who acted, verified by TA against a key registered at install; the poller's service account can relay and display but cannot approve or deny. Agent questions are answered with the same rule. The contract is agreed with the Wayfinder session and documented in `docs/USAGE.md`.
+9. [ ] Tests: the provenance block survives launch, apply and the draft API and is shown first; a hostile excerpt cannot break out of its fence; the attention feed lists, filters, counts and emits events for each item kind; a relay-only credential cannot approve; an unanswered question times out as today.
 
-**Effort**: M. **Why first**: the rules engine's idea of "attended" depends on it. **Note**: on its own this is a speed bump while agents run as the same OS user; v0.17.12.6 onward makes it a wall.
+**Cross-repo requirements (tracked in the Wayfinder and ta-virtual-team repos, agreed 2026-10-11):**
+- Wayfinder Focus view: a "Waiting on you" list at the very top, with, for a project manager, a second list of what the project is waiting on from other people. Each row shows what, why (the provenance summary), who asked, and the age, with the action buttons.
+- A messages box at the top right of the app with a red count whenever something needs the viewer's attention, opening the same list.
+- A pop-up that appears as agent requests arrive so the human can answer immediately, closing when answered, and falling back to the list if dismissed.
+- The ta-virtual-team poller mirrors attention items into Wayfinder (task update plus notification) and relays answers back with the human's assertion.
+
+**Effort**: L. **Why first**: the rules engine's idea of "attended" depends on it. **Note**: on its own this is a speed bump while agents run as the same OS user; v0.17.12.6 onward makes it a wall.
 
 #### Version: `0.17.12-alpha`
 
