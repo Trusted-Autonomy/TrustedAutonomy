@@ -19,8 +19,8 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
-ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.26" }
-ta-events = { path = "../ta-events", version = "0.17.11-alpha.26" }
+ta-submit = { path = "../ta-submit", version = "0.17.11-alpha.30" }
+ta-events = { path = "../ta-events", version = "0.17.11-alpha.30" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

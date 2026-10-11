@@ -482,6 +482,9 @@ pub(crate) async fn run_listener_loop(
             let launch_timeout = policy.launch_timeout;
             let launch = move || async move {
                 match tokio::task::spawn_blocking(move || {
+                    // Counted as in-flight work so an automatic self-update
+                    // never restarts the daemon under a running launch.
+                    let _inflight = crate::self_update::WAKE_LAUNCHES.begin();
                     launch_wake_on_demand(
                         &pr,
                         &sid,

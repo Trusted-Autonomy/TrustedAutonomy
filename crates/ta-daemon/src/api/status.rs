@@ -93,6 +93,12 @@ pub struct ProjectStatus {
     /// Absolute path of the currently active project root (v0.14.18).
     /// None if no valid project root has been set (triggers Projects tab redirect in TA Studio).
     pub active_project_path: Option<String>,
+    /// Result of the daemon's latest self-update check (`[daemon] auto_update`).
+    /// `state` is `pending` while a newer installed build waits for running
+    /// work to finish (`message` reads "update pending, waiting for N goals");
+    /// absent until the first check has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<ta_lifecycle::UpdateReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -265,6 +271,7 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
         power_assertion_active,
         community_pending_count,
         active_project_path,
+        update: crate::self_update::current_report(),
     }
 }
 

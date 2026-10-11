@@ -10,50 +10,40 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use ta_goal::{GoalRunState, GoalRunStore};
-
 use crate::api::AppState;
 
 /// `GET /api/drain/status` — Report current active work to support graceful drain.
 ///
 /// Returns:
-/// - `status`: `"clean"` when no active agent work remains, `"draining"` otherwise.
+/// - `status`: `"clean"` when no active work remains, `"draining"` otherwise.
 /// - `active_goals`: goal runs in Running/Configured state only. PrReady is excluded
 ///   (agent finished, draft awaiting human review). Sessions are not counted — goal
 ///   state is the authoritative signal for whether agent work is in progress.
 /// - `active_sessions`: always 0; retained in the response for API compatibility.
+/// - `inflight_launches`: wake-on-demand launches currently running.
+/// - `applying`: a `ta draft apply` holds a live `.ta/apply.lock`.
 ///
 /// The `ta daemon restart` CLI polls this endpoint every 2 seconds and restarts
 /// once `status == "clean"` or the daemon stops responding.
 pub async fn drain_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Count goal runs where an agent is actively executing.
-    // PrReady: agent done, draft awaiting human review — not active work.
-    let active_goals = {
-        let store = GoalRunStore::new(&state.goals_dir);
-        match store {
-            Ok(s) => s
-                .list()
-                .unwrap_or_default()
-                .iter()
-                .filter(|g| matches!(g.state, GoalRunState::Running | GoalRunState::Configured))
-                .count(),
-            Err(_) => 0,
-        }
-    };
-
-    // Session connections (MCP clients, Claude Code sidebar, ta shell) are NOT
-    // counted toward drain. Goal state is the authoritative signal for whether
-    // agent work is in progress — a Running/Configured goal means an agent
-    // subprocess is actively executing. Sessions are UI connections that outlive
-    // individual goal runs and must not block restart.
-    let active_sessions = 0usize;
-
-    let is_clean = active_goals == 0;
+    // Goals in Running/Configured, in-flight wake launches and a live
+    // `.ta/apply.lock` all count as active work. Session connections (MCP
+    // clients, Claude Code sidebar, ta shell) are NOT counted toward drain:
+    // they are UI connections that outlive individual goal runs and must not
+    // block a manual restart. The automatic self-update is stricter and also
+    // waits for recently used agent sessions (see `self_update`).
+    let snap = crate::self_update::core_snapshot(
+        &state.goals_dir,
+        &state.project_root,
+        crate::self_update::WAKE_LAUNCHES.count(),
+    );
 
     Json(serde_json::json!({
-        "status": if is_clean { "clean" } else { "draining" },
-        "active_goals": active_goals,
-        "active_sessions": active_sessions,
+        "status": snap.status,
+        "active_goals": snap.active_goals,
+        "active_sessions": snap.active_sessions,
+        "inflight_launches": snap.inflight_launches,
+        "applying": snap.applying,
     }))
     .into_response()
 }
@@ -85,6 +75,17 @@ mod tests {
     #[test]
     fn draining_when_session_active() {
         assert_eq!(drain_status_str(0, 1), "draining");
+    }
+
+    #[test]
+    fn draining_when_a_wake_launch_is_in_flight_or_an_apply_is_running() {
+        let launching = ta_lifecycle::DrainSnapshot::from_inflight(1);
+        assert_eq!(launching.status, "draining");
+        let applying = ta_lifecycle::DrainSnapshot {
+            applying: true,
+            ..Default::default()
+        };
+        assert!(!applying.is_idle());
     }
 
     #[test]

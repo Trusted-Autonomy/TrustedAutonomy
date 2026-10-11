@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.11-alpha.26
+**Version**: 0.17.11-alpha.30
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -9033,7 +9033,7 @@ By default, `ta daemon restart` performs a **graceful drain** before restarting:
 
 1. Checks the daemon's `/api/drain/status` endpoint every 2 seconds.
 2. Prints progress (`draining — N goals, M sessions active`) while work is in flight.
-3. Restarts once `status == "clean"` (all goals and sessions have finished), or immediately if the daemon stops responding.
+3. Restarts once `status == "clean"` (no running goals, wake-on-demand launches or draft apply), or immediately if the daemon stops responding.
 
 Use `--force` only when the daemon is unresponsive or you need to restart urgently — it bypasses the drain and sends SIGKILL. Active goal runs will be interrupted.
 
@@ -9061,6 +9061,73 @@ ta daemon log --follow
 #### Auto-start
 
 Commands that need the daemon (`ta shell`, `ta run`, `ta dev`) automatically start it if it's not running. You don't need to run `ta daemon start` manually in normal workflows — it's there for explicit lifecycle control, debugging, and headless/server deployments.
+
+#### Updating a running daemon after you install a newer build
+
+When you install a newer `ta-daemon` (for example with `./install_local.sh`), the running daemon keeps the old build until it restarts. Every 5 minutes it compares its own build hash with `ta-daemon --version` from the installed copy next to it, and what happens next is controlled by one setting in `.ta/daemon.toml`:
+
+```toml
+[daemon]
+auto_update = "ask"                # "when_idle" | "ask" | "never"
+update_check_interval_secs = 300   # how often to check (default 300)
+```
+
+| Value | What the daemon does |
+|-------|----------------------|
+| `"ask"` (default) | Never restarts by itself. It reports the pending update in `ta status`, `ta daemon status` and the status API, and logs it. You apply it with `ta daemon restart` or by answering yes at the `ta shell` / `ta dev` "Restart daemon with the new version? [Y/n]" prompt. The daemon never waits for an answer. |
+| `"when_idle"` | Restarts onto the new build as soon as nothing is running: no running goals, no recently used agent sessions, no in-flight wake-on-demand launches, no draft apply in progress (`.ta/apply.lock`). It never interrupts a running goal. |
+| `"never"` | No self-check. The CLI prompt still works when you use `ta shell` or `ta dev`. |
+
+Why `"ask"` is the default: a restart drops connected MCP clients and shell sessions and can re-trigger macOS Keychain prompts, so a daemon that restarts itself should be something you turn on deliberately. `"ask"` keeps the behaviour you already have and still tells you when an update is waiting. Switch to `"when_idle"` on machines where you rebuild often and want no manual restart.
+
+While a newer build is installed but work is running, `ta status` shows, for example:
+
+```
+│  Daemon update: update pending, waiting for 2 running goals: running 0.17.11-alpha.26 (aaa1111), installed 0.17.11-alpha.27 (bbb2222). It will restart on its own as soon as the daemon is idle; nothing is interrupted. ...
+```
+
+The automatic restart is the same drain-aware `ta daemon restart` you can run by hand (never `--force`). On macOS it re-signs `ta-daemon` only with your named local identity (`TA_CODESIGN_IDENTITY`, default "Trusted Autonomy Local Dev") and the stable identifier; it never signs ad hoc and never creates a Keychain identity. If that identity is absent it leaves the binary untouched and says so in `.ta/daemon.log`.
+
+Restart-loop guard: if the daemon is still running a different build than the installed one after a restart (or the new binary fails to start), it backs off (5 minutes, then 10) and stops after 3 attempts, logging the builds involved and what to do. Attempts are remembered in `.ta/daemon-update.json`; delete that file to re-arm, or fix the install and run `ta daemon restart`. If the new binary crashes on start, the daemon stays down until the next `ta` command that needs it starts it (or you run `ta daemon start`); check `.ta/daemon.log`.
+
+On Windows a running executable cannot be replaced safely, so `auto_update = "when_idle"` behaves as `"ask"` there: updates are reported, and you apply them with `ta daemon restart`. The daemon logs this once at startup. `ta daemon restart --force` is unchanged on every platform.
+
+Note: builds from a dirty working tree report `<hash>-dirty` regardless of content, so two different dirty builds of the same commit look identical and are not detected as an update.
+
+#### Contract for supervised daemons (the VT poller)
+
+Other long-running programs that ship with TA, such as the VT poller daemon, update themselves with the same library, `ta-lifecycle` (a small crate: std plus serde, no HTTP, no dependency on `ta-cli` or `ta-daemon`; depend on it by git revision). The contract:
+
+1. **Compare.** On a timer, read the installed binary's identity with `read_installed_identity` (runs `<bin> --version`) and compare it to the running build with `compare_builds`. Same build: do nothing. A binary must print `<name> <semver> (<build hash>)` on `--version` so the hash can be compared; without a hash only the semver is compared.
+2. **Wait for idle, using your own in-flight records.** Count the work you have started and not finished (`InflightCounter`, or any structure that can produce a `DrainSnapshot`). Never cut work short; keep working and report `update pending, waiting for N <what>`.
+3. **Exit or re-exec.** When idle, exit with `EXIT_FOR_SUPERVISOR_RESTART` (75) so the supervisor (launchd, systemd, a service wrapper) starts the new binary, or call `reexec_current_exe()` on Unix. Configure the supervisor to restart on any exit.
+4. **Guard against loops.** Record each attempt with `RestartGuard` before exiting and consult it before the next one. It backs off and gives up after 3 attempts for the same installed build.
+5. **Respect the same setting.** Honour `auto_update = "when_idle" | "ask" | "never"` with `AutoUpdateMode`; `ask` only reports.
+6. **Signing.** If you re-sign on macOS, use `ensure_stable_codesign` (named identity only, stable identifier, never ad hoc).
+
+`run_update_check` implements steps 1, 2 and 4 in one call over an `UpdateEnv` you implement (running build, installed build, idle snapshot, clock, restart); the daemon uses exactly that. A runnable example of the contract:
+
+```bash
+cargo run -p ta-lifecycle --example poller_contract
+```
+
+and the same flow as a doc-tested snippet:
+
+```rust
+use ta_lifecycle::{compare_builds, BuildIdentity, DrainSnapshot, InflightCounter};
+
+let running = BuildIdentity::new("2.4.0", Some("aaa1111"));
+let installed = BuildIdentity::parse_version_output("ta-poller 2.4.0 (bbb2222)").unwrap();
+
+let inflight = InflightCounter::new();
+let working = inflight.begin();                       // one message in flight
+assert!(compare_builds(&running, &installed).is_stale());
+assert!(!DrainSnapshot::from_inflight(inflight.count()).is_idle());
+
+drop(working);                                        // work finished
+assert!(DrainSnapshot::from_inflight(inflight.count()).is_idle());
+// now: std::process::exit(ta_lifecycle::EXIT_FOR_SUPERVISOR_RESTART);
+```
 
 ### Daemon Watchdog & Process Liveness
 
