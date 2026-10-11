@@ -87,6 +87,40 @@ impl PhaseClaims {
     }
 }
 
+/// Releases the daemon's in-memory claim when `GoalRunStore` reports that a
+/// goal stopped holding its phase (v0.17.11.30), and resets PLAN.md when no
+/// work landed. Registered once per daemon process.
+pub struct DaemonPhaseReleaser {
+    pub claims: std::sync::Arc<PhaseClaims>,
+}
+
+impl ta_goal::phase_release::PhaseClaimReleaser for DaemonPhaseReleaser {
+    fn release(&self, release: &ta_goal::phase_release::PhaseRelease) {
+        if release.reset_plan {
+            if let Some(root) = release.source_dir.as_deref() {
+                let note = format!("phase reset to pending ({})", release.trigger);
+                match ta_plan::reset_phase_if_in_progress(root, &release.phase_id, &note) {
+                    Ok(true) => tracing::info!(
+                        goal_id = %release.goal_id,
+                        phase = %release.phase_id,
+                        trigger = %release.trigger,
+                        "phase reset to pending in PLAN.md"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(
+                        goal_id = %release.goal_id,
+                        phase = %release.phase_id,
+                        error = %e,
+                        "could not reset the plan phase in PLAN.md; run `ta plan reset {}`",
+                        release.phase_id
+                    ),
+                }
+            }
+        }
+        self.claims.release(&release.phase_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

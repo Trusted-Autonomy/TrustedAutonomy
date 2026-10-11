@@ -1398,6 +1398,11 @@ fn main() -> anyhow::Result<()> {
 
 fn run() -> anyhow::Result<()> {
     let startup_begin = std::time::Instant::now();
+    // One enforcement point for plan-phase claims: GoalRunStore calls this
+    // whenever a goal stops holding its phase, whichever command saved it.
+    ta_goal::phase_release::register_releaser(std::sync::Arc::new(
+        commands::plan::CliPhaseClaimReleaser,
+    ));
     let cli = parse_cli_with_help_curation();
     let t_parse = startup_begin.elapsed();
 

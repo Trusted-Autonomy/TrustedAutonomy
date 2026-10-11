@@ -124,6 +124,16 @@ impl AppState {
                 None
             });
 
+        let phase_claims = Arc::new(PhaseClaims::new());
+        // Goals that stop holding their plan phase (completed with no draft,
+        // failed, closed, deleted, process death seen by the watchdog) give
+        // the claim back through the goal store, not through each caller.
+        ta_goal::phase_release::register_releaser(Arc::new(
+            crate::phase_claim::DaemonPhaseReleaser {
+                claims: phase_claims.clone(),
+            },
+        ));
+
         Self {
             pr_packages_dir: ta_dir.join("pr_packages"),
             memory_dir: ta_dir.join("memory"),
@@ -139,7 +149,7 @@ impl AppState {
             bootstrap_sessions: project_new::BootstrapSessionManager::new(),
             persistent_qa,
             active_project_root: Arc::new(std::sync::RwLock::new(project_root.clone())),
-            phase_claims: Arc::new(PhaseClaims::new()),
+            phase_claims,
             signals_cache: Arc::new(health_signals::SignalsCache::default()),
             status_cache: Arc::new(status::StatusCache::new()),
             plan_cache: Arc::new(plan::PlanCache::new()),

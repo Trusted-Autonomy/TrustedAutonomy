@@ -916,7 +916,8 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
 
     let signals = super::health_signals::compute_health_signals(config);
     let vcs_gaps = vcs_gitignore_gaps(config);
-    let total = signals.len() + usize::from(!vcs_gaps.is_empty());
+    let orphans = find_orphaned_claims(config);
+    let total = signals.len() + usize::from(!vcs_gaps.is_empty()) + orphans.len();
 
     if total == 0 {
         println!("No health issues detected — nothing to fix.");
@@ -960,6 +961,51 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
                 Err(e) => {
                     println!("  ✗ Failed: {}", e);
                 }
+            }
+        } else {
+            println!("  Skipped.");
+            skipped += 1;
+        }
+        println!();
+    }
+
+    // Orphaned plan-phase claims: show the exact PLAN.md lines first.
+    for orphan in &orphans {
+        println!(
+            "[warn] Phase {} is in_progress but no live goal holds it{}",
+            orphan.phase_id,
+            if orphan.adhoc_stub {
+                " (ad-hoc stub)"
+            } else {
+                ""
+            }
+        );
+        for line in &orphan.plan_lines {
+            println!("       {}", line);
+        }
+        println!("  Fix: {}", orphan_fix_description(orphan));
+
+        let should_fix = if yes {
+            println!("  → Applying (--yes)");
+            true
+        } else {
+            print!("  Apply fix? [y/N]: ");
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            input.trim().eq_ignore_ascii_case("y")
+        };
+
+        if should_fix {
+            match fix_orphaned_claim(config, orphan) {
+                Ok(msg) => {
+                    println!("  ✓ {}", msg);
+                    fixed += 1;
+                }
+                Err(e) => println!(
+                    "  ✗ Failed: {}. Run `ta plan reset {}` or edit PLAN.md by hand.",
+                    e, orphan.phase_id
+                ),
             }
         } else {
             println!("  Skipped.");
@@ -1588,78 +1634,202 @@ fn check_links(config: &GatewayConfig) -> Vec<CheckResult> {
 
 // ── Orphaned in_progress phase check (v0.16.1.6.1) ───────────────────────────
 
-/// Detect PLAN.md phases that are marked `in_progress` but have no live goal claim.
-///
-/// An `in_progress` marker with no active goal means a previous run was interrupted
-/// or denied without properly resetting the status. This blocks future `ta run --phase`
-/// calls with a confusing "already claimed" error.
-///
-/// Emits a [warn] for each orphaned phase, with a fix hint to reset it manually.
-fn check_orphaned_in_progress_phases(config: &GatewayConfig) -> Vec<CheckResult> {
-    use ta_goal::{GoalRunState, GoalRunStore};
+/// A phase PLAN.md says is `in_progress` while no live goal holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanedClaim {
+    phase_id: String,
+    title: String,
+    /// An ad-hoc stub `ta run` inserted (`*Inserted goal*` note, nothing else
+    /// under its heading): removing it is cleaner than resetting it.
+    adhoc_stub: bool,
+    /// 1-based PLAN.md line of the phase heading.
+    heading_line: usize,
+    /// The exact PLAN.md lines the fix touches, as `line: text`.
+    plan_lines: Vec<String>,
+}
 
-    let plan_path = config.workspace_root.join("PLAN.md");
-    if !plan_path.exists() {
-        return Vec::new();
-    }
+const ADHOC_STUB_NOTE: &str = "*Inserted goal \u{2014} not in original plan.*";
 
-    let content = match std::fs::read_to_string(&plan_path) {
+/// Heading line index (0-based) of `phase_id`, if present.
+fn phase_heading_index(lines: &[&str], phase_id: &str) -> Option<usize> {
+    lines.iter().position(|l| {
+        let t = l.trim_start();
+        t.starts_with("###")
+            && t.trim_start_matches('#')
+                .trim_start()
+                .split(|c: char| c.is_whitespace())
+                .next()
+                .is_some_and(|tok| tok == phase_id)
+    })
+}
+
+/// Index range `(heading, end)` of a phase block: from its heading to the
+/// next heading or separator (exclusive).
+fn phase_block(lines: &[&str], heading: usize) -> (usize, usize) {
+    let end = lines[heading + 1..]
+        .iter()
+        .position(|l| l.starts_with('#') || l.trim() == "---")
+        .map(|i| heading + 1 + i)
+        .unwrap_or(lines.len());
+    (heading, end)
+}
+
+/// Phases PLAN.md marks `in_progress` that no live goal holds. A goal holds
+/// its phase until it reaches a state that ends the claim (completed, failed,
+/// closed, applied, merged), so a phase held only by finished goals, or by
+/// none, is orphaned.
+fn find_orphaned_claims(config: &GatewayConfig) -> Vec<OrphanedClaim> {
+    use ta_goal::GoalRunStore;
+
+    let content = match std::fs::read_to_string(config.workspace_root.join("PLAN.md")) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-
-    // Collect all phases with in_progress status.
-    let in_progress_phases: Vec<_> = super::plan::parse_plan(&content)
+    let in_progress: Vec<_> = super::plan::parse_plan(&content)
         .into_iter()
         .filter(|p| matches!(p.status, super::plan::PlanStatus::InProgress))
         .collect();
-
-    if in_progress_phases.is_empty() {
+    if in_progress.is_empty() {
         return Vec::new();
     }
-
-    // Load all active goals to check which phases have live claims.
-    let active_phase_ids: std::collections::HashSet<String> = GoalRunStore::new(&config.goals_dir)
+    let held: std::collections::HashSet<String> = GoalRunStore::new(&config.goals_dir)
         .ok()
         .and_then(|store| store.list().ok())
         .unwrap_or_default()
         .into_iter()
-        .filter(|g| {
-            matches!(
-                g.state,
-                GoalRunState::Running
-                    | GoalRunState::Configured
-                    | GoalRunState::PrReady
-                    | GoalRunState::UnderReview
-                    | GoalRunState::Approved { .. }
-                    | GoalRunState::Finalizing { .. }
-                    | GoalRunState::DraftPending { .. }
-                    | GoalRunState::AwaitingInput { .. }
-            )
-        })
+        .filter(|g| !ta_goal::phase_release::state_ends_claim(&g.state))
         .filter_map(|g| g.plan_phase)
         .collect();
 
-    let mut results = Vec::new();
-    for phase in in_progress_phases {
-        if !active_phase_ids.contains(&phase.id) {
-            results.push(CheckResult::warn(
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    for phase in in_progress {
+        if held.contains(&phase.id) {
+            continue;
+        }
+        let Some(h) = phase_heading_index(&lines, &phase.id) else {
+            out.push(OrphanedClaim {
+                phase_id: phase.id.clone(),
+                title: phase.title.clone(),
+                adhoc_stub: false,
+                heading_line: 0,
+                plan_lines: Vec::new(),
+            });
+            continue;
+        };
+        let (_, end) = phase_block(&lines, h);
+        let body: Vec<&str> = lines[h + 1..end]
+            .iter()
+            .copied()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        let adhoc_stub = body.len() == 2
+            && body[0].trim().starts_with("<!-- status:")
+            && body[1].trim() == ADHOC_STUB_NOTE;
+        let shown_end = end.min(h + 4);
+        out.push(OrphanedClaim {
+            phase_id: phase.id.clone(),
+            title: phase.title.clone(),
+            adhoc_stub,
+            heading_line: h + 1,
+            plan_lines: (h..shown_end)
+                .map(|i| format!("PLAN.md:{}: {}", i + 1, lines[i]))
+                .collect(),
+        });
+    }
+    out
+}
+
+/// What the fix will do, in words, for the prompt and the warning.
+fn orphan_fix_description(o: &OrphanedClaim) -> String {
+    if o.adhoc_stub {
+        format!(
+            "remove the ad-hoc stub for {} from PLAN.md (it holds nothing but the inserted-goal \
+             note)",
+            o.phase_id
+        )
+    } else {
+        format!(
+            "reset {} from in_progress to pending in PLAN.md and release any daemon claim",
+            o.phase_id
+        )
+    }
+}
+
+/// Detect PLAN.md phases that are marked `in_progress` but have no live goal claim.
+///
+/// An `in_progress` marker with no active goal means a previous run was interrupted
+/// or ended without releasing the phase (an ad-hoc `v0.0.0.N` stub from a chat run
+/// is the classic case). It blocks every later `ta run` that links the phase with
+/// "already in progress". Each orphan is reported with the exact PLAN.md lines the
+/// fix would change; `ta doctor --fix` resets it (or removes an ad-hoc stub).
+fn check_orphaned_in_progress_phases(config: &GatewayConfig) -> Vec<CheckResult> {
+    find_orphaned_claims(config)
+        .into_iter()
+        .map(|o| {
+            let shown = if o.plan_lines.is_empty() {
+                "(heading not found in PLAN.md; edit the status by hand)".to_string()
+            } else {
+                o.plan_lines.join("\n")
+            };
+            CheckResult::warn(
                 "Plan phase",
                 format!(
-                    "Phase {} is marked in_progress but has no active goal",
-                    phase.id
+                    "Phase {} is marked in_progress but has no active goal{}",
+                    o.phase_id,
+                    if o.adhoc_stub { " (ad-hoc stub)" } else { "" }
                 ),
                 format!(
-                    "Reset it manually:\n\
-                     \x20  ta plan reset-phase {} --to pending\n\
-                     or edit PLAN.md and change \"in_progress\" \u{2192} \"pending\" for this phase.\n\
-                     Cause: a previous goal was denied or interrupted without resetting the phase.",
-                    phase.id
+                    "{shown}\n\
+                     Fix: `ta doctor --fix` will {}.\n\
+                     Or by hand: `ta plan reset {}`.\n\
+                     Cause: a goal ended without releasing the phase.",
+                    orphan_fix_description(&o),
+                    o.phase_id
                 ),
+            )
+        })
+        .collect()
+}
+
+/// Apply the fix for one orphaned claim. Returns what was done.
+fn fix_orphaned_claim(config: &GatewayConfig, o: &OrphanedClaim) -> anyhow::Result<String> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    if o.adhoc_stub {
+        let content = std::fs::read_to_string(&plan_path)?;
+        let lines: Vec<&str> = content.lines().collect();
+        if let Some(h) = phase_heading_index(&lines, &o.phase_id) {
+            let (_, end) = phase_block(&lines, h);
+            // The blank line the stub was inserted with goes too.
+            let start = if h > 0 && lines[h - 1].trim().is_empty() {
+                h - 1
+            } else {
+                h
+            };
+            let mut kept: Vec<&str> = lines[..start].to_vec();
+            kept.extend_from_slice(&lines[end..]);
+            let mut updated = kept.join("\n");
+            if content.ends_with('\n') {
+                updated.push('\n');
+            }
+            std::fs::write(&plan_path, updated)?;
+            super::plan::release_daemon_phase_claim(&config.workspace_root, &o.phase_id);
+            return Ok(format!(
+                "Removed the ad-hoc stub {} from PLAN.md (lines {}-{})",
+                o.phase_id,
+                start + 1,
+                end
             ));
         }
     }
-    results
+    let note = "phase reset to pending (orphaned claim found by ta doctor --fix)";
+    let reset = super::plan::reset_phase_if_in_progress(&config.workspace_root, &o.phase_id, note)?;
+    super::plan::release_daemon_phase_claim(&config.workspace_root, &o.phase_id);
+    Ok(if reset {
+        format!("Reset {} to pending in PLAN.md", o.phase_id)
+    } else {
+        format!("{} was no longer in_progress; nothing to reset", o.phase_id)
+    })
 }
 
 // ── Stale PID file check (v0.16.1.8) ─────────────────────────────────────────
@@ -2539,6 +2709,82 @@ mod tests {
         assert_eq!(results[0].status, CheckStatus::Warn);
         assert!(results[0].detail.contains("v0.1.0"));
         assert!(!results[0].fix.is_empty(), "should have a fix hint");
+    }
+
+    // ── Orphaned claims (v0.17.11.30) ────────────────────────────────────────
+
+    const ORPHAN_PLAN: &str = "# Plan\n\n### v0.1.0 \u{2014} Done phase\n<!-- status: done -->\n\nBody.\n\n\
+### v0.1.0.1 \u{2014} Answer a question\n<!-- status: in_progress -->\n*Inserted goal \u{2014} not in original plan.*\n\n\
+### v0.2.0 \u{2014} Real phase\n<!-- status: in_progress -->\n\nReal work.\n";
+
+    #[test]
+    fn doctor_finds_an_orphaned_adhoc_stub_and_shows_the_exact_lines() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        std::fs::write(dir.path().join("PLAN.md"), ORPHAN_PLAN).unwrap();
+
+        let found = find_orphaned_claims(&config);
+        assert_eq!(found.len(), 2, "{found:?}");
+        let stub = found.iter().find(|o| o.phase_id == "v0.1.0.1").unwrap();
+        assert!(stub.adhoc_stub);
+        assert_eq!(stub.heading_line, 8);
+        assert!(stub.plan_lines[0].starts_with("PLAN.md:8: ### v0.1.0.1"));
+        assert!(stub.plan_lines[1].contains("status: in_progress"));
+        let real = found.iter().find(|o| o.phase_id == "v0.2.0").unwrap();
+        assert!(!real.adhoc_stub, "a phase with real content is not a stub");
+
+        let results = check_orphaned_in_progress_phases(&config);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].fix.contains("PLAN.md:"), "{}", results[0].fix);
+        assert!(results[0].fix.contains("ta doctor --fix"));
+    }
+
+    #[test]
+    fn doctor_fix_removes_the_stub_and_resets_a_real_phase() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        std::fs::write(dir.path().join("PLAN.md"), ORPHAN_PLAN).unwrap();
+
+        for orphan in find_orphaned_claims(&config) {
+            let msg = fix_orphaned_claim(&config, &orphan).unwrap();
+            assert!(msg.contains(&orphan.phase_id), "{msg}");
+        }
+        let plan = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert!(!plan.contains("v0.1.0.1"), "stub removed: {plan}");
+        assert!(!plan.contains("Inserted goal"), "{plan}");
+        assert!(plan.contains("### v0.2.0"), "real phase kept: {plan}");
+        assert!(plan.contains("Real work."));
+        assert!(!plan.contains("in_progress"), "{plan}");
+        assert!(plan.contains("### v0.1.0 \u{2014} Done phase\n<!-- status: done -->"));
+        assert!(find_orphaned_claims(&config).is_empty());
+    }
+
+    #[test]
+    fn a_phase_held_by_a_live_goal_is_not_orphaned_but_a_finished_goal_does_not_hold() {
+        use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        std::fs::write(
+            dir.path().join("PLAN.md"),
+            "### v0.2.0 \u{2014} Real phase\n<!-- status: in_progress -->\n",
+        )
+        .unwrap();
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut g = GoalRun::new(
+            "t",
+            "o",
+            "a",
+            dir.path().join("ws"),
+            dir.path().join("store"),
+        );
+        g.plan_phase = Some("v0.2.0".into());
+        g.state = GoalRunState::Running;
+        store.save(&g).unwrap();
+        assert!(find_orphaned_claims(&config).is_empty());
+
+        g.state = GoalRunState::Completed;
+        store.save(&g).unwrap();
+        assert_eq!(find_orphaned_claims(&config).len(), 1);
     }
 
     // ── Stale PID file checks (v0.16.1.8) ────────────────────────────────────

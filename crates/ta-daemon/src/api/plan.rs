@@ -768,31 +768,28 @@ pub async fn claim_phase(
             // PLAN.md in_progress + in-memory claim held → genuine concurrent run,
             // block and surface recovery options.
             Some("in_progress") if state.phase_claims.is_claimed(&phase_id) => {
-                let goal_hint = state
+                let claimed_goal = state
                     .phase_claims
                     .snapshot()
                     .into_iter()
                     .find(|(k, _)| k == &phase_id)
-                    .and_then(|(_, g)| g)
-                    .map(|g| format!("goal {}", g))
-                    .unwrap_or_else(|| "unknown goal".to_string());
+                    .and_then(|(_, g)| g);
+                let holder =
+                    find_claim_holder(&state.goals_dir, &phase_id, claimed_goal.as_deref());
+                tracing::warn!(
+                    phase = %phase_id,
+                    held_by = ?holder,
+                    "phase claim refused: the phase is already in progress"
+                );
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({
-                        "error": format!(
-                            "Phase {} could not be claimed: already in progress ({}). \
-                             If the previous run was killed or failed before producing a draft, \
-                             run `ta goal delete <id>` or `ta plan reset {}` to reclaim it.",
-                            phase_id, goal_hint, phase_id
-                        ),
+                        "error": claim_conflict_message(&phase_id, holder.as_ref()),
                         "hint": {
                             "phase_id": phase_id,
-                            "held_by": goal_hint,
-                            "recovery": [
-                                "ta goal list   # find the stuck goal ID",
-                                format!("ta goal delete <id>       # delete goal + auto-unclaim"),
-                                format!("ta plan reset {}          # force-clear if goal is gone", phase_id),
-                            ]
+                            "held_by": holder.as_ref().map(|h| h.goal_id.clone()),
+                            "held_by_state": holder.as_ref().map(|h| h.state.clone()),
+                            "recovery": claim_recovery_steps(&phase_id, holder.as_ref()),
                         }
                     })),
                 )
@@ -861,6 +858,92 @@ pub async fn claim_phase(
         Json(serde_json::json!({ "status": "claimed", "phase_id": phase_id })),
     )
         .into_response()
+}
+
+/// The goal that holds a phase claim, as far as the goal store can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaimHolder {
+    pub goal_id: String,
+    pub state: String,
+}
+
+/// Find who holds `phase_id`. A claim made with a goal id names it directly
+/// (its record's state, or `missing` if the record is gone). A claim made
+/// before its goal existed (the pre-staging claim carries no goal id) is
+/// matched to the newest goal linked to the phase that still holds it. `None`
+/// means no live goal holds the phase: the run that claimed it ended without
+/// releasing it.
+pub(crate) fn find_claim_holder(
+    goals_dir: &std::path::Path,
+    phase_id: &str,
+    claimed_goal: Option<&str>,
+) -> Option<ClaimHolder> {
+    let store = ta_goal::GoalRunStore::new(goals_dir).ok()?;
+    if let Some(id) = claimed_goal {
+        let state = uuid::Uuid::parse_str(id)
+            .ok()
+            .and_then(|u| store.get(u).ok().flatten())
+            .map(|g| g.state.to_string())
+            .unwrap_or_else(|| "missing (goal record deleted)".to_string());
+        return Some(ClaimHolder {
+            goal_id: id.to_string(),
+            state,
+        });
+    }
+    store
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|g| {
+            g.plan_phase
+                .as_deref()
+                .is_some_and(|p| ids_match(p, phase_id))
+                && !ta_goal::phase_release::state_ends_claim(&g.state)
+        })
+        .map(|g| ClaimHolder {
+            goal_id: g.goal_run_id.to_string(),
+            state: g.state.to_string(),
+        })
+}
+
+/// The 409 text for a refused claim. Names the holder and the two ways out.
+/// Keeps the `could not be claimed` wording the wake listener classifies on.
+pub(crate) fn claim_conflict_message(phase_id: &str, holder: Option<&ClaimHolder>) -> String {
+    match holder {
+        Some(h) => format!(
+            "Phase {phase_id} could not be claimed: already in progress, held by goal {} \
+             (state: {}). Two ways out: finish or close that goal (`ta goal status {}`, then \
+             `ta draft close` or `ta goal delete {}`), or release the claim with \
+             `ta plan reset {phase_id}`.",
+            h.goal_id, h.state, h.goal_id, h.goal_id
+        ),
+        None => format!(
+            "Phase {phase_id} could not be claimed: already in progress, but no live goal holds \
+             it (the run that claimed it ended without releasing it). Release the claim with \
+             `ta plan reset {phase_id}`, or run `ta doctor --fix` to find and reset every \
+             orphaned claim."
+        ),
+    }
+}
+
+fn claim_recovery_steps(phase_id: &str, holder: Option<&ClaimHolder>) -> Vec<String> {
+    match holder {
+        Some(h) => vec![
+            format!(
+                "ta goal status {}   # see what the holder is doing",
+                h.goal_id
+            ),
+            format!(
+                "ta goal delete {}   # delete the goal and release its claim",
+                h.goal_id
+            ),
+            format!("ta plan reset {phase_id}   # release the claim without touching the goal"),
+        ],
+        None => vec![
+            "ta doctor --fix   # find and reset orphaned claims".to_string(),
+            format!("ta plan reset {phase_id}   # release this claim"),
+        ],
+    }
 }
 
 /// Runs synchronous `PlanStore` work on Tokio's blocking pool instead of an
@@ -1890,6 +1973,68 @@ Future work.
             Some(states),
             "goals scan should be served from cache within the TTL window"
         );
+    }
+
+    // ---- v0.17.11.30: claim failures name the holder ----
+
+    #[test]
+    fn claim_conflict_names_the_holding_goal_and_both_ways_out() {
+        let h = ClaimHolder {
+            goal_id: "0aa0bc9f-0000-4000-8000-000000000001".into(),
+            state: "running".into(),
+        };
+        let msg = claim_conflict_message("v0.17.12", Some(&h));
+        assert!(msg.contains("could not be claimed"), "{msg}");
+        assert!(msg.contains(&h.goal_id), "{msg}");
+        assert!(msg.contains("state: running"), "{msg}");
+        assert!(msg.contains("ta goal delete"), "{msg}");
+        assert!(msg.contains("ta plan reset v0.17.12"), "{msg}");
+        assert!(!msg.contains("unknown goal"), "{msg}");
+    }
+
+    #[test]
+    fn claim_conflict_without_a_live_holder_says_so_and_points_at_doctor() {
+        let msg = claim_conflict_message("v0.0.0.3", None);
+        assert!(msg.contains("could not be claimed"), "{msg}");
+        assert!(msg.contains("no live goal holds it"), "{msg}");
+        assert!(msg.contains("ta doctor --fix"), "{msg}");
+        assert!(!msg.contains("unknown goal"), "{msg}");
+    }
+
+    #[test]
+    fn holder_lookup_uses_the_claimed_goal_or_the_newest_live_goal_on_the_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        let store = ta_goal::GoalRunStore::new(&goals_dir).unwrap();
+        let mut g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "a",
+            dir.path().join("ws"),
+            dir.path().join("store"),
+        );
+        g.plan_phase = Some("v1.2.3".into());
+        g.state = ta_goal::GoalRunState::Running;
+        store.save(&g).unwrap();
+        let id = g.goal_run_id.to_string();
+
+        // Claim carries a goal id.
+        let h = find_claim_holder(&goals_dir, "v1.2.3", Some(&id)).unwrap();
+        assert_eq!(
+            (h.goal_id.as_str(), h.state.as_str()),
+            (id.as_str(), "running")
+        );
+        // Pre-staging claim with no goal id: matched by phase.
+        let h = find_claim_holder(&goals_dir, "v1.2.3", None).unwrap();
+        assert_eq!(h.goal_id, id);
+        // A deleted record is reported, not hidden.
+        let ghost = uuid::Uuid::new_v4().to_string();
+        let h = find_claim_holder(&goals_dir, "v1.2.3", Some(&ghost)).unwrap();
+        assert!(h.state.contains("missing"), "{}", h.state);
+        // Once the goal ends, nothing holds the phase.
+        g.state = ta_goal::GoalRunState::Completed;
+        store.save(&g).unwrap();
+        assert_eq!(find_claim_holder(&goals_dir, "v1.2.3", None), None);
     }
 }
 

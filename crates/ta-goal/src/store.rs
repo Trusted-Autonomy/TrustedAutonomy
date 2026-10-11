@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::error::GoalError;
 use crate::goal_run::{slugify_title, GoalRun, GoalRunState};
+use crate::phase_release;
 
 /// Persistent store for GoalRun records.
 ///
@@ -35,14 +36,59 @@ impl GoalRunStore {
     }
 
     /// Save a GoalRun to disk (creates or overwrites).
+    ///
+    /// This is the single enforcement point for releasing a plan-phase claim
+    /// (see `phase_release`): a save that moves a goal INTO a state that ends
+    /// its claim releases it, whichever caller made the save.
     pub fn save(&self, goal_run: &GoalRun) -> Result<(), GoalError> {
         let path = self.goal_file(goal_run.goal_run_id);
+        let previous = self.get(goal_run.goal_run_id).ok().flatten();
         let json = serde_json::to_string_pretty(goal_run)?;
         fs::write(&path, json).map_err(|source| GoalError::IoError {
             path: path.display().to_string(),
             source,
         })?;
+        let ends_claim_now = phase_release::state_ends_claim(&goal_run.state);
+        let held_before = previous
+            .as_ref()
+            .is_some_and(|p| !phase_release::state_ends_claim(&p.state));
+        if ends_claim_now && held_before && goal_run.plan_phase.is_some() {
+            self.release_claim(
+                goal_run,
+                phase_release::ReleaseTrigger::State(goal_run.state.to_string()),
+                phase_release::plan_reset_warranted(goal_run),
+            );
+        }
         Ok(())
+    }
+
+    /// Release `goal`'s phase claim unless another live goal on the same
+    /// phase (a follow-up, a retry) still holds it.
+    fn release_claim(
+        &self,
+        goal: &GoalRun,
+        trigger: phase_release::ReleaseTrigger,
+        reset_plan: bool,
+    ) {
+        let Some(phase) = goal.plan_phase.as_deref() else {
+            return;
+        };
+        let other_holder = self.list().unwrap_or_default().into_iter().find(|g| {
+            g.goal_run_id != goal.goal_run_id
+                && g.plan_phase.as_deref() == Some(phase)
+                && !phase_release::state_ends_claim(&g.state)
+        });
+        if let Some(other) = other_holder {
+            tracing::info!(
+                goal_id = %goal.goal_run_id,
+                phase = %phase,
+                held_by = %other.goal_run_id,
+                held_by_state = %other.state,
+                "keeping the plan-phase claim: another live goal still holds this phase"
+            );
+            return;
+        }
+        phase_release::release(goal, trigger, reset_plan);
     }
 
     /// Get a specific GoalRun by ID.
@@ -206,10 +252,18 @@ impl GoalRunStore {
         if !path.exists() {
             return Ok(false);
         }
+        let removed = self.get(goal_run_id).ok().flatten();
         fs::remove_file(&path).map_err(|source| GoalError::IoError {
             path: path.display().to_string(),
             source,
         })?;
+        // A goal deleted while it still held its phase gives the claim up.
+        if let Some(goal) = removed {
+            if goal.plan_phase.is_some() && !phase_release::state_ends_claim(&goal.state) {
+                let reset = !matches!(goal.state, GoalRunState::Applied | GoalRunState::Merged);
+                self.release_claim(&goal, phase_release::ReleaseTrigger::Deleted, reset);
+            }
+        }
         Ok(true)
     }
 
@@ -233,6 +287,148 @@ mod tests {
             PathBuf::from("/tmp/staging"),
             PathBuf::from("/tmp/store"),
         )
+    }
+
+    // ---- v0.17.11.30: one enforcement point for phase claims ----
+
+    use crate::phase_release::{PhaseClaimReleaser, PhaseRelease, ThreadReleaserGuard};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<PhaseRelease>>);
+
+    impl PhaseClaimReleaser for Recorder {
+        fn release(&self, release: &PhaseRelease) {
+            self.0.lock().unwrap().push(release.clone());
+        }
+    }
+
+    fn goal_on_phase(store: &GoalRunStore, phase: &str) -> GoalRun {
+        let mut g = make_goal_run("phase goal");
+        g.plan_phase = Some(phase.to_string());
+        g.state = GoalRunState::Running;
+        store.save(&g).unwrap();
+        g
+    }
+
+    #[test]
+    fn every_terminal_state_releases_the_claim() {
+        let terminal: Vec<(GoalRunState, bool)> = vec![
+            (GoalRunState::Completed, true),
+            (GoalRunState::Failed { reason: "x".into() }, true),
+            (
+                GoalRunState::Closed {
+                    reason: None,
+                    applied_externally_ref: None,
+                },
+                true,
+            ),
+            (
+                GoalRunState::Closed {
+                    reason: None,
+                    applied_externally_ref: Some("PR #1".into()),
+                },
+                false,
+            ),
+            (GoalRunState::Applied, false),
+            (GoalRunState::Merged, false),
+        ];
+        for (state, resets_plan) in terminal {
+            let dir = tempdir().unwrap();
+            let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+            let rec = Arc::new(Recorder::default());
+            let _guard = ThreadReleaserGuard::set(rec.clone());
+            let mut g = goal_on_phase(&store, "v1.0.0");
+            g.state = state.clone();
+            store.save(&g).unwrap();
+            let seen = rec.0.lock().unwrap();
+            assert_eq!(seen.len(), 1, "state {state} must release exactly once");
+            assert_eq!(seen[0].phase_id, "v1.0.0");
+            assert_eq!(seen[0].goal_id, g.goal_run_id);
+            assert_eq!(seen[0].reset_plan, resets_plan, "state {state}");
+        }
+    }
+
+    #[test]
+    fn completed_with_a_draft_releases_the_claim_but_keeps_the_plan_status() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+        let rec = Arc::new(Recorder::default());
+        let _guard = ThreadReleaserGuard::set(rec.clone());
+        let mut g = goal_on_phase(&store, "v1.0.0");
+        g.pr_package_id = Some(Uuid::new_v4());
+        g.state = GoalRunState::Completed;
+        store.save(&g).unwrap();
+        let seen = rec.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].reset_plan);
+    }
+
+    #[test]
+    fn non_terminal_saves_and_repeat_saves_do_not_release() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+        let rec = Arc::new(Recorder::default());
+        let _guard = ThreadReleaserGuard::set(rec.clone());
+        let mut g = goal_on_phase(&store, "v1.0.0");
+        g.state = GoalRunState::PrReady;
+        store.save(&g).unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        g.state = GoalRunState::Completed;
+        store.save(&g).unwrap();
+        // A later progress-note style save of the finished goal must not
+        // release a claim another goal may hold by now.
+        store.save(&g).unwrap();
+        store.update_progress_note(g.goal_run_id, "note").unwrap();
+        assert_eq!(rec.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_goal_with_no_phase_never_releases() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+        let rec = Arc::new(Recorder::default());
+        let _guard = ThreadReleaserGuard::set(rec.clone());
+        let mut g = make_goal_run("chat goal");
+        g.state = GoalRunState::Running;
+        store.save(&g).unwrap();
+        g.state = GoalRunState::Completed;
+        store.save(&g).unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_goal_that_holds_its_phase_releases_the_claim() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+        let rec = Arc::new(Recorder::default());
+        let _guard = ThreadReleaserGuard::set(rec.clone());
+        let g = goal_on_phase(&store, "v1.0.0");
+        assert!(store.delete(g.goal_run_id).unwrap());
+        let seen = rec.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].trigger, phase_release::ReleaseTrigger::Deleted);
+        drop(seen);
+        // Deleting an already-finished goal releases nothing more.
+        let mut done = goal_on_phase(&store, "v1.0.1");
+        done.state = GoalRunState::Completed;
+        store.save(&done).unwrap();
+        let before = rec.0.lock().unwrap().len();
+        store.delete(done.goal_run_id).unwrap();
+        assert_eq!(rec.0.lock().unwrap().len(), before);
+    }
+
+    #[test]
+    fn another_live_goal_on_the_phase_keeps_the_claim() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+        let rec = Arc::new(Recorder::default());
+        let _guard = ThreadReleaserGuard::set(rec.clone());
+        let mut first = goal_on_phase(&store, "v1.0.0");
+        let _follow_up = goal_on_phase(&store, "v1.0.0");
+        first.state = GoalRunState::Failed { reason: "x".into() };
+        store.save(&first).unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
     }
 
     #[test]

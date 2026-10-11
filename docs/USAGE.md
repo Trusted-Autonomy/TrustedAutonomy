@@ -401,6 +401,12 @@ origin = "cos"
 
 A role whose origin is `cos` or `chat` always launches with `--chat-mode`, even if its persona forgot `chat_mode = true`. The daemon refuses to launch a role, and logs why, when its persona file cannot be read, when the persona and the role name different origins, or when a chat-mode launch would carry an origin that can be auto-approved.
 
+**Chat goals never claim a plan phase.** A chat-mode goal, or any goal whose origin is `cos` or `chat`, does not link a plan phase. `ta run` skips phase detection for it: no phase is guessed from the title or from an in-progress phase, no ad-hoc `v0.0.0.N` stub is added to `PLAN.md`, nothing is marked `in_progress`, and no "mark phase in_progress" commit is made. `PLAN.md` stays byte-for-byte as it was, and the goal still records its own state. A `--phase` passed to such a launch is ignored with a warning. To link a phase, run the work as a normal goal (no `--chat-mode`, an origin other than `cos` or `chat`).
+
+When any other goal that holds a phase stops holding it, the phase is released automatically, whichever command ended it. That covers completing without a draft, failing (including a run the watchdog sees die), closing, and deleting the goal. If no work landed, `PLAN.md` goes back from `in_progress` to `pending` and the daemon's claim is cleared. A goal whose work landed (applied, merged, or completed with a draft) leaves the phase for `ta draft apply --phase` to finish. If another live goal (such as a follow-up) is still on the same phase, the phase stays claimed.
+
+When a launch is refused because a phase is held, the error names the holding goal and its state, and the two ways out: finish or close that goal (`ta goal status <id>`, then `ta draft close` or `ta goal delete <id>`), or release the claim with `ta plan reset <phase>`. If no live goal holds it, the error says so and points to `ta doctor --fix`.
+
 **When a chat-mode session ends.** A chat-mode agent has no file-writing tools, so finishing without file changes is the normal outcome. `ta run` then marks the goal `completed`, prints `Chat session finished: no draft needed.`, and exits 0. Any other goal that ends with no changes still fails with `No changes detected in staging workspace.`
 
 **Where to find what a chat-mode agent did.** Every chat-mode goal keeps its record after the staging copy is deleted:
@@ -430,7 +436,7 @@ Any `ta run --objective-file <file>` launch, chat mode or not, also puts the fil
 
 **Wake-on-demand launches (the daemon starting a role when a message arrives).** Each launch writes everything `ta run` printed to `.ta/logs/wake-launches/<session>-<role>-<UTC time>-<message id>.log` (secrets redacted). When a launch fails, the daemon log shows the last 40 lines of its stderr and the path of that file.
 
-A failed launch is not retried straight away. The daemon waits 30 seconds, then 2 minutes, then 10 minutes between attempts, and after 3 failed attempts it stops: the message is acknowledged so it is never delivered again, a line is added to `.ta/wake-dead-letter.jsonl` (message id, session, role, attempts, the end of the last error, timestamps), an error is logged, and a `command_failed` event is emitted. The attempt count is kept in `.ta/wake-attempts/`, so restarting the daemon does not reset it. As a cost safety net, each listener also starts at most 6 launches in any hour; extra messages wait their turn rather than being dropped. All of these are set in `.ta/workflow.toml`:
+A failed launch is not retried straight away. The daemon waits 30 seconds, then 2 minutes, then 10 minutes between attempts. It does this by sending the transport a delayed negative acknowledgement for the message, so the retry comes at the time shown in the daemon log (`retry_at`) however long the ack wait is. After 3 failed attempts it stops: the message is acknowledged so it is never delivered again, a line is added to `.ta/wake-dead-letter.jsonl` (message id, session, role, attempts, the end of the last error, timestamps), an error is logged, and a `command_failed` event is emitted. The attempt count is kept in `.ta/wake-attempts/`, so restarting the daemon does not reset it. As a cost safety net, each listener also starts at most 6 launches in any hour; extra messages wait their turn rather than being dropped. All of these are set in `.ta/workflow.toml`:
 
 ```toml
 [whiteboard]
@@ -458,6 +464,8 @@ wake_ack_heartbeat_secs = 10          # optional; default is a third of the ack 
 ```
 
 The daemon refuses to start a listener whose settings conflict (for example an ack wait shorter than the launch timeout plus 60 seconds) and logs an error naming both settings. If you edit the file to a conflicting value while the daemon runs, the listener pauses with the same error and resumes once it is fixed; no message is lost.
+
+**Messages left pending survive a daemon restart.** When a listener starts, it looks in `.ta/wake-attempts/` for messages an earlier run launched but never finished, and asks the transport to deliver them again so none waits out the (long) ack wait. The daemon log lists what it found, with message ids: how many are due now, how many are still inside a backoff, how many are at the retry cap, and how many already finished. A due message is launched again; one still inside its backoff is handed back to the transport with the time that remains; one at the retry cap is dead-lettered and acknowledged without a launch; one already recorded in `.ta/wake-completed/` is acknowledged and skipped. The attempt count and the cap are never reset by a restart. If the transport cannot release them, the log says so and names `wake_ack_wait_secs`; restarting the daemon repeats the sweep. With the NATS transport, recovery recreates the listener's durable consumer from the oldest pending message, so later messages that were already acknowledged may arrive again; they are acknowledged and skipped because their sequence is recorded.
 
 To make a message run again on purpose, delete its entry from `.ta/wake-completed/<session>__<role>.json` (or the whole file), then re-send the message. A sequence recorded with a different message body than the one that arrives is treated as a new message, so recreating the stream does not suppress new work.
 
@@ -4257,6 +4265,8 @@ ta doctor --fix
 #
 # 2 fix(es) applied, 0 skipped.
 ```
+
+**Orphaned plan-phase claims.** `ta doctor` warns about every phase `PLAN.md` marks `in_progress` while no live goal holds it, and shows the exact `PLAN.md` lines (with line numbers) the fix would change. `ta doctor --fix` then offers, for each one, to reset the phase to `pending`, or, when it is an ad-hoc `v0.0.0.N` stub with nothing under its heading but the inserted-goal note, to remove the stub. Nothing is changed until you confirm (or pass `--yes`). To release one claim by hand, run `ta plan reset <phase>`.
 
 Stale-draft cleanup calls the same logic as `ta draft close --stale` directly (not a subprocess) — it only closes drafts already in `Approved`/`PendingReview` status that are older than `gc.stale_threshold_days`, and it's gated behind the same confirm/`--yes` prompt as every other `--fix` action.
 

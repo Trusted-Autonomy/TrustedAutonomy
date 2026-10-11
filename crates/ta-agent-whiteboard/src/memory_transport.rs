@@ -35,6 +35,9 @@ struct StreamState {
 
 #[derive(Default)]
 struct Inner {
+    /// Time added to the real clock by [`InMemoryTransport::advance`], so a
+    /// test can step past an ack wait or a nak delay without sleeping.
+    skew: Duration,
     kv: HashMap<String, HashMap<String, KvEntry>>,
     streams: HashMap<String, StreamState>,
 }
@@ -51,6 +54,20 @@ pub struct InMemoryTransport {
 impl InMemoryTransport {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Move this transport's clock forward by `by`. Every deadline it keeps
+    /// (KV expiry, ack wait, nak delay) is judged against the moved clock, so
+    /// a test of a 30 s, 2 m or 10 m retry (or a one-hour ack wait) runs in
+    /// microseconds and cannot flake.
+    pub fn advance(&self, by: Duration) {
+        self.inner.lock().unwrap().skew += by;
+    }
+}
+
+impl Inner {
+    fn now(&self) -> Instant {
+        Instant::now() + self.skew
     }
 }
 
@@ -72,12 +89,13 @@ impl WhiteboardTransport for InMemoryTransport {
         ttl: Option<Duration>,
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        let now = inner.now();
         let b = inner.kv.entry(bucket.to_string()).or_default();
         b.insert(
             key.to_string(),
             KvEntry {
                 value,
-                expires_at: ttl.map(|d| Instant::now() + d),
+                expires_at: ttl.map(|d| now + d),
             },
         );
         Ok(())
@@ -85,9 +103,10 @@ impl WhiteboardTransport for InMemoryTransport {
 
     async fn kv_create(&self, bucket: &str, key: &str, value: Vec<u8>) -> Result<bool> {
         let mut inner = self.inner.lock().unwrap();
+        let now = inner.now();
         let b = inner.kv.entry(bucket.to_string()).or_default();
         if let Some(existing) = b.get(key) {
-            if !is_expired(existing) {
+            if !is_expired(existing, now) {
                 return Ok(false);
             }
         }
@@ -103,11 +122,12 @@ impl WhiteboardTransport for InMemoryTransport {
 
     async fn kv_get(&self, bucket: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let inner = self.inner.lock().unwrap();
+        let now = inner.now();
         Ok(inner
             .kv
             .get(bucket)
             .and_then(|b| b.get(key))
-            .filter(|e| !is_expired(e))
+            .filter(|e| !is_expired(e, now))
             .map(|e| e.value.clone()))
     }
 
@@ -121,12 +141,13 @@ impl WhiteboardTransport for InMemoryTransport {
 
     async fn kv_list(&self, bucket: &str) -> Result<Vec<(String, Vec<u8>)>> {
         let inner = self.inner.lock().unwrap();
+        let now = inner.now();
         Ok(inner
             .kv
             .get(bucket)
             .map(|b| {
                 b.iter()
-                    .filter(|(_, e)| !is_expired(e))
+                    .filter(|(_, e)| !is_expired(e, now))
                     .map(|(k, e)| (k.clone(), e.value.clone()))
                     .collect()
             })
@@ -146,6 +167,7 @@ impl WhiteboardTransport for InMemoryTransport {
         consumer: &str,
     ) -> Result<Option<StreamEnvelope>> {
         let mut inner = self.inner.lock().unwrap();
+        let now = inner.now();
         let s = match inner.streams.get_mut(stream) {
             Some(s) => s,
             None => return Ok(None),
@@ -155,18 +177,16 @@ impl WhiteboardTransport for InMemoryTransport {
             return Ok(None);
         };
         if let Some((idx, deadline)) = s.in_flight.get(consumer) {
-            if *idx == cursor && Instant::now() < *deadline {
+            if *idx == cursor && now < *deadline {
                 // Still within its ack wait: leased to the earlier read.
                 return Ok(None);
             }
         }
         let ack_wait = s.ack_waits.get(consumer).copied().unwrap_or_default();
-        if ack_wait.is_zero() {
-            s.in_flight.remove(consumer);
-        } else {
-            s.in_flight
-                .insert(consumer.to_string(), (cursor, Instant::now() + ack_wait));
-        }
+        // Recorded even with no ack wait (the lease then ends at once), so a
+        // delayed nak can still find the delivery it applies to.
+        s.in_flight
+            .insert(consumer.to_string(), (cursor, now + ack_wait));
         Ok(Some(StreamEnvelope {
             msg_id: cursor.to_string(),
             payload: payload.clone(),
@@ -189,16 +209,60 @@ impl WhiteboardTransport for InMemoryTransport {
 
     async fn stream_ack_progress(&self, stream: &str, consumer: &str, msg_id: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        let now = inner.now();
         if let Some(s) = inner.streams.get_mut(stream) {
             let ack_wait = s.ack_waits.get(consumer).copied().unwrap_or_default();
             if let (Ok(idx), Some(entry)) = (msg_id.parse::<usize>(), s.in_flight.get_mut(consumer))
             {
                 if entry.0 == idx {
-                    entry.1 = Instant::now() + ack_wait;
+                    entry.1 = now + ack_wait;
                 }
             }
         }
         Ok(())
+    }
+
+    async fn stream_nak_delayed(
+        &self,
+        stream: &str,
+        consumer: &str,
+        msg_id: &str,
+        delay: Duration,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let now = inner.now();
+        if let (Some(s), Ok(idx)) = (inner.streams.get_mut(stream), msg_id.parse::<usize>()) {
+            // Only a message that is currently leased to this consumer can be
+            // nak'd; the delay replaces the rest of its ack wait.
+            if s.in_flight.get(consumer).is_some_and(|(i, _)| *i == idx) {
+                s.in_flight.insert(consumer.to_string(), (idx, now + delay));
+            }
+        }
+        Ok(())
+    }
+
+    async fn stream_recover_pending(
+        &self,
+        stream: &str,
+        consumer: &str,
+        msg_ids: &[String],
+    ) -> Result<usize> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(s) = inner.streams.get_mut(stream) else {
+            return Ok(0);
+        };
+        let wanted: Vec<usize> = msg_ids.iter().filter_map(|m| m.parse().ok()).collect();
+        // The cursor only ever sits on the oldest unacked message, so that is
+        // the only one that can be leased.
+        let leased = s
+            .in_flight
+            .get(consumer)
+            .is_some_and(|(idx, _)| wanted.contains(idx));
+        if leased {
+            s.in_flight.remove(consumer);
+            return Ok(1);
+        }
+        Ok(0)
     }
 
     async fn stream_set_ack_wait(
@@ -218,8 +282,8 @@ impl WhiteboardTransport for InMemoryTransport {
     }
 }
 
-fn is_expired(entry: &KvEntry) -> bool {
-    matches!(entry.expires_at, Some(t) if Instant::now() >= t)
+fn is_expired(entry: &KvEntry, now: Instant) -> bool {
+    matches!(entry.expires_at, Some(t) if now >= t)
 }
 
 #[cfg(test)]
@@ -398,5 +462,90 @@ mod tests {
         t.stream_append("s", b"m".to_vec()).await.unwrap();
         assert!(t.stream_read_next("s", "c").await.unwrap().is_some());
         assert!(t.stream_read_next("s", "c").await.unwrap().is_some());
+    }
+
+    const LONG_ACK_WAIT: Duration = Duration::from_secs(3660);
+
+    #[tokio::test]
+    async fn delayed_nak_redelivers_after_the_delay_not_the_long_ack_wait() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        t.stream_set_ack_wait("s", "c", LONG_ACK_WAIT)
+            .await
+            .unwrap();
+        let first = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        t.stream_nak_delayed("s", "c", &first.msg_id, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        t.advance(Duration::from_secs(29));
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        t.advance(Duration::from_secs(2));
+        let again = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        assert_eq!(first.msg_id, again.msg_id, "redelivery keeps the msg_id");
+    }
+
+    #[tokio::test]
+    async fn without_a_nak_the_long_ack_wait_holds_the_message() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        t.stream_set_ack_wait("s", "c", LONG_ACK_WAIT)
+            .await
+            .unwrap();
+        t.stream_read_next("s", "c").await.unwrap().unwrap();
+        t.advance(Duration::from_secs(600));
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        t.advance(Duration::from_secs(3100));
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delayed_nak_works_without_an_ack_wait_and_ignores_unknown_ids() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        let first = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        t.stream_nak_delayed("s", "c", "99", Duration::from_secs(5))
+            .await
+            .unwrap();
+        t.stream_nak_delayed("s", "c", &first.msg_id, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        t.advance(Duration::from_secs(6));
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_pending_releases_a_message_left_leased_by_an_earlier_run() {
+        let t = InMemoryTransport::new();
+        t.stream_append("s", b"m".to_vec()).await.unwrap();
+        t.stream_set_ack_wait("s", "c", LONG_ACK_WAIT)
+            .await
+            .unwrap();
+        let first = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        assert!(t.stream_read_next("s", "c").await.unwrap().is_none());
+        let n = t
+            .stream_recover_pending("s", "c", &["77".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "an id that is not leased is not counted");
+        let n = t
+            .stream_recover_pending("s", "c", std::slice::from_ref(&first.msg_id))
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let again = t.stream_read_next("s", "c").await.unwrap().unwrap();
+        assert_eq!(first.msg_id, again.msg_id);
+    }
+
+    #[tokio::test]
+    async fn kv_expiry_follows_the_controllable_clock() {
+        let t = InMemoryTransport::new();
+        t.kv_put("b", "k", b"v".to_vec(), Some(Duration::from_secs(60)))
+            .await
+            .unwrap();
+        assert!(t.kv_get("b", "k").await.unwrap().is_some());
+        t.advance(Duration::from_secs(61));
+        assert!(t.kv_get("b", "k").await.unwrap().is_none());
     }
 }

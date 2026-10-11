@@ -27,6 +27,15 @@
 //   (3) a launch that fails because its phase is already done or already
 //   claimed is told apart from a real failure.
 //
+// - Retry timing no longer rides on the ack wait (v0.17.11.30). v0.17.11.28
+//   raised the ack wait to the launch timeout plus a margin (about an hour),
+//   so a failed launch that was merely left unacked was not redelivered for
+//   an hour, and a daemon restart did not redeliver it either. A failed
+//   launch now sends a negative ack WITH A DELAY (30s, 2m, 10m by default),
+//   which the transport honors whatever the ack wait is. At listener start
+//   `recover_pending` releases messages an earlier run left pending, so none
+//   is stranded across a restart.
+//
 // All decisions take an explicit `now` so they are unit-testable without a
 // real clock.
 
@@ -241,6 +250,14 @@ impl AttemptStore {
     pub fn get(&self, key: &str, msg_id: &str) -> Option<AttemptRecord> {
         let _g = Self::lock();
         self.load_all().remove(&Self::record_key(key, msg_id))
+    }
+
+    /// Every record in this listener's file, oldest attempt first.
+    pub fn list(&self) -> Vec<AttemptRecord> {
+        let _g = Self::lock();
+        let mut all: Vec<AttemptRecord> = self.load_all().into_values().collect();
+        all.sort_by_key(|r| (r.first_attempt_at, r.msg_id.clone()));
+        all
     }
 
     pub fn put(&self, rec: &AttemptRecord) -> std::io::Result<()> {
@@ -734,7 +751,8 @@ where
         Completed(CompletedRecord),
         Launch(AttemptRecord),
         DeadLetter(AttemptRecord, bool),
-        Done(MessageOutcome),
+        /// Skipped for now; hand it back to the transport for `until`.
+        Delay(MessageOutcome, DateTime<Utc>, &'static str),
     }
     let completed_store = CompletedStore::for_listener(ids.project_root, ids.session, ids.role);
     let digest = payload_digest(&envelope.payload);
@@ -783,7 +801,11 @@ where
                     "wake_listener: message in retry backoff or being launched by a sibling, \
                      not launching"
                 );
-                Begin::Done(MessageOutcome::SkippedBackoff)
+                Begin::Delay(
+                    MessageOutcome::SkippedBackoff,
+                    until,
+                    "in retry backoff or being launched by a sibling",
+                )
             }
             Decision::Launch => {
                 if let Some(until) = rate.blocked_until(now, policy.max_launches_per_hour) {
@@ -799,7 +821,11 @@ where
                              in .ta/workflow.toml if this volume is expected."
                         );
                     }
-                    Begin::Done(MessageOutcome::SkippedRateLimited)
+                    Begin::Delay(
+                        MessageOutcome::SkippedRateLimited,
+                        until,
+                        "launch-rate cap reached",
+                    )
                 } else {
                     // Count the attempt BEFORE launching, so a daemon crash
                     // or restart in the middle of a launch still uses it up.
@@ -832,7 +858,11 @@ where
                                  launching, so an unrecorded attempt can never slip past the \
                                  retry cap. Check that .ta/ is writable."
                             );
-                            Begin::Done(MessageOutcome::SkippedBackoff)
+                            Begin::Delay(
+                                MessageOutcome::SkippedBackoff,
+                                now + chrono::Duration::seconds(30),
+                                "the attempt could not be recorded",
+                            )
                         }
                     }
                 }
@@ -847,7 +877,10 @@ where
         Begin::DeadLetter(rec, first) => {
             return dead_letter(transport, store, ids, envelope, rec, first, now).await
         }
-        Begin::Done(outcome) => return outcome,
+        Begin::Delay(outcome, until, why) => {
+            nak_until(transport, ids, envelope, until, now, why).await;
+            return outcome;
+        }
     };
 
     let launched = with_ack_progress(
@@ -952,12 +985,173 @@ where
                 max_attempts = policy.max_attempts,
                 retry_at = %rec.next_eligible_at,
                 error = %err,
-                "wake_listener: launch failed, message left unacked and will be retried after \
-                 backoff"
+                "wake_listener: launch failed; the message will be retried (attempt {} of {}). \
+                 Retry timing is set by wake_backoff_secs in [whiteboard] of .ta/workflow.toml.",
+                rec.attempts,
+                policy.max_attempts
             );
+            nak_until(
+                transport,
+                ids,
+                envelope,
+                rec.next_eligible_at,
+                failed_at,
+                "launch failed",
+            )
+            .await;
             MessageOutcome::LaunchFailed
         }
     }
+}
+
+/// Hand `envelope` back to the transport to be redelivered at `until` (at
+/// least one second from `now`), with a delayed nak. This is what makes retry
+/// timing independent of the consumer's ack wait. If the nak cannot be sent
+/// the message is still pending and comes back when the ack wait ends, which
+/// is later than intended, so that is logged with what to check.
+async fn nak_until(
+    transport: &dyn WhiteboardTransport,
+    ids: &ListenerIds<'_>,
+    envelope: &StreamEnvelope,
+    until: DateTime<Utc>,
+    now: DateTime<Utc>,
+    why: &str,
+) {
+    let delay = (until - now)
+        .to_std()
+        .unwrap_or_default()
+        .max(Duration::from_secs(1));
+    match transport
+        .stream_nak_delayed(ids.key, ids.consumer, &envelope.msg_id, delay)
+        .await
+    {
+        Ok(()) => tracing::info!(
+            session = %ids.session,
+            role = %ids.role,
+            key = %ids.key,
+            msg_id = %envelope.msg_id,
+            delay_secs = delay.as_secs(),
+            retry_at = %until,
+            reason = why,
+            "wake_listener: message handed back for redelivery in {}s ({why})",
+            delay.as_secs()
+        ),
+        Err(e) => tracing::warn!(
+            session = %ids.session,
+            role = %ids.role,
+            key = %ids.key,
+            msg_id = %envelope.msg_id,
+            delay_secs = delay.as_secs(),
+            error = %e,
+            "wake_listener: could not schedule the redelivery ({why}). The message stays \
+             pending and comes back only when the consumer's ack wait ends \
+             (wake_ack_wait_secs). It is also retried the next time the daemon restarts. \
+             Check the transport connection."
+        ),
+    }
+}
+
+/// What the startup sweep found for one listener.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoverySummary {
+    /// Messages whose retry was already due (they launch as soon as delivered).
+    pub due: Vec<String>,
+    /// Messages still inside their backoff; they are nak'd again with the
+    /// remaining delay when they arrive.
+    pub waiting: Vec<String>,
+    /// Messages at or over the attempt cap; they are dead-lettered on arrival.
+    pub dead_letter: Vec<String>,
+    /// Messages already recorded as finished whose ack never landed; they
+    /// are acked without a launch on arrival.
+    pub finished: Vec<String>,
+    /// How many of the above the transport released.
+    pub released: usize,
+}
+
+impl RecoverySummary {
+    pub fn total(&self) -> usize {
+        self.due.len() + self.waiting.len() + self.dead_letter.len() + self.finished.len()
+    }
+}
+
+/// Startup sweep: release the messages an earlier run of this listener left
+/// pending, so none is stranded behind the (long) ack wait. Attempt records
+/// name them. The sweep only releases; the normal per-message path then
+/// decides, so the retry cap, backoff, dead-letter and completed-sequence
+/// guards all still apply. Run it once per listener per daemon start, after
+/// the ack wait has been applied.
+#[allow(clippy::too_many_arguments)]
+pub async fn recover_pending(
+    transport: &dyn WhiteboardTransport,
+    project_root: &Path,
+    session: &str,
+    role: &str,
+    keys: &[String],
+    consumer: &str,
+    policy: &WakeRetryPolicy,
+    now: DateTime<Utc>,
+) -> RecoverySummary {
+    let store = AttemptStore::for_listener(project_root, session, role);
+    let completed = CompletedStore::for_listener(project_root, session, role);
+    let records = store.list();
+    let mut total = RecoverySummary::default();
+    for key in keys {
+        let mut sum = RecoverySummary::default();
+        let mut ids: Vec<String> = Vec::new();
+        for r in records.iter().filter(|r| &r.key == key) {
+            ids.push(r.msg_id.clone());
+            if completed.get(key, &r.msg_id).is_some() {
+                sum.finished.push(r.msg_id.clone());
+            } else if r.dead_lettered || r.attempts >= policy.max_attempts {
+                sum.dead_letter.push(r.msg_id.clone());
+            } else if now >= r.next_eligible_at {
+                sum.due.push(r.msg_id.clone());
+            } else {
+                sum.waiting.push(r.msg_id.clone());
+            }
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        match transport.stream_recover_pending(key, consumer, &ids).await {
+            Ok(n) => sum.released = n,
+            Err(e) => tracing::error!(
+                session = %session,
+                role = %role,
+                key = %key,
+                pending = ?ids,
+                error = %e,
+                "wake_listener: startup recovery could not release pending messages; they come \
+                 back only when the consumer's ack wait ends (wake_ack_wait_secs in [whiteboard] \
+                 of .ta/workflow.toml). Check the transport connection and restart the daemon \
+                 to retry the sweep."
+            ),
+        }
+        tracing::info!(
+            session = %session,
+            role = %role,
+            key = %key,
+            due = ?sum.due,
+            waiting = ?sum.waiting,
+            dead_letter = ?sum.dead_letter,
+            finished = ?sum.finished,
+            "wake_listener: startup recovery found {} pending message(s) from an earlier run \
+             ({} due now, {} waiting out a backoff, {} at the retry cap, {} already finished); \
+             the transport released {}",
+            sum.total(),
+            sum.due.len(),
+            sum.waiting.len(),
+            sum.dead_letter.len(),
+            sum.finished.len(),
+            sum.released
+        );
+        total.due.extend(sum.due);
+        total.waiting.extend(sum.waiting);
+        total.dead_letter.extend(sum.dead_letter);
+        total.finished.extend(sum.finished);
+        total.released += sum.released;
+    }
+    total
 }
 
 async fn dead_letter(
@@ -1069,13 +1263,26 @@ mod tests {
         policy: WakeRetryPolicy,
         rate: LaunchRateGuard,
         launches: Arc<AtomicU32>,
+        /// How far the transport's clock has been moved: it tracks the
+        /// synthetic `now` passed to `step`.
+        clock: DateTime<Utc>,
     }
 
     impl Harness {
         async fn new() -> Self {
             let transport = InMemoryTransport::new();
             transport.connect().await.unwrap();
+            // The production ack wait: launch timeout plus margin (3660 s).
+            transport
+                .stream_set_ack_wait(
+                    "intake",
+                    "wake-listener:chief-of-staff",
+                    WakeRetryPolicy::default().ack_wait,
+                )
+                .await
+                .unwrap();
             Self {
+                clock: t0(),
                 dir: tempfile::tempdir().unwrap(),
                 transport,
                 policy: WakeRetryPolicy::default(),
@@ -1091,6 +1298,10 @@ mod tests {
         /// Read the next message and process it with a launcher that
         /// succeeds or fails as told.
         async fn step(&mut self, now: DateTime<Utc>, succeed: bool) -> Option<MessageOutcome> {
+            if let Ok(d) = (now - self.clock).to_std() {
+                self.transport.advance(d);
+                self.clock = now;
+            }
             let env = self
                 .transport
                 .stream_read_next("intake", "wake-listener:chief-of-staff")
@@ -1141,11 +1352,9 @@ mod tests {
             h.step(t0(), false).await,
             Some(MessageOutcome::LaunchFailed)
         );
-        // Immediate redelivery (the live bug) must NOT relaunch.
-        assert_eq!(
-            h.step(t0() + secs(1), false).await,
-            Some(MessageOutcome::SkippedBackoff)
-        );
+        // The delayed nak holds the message back: nothing is redelivered
+        // (and so nothing relaunched) inside the 30s backoff.
+        assert_eq!(h.step(t0() + secs(1), false).await, None);
         assert_eq!(h.launches.load(Ordering::SeqCst), 1);
 
         // After the first 30s backoff: attempt 2 fails.
@@ -1154,10 +1363,7 @@ mod tests {
             Some(MessageOutcome::LaunchFailed)
         );
         // Second backoff is 2 minutes, not 30s.
-        assert_eq!(
-            h.step(t0() + secs(31 + 60), false).await,
-            Some(MessageOutcome::SkippedBackoff)
-        );
+        assert_eq!(h.step(t0() + secs(31 + 60), false).await, None);
         // Attempt 3 fails: cap reached, dead-lettered and acked.
         assert_eq!(
             h.step(t0() + secs(31 + 121), false).await,
@@ -1456,6 +1662,23 @@ mod tests {
         async fn stream_ack_progress(&self, s: &str, c: &str, id: &str) -> WbResult<()> {
             self.progress.fetch_add(1, Ordering::SeqCst);
             self.inner.stream_ack_progress(s, c, id).await
+        }
+        async fn stream_nak_delayed(
+            &self,
+            s: &str,
+            c: &str,
+            id: &str,
+            d: Duration,
+        ) -> WbResult<()> {
+            self.inner.stream_nak_delayed(s, c, id, d).await
+        }
+        async fn stream_recover_pending(
+            &self,
+            s: &str,
+            c: &str,
+            ids: &[String],
+        ) -> WbResult<usize> {
+            self.inner.stream_recover_pending(s, c, ids).await
         }
         async fn stream_set_ack_wait(&self, s: &str, c: &str, w: Duration) -> WbResult<()> {
             self.inner.stream_set_ack_wait(s, c, w).await
@@ -1977,5 +2200,212 @@ mod tests {
         std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
         std::fs::write(store.path(), "{ not json").unwrap();
         assert!(store.get("intake", "0").is_none());
+    }
+
+    // ---- v0.17.11.30: explicit delayed nak and restart recovery ----
+
+    #[tokio::test]
+    async fn a_failed_launch_is_retried_after_30s_2m_and_10m_despite_a_one_hour_ack_wait() {
+        let mut h = Harness::new().await;
+        assert_eq!(h.policy.ack_wait, Duration::from_secs(3660));
+        h.policy.max_attempts = 5;
+        h.transport
+            .stream_append("intake", b"wake up".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.step(t0(), false).await,
+            Some(MessageOutcome::LaunchFailed)
+        );
+        // First retry at 30s: not a moment before.
+        assert_eq!(h.step(t0() + secs(29), false).await, None);
+        let t1 = t0() + secs(31);
+        assert_eq!(h.step(t1, false).await, Some(MessageOutcome::LaunchFailed));
+        // Second retry 2 minutes after the second failure.
+        assert_eq!(h.step(t1 + secs(119), false).await, None);
+        let t2 = t1 + secs(121);
+        assert_eq!(h.step(t2, false).await, Some(MessageOutcome::LaunchFailed));
+        // Third retry 10 minutes after the third failure.
+        assert_eq!(h.step(t2 + secs(599), false).await, None);
+        let t3 = t2 + secs(601);
+        assert_eq!(h.step(t3, false).await, Some(MessageOutcome::LaunchFailed));
+        // The last backoff value repeats.
+        assert_eq!(h.step(t3 + secs(599), false).await, None);
+        assert_eq!(
+            h.step(t3 + secs(601), true).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+        assert_eq!(h.launches.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn the_dead_letter_cap_still_applies_with_delayed_naks() {
+        let mut h = Harness::new().await;
+        h.transport
+            .stream_append("intake", b"x".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            h.step(t0(), false).await,
+            Some(MessageOutcome::LaunchFailed)
+        );
+        assert_eq!(
+            h.step(t0() + secs(31), false).await,
+            Some(MessageOutcome::LaunchFailed)
+        );
+        assert_eq!(
+            h.step(t0() + secs(31 + 121), false).await,
+            Some(MessageOutcome::DeadLettered)
+        );
+        assert_eq!(h.step(t0() + secs(100_000), false).await, None);
+        assert_eq!(h.launches.load(Ordering::SeqCst), 3);
+    }
+
+    /// An attempt record for message "0" as an earlier run would have left it.
+    fn left_by_earlier_run(h: &Harness, attempts: u32, next_in: i64, dead: bool) {
+        h.store()
+            .put(&AttemptRecord {
+                session: "sess-1".into(),
+                role: "chief-of-staff".into(),
+                key: "intake".into(),
+                msg_id: "0".into(),
+                attempts,
+                first_attempt_at: t0(),
+                last_attempt_at: t0(),
+                next_eligible_at: t0() + secs(next_in),
+                last_error: "earlier failure".into(),
+                dead_lettered: dead,
+            })
+            .unwrap();
+    }
+
+    /// The message is leased to the previous run, which is gone.
+    async fn lease_to_dead_run(h: &Harness) {
+        h.transport
+            .stream_append("intake", b"wake up".to_vec())
+            .await
+            .unwrap();
+        h.transport
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    async fn sweep(h: &Harness, now: DateTime<Utc>) -> RecoverySummary {
+        recover_pending(
+            &h.transport,
+            h.dir.path(),
+            "sess-1",
+            "chief-of-staff",
+            &["intake".to_string()],
+            CONSUMER,
+            &h.policy,
+            now,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_restart_recovers_a_pending_message_whose_retry_is_due() {
+        let mut h = Harness::new().await;
+        lease_to_dead_run(&h).await;
+        left_by_earlier_run(&h, 1, 30, false);
+
+        // Without the sweep the message stays stranded behind the ack wait.
+        assert_eq!(h.step(t0() + secs(60), true).await, None);
+        assert_eq!(h.launches.load(Ordering::SeqCst), 0);
+
+        let sum = sweep(&h, t0() + secs(60)).await;
+        assert_eq!(sum.due, vec!["0".to_string()]);
+        assert_eq!(sum.released, 1);
+        assert_eq!(
+            h.step(t0() + secs(60), true).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+        assert_eq!(h.launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_recovered_message_still_inside_its_backoff_is_nakd_for_the_rest_of_it() {
+        let mut h = Harness::new().await;
+        lease_to_dead_run(&h).await;
+        left_by_earlier_run(&h, 2, 120, false);
+
+        let sum = sweep(&h, t0() + secs(10)).await;
+        assert_eq!(sum.waiting, vec!["0".to_string()]);
+        assert_eq!(
+            h.step(t0() + secs(10), true).await,
+            Some(MessageOutcome::SkippedBackoff)
+        );
+        // Handed back with the remaining ~110s, not left to the ack wait.
+        assert_eq!(h.step(t0() + secs(60), true).await, None);
+        assert_eq!(
+            h.step(t0() + secs(121), true).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_message_over_the_cap_is_dead_lettered() {
+        let mut h = Harness::new().await;
+        lease_to_dead_run(&h).await;
+        left_by_earlier_run(&h, 3, -10, false);
+
+        let sum = sweep(&h, t0() + secs(60)).await;
+        assert_eq!(sum.dead_letter, vec!["0".to_string()]);
+        assert_eq!(
+            h.step(t0() + secs(60), true).await,
+            Some(MessageOutcome::DeadLettered)
+        );
+        assert_eq!(h.launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_recovered_message_already_completed_is_acked_not_launched() {
+        let mut h = Harness::new().await;
+        lease_to_dead_run(&h).await;
+        left_by_earlier_run(&h, 1, -10, false);
+        CompletedStore::for_listener(h.dir.path(), "sess-1", "chief-of-staff")
+            .record(&CompletedRecord {
+                session: "sess-1".into(),
+                role: "chief-of-staff".into(),
+                key: "intake".into(),
+                msg_id: "0".into(),
+                payload_sha256: payload_digest(b"wake up"),
+                status: CompletedStatus::Completed,
+                completed_at: t0(),
+            })
+            .unwrap();
+
+        let sum = sweep(&h, t0() + secs(60)).await;
+        assert_eq!(sum.finished, vec!["0".to_string()]);
+        assert_eq!(
+            h.step(t0() + secs(60), true).await,
+            Some(MessageOutcome::SkippedCompleted { acked: true })
+        );
+        assert_eq!(h.launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_sweep_ignores_other_keys_and_does_nothing_without_records() {
+        let h = Harness::new().await;
+        lease_to_dead_run(&h).await;
+        let sum = sweep(&h, t0()).await;
+        assert_eq!(sum, RecoverySummary::default());
+        left_by_earlier_run(&h, 1, 0, false);
+        let other = recover_pending(
+            &h.transport,
+            h.dir.path(),
+            "sess-1",
+            "chief-of-staff",
+            &["other-key".to_string()],
+            CONSUMER,
+            &h.policy,
+            t0(),
+        )
+        .await;
+        assert_eq!(other.total(), 0);
     }
 }

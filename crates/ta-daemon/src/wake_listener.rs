@@ -32,8 +32,8 @@ use uuid::Uuid;
 
 use crate::team_session::{build_ta_run_args, RoleFinding, TeamSessionState, TeamSessionStatus};
 use crate::wake_retry::{
-    process_message, sanitize_component, tail_lines, AttemptStore, LaunchRateGuard, ListenerIds,
-    WakeRetryPolicy,
+    process_message, recover_pending, sanitize_component, tail_lines, AttemptStore,
+    LaunchRateGuard, ListenerIds, WakeRetryPolicy,
 };
 
 /// How many trailing stderr lines a failed launch's error (and so the
@@ -272,6 +272,22 @@ fn gate_on_session_status(project_root: &Path, session_id: &str) -> ListenerGate
     }
 }
 
+/// `true` the first time it is called for this (project, session, role, key)
+/// in this process, so the startup recovery sweep runs once per stream.
+fn claim_recovery(project_root: &Path, session: &str, role: &str, key: &str) -> bool {
+    static SWEPT: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
+    let id = format!(
+        "{}\u{1f}{session}\u{1f}{role}\u{1f}{key}",
+        project_root.display()
+    );
+    SWEPT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .insert(id)
+}
+
 /// The supervised loop for one `(session, listener)` pair. Runs until the
 /// daemon shuts down or the team session disappears. See this module's doc
 /// comment for why no external single-flight tracking is needed — this
@@ -310,6 +326,9 @@ pub(crate) async fn run_listener_loop(
     // Ack wait last applied to this listener's consumer, per key.
     let mut applied_ack_wait: Option<Duration> = None;
     let mut last_timing_warning: Option<std::time::Instant> = None;
+    // The startup sweep for messages an earlier run left pending runs once,
+    // as soon as the ack wait has been applied.
+    let mut recovered = false;
 
     loop {
         // Live pause/stop check, re-read fresh every round -- not just once
@@ -397,6 +416,31 @@ pub(crate) async fn run_listener_loop(
                     "wake_listener: ack wait set"
                 );
                 applied_ack_wait = Some(policy.ack_wait);
+            }
+        }
+        if !recovered && applied_ack_wait.is_some() {
+            recovered = true;
+            // Once per (project, session, role, key) per daemon process: a
+            // sibling listener starting later must not reset a consumer
+            // whose messages are being worked on.
+            let keys: Vec<String> = listener
+                .keys
+                .iter()
+                .filter(|k| claim_recovery(&project_root, &session_id, &listener.role, k))
+                .cloned()
+                .collect();
+            if !keys.is_empty() {
+                recover_pending(
+                    transport.as_ref(),
+                    &project_root,
+                    &session_id,
+                    &listener.role,
+                    &keys,
+                    &consumer,
+                    &policy,
+                    chrono::Utc::now(),
+                )
+                .await;
             }
         }
 

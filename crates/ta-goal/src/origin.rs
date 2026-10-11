@@ -79,6 +79,17 @@ pub fn origin_blocks_auto_approve(origin: Option<&str>) -> bool {
     }
 }
 
+/// Whether a goal must stay out of the plan entirely: no auto-linked phase,
+/// no ad-hoc stub in `PLAN.md`, no `in_progress` marker, no claim.
+///
+/// True for any chat-mode goal and any goal whose origin is in
+/// [`NO_AUTO_APPROVE_ORIGINS`]. Such a goal is a conversation, not a unit of
+/// planned work: it usually ends with no draft, so a phase it claimed would
+/// stay `in_progress` forever and fail every later launch that linked it.
+pub fn goal_never_claims_plan_phase(chat_mode: bool, origin: Option<&str>) -> bool {
+    chat_mode || origin_blocks_auto_approve(origin)
+}
+
 /// The origin `ta run` should write onto a goal record, given the origin
 /// already on the record and the one requested for this run (`--origin` /
 /// `TA_GOAL_ORIGIN`). `None` means "leave the record alone".
@@ -165,6 +176,16 @@ pub fn auto_approve_refusal(origin: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_mode_and_untrusted_origins_never_claim_a_plan_phase() {
+        assert!(goal_never_claims_plan_phase(true, None));
+        assert!(goal_never_claims_plan_phase(false, Some("cos")));
+        assert!(goal_never_claims_plan_phase(false, Some(" Chat ")));
+        assert!(goal_never_claims_plan_phase(true, Some("cli")));
+        assert!(!goal_never_claims_plan_phase(false, None));
+        assert!(!goal_never_claims_plan_phase(false, Some("cli")));
+    }
 
     #[test]
     fn cos_and_chat_block_auto_approve_case_insensitively() {
