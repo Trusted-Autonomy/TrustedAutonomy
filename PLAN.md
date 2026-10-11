@@ -10905,7 +10905,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.30`
 
 ### v0.17.12 - Human-Credential Gate for Approve and Apply (CR-02)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: An agent with a shell must not be able to approve or apply its own draft by calling the daemon on localhost.
