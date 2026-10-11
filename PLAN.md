@@ -11108,6 +11108,8 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 9. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 10. [ ] The legacy whole-document PLAN.md merge (`ta_changeset::plan_merge::merge_plan_md`, used only when an apply has no target phase) is not CRLF-faithful: on a CRLF checkout (Windows) a merge of identical inputs changes line endings. Make it byte-preserving like the scoped merge, or route every apply through the scoped merge; add a CRLF golden test.
 11. [ ] The phase-scoped plan merge matches a checked item by its full text, so an agent that appends implementation notes to an item when it checks it (seen in v0.17.11.27) gets the checkmark refused and the phase left not done. Match by item number plus a stable prefix, or tell agents to flip the box only; add a test with an item that gained a trailing note.
+12. [ ] **`ta doctor --fix` must be scriptable.** It asks one interactive y/N question per finding and the list of findings changes as fixes apply, so piped answers land on the wrong fix (seen twice on 2026-10-10: one `y` answered only the first of three prompts, and another run rewrote a tracked `.gitignore`). Add `--yes` (apply every non-destructive fix), `--fix <finding-id>` (apply only the named fixes, stable ids), `--dry-run`, and never rewrite a tracked file without naming it; destructive fixes (removing failed-goal staging) stay opt-in even with `--yes`.
+13. [ ] **Flaky timing test:** `ta-plugin` `transport::tests::call_json_deserializes_response` uses a 5 s timeout around a shell mock and timed out once on a loaded macOS CI runner (passed on re-run, unrelated code). Raise the limit or make the mock event-driven so shared runners cannot flake it.
 
 **Effort**: M.
 
