@@ -10834,15 +10834,15 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.11-alpha.26`
 
 ### v0.17.11.27 - Daemon Self-Update When Idle, as a Reusable Library
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.11.26 (single pid and port contract)
 
 **Goal**: Today nothing updates a stale daemon by itself. The only check is in the CLI: `ta shell`, `ta dev` and the terminal UI compare the daemon's reported version and build hash with their own and ask "Restart daemon with the new version? [Y/n]"; non-interactive runs and `--no-version-check` carry on with the stale daemon. That logic lives inside the `ta-cli` binary, so other programs (the VT poller daemon) cannot reuse it. The owner wants both daemons to update themselves when a newer build is installed, with no manual kill.
 
-1. [ ] Extract a small library (version and build-hash comparison, "is the daemon idle" via `/api/drain/status`, drain-aware restart, sibling-binary lookup, codesign) used by the CLI and available to VT.
-2. [ ] Daemon self-check: periodically compare the running build hash with the installed sibling binary's `--version`; when different **and** idle (no active goals or sessions, no in-flight wake launches), restart onto the new binary. Never interrupts a running goal: it waits, and reports "update pending, waiting for N goals" in `ta status`.
-3. [ ] Opt-in or opt-out by posture and setting (`[daemon] auto_update = "when_idle" | "ask" | "never"`), with `ta daemon restart --force` unchanged as the manual override.
-4. [ ] Documented contract so the VT poller daemon implements the same behaviour with the same library: compare, wait for idle (its own in-flight records), exit or re-exec so its supervisor restarts it.
+1. [x] Extract a small library (version and build-hash comparison, "is the daemon idle" via `/api/drain/status`, drain-aware restart, sibling-binary lookup, codesign) used by the CLI and available to VT.
+2. [x] Daemon self-check: periodically compare the running build hash with the installed sibling binary's `--version`; when different **and** idle (no active goals or sessions, no in-flight wake launches), restart onto the new binary. Never interrupts a running goal: it waits, and reports "update pending, waiting for N goals" in `ta status`.
+3. [x] Opt-in or opt-out by posture and setting (`[daemon] auto_update = "when_idle" | "ask" | "never"`), with `ta daemon restart --force` unchanged as the manual override.
+4. [x] Documented contract so the VT poller daemon implements the same behaviour with the same library: compare, wait for idle (its own in-flight records), exit or re-exec so its supervisor restarts it.
 
 **Effort**: S to M.
 
@@ -11107,6 +11107,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 8. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 9. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 10. [ ] The legacy whole-document PLAN.md merge (`ta_changeset::plan_merge::merge_plan_md`, used only when an apply has no target phase) is not CRLF-faithful: on a CRLF checkout (Windows) a merge of identical inputs changes line endings. Make it byte-preserving like the scoped merge, or route every apply through the scoped merge; add a CRLF golden test.
+11. [ ] The phase-scoped plan merge matches a checked item by its full text, so an agent that appends implementation notes to an item when it checks it (seen in v0.17.11.27) gets the checkmark refused and the phase left not done. Match by item number plus a stable prefix, or tell agents to flip the box only; add a test with an item that gained a trailing note.
 
 **Effort**: M.
 
