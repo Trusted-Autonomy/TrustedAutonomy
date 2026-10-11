@@ -10931,7 +10931,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha`
 
 ### v0.17.12.1 - Control-Plane Secrets Out of the Project Tree (CR-03)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12
 
 **Goal**: The keys and tokens that make TA's capability tokens and audit log trustworthy are not files an agent can reach with `../../`.
