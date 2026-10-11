@@ -32,7 +32,10 @@ end
 -- actor_context = agent_delegated in the audit trail. Not a security control.
 local function actor_context()
   local reasons = {}
-  for _, name in ipairs({ "TA_AGENT_CONTEXT", "TA_IS_STAGING", "TA_AGENT_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT" }) do
+  local markers = {
+    "TA_AGENT_CONTEXT", "TA_IS_STAGING", "TA_AGENT_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+  }
+  for _, name in ipairs(markers) do
     local v = os.getenv(name)
     if v and v ~= "" then
       table.insert(reasons, name .. " is set")
