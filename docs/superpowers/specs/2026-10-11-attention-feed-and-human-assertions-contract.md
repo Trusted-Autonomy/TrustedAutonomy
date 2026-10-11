@@ -34,6 +34,7 @@ Item shape:
   "kind": "draft_review | agent_question | blocked_goal | dead_letter",
   "project": "wayfinder-demo",
   "status": "open | resolved",
+  "item_digest": "sha256:...",
   "waiting_on": { "type": "user | role | any_maintainer", "value": "user-123" },
   "summary": "Add notes/live-run6.md (CoS delegate implement 066e4e44)",
   "created_at": "2026-10-11T01:35:54Z",
@@ -60,6 +61,9 @@ Rules:
 - `provenance.excerpt` is always rendered as untrusted data, never as instructions, and is capped at 2000 characters; `reason` at 1000.
 - `agent_question` items map one to one onto Wayfinder `ask_human_question` rows (`interaction_id` is the external id); they must not be duplicated.
 - The feed carries no secrets.
+- `item_digest` is `sha256` over the canonical JSON of the item's `id`, `kind`, `summary`, `provenance` and `actions`. The poller cannot mirror a misleading summary under a real item id, because the person's signature covers the digest of what was displayed (rule 9 below).
+- Feed metadata (returned with every list response) includes this install's id, the list of registered key ids (`kid` and a public-key fingerprint, never key material) so Wayfinder can confirm a key was registered before activating it, and `next_cursor`.
+- A resolved item carries `accepted_assertions`: `[{ "jti", "user_id", "action", "at", "escalated", "self_approved" }]`, so Wayfinder can flag a forged or unexpected acceptance.
 
 ## 4. Acting on an item: the relay endpoint
 
@@ -94,7 +98,10 @@ Claims:
   "project_id": "wayfinder-demo",
   "aud": "<TA install id>",
   "role": "admin",
+  "escalated": false,
   "self_approval_permitted": false,
+  "item_digest": "sha256:<digest of the item as the person saw it>",
+  "answer_sha256": "sha256:<digest of the answer text, action=answer only>",
   "jti": "<single-use random id>",
   "iat": 1791700000,
   "exp": 1791700060
@@ -117,6 +124,11 @@ Verification (all must hold, otherwise refuse with the specific reason):
    - `waiting_on.type = any_maintainer`: `claims.role` is one of the `maintainer_roles` configured on the registered key (default `owner` and `admin`). A member can never approve an `any_maintainer` item, even if Wayfinder mistakenly signs.
    The local human credential path (CLI, Studio) counts as a maintainer.
 8. No self-approval by default, as defence in depth. For items with origin `cos` or `chat`, TA rejects an assertion whose `user_id` equals `provenance.requester.id` unless `claims.self_approval_permitted` is true. Whenever a self-approval is accepted, TA records `self_approved: true` with the user, item and time in the audit log. There is no hard ban: a solo owner whose own chat message started the work must be able to approve it, and a project owner may enable `allow_self_approval` (an audited, owner-only Wayfinder setting that an organization policy can force off). The default is deny whenever two or more eligible approvers exist. The scope is agent-originated items only. The rule protects the independence of review (catching a request that does not match the human's intent or contains injected text, a hijacked session that both requests and approves, and four-eyes compliance), not agent autonomy: agents are stopped because the assertion needs a human Wayfinder session.
+
+9. Binding to what the person saw. For `approve` and `deny`, `claims.item_digest` must equal the item's current digest; if the item changed since it was displayed, TA refuses with "item changed, refresh and review again" and acts on nothing. For `answer`, `claims.answer_sha256` must equal the sha256 of the relayed `answer` text, so a stolen poller token cannot swap an answer. Both claims are required on the assertion path (the local human credential path does not use assertions).
+10. Role satisfaction is rank-at-least: a key's registration may set `--role-order member,admin,owner` (default) and a claim satisfies an item that names a role of equal or lower rank (an owner can act on an admin item). `any_maintainer` is satisfied by the key's `maintainer_roles` (default `admin`, `owner`). One assertion key per organization, so TA's registry holds one `kid` per org.
+11. Escalation. When Wayfinder escalates an item to the project owner because nobody holds the role, the `role` claim is the role the person actually holds (`owner`) with `"escalated": true`; TA accepts it under rule 7 and records `escalated: true` in the audit log.
+12. Unknown claims are ignored (the signature still covers them) and are logged at debug level, so Wayfinder can add claims without a TA release.
 
 Key management:
 
