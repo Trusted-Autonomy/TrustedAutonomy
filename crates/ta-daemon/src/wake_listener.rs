@@ -589,6 +589,7 @@ fn launch_wake_on_demand(
         msg_id,
         ta_bin,
         &args,
+        &crate::team_session::role_launch_env(project_root, &state, role),
         launch_timeout,
     )?;
 
@@ -611,6 +612,7 @@ fn launch_wake_on_demand(
 /// `.ta/logs/wake-launches/`. A non-zero exit becomes an error carrying the
 /// log path and the last `STDERR_TAIL_LINES` lines of stderr (the daemon log
 /// used to keep only the first line, which hid why the live CoS failed).
+#[allow(clippy::too_many_arguments)]
 fn run_and_record_launch(
     project_root: &Path,
     session_id: &str,
@@ -618,11 +620,15 @@ fn run_and_record_launch(
     msg_id: &str,
     ta_bin: &Path,
     args: &[String],
+    env: &[(String, String)],
     launch_timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
     let started_at = chrono::Utc::now();
     let mut command = std::process::Command::new(ta_bin);
-    command.args(args).current_dir(project_root);
+    command
+        .args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .current_dir(project_root);
     let (output, timed_out) = output_with_timeout(command, launch_timeout)?;
 
     let log_path = launch_log_path(project_root, session_id, role, msg_id, started_at);
@@ -845,6 +851,7 @@ mod tests {
             objective: "Generate income".to_string(),
             budget: None,
             role_prompts: std::collections::HashMap::new(),
+            whiteboard_enabled: false,
             whiteboard_token: None,
             whiteboard_token_expires_at: None,
         }
@@ -1217,6 +1224,7 @@ mod tests {
             "seq-7",
             &fake,
             &[],
+            &[],
             Duration::from_millis(300),
         )
         .unwrap_err()
@@ -1255,6 +1263,7 @@ mod tests {
             "seq-42",
             &fake,
             &["run".to_string(), "--headless".to_string()],
+            &[],
             Duration::from_secs(60),
         )
         .unwrap_err()

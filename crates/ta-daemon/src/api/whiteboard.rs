@@ -39,7 +39,7 @@ fn require_whiteboard_scope(
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let scope = format!("whiteboard:team_session:{team_session}");
     let broker =
-        ta_credential_broker::CredentialBroker::open(&project_root.join(".ta")).map_err(|e| {
+        ta_credential_broker::CredentialBroker::open_for_project(project_root).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("credential broker unavailable: {e}")})),
@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn mint_test_token(dir: &std::path::Path, team_session: &str) -> String {
-        let broker = ta_credential_broker::CredentialBroker::open(&dir.join(".ta")).unwrap();
+        let broker = ta_credential_broker::CredentialBroker::open_for_project(dir).unwrap();
         broker
             .grant(
                 uuid::Uuid::new_v4(),

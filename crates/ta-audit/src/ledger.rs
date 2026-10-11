@@ -192,8 +192,11 @@ pub struct GoalAuditLedger {
     last_hash: Option<String>,
     /// Timestamp of the most recently appended entry (for ordering validation).
     last_recorded_at: Option<DateTime<Utc>>,
-    /// Number of entries appended in this session.
+    /// Number of entries in the ledger (existing plus appended this session).
     entry_count: usize,
+    /// Signs the chain head into the state directory every few entries (CR-42).
+    /// Present only for a project's real `.ta/goal-audit.jsonl` with an audit key.
+    checkpoints: Option<crate::checkpoint::CheckpointSink>,
 }
 
 impl GoalAuditLedger {
@@ -223,13 +226,30 @@ impl GoalAuditLedger {
                 source,
             })?;
 
+        let checkpoints = Self::checkpoint_sink_for(&path);
+
         Ok(Self {
             writer: BufWriter::new(file),
             path,
             last_hash,
             last_recorded_at,
             entry_count,
+            checkpoints,
         })
+    }
+
+    /// A checkpoint sink only for `<project>/.ta/goal-audit.jsonl` itself (not
+    /// temp files such as the one `ledger gc` writes), and only when the
+    /// project has an audit key.
+    fn checkpoint_sink_for(path: &Path) -> Option<crate::checkpoint::CheckpointSink> {
+        if path.file_name()? != "goal-audit.jsonl" {
+            return None;
+        }
+        let ta_dir = path.parent()?;
+        if ta_dir.file_name()? != ".ta" {
+            return None;
+        }
+        crate::checkpoint::CheckpointSink::for_project(ta_dir.parent()?)
     }
 
     /// Standard path for a project's goal audit ledger.
@@ -263,6 +283,25 @@ impl GoalAuditLedger {
 
         writeln!(self.writer, "{}", json)?;
         self.writer.flush()?;
+
+        if let Some(sink) = &self.checkpoints {
+            if self
+                .entry_count
+                .is_multiple_of(crate::checkpoint::CHECKPOINT_EVERY)
+            {
+                // A failed checkpoint must not lose the entry that was just
+                // written, but it must be loud.
+                if let Err(e) = sink.record(&self.path, false) {
+                    tracing::warn!(
+                        ledger = %self.path.display(),
+                        checkpoints = %sink.checkpoints_path().display(),
+                        error = %e,
+                        "could not record a signed audit checkpoint; run \
+                         `ta audit ledger checkpoint` once the problem is fixed"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }

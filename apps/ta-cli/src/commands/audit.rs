@@ -240,6 +240,23 @@ pub enum LedgerCommands {
         #[arg(long)]
         ledger: Option<String>,
     },
+    /// Sign the ledger's current head into the state directory (tamper evidence).
+    ///
+    /// Checkpoints are also recorded automatically every few entries when the
+    /// project has an audit key. Use `--epoch` after a deliberate rewrite
+    /// (`gc`) so the shorter ledger is accepted as the new baseline.
+    Checkpoint {
+        /// Mark this checkpoint as the start of a new epoch (a deliberate rewrite).
+        #[arg(long)]
+        epoch: bool,
+        /// Create this project's audit key (in the state directory, never in
+        /// the project) if it has none yet.
+        #[arg(long)]
+        create_key: bool,
+        /// Path to ledger (defaults to .ta/goal-audit.jsonl).
+        #[arg(long)]
+        ledger: Option<String>,
+    },
     /// Remove entries older than a retention period while preserving chain integrity.
     Gc {
         /// Remove entries older than this duration (e.g. "1y", "6m", "90d").
@@ -686,6 +703,14 @@ fn execute_ledger(cmd: &LedgerCommands, config: &GatewayConfig) -> anyhow::Resul
             ledger_verify(config, ledger.as_deref())?;
         }
 
+        LedgerCommands::Checkpoint {
+            epoch,
+            create_key,
+            ledger,
+        } => {
+            ledger_checkpoint(config, *epoch, *create_key, ledger.as_deref())?;
+        }
+
         LedgerCommands::Gc {
             older_than,
             dry_run,
@@ -828,24 +853,21 @@ fn ledger_verify(config: &GatewayConfig, override_path: Option<&str>) -> anyhow:
         return Ok(());
     }
 
-    // Load HMAC key if present (high-security projects).
-    let hmac_key_path = AuditHmacKey::path_for(&config.workspace_root);
-    let hmac_key = if hmac_key_path.exists() {
-        match AuditHmacKey::load(&hmac_key_path) {
-            Ok(k) => {
-                println!("HMAC key found — verifying signed hash chain.");
-                Some(k)
-            }
-            Err(e) => {
-                eprintln!(
-                    "[warn] Failed to load audit.key: {} — skipping HMAC verification.",
-                    e
-                );
-                None
-            }
+    // Load the HMAC key if the project has one (high-security projects). It
+    // lives in the state directory; an old in-project copy is read with a warning.
+    let hmac_key = match AuditHmacKey::load_for_project(&config.workspace_root) {
+        Ok(Some(k)) => {
+            println!(
+                "HMAC key found ({}) - verifying signed hash chain.",
+                k.path().display()
+            );
+            Some(k)
         }
-    } else {
-        None
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("[warn] Failed to load the audit key: {e} Skipping HMAC verification.");
+            None
+        }
     };
 
     // Use the extended chain verifier which also checks HMAC sigs.
@@ -882,6 +904,32 @@ fn ledger_verify(config: &GatewayConfig, override_path: Option<&str>) -> anyhow:
         );
         println!("The goal audit ledger may have been tampered with.");
         anyhow::bail!("Goal audit ledger integrity check failed");
+    }
+
+    // Signed checkpoints (CR-42): detect truncation and rewrites even when an
+    // attacker recomputed the whole unsigned chain.
+    if override_path.is_none() {
+        if let Some(sink) =
+            ta_audit::checkpoint::CheckpointSink::for_project(&config.workspace_root)
+        {
+            let report = sink.verify(&path)?;
+            if !report.ok() {
+                println!();
+                for p in &report.problems {
+                    println!("  CHECKPOINT VIOLATION: {p}");
+                }
+                anyhow::bail!(
+                    "Goal audit ledger failed signed-checkpoint verification ({} problem(s)); \
+                     checkpoints are in {}",
+                    report.problems.len(),
+                    sink.checkpoints_path().display()
+                );
+            }
+            println!(
+                "{} signed checkpoint(s) verified against the ledger.",
+                report.verified
+            );
+        }
     }
 
     let hmac_str = if hmac_key.is_some() {
@@ -922,6 +970,42 @@ fn parse_retention_duration(s: &str) -> anyhow::Result<chrono::Duration> {
     } else {
         anyhow::bail!("Duration must end with 'y' (years), 'm' (months), or 'd' (days). Examples: 1y, 6m, 90d")
     }
+}
+
+fn ledger_checkpoint(
+    config: &GatewayConfig,
+    epoch: bool,
+    create_key: bool,
+    override_path: Option<&str>,
+) -> anyhow::Result<()> {
+    let path = ledger_path(config, override_path);
+    if create_key {
+        let key = ta_audit::AuditHmacKey::load_or_generate_for_project(&config.workspace_root)?;
+        println!("Audit key ready at {}.", key.path().display());
+    }
+    if !path.exists() {
+        anyhow::bail!(
+            "no goal audit ledger at {}; nothing to checkpoint. Run a goal first, or pass --ledger.",
+            path.display()
+        );
+    }
+    let Some(sink) = ta_audit::checkpoint::CheckpointSink::for_project(&config.workspace_root)
+    else {
+        anyhow::bail!(
+            "this project has no audit key, so there is nothing to sign checkpoints with. Create \
+             one with `ta audit ledger checkpoint --create-key` (the key is kept in the state \
+             directory, not in the project), then retry."
+        );
+    };
+    let cp = sink.record(&path, epoch)?;
+    println!(
+        "Recorded signed checkpoint #{} covering {} ledger entries{}.",
+        cp.seq,
+        cp.entries,
+        if epoch { " (new epoch)" } else { "" }
+    );
+    println!("  Stored in: {}", sink.checkpoints_path().display());
+    Ok(())
 }
 
 fn ledger_gc(
@@ -969,6 +1053,25 @@ fn ledger_gc(
         }
     }
     std::fs::rename(&tmp_path, &path)?;
+
+    // The rewrite is deliberate: record a signed epoch so the shorter ledger
+    // is the new baseline rather than looking like tampering.
+    if override_path.is_none() {
+        if let Some(sink) =
+            ta_audit::checkpoint::CheckpointSink::for_project(&config.workspace_root)
+        {
+            match sink.record(&path, true) {
+                Ok(cp) => println!(
+                    "Recorded signed checkpoint #{} for the re-anchored ledger.",
+                    cp.seq
+                ),
+                Err(e) => eprintln!(
+                    "[warn] Could not record a signed checkpoint after gc: {e} Run \
+                     `ta audit ledger checkpoint --epoch` to finish."
+                ),
+            }
+        }
+    }
 
     println!(
         "Removed {} entries older than {} (before {}).",

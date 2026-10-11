@@ -32,6 +32,7 @@
 //! ta-daemon --api --web-port 8080    # Also serves the legacy web UI on port 8080
 //! ```
 
+pub mod actor_context;
 mod api;
 pub mod assertion;
 pub mod attention;
@@ -184,6 +185,16 @@ async fn main() -> Result<()> {
     // not an optional feature that might be unused.
     if let Err(e) = config::validate_auth_posture(&daemon_config.server, &daemon_config.auth) {
         anyhow::bail!("Refusing to start: {e}");
+    }
+
+    // Control-plane secrets belong in the per-user state directory, not the
+    // project tree. Warn about old-location copies; refuse under `strict`.
+    {
+        let locator = ta_credentials::state::StateLocator::from_env();
+        let posture = ta_credentials::state::Posture::resolve(&locator);
+        if let Err(e) = ta_credentials::state::startup_check(&project_root, posture) {
+            anyhow::bail!("Refusing to start: {e}");
+        }
     }
 
     // Validate security-sensitive config fields at startup (v0.17.0.9).

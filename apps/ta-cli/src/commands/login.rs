@@ -21,7 +21,7 @@ pub enum LoginCommands {
     Open,
     /// Show whether a human credential exists and where it is held.
     Status,
-    /// Remove the human credential (approve/apply from agent contexts stop working).
+    /// Remove the human credential: approve/deny/apply from agent contexts stop working and approvals are Wayfinder-only.
     Logout,
 }
 
@@ -69,10 +69,14 @@ pub fn execute(
     match command {
         None => login(&state_dir, use_keychain && !file),
         Some(LoginCommands::Open) => open_ui(&state_dir, use_keychain, project_root),
-        Some(LoginCommands::Status) => status(&state_dir, use_keychain),
+        Some(LoginCommands::Status) => status(&state_dir, use_keychain, project_root),
         Some(LoginCommands::Logout) => {
             if human::logout(&state_dir, use_keychain) {
                 println!("Human credential removed from {}.", state_dir.display());
+                println!(
+                    "Approve, deny and apply from agent contexts are refused again; approvals \
+                     are Wayfinder-only (attention feed and signed assertions)."
+                );
                 println!("Run `ta login` to create a new one.");
             } else {
                 println!(
@@ -150,7 +154,11 @@ fn open_ui(
     }
 }
 
-fn status(state_dir: &std::path::Path, use_keychain: bool) -> anyhow::Result<()> {
+fn status(
+    state_dir: &std::path::Path,
+    use_keychain: bool,
+    project_root: &std::path::Path,
+) -> anyhow::Result<()> {
     println!("Credential directory: {}", state_dir.display());
     if human::credential_present(state_dir, use_keychain) {
         println!("Human credential: present and valid");
@@ -164,12 +172,86 @@ fn status(state_dir: &std::path::Path, use_keychain: bool) -> anyhow::Result<()>
         ),
         None => println!("Agent context:    not detected"),
     }
+    if let Some(line) =
+        delegation_line_for_project(project_root, state_dir, use_keychain, chrono::Utc::now())
+    {
+        println!("Delegation:       {line}");
+    }
     let keys = human::load_assertion_keys(state_dir)?;
     println!(
         "Assertion keys:   {} registered (`ta keys list`; install id: `ta show install`)",
         keys.len()
     );
     Ok(())
+}
+
+/// The 'agent delegation active' line, or `None`. Shared by `ta login status`
+/// and `ta status`; the clock is supplied so tests can pin it.
+pub(crate) fn delegation_line(
+    state_dir: &std::path::Path,
+    use_keychain: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let sighting = human::agent_context_seen_within(
+        state_dir,
+        chrono::Duration::hours(human::DELEGATION_ACTIVE_WINDOW_HOURS),
+        now,
+    );
+    human::delegation_status_line(
+        human::credential_present(state_dir, use_keychain),
+        sighting.as_ref(),
+        now,
+    )
+}
+
+/// The `agent_delegation` object from the daemon's `GET /api/status`, or `None`
+/// when the daemon is unreachable or too old to report it. Short timeout: this
+/// runs inside `ta status` and `ta login status`.
+pub(crate) fn fetch_daemon_delegation(base_url: &str) -> Option<human::DelegationStatus> {
+    let client = super::human_auth::blocking_client_builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let url = format!("{}/api/status", base_url.trim_end_matches('/'));
+    let resp = match client.get(&url).send() {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::debug!(url = %url, status = %r.status(), "daemon status unavailable; using the local agent sighting file");
+            return None;
+        }
+        Err(e) => {
+            tracing::debug!(url = %url, error = %e, "daemon not reachable; using the local agent sighting file");
+            return None;
+        }
+    };
+    let json: serde_json::Value = resp.json().ok()?;
+    serde_json::from_value(json.get("agent_delegation")?.clone()).ok()
+}
+
+/// The 'agent delegation active' line. The daemon's answer wins when it gave
+/// one; otherwise (daemon unreachable or older) the local sighting file decides.
+pub(crate) fn delegation_line_with(
+    daemon: Option<&human::DelegationStatus>,
+    state_dir: &std::path::Path,
+    use_keychain: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    match daemon {
+        Some(d) => d.line(now),
+        None => delegation_line(state_dir, use_keychain, now),
+    }
+}
+
+/// As [`delegation_line_with`], asking the project's daemon first.
+pub(crate) fn delegation_line_for_project(
+    project_root: &std::path::Path,
+    state_dir: &std::path::Path,
+    use_keychain: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let url = super::daemon::resolve_daemon_url(project_root, None);
+    let daemon = fetch_daemon_delegation(&url);
+    delegation_line_with(daemon.as_ref(), state_dir, use_keychain, now)
 }
 
 /// Read a public key file: base64 text (standard or URL-safe), or 32 raw bytes.
@@ -401,5 +483,121 @@ mod tests {
         assert_eq!(url, "http://127.0.0.1:7700/ui#ta_cred=tahc_abc");
         // The part a server (and its logs) sees has no secret in it.
         assert!(!url.split('#').next().unwrap().contains("tahc_"));
+    }
+
+    #[test]
+    fn delegation_line_follows_credential_and_recency() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let ctx = human::AgentContext {
+            signals: vec!["CLAUDECODE is set".into()],
+        };
+        // No credential: never shown, even with a fresh sighting.
+        human::record_agent_context_seen_at(dir.path(), &ctx, now - chrono::Duration::hours(1))
+            .unwrap();
+        assert!(delegation_line(dir.path(), false, now).is_none());
+        // Credential present and agent seen 1h ago: shown.
+        human::login(dir.path(), false).unwrap();
+        let line = delegation_line(dir.path(), false, now).expect("line shown");
+        assert!(line.contains("agent delegation active"), "{line}");
+        assert!(line.contains("CLAUDECODE is set"), "{line}");
+        assert!(line.contains("ta login logout"), "{line}");
+        // Seen 25h ago: not shown.
+        human::record_agent_context_seen_at(dir.path(), &ctx, now - chrono::Duration::hours(25))
+            .unwrap();
+        assert!(delegation_line(dir.path(), false, now).is_none());
+        // Logout switches back: no credential, no line.
+        human::record_agent_context_seen_at(dir.path(), &ctx, now).unwrap();
+        assert!(delegation_line(dir.path(), false, now).is_some());
+        human::logout(dir.path(), false);
+        assert!(delegation_line(dir.path(), false, now).is_none());
+    }
+
+    /// Serve one canned `GET /api/status` response; returns the base URL.
+    fn fake_daemon(body: serde_json::Value) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+                let payload = body.to_string();
+                let _ = write!(
+                    sock,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn delegation_line_uses_the_daemon_when_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        // Local state says nothing (no credential, no sighting) ...
+        assert!(delegation_line(dir.path(), false, now).is_none());
+        // ... but the daemon reports an active delegation, and its answer wins.
+        let url = fake_daemon(serde_json::json!({
+            "agent_delegation": {
+                "active": true,
+                "last_seen": (now - chrono::Duration::minutes(5)).to_rfc3339(),
+                "credential_present": true,
+                "reasons": ["TA_CHAT_MODE is set"]
+            }
+        }));
+        let daemon = fetch_daemon_delegation(&url).expect("daemon answered");
+        let line = delegation_line_with(Some(&daemon), dir.path(), false, now).unwrap();
+        assert!(line.contains("agent delegation active"), "{line}");
+        assert!(line.contains("TA_CHAT_MODE is set"), "{line}");
+        assert!(line.contains("ta login logout"), "{line}");
+    }
+
+    #[test]
+    fn an_inactive_daemon_answer_hides_the_line_even_if_a_local_file_says_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        human::login(dir.path(), false).unwrap();
+        let ctx = human::AgentContext {
+            signals: vec!["CLAUDECODE is set".into()],
+        };
+        human::record_agent_context_seen_at(dir.path(), &ctx, now).unwrap();
+        let url = fake_daemon(serde_json::json!({
+            "agent_delegation": {"active": false, "last_seen": null, "credential_present": false}
+        }));
+        let daemon = fetch_daemon_delegation(&url).unwrap();
+        assert!(delegation_line_with(Some(&daemon), dir.path(), false, now).is_none());
+    }
+
+    #[test]
+    fn delegation_line_falls_back_to_the_local_file_when_the_daemon_is_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        human::login(dir.path(), false).unwrap();
+        let ctx = human::AgentContext {
+            signals: vec!["CLAUDECODE is set".into()],
+        };
+        human::record_agent_context_seen_at(dir.path(), &ctx, now - chrono::Duration::hours(2))
+            .unwrap();
+        // Nothing listens on this port: bind, note the port, drop the listener.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let daemon = fetch_daemon_delegation(&format!("http://127.0.0.1:{port}"));
+        assert!(daemon.is_none());
+        let line = delegation_line_with(daemon.as_ref(), dir.path(), false, now).unwrap();
+        assert!(line.contains("agent delegation active"), "{line}");
+        assert!(line.contains("2 hour(s) ago"), "{line}");
+    }
+
+    #[test]
+    fn an_older_daemon_without_the_field_falls_back_too() {
+        let url = fake_daemon(serde_json::json!({"version": "0.17.0"}));
+        assert!(fetch_daemon_delegation(&url).is_none());
     }
 }

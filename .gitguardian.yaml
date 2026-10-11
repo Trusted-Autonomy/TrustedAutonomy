@@ -1,0 +1,16 @@
+version: 2
+
+# Narrow on purpose: only paths that hold documented placeholder tokens.
+# Real alerts anywhere else in the tree must stay visible. The in-repo scan
+# (scripts/secret-scan.sh, allowlist scripts/secret-scan.allowlist) enforces the
+# same boundary in CI.
+secret:
+  ignored_paths:
+    # Reserved directory for fixtures that must contain real-shaped secrets.
+    - "tests/fixtures/secret-shaped/**"
+    # Channel templates show placeholder bot tokens (xoxb-...) as setup hints.
+    - "templates/channels/**"
+    # Slack plugin README documents the token format with a placeholder.
+    - "plugins/ta-channel-slack/README.md"
+    # Setup guides that show placeholder tokens such as xoxb-your-bot-token.
+    - "docs/guides/**"

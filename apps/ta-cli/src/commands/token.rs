@@ -22,7 +22,7 @@ pub enum TokenCommands {
 }
 
 pub fn execute(cmd: &TokenCommands, config: &GatewayConfig) -> anyhow::Result<()> {
-    let tokens_dir = config.workspace_root.join(".ta").join("tokens");
+    let tokens_dir = tokens_dir(&config.workspace_root)?;
     let store = TokenStore::new(&tokens_dir);
 
     match cmd {
@@ -30,6 +30,23 @@ pub fn execute(cmd: &TokenCommands, config: &GatewayConfig) -> anyhow::Result<()
         TokenCommands::List => list_tokens(&store),
         TokenCommands::Cleanup => cleanup_tokens(&store),
     }
+}
+
+/// Approval tokens live in the per-user TA state directory, not the project
+/// tree, so an agent cannot read them with `../../`. An old-location
+/// `.ta/tokens` is still used (with a warning) in the default posture until
+/// `ta doctor --fix` moves it.
+fn tokens_dir(project_root: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    use ta_credentials::state::{
+        resolve_moved_path, MovedItem, Posture, ProjectState, StateLocator,
+    };
+    let locator = StateLocator::from_env();
+    let ps = ProjectState::open(project_root, &locator)?;
+    Ok(resolve_moved_path(
+        &ps,
+        MovedItem::Tokens,
+        Posture::resolve(&locator),
+    )?)
 }
 
 fn parse_token_duration(s: &str) -> anyhow::Result<chrono::Duration> {

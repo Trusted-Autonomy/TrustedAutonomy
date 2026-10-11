@@ -48,6 +48,8 @@ struct WebState {
     /// (v0.17.0.12.5). Cleared on daemon restart — job status is also durably
     /// recorded in the log file at `ApplyJobRecord::log_path`.
     apply_jobs: Arc<Mutex<HashMap<String, ApplyJobRecord>>>,
+    /// Per-user state directory, where agent-context sightings are recorded.
+    state_dir: PathBuf,
 }
 
 // ── Apply jobs (v0.17.0.12.5) ───────────────────────────────────────
@@ -670,6 +672,7 @@ struct ApproveDraftRequest {
 async fn approve_draft(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     proof: Option<axum::Extension<crate::human_gate::HumanProof>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
@@ -695,10 +698,14 @@ async fn approve_draft(
         }
     };
 
-    // The named human when the call carried a verified assertion.
-    let approver = proof
-        .and_then(|axum::Extension(p)| p.user_id)
-        .unwrap_or_else(|| "web-ui".to_string());
+    // The named human when the call carried a verified assertion; the
+    // credential holder when an agent client said it was acting (CR-03 item 6).
+    let claim = crate::actor_context::claim_for(&headers, proof.as_ref().map(|e| &e.0));
+    let approver = crate::actor_context::actor_name(
+        &claim,
+        proof.and_then(|axum::Extension(p)| p.user_id),
+        "web-ui",
+    );
     let status = DraftStatus::Approved {
         approved_by: approver,
         approved_at: Utc::now(),
@@ -709,12 +716,23 @@ async fn approve_draft(
         status,
         approve_request.selected_uris.as_deref(),
     ) {
-        Ok(true) => Json(ActionResponse {
-            package_id: id,
-            status: "Approved".into(),
-            message: "Draft approved via web UI".into(),
-        })
-        .into_response(),
+        Ok(true) => {
+            crate::actor_context::record_draft_action(
+                &state.pr_packages_dir,
+                &project_root_from_pr_packages_dir(&state.pr_packages_dir),
+                &state.state_dir,
+                &claim,
+                "approve",
+                uuid,
+                "POST /api/drafts/{id}/approve",
+            );
+            Json(ActionResponse {
+                package_id: id,
+                status: "Approved".into(),
+                message: "Draft approved via web UI".into(),
+            })
+            .into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "draft not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -745,6 +763,8 @@ struct ApplyDraftRequest {
 async fn apply_draft_endpoint(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    proof: Option<axum::Extension<crate::human_gate::HumanProof>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let uuid = match Uuid::parse_str(&id) {
@@ -813,7 +833,19 @@ async fn apply_draft_endpoint(
 
     let project_root = project_root_from_pr_packages_dir(&state.pr_packages_dir);
 
-    let ta_bin = find_ta_binary_web();
+    // Label the accepted apply before the background job starts (CR-03 item 6).
+    let claim = crate::actor_context::claim_for(&headers, proof.as_ref().map(|e| &e.0));
+    crate::actor_context::record_draft_action(
+        &state.pr_packages_dir,
+        &project_root,
+        &state.state_dir,
+        &claim,
+        "apply",
+        uuid,
+        "POST /api/drafts/{id}/apply",
+    );
+
+    let ta_bin = apply_ta_binary();
     let short_id = id[..8.min(id.len())].to_string();
 
     let logs_dir = apply_logs_dir(&project_root);
@@ -853,7 +885,10 @@ async fn apply_draft_endpoint(
             .arg("draft")
             .arg("apply")
             .arg(&short_id)
-            .arg("--git-commit");
+            .arg("--git-commit")
+            // The daemon already recorded actor_context for this apply; the
+            // headless child would otherwise label a direct action as delegated.
+            .env(crate::actor_context::DAEMON_RECORDED_ENV, "1");
         for pattern in &reject_patterns {
             cmd.arg("--reject").arg(pattern);
         }
@@ -937,6 +972,17 @@ fn parse_commit_sha(output: &str) -> Option<String> {
     None
 }
 
+/// The `ta` used for background applies. Tests never run a real `ta`.
+fn apply_ta_binary() -> String {
+    // `cfg!` rather than a cfg attribute: the route-classification test scans
+    // the text before the first test-only attribute for route registrations.
+    if cfg!(test) {
+        "ta-binary-not-available-in-unit-tests".to_string()
+    } else {
+        find_ta_binary_web()
+    }
+}
+
 /// Locate the `ta` binary. Prefers the one adjacent to the running daemon.
 pub(crate) fn find_ta_binary_web() -> String {
     if let Ok(current) = std::env::current_exe() {
@@ -953,6 +999,7 @@ pub(crate) fn find_ta_binary_web() -> String {
 async fn deny_draft(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     proof: Option<axum::Extension<crate::human_gate::HumanProof>>,
     Json(body): Json<DenyRequest>,
 ) -> impl IntoResponse {
@@ -962,9 +1009,12 @@ async fn deny_draft(
     };
 
     let selected_uris = body.selected_uris;
-    let denier = proof
-        .and_then(|axum::Extension(p)| p.user_id)
-        .unwrap_or_else(|| "web-ui".to_string());
+    let claim = crate::actor_context::claim_for(&headers, proof.as_ref().map(|e| &e.0));
+    let denier = crate::actor_context::actor_name(
+        &claim,
+        proof.and_then(|axum::Extension(p)| p.user_id),
+        "web-ui",
+    );
     let status = DraftStatus::Denied {
         reason: body.reason,
         denied_by: denier,
@@ -975,12 +1025,23 @@ async fn deny_draft(
         status,
         selected_uris.as_deref(),
     ) {
-        Ok(true) => Json(ActionResponse {
-            package_id: id,
-            status: "Denied".into(),
-            message: "Draft denied via web UI".into(),
-        })
-        .into_response(),
+        Ok(true) => {
+            crate::actor_context::record_draft_action(
+                &state.pr_packages_dir,
+                &project_root_from_pr_packages_dir(&state.pr_packages_dir),
+                &state.state_dir,
+                &claim,
+                "deny",
+                uuid,
+                "POST /api/drafts/{id}/deny",
+            );
+            Json(ActionResponse {
+                package_id: id,
+                status: "Denied".into(),
+                message: "Draft denied via web UI".into(),
+            })
+            .into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "draft not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1152,6 +1213,7 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
         pr_packages_dir,
         memory_dir,
         apply_jobs: Arc::new(Mutex::new(HashMap::new())),
+        state_dir: ta_credentials::human::user_state_dir(),
     });
 
     build_web_routes(state)
@@ -1236,6 +1298,7 @@ pub fn build_full_router(
         pr_packages_dir: app_state.pr_packages_dir.clone(),
         memory_dir: app_state.memory_dir.clone(),
         apply_jobs: Arc::new(Mutex::new(HashMap::new())),
+        state_dir: app_state.human_gate.state_dir().to_path_buf(),
     });
 
     // Build CORS layer using any extra origins from config (Studio URL, custom UIs).
@@ -1636,6 +1699,41 @@ fn start_goal_recovery_tasks(app_state: &std::sync::Arc<crate::api::AppState>) {
             }
         });
     }
+}
+
+/// A minimal valid DraftPackage JSON with the given id (shared by test modules).
+#[cfg(test)]
+pub(crate) fn test_draft_value(id: Uuid) -> serde_json::Value {
+    serde_json::json!({
+        "package_version": "1.0.0",
+        "package_id": id.to_string(),
+        "created_at": "2026-01-01T00:00:00Z",
+        "goal": {
+            "goal_id": "aabbccdd-0000-0000-0000-000000000000",
+            "title": "Test goal",
+            "objective": "test",
+            "success_criteria": [],
+            "constraints": []
+        },
+        "iteration": {
+            "iteration_id": "iter-1",
+            "sequence": 1,
+            "workspace_ref": {"type": "staging_dir", "ref": "test"}
+        },
+        "agent_identity": {
+            "agent_id": "test-agent",
+            "agent_type": "test",
+            "constitution_id": "default",
+            "capability_manifest_hash": "abc"
+        },
+        "summary": {"what_changed": "test", "why": "test", "impact": "none", "rollback_plan": "none", "open_questions": [], "alternatives_considered": []},
+        "plan": {"completed_steps": [], "next_steps": [], "decision_log": []},
+        "changes": {"artifacts": [], "patch_sets": [], "pending_actions": []},
+        "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+        "provenance": {"inputs": [], "tool_trace_hash": "test"},
+        "review_requests": {"requested_actions": [], "reviewers": [], "required_approvals": 1},
+        "signatures": {"package_hash": "test", "agent_signature": "test"}
+    })
 }
 
 #[cfg(test)]
@@ -2197,36 +2295,7 @@ mod tests {
 
     /// Build a minimal valid DraftPackage JSON with the given UUID.
     fn minimal_draft_json(id: Uuid) -> serde_json::Value {
-        serde_json::json!({
-            "package_version": "1.0.0",
-            "package_id": id.to_string(),
-            "created_at": "2026-01-01T00:00:00Z",
-            "goal": {
-                "goal_id": "aabbccdd-0000-0000-0000-000000000000",
-                "title": "Test goal",
-                "objective": "test",
-                "success_criteria": [],
-                "constraints": []
-            },
-            "iteration": {
-                "iteration_id": "iter-1",
-                "sequence": 1,
-                "workspace_ref": {"type": "staging_dir", "ref": "test"}
-            },
-            "agent_identity": {
-                "agent_id": "test-agent",
-                "agent_type": "test",
-                "constitution_id": "default",
-                "capability_manifest_hash": "abc"
-            },
-            "summary": {"what_changed": "test", "why": "test", "impact": "none", "rollback_plan": "none", "open_questions": [], "alternatives_considered": []},
-            "plan": {"completed_steps": [], "next_steps": [], "decision_log": []},
-            "changes": {"artifacts": [], "patch_sets": [], "pending_actions": []},
-            "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
-            "provenance": {"inputs": [], "tool_trace_hash": "test"},
-            "review_requests": {"requested_actions": [], "reviewers": [], "required_approvals": 1},
-            "signatures": {"package_hash": "test", "agent_signature": "test"}
-        })
+        test_draft_value(id)
     }
 
     fn write_draft_json(packages_dir: &std::path::Path, id: Uuid, extra: serde_json::Value) {
@@ -2364,6 +2433,7 @@ mod tests {
             pr_packages_dir: packages_dir.clone(),
             memory_dir: project.join(".ta").join("memory"),
             apply_jobs: Arc::new(Mutex::new(HashMap::new())),
+            state_dir: state_dir.clone(),
         });
         let app = build_web_routes(web_state).layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -2502,6 +2572,170 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{action}");
         }
+    }
+
+    // ── actor_context labeling on the draft routes (CR-03 item 6) ─────────
+
+    const AGENT_HEADER: &str =
+        "agent_delegated; reasons=CLAUDECODE%20is%20set,TA_CHAT_MODE%20is%20set";
+
+    fn load_pkg(packages_dir: &std::path::Path, id: Uuid) -> ta_changeset::DraftPackage {
+        serde_json::from_str(
+            &std::fs::read_to_string(packages_dir.join(format!("{id}.json"))).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Send `action` with the credential and an optional actor-context header.
+    async fn act_on_draft(
+        g: &GatedWeb,
+        id: Uuid,
+        action: &str,
+        actor_header: Option<&str>,
+    ) -> StatusCode {
+        let secret = ta_credentials::human::load_secret(&g.state_dir, false).unwrap();
+        let mut headers = vec![("x-ta-human-credential", secret)];
+        if let Some(h) = actor_header {
+            headers.push(("x-ta-actor-context", h.to_string()));
+        }
+        let body = if action == "deny" {
+            r#"{"reason":"no"}"#
+        } else {
+            "{}"
+        };
+        g.app
+            .clone()
+            .oneshot(post_with(
+                &format!("/api/drafts/{id}/{action}"),
+                "127.0.0.1:5000",
+                &headers,
+                body,
+            ))
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn audit_text(g: &GatedWeb) -> String {
+        let project = g.packages_dir.parent().unwrap().parent().unwrap();
+        std::fs::read_to_string(project.join(".ta").join("audit.jsonl")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn approve_deny_apply_are_labeled_agent_delegated_when_the_header_is_sent() {
+        let holder = ta_credentials::human::credential_holder();
+        for action in ["approve", "deny", "apply"] {
+            let g = gated_web();
+            ta_credentials::human::login(&g.state_dir, false).unwrap();
+            let id = Uuid::new_v4();
+            write_draft_json(&g.packages_dir, id, serde_json::json!({}));
+
+            let status = act_on_draft(&g, id, action, Some(AGENT_HEADER)).await;
+            assert!(status.is_success(), "{action}: {status}");
+
+            let pkg = load_pkg(&g.packages_dir, id);
+            assert_eq!(pkg.action_contexts.len(), 1, "{action}");
+            let rec = &pkg.action_contexts[0];
+            assert_eq!(rec.action, action);
+            assert_eq!(rec.actor_context, "agent_delegated");
+            assert_eq!(rec.delegating_owner, holder);
+            assert_eq!(
+                rec.delegated_signals,
+                vec!["CLAUDECODE is set", "TA_CHAT_MODE is set"]
+            );
+            match (&pkg.status, action) {
+                (ta_changeset::DraftStatus::Approved { approved_by, .. }, "approve") => {
+                    assert_eq!(approved_by, &holder)
+                }
+                (ta_changeset::DraftStatus::Denied { denied_by, .. }, "deny") => {
+                    assert_eq!(denied_by, &holder)
+                }
+                (_, "apply") => {}
+                (other, _) => panic!("{action}: unexpected status {other:?}"),
+            }
+
+            let audit = audit_text(&g);
+            assert!(audit.contains("agent_delegated"), "{action}: {audit}");
+            assert!(audit.contains("CLAUDECODE is set"), "{action}: {audit}");
+            assert!(audit.contains(&holder), "{action}: {audit}");
+            // The sighting feeds /api/status and `ta status`.
+            assert!(
+                ta_credentials::human::last_agent_context_seen(&g.state_dir).is_some(),
+                "{action}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_the_header_the_action_is_direct_and_names_the_usual_actor() {
+        for action in ["approve", "deny", "apply"] {
+            let g = gated_web();
+            ta_credentials::human::login(&g.state_dir, false).unwrap();
+            let id = Uuid::new_v4();
+            write_draft_json(&g.packages_dir, id, serde_json::json!({}));
+
+            let status = act_on_draft(&g, id, action, None).await;
+            assert!(status.is_success(), "{action}: {status}");
+
+            let pkg = load_pkg(&g.packages_dir, id);
+            assert_eq!(pkg.action_contexts.len(), 1, "{action}");
+            assert_eq!(pkg.action_contexts[0].actor_context, "direct");
+            assert!(pkg.action_contexts[0].delegated_signals.is_empty());
+            if action == "approve" {
+                assert_eq!(approved_by(&g.packages_dir, id).as_deref(), Some("web-ui"));
+            }
+            let audit = audit_text(&g);
+            assert!(audit.contains("\"actor_context\":\"direct\""), "{audit}");
+            assert!(!audit.contains("agent_delegated"), "{audit}");
+            assert!(
+                ta_credentials::human::last_agent_context_seen(&g.state_dir).is_none(),
+                "a direct action is not an agent sighting"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_or_oversize_actor_header_is_ignored_and_the_action_still_succeeds() {
+        let oversize = format!("agent_delegated; reasons={}", "a".repeat(4000));
+        for (n, bad) in [
+            "agent_delegated; reasons=%ZZ",
+            "not-an-actor-context",
+            oversize.as_str(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let g = gated_web();
+            ta_credentials::human::login(&g.state_dir, false).unwrap();
+            let id = Uuid::new_v4();
+            write_draft_json(&g.packages_dir, id, serde_json::json!({}));
+            let status = act_on_draft(&g, id, "approve", Some(bad)).await;
+            assert_eq!(status, StatusCode::OK, "case {n}");
+            let pkg = load_pkg(&g.packages_dir, id);
+            assert_eq!(pkg.action_contexts[0].actor_context, "direct", "case {n}");
+            assert_eq!(approved_by(&g.packages_dir, id).as_deref(), Some("web-ui"));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_header_does_not_open_the_gate() {
+        // Advisory only: an actor-context header without the credential is refused as before.
+        let g = gated_web();
+        let id = Uuid::new_v4();
+        write_draft_json(&g.packages_dir, id, serde_json::json!({}));
+        let resp = g
+            .app
+            .clone()
+            .oneshot(post_with(
+                &format!("/api/drafts/{id}/approve"),
+                "127.0.0.1:5000",
+                &[("x-ta-actor-context", AGENT_HEADER.to_string())],
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(load_pkg(&g.packages_dir, id).action_contexts.is_empty());
     }
 
     // ── Artifact content preview (v0.17.0.12.17 item 5) ───────────────────

@@ -25,6 +25,7 @@ pub mod encryption;
 pub mod error;
 pub mod file_vault;
 pub mod human;
+pub mod state;
 pub mod vault;
 
 pub use config::CredentialsConfig;

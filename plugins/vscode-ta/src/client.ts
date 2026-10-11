@@ -24,6 +24,41 @@ export function humanCredential(): string {
   }
 }
 
+/**
+ * Advisory `X-TA-Actor-Context` value when this editor was launched from an
+ * agent (same environment markers the `ta` CLI checks), else ''. The daemon
+ * records it as `actor_context: agent_delegated` in the audit trail. It is not
+ * a security control: an agent can unset the variables.
+ */
+export function actorContextHeader(env: NodeJS.ProcessEnv = process.env): string {
+  const reasons: string[] = [];
+  for (const name of [
+    'TA_AGENT_CONTEXT',
+    'TA_IS_STAGING',
+    'TA_AGENT_ID',
+    'CLAUDECODE',
+    'CLAUDE_CODE_ENTRYPOINT',
+  ]) {
+    if (env[name]) {
+      reasons.push(`${name} is set`);
+    }
+  }
+  const mode = env.TA_CALLER_MODE;
+  if (mode && mode !== 'normal') {
+    reasons.push(`TA_CALLER_MODE=${mode}`);
+  }
+  if (env.TA_CHAT_MODE) {
+    reasons.push('TA_CHAT_MODE is set');
+  }
+  if (reasons.length === 0) {
+    return '';
+  }
+  const encoded = reasons
+    .slice(0, 5)
+    .map((r) => encodeURIComponent(r.slice(0, 60)).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()));
+  return `agent_delegated; reasons=${encoded.join(',')}`;
+}
+
 export interface HealthResponse {
   status: string;
   version: string;
@@ -136,6 +171,10 @@ export class TaClient {
       const credential = auth ? humanCredential() : '';
       if (credential) {
         headers['X-TA-Human-Credential'] = credential;
+      }
+      const actorContext = auth ? actorContextHeader() : '';
+      if (actorContext) {
+        headers['X-TA-Actor-Context'] = actorContext;
       }
       if (payload) {
         headers['Content-Length'] = Buffer.byteLength(payload).toString();

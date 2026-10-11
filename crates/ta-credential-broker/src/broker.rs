@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
 
+use ta_credentials::state::{
+    load_or_create_secret, ControlSecret, CustodyOpts, ProjectState, StateLocator,
+};
+
 use crate::error::BrokerError;
 
 const ROOT_KEY_FILENAME: &str = "broker_root.key";
@@ -67,9 +71,45 @@ pub struct CredentialBroker {
 }
 
 impl CredentialBroker {
-    /// Open (or initialize) a broker rooted at `dir` — typically a project's
-    /// `.ta` directory, the same one `FileVault` stores `credentials.json`
-    /// alongside. Generates and persists a root key on first use.
+    /// Open (or initialize) a broker for a project. The root key lives in the
+    /// daemon-only per-user state directory (OS keychain, or an owner-only
+    /// file there), NOT in the project tree. An old-location
+    /// `.ta/broker_root.key` is still read in the default posture with a loud
+    /// warning (move it with `ta doctor --fix`) and refused under `strict`.
+    /// The revocation list stays next to the project's other `.ta` files.
+    pub fn open_for_project(project_root: &Path) -> Result<Self, BrokerError> {
+        let locator = StateLocator::from_env();
+        let opts = CustodyOpts::from_env(&locator);
+        let ps = ProjectState::open(project_root, &locator)?;
+        Self::open_with_state(&project_root.join(".ta"), &ps, opts)
+    }
+
+    /// Like [`open_for_project`](Self::open_for_project) with an explicit
+    /// state directory and custody options (tests, installers).
+    pub fn open_with_state(
+        dir: &Path,
+        ps: &ProjectState,
+        opts: CustodyOpts,
+    ) -> Result<Self, BrokerError> {
+        fs::create_dir_all(dir)?;
+        let (loaded, _created) =
+            load_or_create_secret(ps, ControlSecret::BrokerRootKey, opts, || {
+                KeyPair::new().private().to_bytes_hex()
+            })?;
+        let keypair = parse_root_keypair(&loaded.value, &loaded.origin.describe())?;
+        let denylist_path = dir.join(DENYLIST_FILENAME);
+        let denylist = load_denylist(&denylist_path)?;
+        Ok(Self {
+            keypair,
+            denylist_path,
+            denylist,
+        })
+    }
+
+    /// Open (or initialize) a broker whose root key is a plain file inside
+    /// `dir`. For tests and tools that manage their own key directory; the
+    /// production entry point is [`open_for_project`](Self::open_for_project),
+    /// which keeps the key out of the project tree.
     pub fn open(dir: &Path) -> Result<Self, BrokerError> {
         fs::create_dir_all(dir)?;
         let keypair = load_or_create_root_keypair(&dir.join(ROOT_KEY_FILENAME))?;
@@ -408,6 +448,16 @@ fn revocation_id_hex(biscuit: &Biscuit) -> String {
     authority_id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn parse_root_keypair(hex: &str, location: &str) -> Result<KeyPair, BrokerError> {
+    let private = PrivateKey::from_bytes_hex(hex.trim(), Algorithm::Ed25519).map_err(|e| {
+        BrokerError::KeyUnreadable {
+            path: std::path::PathBuf::from(location),
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(KeyPair::from(&private))
+}
+
 fn load_or_create_root_keypair(key_path: &Path) -> Result<KeyPair, BrokerError> {
     if key_path.exists() {
         let hex = fs::read_to_string(key_path)?;
@@ -450,6 +500,49 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    #[test]
+    fn project_key_lives_in_the_state_dir_not_the_project_tree() {
+        let project = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        let loc = StateLocator::at(state.path());
+        let ps = ProjectState::open(project.path(), &loc).unwrap();
+        let ta = project.path().join(".ta");
+        let broker = CredentialBroker::open_with_state(&ta, &ps, CustodyOpts::file_only()).unwrap();
+        let g = broker
+            .grant(Uuid::new_v4(), "agent", vec!["s".into()], 60)
+            .unwrap();
+        assert!(!ta.join("broker_root.key").exists());
+        assert!(ps.secrets_dir().join("broker-root-key").is_file());
+        // A second open (another process) verifies the same token.
+        let again = CredentialBroker::open_with_state(&ta, &ps, CustodyOpts::file_only()).unwrap();
+        again.verify(&g.token).unwrap();
+    }
+
+    #[test]
+    fn old_location_key_still_verifies_in_default_posture_and_strict_refuses_it() {
+        let project = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        let loc = StateLocator::at(state.path());
+        let ps = ProjectState::open(project.path(), &loc).unwrap();
+        let ta = project.path().join(".ta");
+        // A grant minted by the old layout (key file in the project).
+        let old = CredentialBroker::open(&ta).unwrap();
+        let g = old
+            .grant(Uuid::new_v4(), "agent", vec!["s".into()], 60)
+            .unwrap();
+        let broker = CredentialBroker::open_with_state(&ta, &ps, CustodyOpts::file_only()).unwrap();
+        broker.verify(&g.token).unwrap();
+        assert!(
+            ta.join("broker_root.key").exists(),
+            "reading must not move it"
+        );
+        let err = CredentialBroker::open_with_state(&ta, &ps, CustodyOpts::file_only().strict())
+            .err()
+            .expect("strict must refuse")
+            .to_string();
+        assert!(err.contains("ta doctor --fix"), "{err}");
+    }
 
     #[test]
     fn grant_round_trips_claims() {

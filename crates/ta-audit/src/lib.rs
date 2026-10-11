@@ -22,6 +22,7 @@
 // in the same directory and include it as a submodule.
 pub mod attestation;
 pub mod chain;
+pub mod checkpoint;
 pub mod drift;
 pub mod error;
 pub mod event;

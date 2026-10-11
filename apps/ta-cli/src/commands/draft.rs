@@ -719,7 +719,23 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             super::human_auth::require_human_for("approve")?;
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
             let identity = reviewer_as.as_deref().unwrap_or(reviewer.as_str());
-            approve_package(config, &resolved, identity, *force_override)
+            // CR-03 item 6: accepted from an agent context on the credential,
+            // the approval is the holder's delegation, not a direct human act.
+            let delegation = super::human_auth::current_delegation("approve");
+            let identity = match &delegation {
+                Some(d) => {
+                    println!(
+                        "  Agent context detected ({}): approving as {} (delegating owner), recorded as agent_delegated.",
+                        d.signals.join("; "),
+                        d.holder
+                    );
+                    d.holder.as_str()
+                }
+                None => identity,
+            };
+            approve_package(config, &resolved, identity, *force_override)?;
+            super::human_auth::record_delegation(config, &resolved, "approve");
+            Ok(())
         }
         DraftCommands::Deny {
             id,
@@ -729,11 +745,18 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
         } => {
             super::human_auth::require_human_for("deny")?;
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+            let delegation = super::human_auth::current_delegation("deny");
+            let reviewer = delegation
+                .as_ref()
+                .map(|d| d.holder.as_str())
+                .unwrap_or(reviewer.as_str());
             if let Some(file_path) = file {
-                deny_artifact(config, &resolved, reason, reviewer, file_path)
+                deny_artifact(config, &resolved, reason, reviewer, file_path)?;
             } else {
-                deny_package(config, &resolved, reason, reviewer)
+                deny_package(config, &resolved, reason, reviewer)?;
             }
+            super::human_auth::record_delegation(config, &resolved, "deny");
+            Ok(())
         }
         DraftCommands::Apply {
             id,
@@ -775,7 +798,11 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
 
             // --chain: walk up to root parent and apply all unapplied drafts in order.
             if *chain {
-                return apply_chain(config, &resolved, target.as_deref(), *skip_verify);
+                apply_chain(config, &resolved, target.as_deref(), *skip_verify)?;
+                if !*dry_run {
+                    super::human_auth::record_delegation(config, &resolved, "apply");
+                }
+                return Ok(());
             }
 
             // Warn on deprecated flags.
@@ -871,6 +898,9 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 watch_package(config, &resolved, 30, 120)?;
             }
 
+            if !*dry_run {
+                super::human_auth::record_delegation(config, &resolved, "apply");
+            }
             Ok(())
         }
         DraftCommands::Amend {
@@ -2526,6 +2556,7 @@ pub(crate) fn build_package(
         vcs_status: None,
         parent_draft_id: None, // Set below if this is a follow-up.
         pending_approvals: vec![],
+        action_contexts: vec![],
         supervisor_review: None,
         ignored_artifacts: vec![],
         baseline_artifacts: vec![], // Set below if this is a follow-up (v0.14.3.5).
@@ -3282,6 +3313,7 @@ fn build_memory_only_draft(
         vcs_status: None,
         parent_draft_id: None,
         pending_approvals: vec![],
+        action_contexts: vec![],
         supervisor_review: None,
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
@@ -11407,7 +11439,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// matches nothing.
 /// Resolve a draft ID from a required string (legacy callers).
 /// Accepts UUID, UUID prefix, or goal title/phase substring.
-fn resolve_draft_id(id: &str, config: &GatewayConfig) -> anyhow::Result<Uuid> {
+pub(crate) fn resolve_draft_id(id: &str, config: &GatewayConfig) -> anyhow::Result<Uuid> {
     let resolved = resolve_draft_id_flexible(config, Some(id))?;
     Uuid::parse_str(&resolved)
         .map_err(|e| anyhow::anyhow!("Invalid draft ID after resolution: {} — {}", resolved, e))
@@ -20106,3 +20138,6 @@ fn run() {
 
 #[cfg(test)]
 mod review_packet_tests;
+
+#[cfg(test)]
+mod delegation_tests;
