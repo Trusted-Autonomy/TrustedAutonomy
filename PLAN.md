@@ -11151,7 +11151,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 > **Focus**: Supervised Autonomy (SA) enterprise credential store, host-wide FUSE filesystem virtualization, and external process governance (ComfyUI, SimpleTuner, arbitrary daemons). This milestone is the foundation for deploying TA in regulated enterprise environments.
 ### v0.17.12.13 - CI Reliability: Windows Process Leak, Standalone Plugin Builds, Flaky Timing Test
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: A Windows CI run should not take an hour or die. Evidence from 2026-10-11: even passing Windows runs end with about 7,000 orphaned `gh` processes (6,974 in the 08:41 push run) and a leftover `ta-daemon`; a longer failed run (02:24, release build) ended with 23,040, and four Windows jobs this day ran 54 to 68 minutes and died mid-clippy or in teardown with no failing step. Pull requests that touch plugin code also shipped a manifest CI never built. This phase is ordered last by number only; it is urgent and independent of the security release.
