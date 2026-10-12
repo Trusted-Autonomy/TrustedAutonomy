@@ -10949,7 +10949,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.1`
 
 ### v0.17.12.2 - Role-Bound Outcome Tokens, Daemon-Stamped Messages, NATS Credentials (CR-04, CR-05)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.1
 
 **Goal**: The poller can prove an outcome came from the CoS and not from another role, and the message bus is not open to anything that can reach it.
