@@ -10971,7 +10971,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.2`
 
 ### v0.17.12.3 - Atomic Apply, Reversibility Classes and Durable Action Queue
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.1
 
 **Goal**: A draft is never half applied, outside actions survive restarts and never run twice, and the system is honest that not everything can be undone. Design: `docs/superpowers/specs/2026-10-07-atomic-apply-and-action-queue-design.md`. Supersedes PR #642.
