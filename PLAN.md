@@ -11189,7 +11189,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.14`
 
 ### v0.17.12.15 - Goal Spend and Origin Class Tracking
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.14
 
 **Goal**: The owner lets Chief-of-Staff workers run uncapped on autonomy and wants token spend tracked by why the work started (asked, suggested, unasked), so spend on unasked work is visible and cappable. TA records input and output tokens per goal today (`GoalRun.input_tokens`, `output_tokens`, copied to `VelocityEntry` in `.ta/velocity-stats.json`) and nothing ships them out; `origin = cos|chat` does not say whether a human asked. Checked 2026-10-12 against real headless goals: tokens are populated (14 of 16 goals since 2026-10-10), but input counts are tiny (144 to 228) next to 50,000 to 150,000 output tokens, so cache-read and cache-creation tokens are not recorded and cost is understated; and `token_cost.rs` prices only older Claude model names, so current models resolve to no price. Requested by the Wayfinder session (scoping note, 2026-10-12).
