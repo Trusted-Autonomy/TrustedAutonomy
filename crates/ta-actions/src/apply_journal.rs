@@ -188,6 +188,16 @@ fn staged_path(dst: &Path) -> PathBuf {
     dst.with_file_name(name)
 }
 
+/// Flush an existing file to disk. Opened with write access (without
+/// truncating) because Windows `FlushFileBuffers` refuses a read-only handle
+/// with "Access is denied"; Unix accepts either.
+fn fsync_existing_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.sync_all())
+}
+
 /// Staged copy then rename: the destination is either the old file or the
 /// complete new file, never a partial one. Used for installs and for restores.
 pub fn install_file(src: &Path, dst: &Path) -> Result<(), JournalError> {
@@ -196,9 +206,7 @@ pub fn install_file(src: &Path, dst: &Path) -> Result<(), JournalError> {
     }
     let tmp = staged_path(dst);
     std::fs::copy(src, &tmp).map_err(io("stage a copy for", dst))?;
-    std::fs::File::open(&tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(io("fsync the staged copy of", &tmp))?;
+    fsync_existing_file(&tmp).map_err(io("fsync the staged copy of", &tmp))?;
     std::fs::rename(&tmp, dst).map_err(io("move the staged copy into place at", dst))?;
     Ok(())
 }
@@ -295,9 +303,7 @@ impl ApplyJournal {
             self.next_backup += 1;
             let dst = self.dir.join(BACKUP_DIR).join(&name);
             std::fs::copy(&abs, &dst).map_err(io("back up", &abs))?;
-            std::fs::File::open(&dst)
-                .and_then(|f| f.sync_all())
-                .map_err(io("fsync the backup of", &dst))?;
+            fsync_existing_file(&dst).map_err(io("fsync the backup of", &dst))?;
             (true, Some(name))
         } else {
             (false, None)
