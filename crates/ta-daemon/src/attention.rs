@@ -232,7 +232,7 @@ fn make_id(prefix: &str, key: &str) -> String {
 }
 
 /// One line, no control characters, at most `MAX_SUMMARY_CHARS`.
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     let flat: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -248,21 +248,33 @@ fn one_line(s: &str) -> String {
     }
 }
 
+/// The value whose canonical JSON the item digest covers (contract section 3).
+/// Shared with the golden-vector generator so the two cannot drift.
+pub(crate) fn digest_input(
+    id: &str,
+    kind: AttentionKind,
+    summary: &str,
+    provenance: &Option<FeedProvenance>,
+    actions: &[String],
+) -> Value {
+    json!({
+        "id": id,
+        "kind": kind.as_str(),
+        "summary": summary,
+        "provenance": provenance,
+        "actions": actions,
+    })
+}
+
 /// The digest the person's assertion must cover (contract section 3).
-fn item_digest(
+pub(crate) fn item_digest(
     id: &str,
     kind: AttentionKind,
     summary: &str,
     provenance: &Option<FeedProvenance>,
     actions: &[String],
 ) -> String {
-    let v = json!({
-        "id": id,
-        "kind": kind.as_str(),
-        "summary": summary,
-        "provenance": provenance,
-        "actions": actions,
-    });
+    let v = digest_input(id, kind, summary, provenance, actions);
     sha256_tagged(canonical_json(&v).as_bytes())
 }
 
@@ -1016,7 +1028,7 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<AttentionQ
     let keys: Vec<Value> = ta_credentials::human::load_assertion_keys(state_dir)
         .unwrap_or_default()
         .iter()
-        .map(|k| json!({ "kid": k.kid, "fingerprint": k.fingerprint() }))
+        .map(key_metadata)
         .collect();
     Json(json!({
         "count": items.len(),
@@ -1027,6 +1039,18 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<AttentionQ
         "keys": keys,
     }))
     .into_response()
+}
+
+/// What the feed publishes about one registered key: enough for the signing
+/// system to check a role against TA's floor at bind time. Never key material.
+pub(crate) fn key_metadata(k: &ta_credentials::human::AssertionKey) -> Value {
+    json!({
+        "kid": k.kid,
+        "fingerprint": k.fingerprint(),
+        "role_order": k.role_order,
+        "maintainer_roles": k.maintainer_roles,
+        "escalation_min_role": k.escalation_min_role,
+    })
 }
 
 /// `GET /api/attention/count`
@@ -1375,7 +1399,7 @@ pub async fn act(
     .into_response()
 }
 
-fn assertion_code(e: &crate::assertion::AssertionError) -> &'static str {
+pub(crate) fn assertion_code(e: &crate::assertion::AssertionError) -> &'static str {
     use crate::assertion::AssertionError as E;
     match e {
         E::Malformed(_) => "assertion_malformed",
@@ -1481,6 +1505,9 @@ async fn perform(
         )),
     }
 }
+
+#[cfg(test)]
+mod vectors;
 
 #[cfg(test)]
 mod tests {
@@ -2145,6 +2172,61 @@ mod tests {
         send(app, peer_req("GET", uri, "127.0.0.1:50000", &[], None)).await
     }
 
+    #[tokio::test]
+    async fn feed_metadata_lists_role_metadata_for_every_key_including_non_default_order() {
+        let r = rig();
+        let second = TestSigner::new(9);
+        ta_credentials::human::add_assertion_key_full(
+            r.state_dir.path(),
+            "org-2",
+            &second.public_b64(),
+            Some(&["lead".to_string()]),
+            Some(&[
+                "viewer".to_string(),
+                "editor".to_string(),
+                "lead".to_string(),
+            ]),
+            Some("editor"),
+            None,
+        )
+        .unwrap();
+        let (status, v) = get_json(&r.app, "/api/attention").await;
+        assert_eq!(status, StatusCode::OK);
+        let keys = v["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        let org2 = keys.iter().find(|k| k["kid"] == "org-2").unwrap();
+        assert_eq!(org2["role_order"], json!(["viewer", "editor", "lead"]));
+        assert_eq!(org2["maintainer_roles"], json!(["lead"]));
+        assert_eq!(org2["escalation_min_role"], "editor");
+        assert_eq!(
+            org2["fingerprint"],
+            ta_credentials::human::public_key_fingerprint(&second.public_b64()).as_str()
+        );
+        // Exactly these fields: nothing that could carry key material.
+        let mut names: Vec<&str> = org2
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "escalation_min_role",
+                "fingerprint",
+                "kid",
+                "maintainer_roles",
+                "role_order"
+            ]
+        );
+        assert!(!v.to_string().contains(&second.public_b64()));
+        assert!(!v.to_string().contains(&r.signer.public_b64()));
+        // The default key is still listed with defaults.
+        let org1 = keys.iter().find(|k| k["kid"] == KID).unwrap();
+        assert_eq!(org1["role_order"], json!(["member", "admin", "owner"]));
+    }
+
     impl Rig {
         fn root(&self) -> &Path {
             self.project.path()
@@ -2285,6 +2367,13 @@ mod tests {
             .unwrap()
             .starts_with("sha256:"));
         assert!(!v["keys"][0].to_string().contains(&r.signer.public_b64()));
+        // Role metadata (defaults for a key registered without options).
+        assert_eq!(
+            v["keys"][0]["role_order"],
+            json!(["member", "admin", "owner"])
+        );
+        assert_eq!(v["keys"][0]["maintainer_roles"], json!(["admin", "owner"]));
+        assert_eq!(v["keys"][0]["escalation_min_role"], "member");
         assert!(v["next_cursor"].is_string());
 
         // alice sees the any-maintainer items (all three here).

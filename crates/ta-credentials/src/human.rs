@@ -670,6 +670,9 @@ pub fn install_id(state_dir: &Path) -> Result<String, HumanCredentialError> {
 pub const DEFAULT_MAINTAINER_ROLES: &[&str] = &["admin", "owner"];
 /// Role ranks, lowest first, unless a key says otherwise.
 pub const DEFAULT_ROLE_ORDER: &[&str] = &["member", "admin", "owner"];
+/// Lowest role whose `escalated` claim is honored for a rerouted item, unless a
+/// key says otherwise.
+pub const DEFAULT_ESCALATION_MIN_ROLE: &str = "member";
 
 fn default_maintainer_roles() -> Vec<String> {
     DEFAULT_MAINTAINER_ROLES
@@ -680,6 +683,10 @@ fn default_maintainer_roles() -> Vec<String> {
 
 fn default_role_order() -> Vec<String> {
     DEFAULT_ROLE_ORDER.iter().map(|r| r.to_string()).collect()
+}
+
+fn default_escalation_min_role() -> String {
+    DEFAULT_ESCALATION_MIN_ROLE.to_string()
 }
 
 /// One registered public key allowed to sign human assertions. There is one
@@ -697,6 +704,11 @@ pub struct AssertionKey {
     /// role of equal or lower rank.
     #[serde(default = "default_role_order")]
     pub role_order: Vec<String>,
+    /// Lowest role whose `escalated` claim TA honors for an item rerouted away
+    /// from its named user (contract rule 7). Published in the feed metadata so
+    /// the signing system can check a role against TA's floor at bind time.
+    #[serde(default = "default_escalation_min_role")]
+    pub escalation_min_role: String,
     #[serde(default)]
     pub label: Option<String>,
     pub registered_at: chrono::DateTime<chrono::Utc>,
@@ -802,6 +814,29 @@ pub fn add_assertion_key(
     role_order: Option<&[String]>,
     label: Option<&str>,
 ) -> Result<AssertionKey, HumanCredentialError> {
+    add_assertion_key_full(
+        state_dir,
+        kid,
+        public_key_b64,
+        maintainer_roles,
+        role_order,
+        None,
+        label,
+    )
+}
+
+/// [`add_assertion_key`] plus `escalation_min_role` (default
+/// [`DEFAULT_ESCALATION_MIN_ROLE`]). An explicit value must be one of the key's
+/// `role_order` names so a typo cannot silently disable the floor.
+pub fn add_assertion_key_full(
+    state_dir: &Path,
+    kid: &str,
+    public_key_b64: &str,
+    maintainer_roles: Option<&[String]>,
+    role_order: Option<&[String]>,
+    escalation_min_role: Option<&str>,
+    label: Option<&str>,
+) -> Result<AssertionKey, HumanCredentialError> {
     let kid = kid.trim();
     if kid.is_empty()
         || kid.len() > 128
@@ -833,6 +868,20 @@ pub fn add_assertion_key(
         Some(r) => clean_roles("--role-order", r)?,
         None => default_role_order(),
     };
+    let escalation_min_role = match escalation_min_role {
+        Some(r) => {
+            let r = r.trim();
+            if !role_order.iter().any(|o| o == r) {
+                return Err(HumanCredentialError::Invalid(format!(
+                    "--escalation-min-role '{r}' is not in the role order ({}). Pick one of those \
+                     names.",
+                    role_order.join(",")
+                )));
+            }
+            r.to_string()
+        }
+        None => default_escalation_min_role(),
+    };
     let mut keys = load_assertion_keys(state_dir)?;
     keys.retain(|k| k.kid != kid);
     let key = AssertionKey {
@@ -840,6 +889,7 @@ pub fn add_assertion_key(
         public_key: public_key_b64.trim().to_string(),
         maintainer_roles,
         role_order,
+        escalation_min_role,
         label: label.map(str::to_string),
         registered_at: chrono::Utc::now(),
     };
@@ -999,6 +1049,7 @@ mod tests {
         assert_eq!(k.kid, "wf-1");
         assert_eq!(k.maintainer_roles, vec!["admin", "owner"]);
         assert_eq!(k.role_order, vec!["member", "admin", "owner"]);
+        assert_eq!(k.escalation_min_role, "member");
         assert!(k.fingerprint().starts_with("sha256:"));
         assert!(!k.fingerprint().contains(&key));
         assert_eq!(load_assertion_keys(dir.path()).unwrap().len(), 1);
@@ -1014,6 +1065,45 @@ mod tests {
         assert!(remove_assertion_key(dir.path(), "wf-1").unwrap());
         assert!(!remove_assertion_key(dir.path(), "wf-1").unwrap());
         assert!(load_assertion_keys(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn escalation_min_role_is_stored_validated_and_defaults_for_old_registries() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "A".repeat(43);
+        let order = vec![
+            "viewer".to_string(),
+            "editor".to_string(),
+            "lead".to_string(),
+        ];
+        let k = add_assertion_key_full(
+            dir.path(),
+            "k",
+            &key,
+            None,
+            Some(&order),
+            Some("editor"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(k.escalation_min_role, "editor");
+        let err = add_assertion_key_full(
+            dir.path(),
+            "k",
+            &key,
+            None,
+            Some(&order),
+            Some("boss"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--escalation-min-role") && err.contains("viewer,editor,lead"));
+        // A registry written before the field existed loads with the default.
+        let old = r#"{"keys":[{"kid":"old","public_key":"AAAA","registered_at":"2026-01-01T00:00:00Z"}]}"#;
+        std::fs::write(assertion_keys_path(dir.path()), old).unwrap();
+        let keys = load_assertion_keys(dir.path()).unwrap();
+        assert_eq!(keys[0].escalation_min_role, "member");
     }
 
     #[test]

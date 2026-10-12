@@ -23,8 +23,12 @@ toml = { workspace = true }
 async-trait = "0.1"
 async-nats = "0.50"
 bytes = "1"
+base64 = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 futures-util = "0.3"
-ta-session = { path = "../ta-session", version = "0.17.12-alpha.1" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.2" }
+ta-session = { path = "../ta-session", version = "0.17.12-alpha.2" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

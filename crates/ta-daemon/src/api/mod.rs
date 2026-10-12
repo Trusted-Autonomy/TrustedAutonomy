@@ -129,9 +129,10 @@ impl AppState {
 
         let cmd_max = daemon_config.commands.max_background_tasks;
         let whiteboard_config = ta_agent_whiteboard::WhiteboardConfig::load(&project_root);
-        let whiteboard_transport = ta_agent_whiteboard::select_transport(&whiteboard_config)
+        let whiteboard_transport = ta_agent_whiteboard::select_transport_for_project(&whiteboard_config, &project_root)
             .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "whiteboard: invalid [whiteboard] config, disabling coordination");
+                eprintln!("whiteboard: coordination disabled: {e}");
+                tracing::error!(error = %e, "whiteboard: invalid [whiteboard] config, disabling coordination");
                 None
             });
 
@@ -596,6 +597,11 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/whiteboard/outcome/send",
             post(whiteboard::send_outcome),
+        )
+        // Daemon-side verification of a report-back payload (CR-04).
+        .route(
+            "/api/whiteboard/outcome/check",
+            post(whiteboard::check_outcome),
         )
         // Which project this daemon serves: whiteboard clients verify it
         // before sending a session token.

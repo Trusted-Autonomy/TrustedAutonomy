@@ -32,6 +32,8 @@ const FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct NatsTransport {
     url: String,
+    credentials_env: String,
+    project_root: Option<std::path::PathBuf>,
     context: OnceCell<Context>,
     kv_stores: Mutex<HashMap<String, Store>>,
     streams: Mutex<HashMap<String, jetstream::stream::Stream>>,
@@ -50,6 +52,8 @@ impl NatsTransport {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
+            credentials_env: crate::nats_auth::DEFAULT_CREDENTIALS_ENV.to_string(),
+            project_root: None,
             context: OnceCell::new(),
             kv_stores: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
@@ -57,6 +61,19 @@ impl NatsTransport {
             ack_pending: Mutex::new(HashMap::new()),
             ack_waits: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Name of the environment variable holding NATS credentials.
+    pub fn with_credentials_env(mut self, name: impl Into<String>) -> Self {
+        self.credentials_env = name.into();
+        self
+    }
+
+    /// Project root whose credential vault (entry `nats-credentials`) is
+    /// consulted when the credentials environment variable is unset.
+    pub fn with_project_root(mut self, root: std::path::PathBuf) -> Self {
+        self.project_root = Some(root);
+        self
     }
 
     fn context(&self) -> Result<&Context> {
@@ -232,7 +249,29 @@ impl WhiteboardTransport for NatsTransport {
         if self.context.initialized() {
             return Ok(());
         }
-        let client = async_nats::connect(&self.url)
+        use crate::nats_auth::NatsAuth;
+        let auth = crate::nats_auth::resolve_for_url(
+            &self.url,
+            &self.credentials_env,
+            self.project_root.as_deref(),
+        )
+        .map_err(|e| WhiteboardError::ConnectFailed(e.to_string()))?;
+        let opts = async_nats::ConnectOptions::new();
+        let opts = match auth {
+            NatsAuth::None => opts,
+            NatsAuth::CredsFile(path) => opts.credentials_file(&path).await.map_err(|e| {
+                WhiteboardError::ConnectFailed(format!(
+                    "could not read NATS credentials file {} ({e}). To fix: check the file \
+                     exists and is readable, or change {}",
+                    path.display(),
+                    self.credentials_env
+                ))
+            })?,
+            NatsAuth::UserPassword { user, password } => opts.user_and_password(user, password),
+            NatsAuth::Token(token) => opts.token(token),
+        };
+        let client = opts
+            .connect(&self.url)
             .await
             .map_err(|e| WhiteboardError::ConnectFailed(format!("{} ({e})", self.url)))?;
         let ctx = jetstream::new(client);

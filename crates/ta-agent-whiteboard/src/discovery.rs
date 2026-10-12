@@ -30,6 +30,21 @@ pub async fn list_active_agents(
     Ok(records)
 }
 
+/// Live presence records belonging to `team_session` only. Records of other
+/// sessions, and records with no session (pre-isolation writers), are not
+/// returned. The daemon calls this with the session it verified from the
+/// caller's token, never one the client named in a body.
+pub async fn list_active_agents_in_session(
+    transport: &dyn WhiteboardTransport,
+    team_session: &str,
+) -> Result<Vec<PresenceRecord>> {
+    Ok(list_active_agents(transport)
+        .await?
+        .into_iter()
+        .filter(|r| r.team_session.as_deref() == Some(team_session))
+        .collect())
+}
+
 /// Presence records for agents whose declared `source_dir` matches
 /// `source_dir` (exact match — presence is scoped per project checkout,
 /// not fuzzy-matched).

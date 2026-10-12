@@ -5097,7 +5097,7 @@ dependencies = [
 
 [[package]]
 name = "ta-actions"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "serde",
@@ -5112,7 +5112,7 @@ dependencies = [
 
 [[package]]
 name = "ta-advisor"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "serde",
@@ -5127,7 +5127,7 @@ dependencies = [
 
 [[package]]
 name = "ta-agent-ollama"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -5142,17 +5142,21 @@ dependencies = [
 
 [[package]]
 name = "ta-agent-whiteboard"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "async-nats",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
+ "ed25519-dalek",
  "futures-util",
  "glob",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "ta-credentials",
  "ta-session",
  "tempfile",
  "thiserror 2.0.20",
@@ -5164,7 +5168,7 @@ dependencies = [
 
 [[package]]
 name = "ta-audit"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5181,7 +5185,7 @@ dependencies = [
 
 [[package]]
 name = "ta-brain"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "schemars",
@@ -5201,7 +5205,7 @@ dependencies = [
 
 [[package]]
 name = "ta-build"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "reqwest",
  "serde",
@@ -5213,7 +5217,7 @@ dependencies = [
 
 [[package]]
 name = "ta-changeset"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5235,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5302,7 +5306,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-comfyui"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -5317,7 +5321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-discord"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -5331,7 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-email"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -5345,7 +5349,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-fs"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "serde",
@@ -5362,7 +5366,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-drive"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -5371,7 +5375,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-gmail"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -5380,7 +5384,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-slack"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -5394,7 +5398,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unity"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -5407,7 +5411,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unreal"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -5421,7 +5425,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-web"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -5430,7 +5434,7 @@ dependencies = [
 
 [[package]]
 name = "ta-credential-broker"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "biscuit-auth",
  "chrono",
@@ -5445,11 +5449,13 @@ dependencies = [
 
 [[package]]
 name = "ta-credentials"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "age",
+ "base64 0.22.1",
  "chrono",
  "dirs",
+ "ed25519-dalek",
  "keyring",
  "rand 0.8.7",
  "serde",
@@ -5464,7 +5470,7 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5523,7 +5529,7 @@ dependencies = [
 
 [[package]]
 name = "ta-data-spec"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "schemars",
  "serde_json",
@@ -5535,7 +5541,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-overlay"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "serde",
@@ -5549,7 +5555,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-proxy"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "decision-gate",
@@ -5567,7 +5573,7 @@ dependencies = [
 
 [[package]]
 name = "ta-events"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5585,7 +5591,7 @@ dependencies = [
 
 [[package]]
 name = "ta-extension"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5602,7 +5608,7 @@ dependencies = [
 
 [[package]]
 name = "ta-goal"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5620,7 +5626,7 @@ dependencies = [
 
 [[package]]
 name = "ta-governed-paths"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "serde",
@@ -5634,7 +5640,7 @@ dependencies = [
 
 [[package]]
 name = "ta-init"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5647,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "ta-intake"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "regex",
@@ -5665,7 +5671,7 @@ dependencies = [
 
 [[package]]
 name = "ta-lifecycle"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5674,7 +5680,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mcp-gateway"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -5719,7 +5725,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mediation"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "serde",
@@ -5734,7 +5740,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "glob",
@@ -5752,7 +5758,7 @@ dependencies = [
 
 [[package]]
 name = "ta-output-schema"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5764,7 +5770,7 @@ dependencies = [
 
 [[package]]
 name = "ta-plan"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5783,7 +5789,7 @@ dependencies = [
 
 [[package]]
 name = "ta-plan-wayfinder"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5805,7 +5811,7 @@ dependencies = [
 
 [[package]]
 name = "ta-plugin"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "libc",
  "serde",
@@ -5819,7 +5825,7 @@ dependencies = [
 
 [[package]]
 name = "ta-policy"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "glob",
@@ -5836,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "ta-release"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
@@ -5852,7 +5858,7 @@ dependencies = [
 
 [[package]]
 name = "ta-runtime"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5874,7 +5880,7 @@ dependencies = [
 
 [[package]]
 name = "ta-sandbox"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5887,7 +5893,7 @@ dependencies = [
 
 [[package]]
 name = "ta-session"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "decision-gate",
@@ -5907,7 +5913,7 @@ dependencies = [
 
 [[package]]
 name = "ta-submit"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "chrono",
  "decision-gate",
@@ -5927,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workflow"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5952,7 +5958,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workspace"
-version = "0.17.12-alpha.1"
+version = "0.17.12-alpha.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

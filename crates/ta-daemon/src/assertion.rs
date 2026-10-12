@@ -659,6 +659,22 @@ pub(crate) mod testkit {
             }
         }
 
+        /// A signer from an explicit 32-byte seed (the published test key).
+        pub fn from_seed(seed: [u8; 32]) -> Self {
+            Self {
+                key: SigningKey::from_bytes(&seed),
+            }
+        }
+
+        pub fn public_hex(&self) -> String {
+            self.key
+                .verifying_key()
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+
         pub fn public_b64(&self) -> String {
             base64::engine::general_purpose::STANDARD_NO_PAD
                 .encode(self.key.verifying_key().as_bytes())

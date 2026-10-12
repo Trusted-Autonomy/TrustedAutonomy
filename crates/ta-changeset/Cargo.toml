@@ -24,7 +24,7 @@ regex = { workspace = true }
 toml = "0.8"
 reqwest = { workspace = true }
 anyhow = { workspace = true }
-ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.1" }
+ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.2" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -45,6 +45,7 @@ pub mod external_channel;
 pub mod human_gate;
 pub mod notification_dispatcher;
 pub mod office;
+pub mod outcome_stamp;
 pub mod phase_claim;
 pub mod power_manager;
 pub mod project_context;

@@ -85,6 +85,30 @@ pub struct WhiteboardConfig {
     /// Unset (default) derives it as one third of the ack wait, at most 10.
     #[serde(default)]
     pub wake_ack_heartbeat_secs: Option<u64>,
+
+    /// Outcome envelope verification (CR-04). When `true`, the daemon-side
+    /// verifier refuses any outcome that is not a validly stamped and signed
+    /// envelope. Unset (default) means "off in the default posture, on under
+    /// the `strict` posture"; an explicit value always wins.
+    #[serde(default)]
+    pub require_stamped_outcomes: Option<bool>,
+
+    /// Roles whose launches are granted the `whiteboard:outcome:send` right.
+    /// Default `["chief-of-staff"]`. A role not listed cannot post outcomes.
+    #[serde(default = "default_outcome_roles")]
+    pub outcome_roles: Vec<String>,
+
+    /// An outcome envelope older than this many seconds is rejected as stale
+    /// by the verifier. Default 300.
+    #[serde(default = "default_outcome_max_age_secs")]
+    pub outcome_max_age_secs: u64,
+
+    /// Name of the environment variable holding NATS credentials (a `.creds`
+    /// file path, or `user:password`, or a bare token; see docs/USAGE.md).
+    /// Default `TA_NATS_CREDENTIALS`. The vault entry name is
+    /// `nats-credentials`.
+    #[serde(default = "default_nats_credentials_env")]
+    pub nats_credentials_env: String,
 }
 
 impl Default for WhiteboardConfig {
@@ -99,8 +123,24 @@ impl Default for WhiteboardConfig {
             wake_launch_timeout_secs: default_wake_launch_timeout_secs(),
             wake_ack_wait_secs: None,
             wake_ack_heartbeat_secs: None,
+            require_stamped_outcomes: None,
+            outcome_roles: default_outcome_roles(),
+            outcome_max_age_secs: default_outcome_max_age_secs(),
+            nats_credentials_env: default_nats_credentials_env(),
         }
     }
+}
+
+fn default_outcome_roles() -> Vec<String> {
+    vec!["chief-of-staff".to_string()]
+}
+
+fn default_outcome_max_age_secs() -> u64 {
+    300
+}
+
+fn default_nats_credentials_env() -> String {
+    "TA_NATS_CREDENTIALS".to_string()
 }
 
 fn default_wake_max_attempts() -> u32 {
@@ -152,11 +192,42 @@ impl WhiteboardConfig {
 /// coordination is disabled (`enabled = false`) — callers should treat this
 /// as "whiteboard participation is off," not an error.
 pub fn select_transport(config: &WhiteboardConfig) -> Result<Option<Arc<dyn WhiteboardTransport>>> {
+    select_transport_inner(config, None)
+}
+
+/// Like [`select_transport`], but also consults the project's credential
+/// vault (entry `nats-credentials`) for NATS credentials, and refuses at once
+/// (rather than on the first message) an unauthenticated non-loopback NATS.
+pub fn select_transport_for_project(
+    config: &WhiteboardConfig,
+    project_root: &std::path::Path,
+) -> Result<Option<Arc<dyn WhiteboardTransport>>> {
+    select_transport_inner(config, Some(project_root))
+}
+
+fn select_transport_inner(
+    config: &WhiteboardConfig,
+    project_root: Option<&std::path::Path>,
+) -> Result<Option<Arc<dyn WhiteboardTransport>>> {
     if !config.enabled {
         return Ok(None);
     }
     let transport: Arc<dyn WhiteboardTransport> = match config.transport.as_str() {
-        "nats" => Arc::new(NatsTransport::new(config.nats_url.clone())),
+        "nats" => {
+            // Fail at startup, not on the first message.
+            crate::nats_auth::resolve_for_url(
+                &config.nats_url,
+                &config.nats_credentials_env,
+                project_root,
+            )
+            .map_err(|e| WhiteboardError::Config(e.to_string()))?;
+            let mut t = NatsTransport::new(config.nats_url.clone())
+                .with_credentials_env(config.nats_credentials_env.clone());
+            if let Some(root) = project_root {
+                t = t.with_project_root(root.to_path_buf());
+            }
+            Arc::new(t)
+        }
         "memory" => Arc::new(InMemoryTransport::new()),
         other => return Err(WhiteboardError::UnknownTransport(other.to_string())),
     };
@@ -232,6 +303,41 @@ mod tests {
         };
         let t = select_transport(&config).unwrap().unwrap();
         assert_eq!(t.backend_name(), "memory");
+    }
+
+    #[test]
+    fn select_transport_refuses_unauthenticated_remote_nats() {
+        let config = WhiteboardConfig {
+            enabled: true,
+            transport: "nats".into(),
+            nats_url: "10.0.0.5:4222".into(),
+            nats_credentials_env: "TA_TEST_NATS_CREDS_UNSET_XYZ".into(),
+            ..WhiteboardConfig::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let err = select_transport_for_project(&config, dir.path())
+            .err()
+            .unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("10.0.0.5:4222") && msg.contains("nats-credentials"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn select_transport_allows_loopback_nats_without_creds() {
+        let config = WhiteboardConfig {
+            enabled: true,
+            transport: "nats".into(),
+            nats_url: "nats://127.0.0.1:4222".into(),
+            nats_credentials_env: "TA_TEST_NATS_CREDS_UNSET_XYZ".into(),
+            ..WhiteboardConfig::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        assert!(select_transport_for_project(&config, dir.path())
+            .unwrap()
+            .is_some());
     }
 
     #[test]

@@ -321,6 +321,7 @@ pub(crate) fn keys_in(state_dir: &std::path::Path, command: &KeyCommands) -> any
             println!("  Fingerprint:      {}", key.fingerprint());
             println!("  Maintainer roles: {}", key.maintainer_roles.join(", "));
             println!("  Role order:       {}", key.role_order.join(" < "));
+            println!("  Escalation floor: {}", key.escalation_min_role);
             println!("The daemon reads the registry on each request; no restart is needed.");
             println!(
                 "Signed assertions must name this install as aud: run `ta show install` for its id."
@@ -335,11 +336,12 @@ pub(crate) fn keys_in(state_dir: &std::path::Path, command: &KeyCommands) -> any
             }
             for k in keys {
                 println!(
-                    "  {}  fingerprint={}  maintainer_roles={}  role_order={}  label={}  registered={}",
+                    "  {}  fingerprint={}  maintainer_roles={}  role_order={}  escalation_min_role={}  label={}  registered={}",
                     k.kid,
                     k.fingerprint(),
                     k.maintainer_roles.join(","),
                     k.role_order.join(","),
+                    k.escalation_min_role,
                     k.label.as_deref().unwrap_or("-"),
                     k.registered_at.to_rfc3339()
                 );

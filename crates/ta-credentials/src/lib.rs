@@ -21,10 +21,12 @@
 
 pub mod config;
 pub mod connector_registry;
+pub mod daemon_tokens;
 pub mod encryption;
 pub mod error;
 pub mod file_vault;
 pub mod human;
+pub mod outcome_keys;
 pub mod state;
 pub mod vault;
 

@@ -40,9 +40,34 @@ New tools registered in `ta-mcp-gateway`, mirroring the existing pattern `ta_goa
 
 Each tool handler makes an authenticated HTTP call to a new daemon endpoint; the daemon is the only process that ever touches the transport directly.
 
-### 3. Biscuit scope: `whiteboard:team_session:<session_id>`
+### 3. Biscuit scopes: session, role, outcome right, target
 
-Minted into the agent's `GrantedToken.allowed_scopes` (existing mechanism, `crates/ta-credential-broker/src/broker.rs`) at `ta team-session start` (or `ta_goal_start` for a standalone goal with whiteboard enabled), alongside its existing credential scopes. The daemon verifies this scope on every whiteboard RPC call before servicing it. An agent can only see/act within the team-session it was actually issued into — this is also the natural tenant boundary if a hosted multi-tenant option is ever built later (each tenant's daemon only ever issues scopes for its own sessions; no cross-daemon scope forgery is possible since verification is against the issuing daemon's own root key).
+The daemon mints one token **per role launch** (not per session) and hands it to the launched process in its environment (`TA_WHITEBOARD_TOKEN`, never a file under the project). Its scopes:
+
+| Scope | Meaning |
+|---|---|
+| `whiteboard:team_session:<s>` | member of session `s`: presence, handoff, tasks |
+| `whiteboard:team_session:<s>:role:<r>` | this launch is role `r` |
+| `whiteboard:outcome:send` | may post outcomes; granted only to roles in `[whiteboard] outcome_roles` (default `chief-of-staff`) |
+| `whiteboard:target:<t>` | execution target identity, `local` unless a remote runner |
+
+The daemon verifies the token on every whiteboard call and reads the session, role, outcome right and target **from the token**, never from the request body. A token is accepted for a scope only if that scope was granted when it was minted (attenuation can only narrow it further). A role-less token minted before role binding keeps working for presence, handoff and tasks but cannot post outcomes.
+
+**Per-session isolation (what is and is not promised).** Isolation is enforced by the daemon, not by the transport:
+
+- *Presence*: `PresenceRecord.team_session` is stamped from the verified token (a value in the client body is discarded), the KV key is derived from `(team_session, agent_id)` by one shared function (`presence::session_scoped_key`, `_` as separator, components escaped so no two pairs collide), and `GET /api/whiteboard/presence` returns only the caller's session.
+- *Tasks*: the task id is namespaced with the same function, so one session cannot see or claim another's task. A publisher that wants a session-private task gives it `tasks::scoped_task_id(session, id)`.
+- *Handoffs*: the routing stream name carries the encoded session, so a handoff sent in one session is never delivered in another.
+- *Advisory pre-launch query* (`presence_for_source`) is deliberately unfiltered: it runs before any session exists and answers "is anyone in this checkout", across sessions.
+- *Not promised*: the transport itself (one NATS server, one KV bucket) is shared, so isolation holds against agents that go through the daemon, not against a process that can reach NATS directly. That is what NATS credentials and loopback binding are for (see below). Strong tenant isolation for hosted multi-tenant remains out of scope (Deferred).
+
+### 3a. Outcomes are stamped and signed
+
+`POST /api/whiteboard/outcome/send` no longer appends opaque bytes. The daemon checks the caller holds `whiteboard:outcome:send`, validates the outcome against a strict schema and size limits, stamps `{team_session, role, goal_id, target, msg_id, issued_at}` and signs the unit with an Ed25519 key only the daemon holds (control-plane state directory, never the project tree). The original four fields keep their names; `v`, `stamp` and `sig` are added, so a consumer that ignores them keeps working. The wire contract, key distribution, rotation and revocation are in `2026-10-11-outcome-envelope-contract.md`. `[whiteboard] require_stamped_outcomes` (off in the default posture, on under `strict`) makes the daemon-side check (`POST /api/whiteboard/outcome/check`) refuse unstamped legacy envelopes.
+
+### 3b. The bus is authenticated
+
+NATS accepts credentials (`TA_NATS_CREDENTIALS` or the vault entry `nats-credentials`) and TA refuses an unauthenticated non-loopback NATS. Loopback works unchanged, including `nats-server.exe` on Windows.
 
 ### 4. LAN/VPN pre-planning (not implemented this pass)
 
@@ -60,9 +85,9 @@ Every whiteboard RPC failure (auth rejection, transport error, `[whiteboard] ena
 
 A team-session with two roles (`chief-of-staff`, `implementer`) running as two separate concurrent goals:
 
-1. `ta team-session start` mints each agent a Biscuit token with `whiteboard:team_session:<id>` alongside its normal scopes, then launches each role's agent in its own `ta serve` subprocess as today.
+1. The daemon mints each role launch its own Biscuit token (session, role, and for the Chief-of-Staff the outcome right) and passes it in the launched process's environment, then launches each role's agent in its own `ta serve` subprocess as today.
 2. Each agent calls `ta_whiteboard_presence_register` on startup. The MCP tool handler calls the daemon's `/api/whiteboard/presence` endpoint with the agent's token; the daemon verifies the scope, then records presence in its in-process transport.
-3. `chief-of-staff` calls `ta_whiteboard_handoff_send` targeting `implementer`; the daemon validates both the sender's scope and that the target is a valid member of the same session, then appends to the transport's message stream.
+3. `chief-of-staff` calls `ta_whiteboard_handoff_send` targeting `implementer`; the daemon validates the sender's token, stamps the sender's verified session on the message, and appends it to that session's own handoff stream, so only members of the same session can receive it.
 4. `implementer` calls `ta_whiteboard_handoff_receive` (or the daemon proactively surfaces it — implementation detail for the plan) and gets the message.
 5. `ta_whiteboard_presence_list`, called by either agent, shows both agents active — this is the concrete, live proof that today's crash-looping/false-negative failure mode is fixed.
 

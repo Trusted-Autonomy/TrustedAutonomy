@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::transport::WhiteboardTransport;
 
+/// The task id under which `task_id` is stored for `team_session`, derived
+/// with the same function as presence keys so sessions cannot see or claim
+/// each other's tasks. Publishers that want session-private tasks must give
+/// their `WhiteboardTask.id` this value.
+pub fn scoped_task_id(team_session: &str, task_id: &str) -> String {
+    crate::presence::session_scoped_key(Some(team_session), task_id)
+}
+
 pub const TASKS_BUCKET: &str = "wb_tasks";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

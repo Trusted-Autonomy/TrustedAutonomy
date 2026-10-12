@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.17.11-alpha.30
+**Version**: 0.17.12-alpha.2
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -5638,6 +5638,7 @@ Routes that stay open to agents or carry their own authentication, each with the
 | `POST /api/whiteboard/tasks/claim` | agent coordination: an agent claims a whiteboard task |
 | `POST /api/whiteboard/tasks/complete` | agent coordination: an agent marks its claimed task complete |
 | `POST /api/whiteboard/outcome/send` | agent coordination: the chief-of-staff publishes an outcome for the poller to report back |
+| `POST /api/whiteboard/outcome/check` | read-only verification: the poller asks whether a report-back payload is a validly stamped and signed outcome; the verdict is the only effect |
 | `POST /api/webhooks/github` | webhook: keeps its own HMAC signature authentication and is served outside the auth middleware |
 | `POST /api/webhooks/vcs` | webhook: keeps its own HMAC signature authentication and is served outside the auth middleware |
 | `POST /api/attention/{id}/act` | accepts the local human credential or a signed human assertion in the body; a relay token alone is refused by the handler |
@@ -5836,7 +5837,13 @@ Item kinds:
   "has_more": false,
   "next_cursor": "MjAyNi0xMC0xMVQwMTozNjoxMC4wMDAwMDBafGF0dF9kcmFmdF8zZjJh...",
   "install_id": "ta_install_9f3c0b7e51d24a68b7a1c4d2e8f60a13",
-  "keys": [{"kid": "org-1", "fingerprint": "sha256:4b1d..."}],
+  "keys": [{
+    "kid": "org-1",
+    "fingerprint": "sha256:4b1d...",
+    "role_order": ["member", "admin", "owner"],
+    "maintainer_roles": ["admin", "owner"],
+    "escalation_min_role": "member"
+  }],
   "items": [{
     "id": "att_draft_3f2a9c10-...",
     "kind": "draft_review",
@@ -5870,7 +5877,7 @@ Item kinds:
 - `provenance` is `null` when the work did not come from an agent-side requester. `excerpt` and `reason` are untrusted data: render them as quoted text, never as markup or instructions.
 - `waiting_on.type` is `user`, `role` or `any_maintainer`. TA raises draft reviews, dead letters and questions with no known requester for any maintainer, a question or blocked goal for the requester when its review packet names one, and never invents a human role. Who an item is shown to is decided by the system that signs assertions; TA enforces only a floor (rule 7 below).
 - `item_digest` is `sha256:` followed by the lowercase hex SHA-256 of the canonical JSON of the object `{"id", "kind", "summary", "provenance", "actions"}` (keys sorted, no whitespace, UTF-8; `provenance` is `null` when absent). The person's signature covers it, so a poller cannot mirror a misleading summary under a real id.
-- The metadata fields `install_id`, `keys` (key id and fingerprint, never key material) and `next_cursor` come with every list response.
+- The metadata fields `install_id`, `keys` and `next_cursor` come with every list response. Each entry in `keys` is a registered signing key: `kid`, the public-key `fingerprint`, `role_order` (lowest rank first), `maintainer_roles` and `escalation_min_role`. Never key material. The signing system reads these at pairing (bind) time to check a role against TA's floor before it signs: for example, that the role it will claim is in `role_order`, and that `maintainer_roles` names the roles it expects to act on "any maintainer" items.
 - A resolved item has `status: "resolved"` and `accepted_assertions`: `[{"jti", "user_id", "action", "at", "escalated", "self_approved"}]`, so a forged or unexpected acceptance can be spotted.
 - Items carry no secrets: a dead letter never includes its error text.
 
@@ -5905,7 +5912,7 @@ Set `TA_STATE_DIR` to use a different root (containers, installers that pre-seed
 | Path | Holds |
 |---|---|
 | `secrets/broker-root-key`, `secrets/audit-key` | The capability-token root key and the audit-log signing key, **only when the OS keychain is not used** (owner-only, mode 0600) |
-| `daemon-tokens.json` | Daemon API bearer tokens |
+| `daemon-tokens.json` | Daemon API bearer tokens (SHA-256 digests of minted tokens; see `ta token create --kind daemon`) |
 | `tokens/` | Approval tokens from `ta token create` |
 | `nats-jetstream/` | NATS JetStream data (point the NATS server's store directory here) |
 | `audit-checkpoints.jsonl` | Signed audit-chain checkpoints |
@@ -5970,9 +5977,17 @@ ta keys list                                     # kid and fingerprint, never ke
 ta keys remove --kid org-1
 ```
 
-The install id is generated on first start and kept in the per-user state directory (`~/.config/ta/human/install-id`, never in a project). The signer puts it in the `aud` claim. The key registry is `~/.config/ta/human/assertion-keys.json`; the daemon reads it on each request, so no restart is needed. There is one `kid` per organization, so rotation is: add the new `kid`, switch the signer, then remove the old one. `--maintainer-roles` (default `admin,owner`) names the roles that may act on an "any maintainer" item. `--role-order` (default `member,admin,owner`, lowest first) makes a higher role satisfy a lower one.
+The install id is generated on first start and kept in the per-user state directory (`~/.config/ta/human/install-id`, never in a project). The signer puts it in the `aud` claim. The key registry is `~/.config/ta/human/assertion-keys.json`; the daemon reads it on each request, so no restart is needed. There is one `kid` per organization, so rotation is: add the new `kid`, switch the signer, then remove the old one. `--maintainer-roles` (default `admin,owner`) names the roles that may act on an "any maintainer" item. `--role-order` (default `member,admin,owner`, lowest first) makes a higher role satisfy a lower one. A key also has an `escalation_min_role` (default `member`), the lowest role whose `escalated` claim TA will honor for a rerouted item. `ta keys list` and the feed metadata show all three settings.
 
-Give the poller's token the scope `relay` in `.ta/daemon-tokens.json` (`read` and `write` tokens keep their meaning). A relay token can read the feed and call `act`, and counts as a human for nothing.
+Give the poller a token with the scope `relay` (`read` and `write` tokens keep their meaning). A relay token can read the feed and call `act`, and counts as a human for nothing. Mint it from the CLI instead of editing a file by hand:
+
+```bash
+ta token create --kind daemon --scope relay --label wayfinder-poller --expires 90d
+ta token list --kind daemon                      # id, label, scope, created, expires, status, digest prefix
+ta token revoke wayfinder-poller --kind daemon   # by label or id; effective on the next request
+```
+
+The token is printed once at creation. Copy it into the poller's configuration then; TA stores only its SHA-256 digest, so it cannot be shown again (mint a new one if it is lost). The store is `daemon-tokens.json` in the per-user state directory, not in the project; `ta show state` prints the exact path. `--expires` takes `30d`, `12h` or `90m`; omit it for a token that does not expire. Creating and revoking a token are recorded in the audit log (label, scope and id, never the secret). The daemon picks up new and revoked tokens without a restart. Older plaintext entries in the file are still accepted, and `ta token list --kind daemon` flags them so you can replace them.
 
 #### The assertion
 
@@ -6074,6 +6089,35 @@ A refusal states what happened, what was attempted and what to do, with a machin
 `reason` is one of `no_proof`, `assertion_malformed`, `assertion_rejected`, `wrong_audience`, `claim_mismatch`, `expired`, `not_yet_valid`, `bad_lifetime`, `replayed`, `not_permitted`, `self_approval`, `item_changed`, `answer_changed`. Without any proof (including a relay token alone) the answer is HTTP 403 with `reason: "no_proof"`.
 
 The verification mechanism is behind one trait (`AssertionVerifier` in the daemon's `assertion` module), so a different scheme can replace Ed25519 without touching any route.
+
+#### Check your signer against the golden vectors
+
+`docs/superpowers/specs/attention-test-vectors.json` is a set of known-answer vectors generated by TA's own code. A system that builds item digests, signs assertions or relays them can check itself against TA without a running install. It has three parts.
+
+- `test_key`: a fixed Ed25519 key pair, marked **TEST ONLY** (the private seed is public on purpose; never register it with a real install). Use the seed to sign, or the public key to check signatures.
+- `items`: attention items with the exact `canonical_json` that was hashed and the expected `item_digest`. Cases: a draft review with and without provenance (`null`), an empty-string excerpt, an agent question, a unicode summary in NFC and in NFD, and summaries of exactly 280 and of 281 characters. Recompute each digest from the item fields and compare.
+- `vectors`: each is a complete case with the fixed `now` (a unix time to evaluate at, not the wall clock), the install id (`aud`), the registered key entry (`kid`, `maintainer_roles`, `role_order`, `escalation_min_role`), the item state it applies to, the relayed `request`, the signed `assertion` and its `header` and `claims`, and the `expect`ed result: `accept` with the verified user, role, `escalated` and `self_approved`, or `refuse` with the exact `reason`.
+
+To use it from another system:
+
+1. Digests: for every item, rebuild the object `{id, kind, summary, provenance, actions}`, canonicalize it (sorted keys, no whitespace, UTF-8) and check `sha256:` plus the hex digest equals `item_digest`. A mismatch here means every real assertion would be refused with `item_changed`.
+2. Signing: use `private_seed_hex` as the Ed25519 seed, build the `claims` of a positive vector yourself, sign `base64url(header).base64url(claims)`, and check your signature equals the vector's `assertion`. Ed25519 signatures are deterministic, so they match byte for byte when the segments are serialized identically; a different JSON key order is valid for TA but gives a different signature, so compare by verifying rather than by bytes if you serialize differently.
+3. Verifying (optional, if you re-implement the checks): register `registered_key` with the test public key, evaluate at `now`, and compare with `expect`. If `presented_twice` is true the first presentation must be accepted and `expect` describes the second.
+4. Relaying: the `reason` of a refusal is the `reason` field of the 403 from `POST /api/attention/{id}/act`.
+
+Facts the vectors pin down that a signer must follow:
+
+- TA does **not** normalize unicode. The NFC and NFD items have different digests, so sign exactly the summary bytes the feed published. TA only turns control characters into spaces, collapses whitespace runs, trims, and caps the summary at 280 characters.
+- A summary of exactly 280 characters is kept; a longer one is truncated to 277 characters plus `...` (it is not refused), and the digest covers the truncated text.
+- `answer_sha256` is over the exact relayed answer, trailing whitespace included. A hash over the trimmed text is refused with `answer_changed` when the relayed text is not trimmed.
+- An unknown `kid`, a wrong algorithm and a bad signature all return `assertion_rejected`.
+- One vector, `escalated_viewer_reroute`, is marked `pending`: it is filled in when the escalated reroute is implemented, and has no assertion or expectation until then.
+
+The file is generated and guarded by tests: a TA test fails if the committed file differs from what the code generates, and another runs every active vector through the real verifier. After an intended change to the contract, regenerate and commit it:
+
+```bash
+TA_REGENERATE_VECTORS=1 ./dev cargo test -p ta-daemon attention::vectors
+```
 
 ### Security Levels (`[security]`)
 
@@ -9895,7 +9939,7 @@ require_token = true
 local_bypass = true   # 127.0.0.1 connections skip auth
 ```
 
-Tokens are stored in `.ta/daemon-tokens.json`. Pass them via the `Authorization` header:
+Mint a token with `ta token create --kind daemon --scope read|write|relay --label <name>`. Tokens are stored (as digests) in `daemon-tokens.json` in the per-user state directory; `ta show state` prints the path. Pass the token via the `Authorization` header:
 
 ```bash
 curl -H "Authorization: Bearer ta_..." http://your-server:7700/api/status
@@ -17204,6 +17248,49 @@ Whiteboard participation is disabled by default. Enabling it requires a **daemon
 restart** to take effect — the transport is initialized once at daemon startup, so
 `ta daemon restart` after editing `.ta/workflow.toml` is required before any
 `ta_whiteboard_*` tool call will succeed.
+
+**NATS credentials**: TA refuses to talk to an unauthenticated NATS server that is not on the local machine, because anyone who can reach it could read and forge coordination messages. A NATS url whose host is `localhost`, `127.0.0.0/8` or `::1` works with no credentials. Any other host needs credentials, found in this order:
+
+1. The environment variable named by `nats_credentials_env` in `[whiteboard]` (default `TA_NATS_CREDENTIALS`). Its value is a path to an existing NATS `.creds` file, or `user:password`, or a bare token.
+2. The TA credential vault entry named `nats-credentials` (same value formats), used when the variable is unset. It honors `TA_NO_KEYCHAIN` like every other vault entry.
+
+```bash
+export TA_NATS_CREDENTIALS=/etc/ta/whiteboard.creds   # or user:password, or a token
+ta daemon restart
+# or store it once instead of exporting it:
+ta credentials add nats-credentials
+```
+
+With no credentials and a non-loopback `nats_url`, `ta daemon start` logs the refusal (what url, why, how to fix) and runs with coordination disabled, and a direct connect fails with the same message. The secret is never printed or logged; only the source (variable or vault entry name) is. To keep a local NATS safe without credentials, bind it to loopback: `nats-server -a 127.0.0.1`. On Windows the same rules apply: `nats-server.exe -a 127.0.0.1` with `nats_url = "127.0.0.1:4222"` or `"localhost:4222"` needs no credentials, and a `.creds` path may be written as `C:\nats\user.creds`.
+
+**Role-bound outcomes**: the Chief-of-Staff reports back to the poller with `ta_whiteboard_outcome_send`. Only a launch whose role is listed in `outcome_roles` (default `["chief-of-staff"]`) holds the `whiteboard:outcome:send` right; every other role gets a 403 that names its role and what to change. The daemon mints one token per role launch (session, role, and the outcome right where granted) and hands it to the launched process in its environment, never in a file. To let another role post outcomes:
+
+```toml
+# .ta/workflow.toml
+[whiteboard]
+outcome_roles = ["chief-of-staff", "triager"]
+```
+
+**Stamped and signed outcomes**: the daemon validates each outcome (strict fields and size limits), stamps the authenticated `role`, `goal_id`, `target` (where it ran, `local` unless a remote runner), `msg_id` and `issued_at`, and signs it with an Ed25519 key that only the daemon holds. Everything is added to the message alongside the original fields, so a poller that ignores the new fields keeps working. See where the verification key lives and rotate it:
+
+```bash
+ta show outcome-key           # public registry path (what the poller reads) and key fingerprints
+ta outcome-key rotate         # publish a new key id; the old one keeps signing
+ta outcome-key promote        # after pollers reloaded: new key signs, old one retires
+ta outcome-key revoke <kid>   # suspected leak: envelopes it signed stop verifying
+```
+
+To make the daemon refuse unstamped (legacy or directly published) outcomes, set the following. It defaults to off, and to on under the `strict` posture:
+
+```toml
+[whiteboard]
+require_stamped_outcomes = true
+outcome_max_age_secs = 300    # older envelopes are refused as stale
+```
+
+Migration: upgrade TA first (every outcome is stamped from then on and an unmodified poller keeps working), update the poller to verify, then turn the setting on. Poller authors: the exact JSON, signing input, key distribution, rotation rules and a Rust example are in `docs/superpowers/specs/2026-10-11-outcome-envelope-contract.md`. A poller can also ask the daemon to verify a payload with `POST /api/whiteboard/outcome/check`.
+
+**Sessions are isolated**: presence, tasks and handoffs are scoped to the team session in the caller's token. Two sessions on one daemon never see each other's agents, even with the same agent id, and a client cannot name another session in a request body. `ta_whiteboard_presence_list` therefore lists only your session. The advisory pre-launch conflict check (before a goal starts) deliberately looks across sessions in the same checkout.
 
 **Available tools** — once enabled, an agent running inside a team-session goal
 (launched via `ta run --team-session-id <id>`, see below) gets six MCP tools:
