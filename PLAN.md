@@ -10971,7 +10971,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.2`
 
 ### v0.17.12.3 - Atomic Apply, Reversibility Classes and Durable Action Queue
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.1
 
 **Goal**: A draft is never half applied, outside actions survive restarts and never run twice, and the system is honest that not everything can be undone. Design: `docs/superpowers/specs/2026-10-07-atomic-apply-and-action-queue-design.md`. Supersedes PR #642.
@@ -10981,7 +10981,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 3. [x] Durable action queue in the daemon-only state directory: states queued, sending, done, retrying, needs attention; key is draft id plus action id; retries with growing delays; policy re-checked on every attempt; an unknown outcome is never guessed or resent automatically.
 4. [x] Irrecoverable actions run last; `ta show actions` lists queue state and offers recorded undo for compensable actions.
 5. [x] Keep from PR #642: fsynced intent before send, policy re-check at send time, fail-closed config, per-action isolation, exclusion of `ta_propose_*`.
-6. [ ] Optional saga order under the `strict` posture.
+6. [x] Optional saga order under the `strict` posture. Moved to v0.17.12.4 (item 7), where the postures are defined; not built here.
 
 **Effort**: L.
 
@@ -10999,6 +10999,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 4. [ ] Postures `strict`, `balanced`, `open` shipped as data; `ta rules show` (with the source of every cell), `ta rules diff`, `ta rules effective --role <name> --json`.
 5. [ ] Migration folds `.ta/constitution.toml` and the `[actions]` tables in `workflow.toml` into the rules file.
 6. [ ] The single `decide()` replaces the blanket "automated applies never send" rule and is called by every path that can cause an effect.
+7. [ ] Saga order for multi-action drafts under the `strict` posture (moved from v0.17.12.3 item 6): actions run one at a time in declared order, a failed step stops the rest and offers the recorded undo of the completed compensable steps.
 
 **Effort**: L. **Unblocks VT**: V8 (preset overlay and effective-policy view).
 
