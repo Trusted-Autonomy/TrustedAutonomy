@@ -1704,6 +1704,9 @@ fn dispatch_raw(
             commands::outcome_key::show(project_root)
         }
         Commands::OutcomeKey { command } => commands::outcome_key::execute(command, config),
+        Commands::Show { noun, id, extra } if noun == "actions" => {
+            commands::apply_queue::show_actions(project_root, id.as_deref(), extra)
+        }
         Commands::Show { noun, .. } if noun == "state" => {
             commands::state_secrets::show_state(project_root)
         }

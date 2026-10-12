@@ -55,6 +55,7 @@ rand = { workspace = true }
 
 # Internal crates — version kept in sync with workspace by bump-version.sh
 ta-audit = { path = "../../crates/ta-audit", version = "0.17.12-alpha.2" }
+ta-actions = { path = "../../crates/ta-actions", version = "0.17.12-alpha.2" }
 ta-credentials = { path = "../../crates/ta-credentials", version = "0.17.12-alpha.2" }
 ta-memory = { path = "../../crates/ta-memory", version = "0.17.12-alpha.2" }
 ta-changeset = { path = "../../crates/ta-changeset", version = "0.17.12-alpha.2" }

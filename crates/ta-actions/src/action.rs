@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::reversibility::Declaration;
+
 // ── Error ────────────────────────────────────────────────────────────────────
 
 /// Errors from action validation or execution.
@@ -84,6 +86,13 @@ pub trait ExternalAction: Send + Sync {
     /// real, subprocess-computed score — never a hardcoded value.
     fn risk_score(&self, _payload: &Value) -> Result<RiskAssessment, ActionError> {
         Ok(RiskAssessment::default())
+    }
+
+    /// What this action type declares about its own reversibility, undo and
+    /// idempotency (v0.17.12.3). Defaults to irrecoverable: a connector that
+    /// declares nothing is treated as something that cannot be taken back.
+    fn declaration(&self) -> Declaration {
+        Declaration::undeclared()
     }
 
     /// Execute the action with the given payload.
@@ -345,6 +354,14 @@ impl ActionRegistry {
             .iter()
             .find(|a| a.action_type() == action_type)
             .map(|a| a.as_ref())
+    }
+
+    /// The declared reversibility of `action_type`. Unknown types are
+    /// irrecoverable.
+    pub fn declaration_for(&self, action_type: &str) -> Declaration {
+        self.get(action_type)
+            .map(|a| a.declaration())
+            .unwrap_or_else(Declaration::undeclared)
     }
 
     /// List all registered action types with their schemas.
