@@ -11188,6 +11188,24 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.12-alpha.14`
 
+### v0.17.12.15 - Goal Spend and Origin Class Tracking
+<!-- status: pending -->
+**Depends on**: v0.17.12.14
+
+**Goal**: The owner lets Chief-of-Staff workers run uncapped on autonomy and wants token spend tracked by why the work started (asked, suggested, unasked), so spend on unasked work is visible and cappable. TA records input and output tokens per goal today (`GoalRun.input_tokens`, `output_tokens`, copied to `VelocityEntry` in `.ta/velocity-stats.json`) and nothing ships them out; `origin = cos|chat` does not say whether a human asked. Checked 2026-10-12 against real headless goals: tokens are populated (14 of 16 goals since 2026-10-10), but input counts are tiny (144 to 228) next to 50,000 to 150,000 output tokens, so cache-read and cache-creation tokens are not recorded and cost is understated; and `token_cost.rs` prices only older Claude model names, so current models resolve to no price. Requested by the Wayfinder session (scoping note, 2026-10-12).
+
+1. [ ] **Origin class.** `ta run --origin-class asked|suggested|unasked` as a validated enum (default `unasked` when absent), also `TA_GOAL_ORIGIN_CLASS`, inherited by nested goals, settable at launch by the launcher (flag, `--provenance-file`, environment), never by the agent (the `ta_goal_start` tool and chat-mode tools must not accept it, and an agent cannot change it afterwards); copied to `GoalRun.origin_class`, `VelocityEntry` and the draft provenance. Backward compatible (serde default).
+2. [ ] **Completion result.** A machine-readable completion record with `goal_id`, input, output, cache-read and cache-creation tokens, `usd`, `cost_estimated`, `origin` and `origin_class`, available from `ta goal status --json` and as a daemon event (`goal.completed`) on `/api/events`, and returned in the headless result line.
+3. [ ] **Aggregate read endpoint.** `GET /api/spend?group_by=origin_class,project&since=&until=` (read-only, no secrets) with totals per group and a count of estimated versus exact costs.
+4. [ ] **Per-goal ceiling.** `--max-tokens` and `--max-usd` (and a config default under the posture) that abort the agent with a clear message and a recorded `aborted_budget` outcome; the draft built from partial work is marked incomplete.
+5. [ ] **Origin class never gates anything.** An explicit test and a comment that `origin_class` is never read by auto-approve, policy, routing or any authorization decision (it is accounting data only); auto-approve stays refused for origin `cos` and `chat` regardless of class.
+6. [ ] **Accurate tokens and prices.** Record cache-read and cache-creation tokens from the agent runtime's usage report, price them with cache rates, extend the price table to current model names (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`, `claude-haiku-4-5` and the older ones) with a file override (`.ta/pricing.toml`), and for unknown or non-Claude models record tokens with `cost_estimated = false` and no invented price.
+7. [ ] Tests and docs: enum validation and default, inheritance, agent cannot set it, completion record shape, aggregate grouping and filters, budget abort, cache tokens and pricing for each model family, unknown model handling; how-to in `docs/USAGE.md`; Windows-safe, tempdir, no real Keychain.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.15`
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
 
