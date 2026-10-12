@@ -11207,7 +11207,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.15`
 
 ### v0.17.12.16 - Daemon Startup Robustness: Keychain Approval at Start, Bounded NATS Retry
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.14
 
 **Goal**: An unattended daemon start must not look healthy and then hang. Found 2026-10-12 in the live end-to-end test: the scratch daemon hung reading the broker root key from the macOS Keychain in the middle of its first wake. The Keychain approval prompt appears only at first use, HTTP stops answering, logging stops, and nothing says the daemon is waiting for a person to click "Always Allow"; separately the wake listener never retries a failed NATS connection. Evidence: `/tmp/vt-live-test/evidence/run8/run8-report.txt` and `daemon-hang-keychain-stack.txt`.
