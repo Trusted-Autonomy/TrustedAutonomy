@@ -2,8 +2,14 @@
 //
 // `ProjectSendPolicy` is what the queue worker consults before EVERY attempt.
 // It fails closed: a missing connector, a policy file that cannot be parsed,
-// or a rule that now blocks the action all stop the send and put the action in
-// `needs attention` with the reason. Nothing is guessed.
+// a rules file that does not verify, or a rule that now blocks the action all
+// stop the send and put the action in `needs attention` with the reason.
+// Nothing is guessed.
+//
+// Since v0.17.12.4 the answer to "may this be sent?" comes from the compiled
+// rules table (`rules::CompiledRules::decide`), called with the attendance
+// that was proven when the draft was applied and stored with the queued
+// action. The old per-file checks below it still run and can only tighten.
 //
 // `RegistryExecutor` runs an action through the same `ExternalAction` plugins
 // that `ta_external_action` uses, and classifies the outcome conservatively:
@@ -22,6 +28,8 @@ use crate::constitution_rules::PolicyConstitution;
 use crate::policy::{ActionPolicy, ActionPolicyConfig};
 use crate::queue::{ActionExecutor, ExecOutcome, PolicyVerdict, QueueEntry, SendPolicy};
 use crate::reversibility::Idempotency;
+use crate::rules::audit::{self, DecisionRecord};
+use crate::rules::{Request, RulesLoader, TargetRef};
 
 /// Tool names that carry a connector verb look like `ta_external_action:<verb>`.
 pub const EXTERNAL_ACTION_PREFIX: &str = "ta_external_action:";
@@ -35,13 +43,23 @@ fn verb_of(tool_name: &str) -> Option<&str> {
 /// Re-reads the project's policy files on every call and fails closed.
 pub struct ProjectSendPolicy {
     workspace_root: PathBuf,
+    loader: RulesLoader,
 }
 
 impl ProjectSendPolicy {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        let workspace_root = workspace_root.into();
         Self {
-            workspace_root: workspace_root.into(),
+            loader: RulesLoader::for_project(&workspace_root),
+            workspace_root,
         }
+    }
+
+    /// Use an explicit rules loader (tests, and callers that already know
+    /// where the state directory and org floor are).
+    pub fn with_loader(mut self, loader: RulesLoader) -> Self {
+        self.loader = loader;
+        self
     }
 
     fn policy_config(&self, verb: &str) -> Result<ActionPolicyConfig, String> {
@@ -77,6 +95,31 @@ impl SendPolicy for ProjectSendPolicy {
                 entry.action.tool_name
             ));
         };
+        // The rules table decides first. It is re-read and its signature
+        // re-verified on every attempt, so an edit or a revoked allow takes
+        // effect on the next retry.
+        let loaded = self.loader.load(None);
+        let when = entry.action.attendance;
+        let decision = loaded.decide(
+            &Request::new(verb, when).with_target(TargetRef::from_params(&entry.action.parameters)),
+        );
+        let audit_path = self.workspace_root.join(".ta").join("audit.jsonl");
+        if let Err(e) = audit::record(
+            &audit_path,
+            &DecisionRecord {
+                caller: "ta-send-policy",
+                action: verb,
+                when,
+                decision: &decision,
+                subject: Some(&entry.key),
+                path: None,
+            },
+        ) {
+            tracing::warn!(key = %entry.key, error = %e, "rules decision could not be audited");
+        }
+        if decision.is_deny() {
+            return block(decision.refusal(verb, when));
+        }
         let cfg = match self.policy_config(verb) {
             Ok(c) => c,
             Err(e) => {
@@ -202,6 +245,8 @@ mod tests {
                 undo: None,
                 idempotency: Idempotency::None,
                 undo_of: None,
+                attendance: crate::rules::When::Attended,
+                ordered: false,
             }],
             &clock,
         )
@@ -215,6 +260,11 @@ mod tests {
         root
     }
 
+    /// A policy that reads no real state directory or org floor.
+    fn policy(root: &std::path::Path) -> ProjectSendPolicy {
+        ProjectSendPolicy::new(root).with_loader(RulesLoader::with_dirs(root, None, None))
+    }
+
     fn blocked(v: PolicyVerdict) -> String {
         match v {
             PolicyVerdict::Block { reason } => reason,
@@ -226,7 +276,7 @@ mod tests {
     fn no_config_allows_a_reviewed_action() {
         let tmp = tempfile::tempdir().unwrap();
         let e = entry_in(tmp.path(), "ta_external_action:email");
-        let p = ProjectSendPolicy::new(project(tmp.path()));
+        let p = policy(&project(tmp.path()));
         assert_eq!(p.check(&e), PolicyVerdict::Allow);
     }
 
@@ -235,7 +285,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = project(tmp.path());
         let e = entry_in(tmp.path(), "ta_external_action:email");
-        let p = ProjectSendPolicy::new(&root);
+        let p = policy(&root);
         let wf = root.join(".ta").join("workflow.toml");
 
         std::fs::write(&wf, "[actions.email]\npolicy = \"block\"\n").unwrap();
@@ -258,7 +308,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = project(tmp.path());
         let e = entry_in(tmp.path(), "ta_external_action:email");
-        let p = ProjectSendPolicy::new(&root);
+        let p = policy(&root);
         let cons = root.join(".ta").join("constitution.toml");
         std::fs::write(&cons, "[[rules.block").unwrap();
         assert!(blocked(p.check(&e)).contains("constitution is unreadable"));
@@ -273,10 +323,44 @@ mod tests {
     }
 
     #[test]
+    fn unattended_send_is_decided_by_the_rules_table_and_audited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = project(tmp.path());
+        let mut e = entry_in(tmp.path(), "ta_external_action:email");
+        e.action.attendance = crate::rules::When::Unattended;
+        let p = policy(&root);
+        let why = blocked(p.check(&e));
+        assert!(why.contains("Blocked: unattended email"), "{why}");
+        assert!(
+            why.contains("ta rules sign"),
+            "the refusal names the fix: {why}"
+        );
+        let audit = std::fs::read_to_string(root.join(".ta").join("audit.jsonl")).unwrap();
+        assert!(audit.contains("ta-send-policy"), "{audit}");
+
+        // A rules file an agent wrote into the tree is unsigned, so it allows nothing.
+        std::fs::write(
+            root.join(".ta").join("rules.toml"),
+            "version = 1\n[[allow]]\naction = \"email\"\nwhen = \"unattended\"\n",
+        )
+        .unwrap();
+        let why = blocked(p.check(&e));
+        assert!(
+            why.contains("could not be verified") || why.contains("Blocked"),
+            "{why}"
+        );
+
+        // The same action queued by a person present is not stopped by the table.
+        e.action.attendance = crate::rules::When::Attended;
+        let fresh = policy(&project(tmp.path().join("other").as_path()));
+        assert_eq!(fresh.check(&e), PolicyVerdict::Allow);
+    }
+
+    #[test]
     fn non_connector_tool_is_blocked() {
         let tmp = tempfile::tempdir().unwrap();
         let e = entry_in(tmp.path(), "gmail_send");
-        let p = ProjectSendPolicy::new(project(tmp.path()));
+        let p = policy(&project(tmp.path()));
         assert!(matches!(p.check(&e), PolicyVerdict::Block { .. }));
     }
 

@@ -1,0 +1,42 @@
+# strict: the default for any install. Nothing leaves the project without a
+# person, and nothing touches a production-like environment at all.
+revision = 1
+ordered_actions = true
+description = "Nothing runs without a person. Production and staging are never touched."
+
+[[deny]]
+action = "email"
+when = "unattended"
+reason = "Email always needs a person."
+
+[[ask]]
+action = "email"
+when = "attended"
+
+[[deny]]
+action = "social_post"
+when = "unattended"
+reason = "Posting always needs a person."
+
+[[ask]]
+action = "social_post"
+when = "attended"
+
+[[deny]]
+action = "db_query"
+environment = ["production", "staging"]
+reason = "Production-like databases are never touched by a draft."
+
+[[deny]]
+action = "db_query"
+environment = ["dev", "test"]
+when = "unattended"
+
+[[ask]]
+action = "db_query"
+environment = ["dev", "test"]
+when = "attended"
+
+[[allow]]
+action = "apply"
+when = "attended"

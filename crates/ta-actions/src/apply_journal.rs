@@ -718,6 +718,8 @@ mod tests {
             undo: None,
             idempotency: Idempotency::None,
             undo_of: None,
+            attendance: crate::rules::When::Unattended,
+            ordered: false,
         }
     }
 

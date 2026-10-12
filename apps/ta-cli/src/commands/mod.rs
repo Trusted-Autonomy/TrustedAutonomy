@@ -61,6 +61,8 @@ pub mod publish;
 pub mod release;
 pub mod release_git;
 pub mod review_packet;
+pub mod rules;
+pub mod rules_gate;
 pub mod run;
 pub mod runbook;
 pub mod serve;

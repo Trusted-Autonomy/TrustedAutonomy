@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "role": null,
+  "preset_found": false,
+  "valid": true,
+  "status": "default",
+  "key_id": null,
+  "fail_closed": false,
+  "posture": "strict",
+  "posture_revision": 1,
+  "org_floor": false,
+  "ordered_actions": true,
+  "problems": [],
+  "warnings": [],
+  "default": {
+    "unattended": "deny",
+    "attended": "ask"
+  },
+  "cells": [
+    {
+      "action": "db_query",
+      "environment": "production",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "production",
+      "when": "attended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "staging",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "staging",
+      "when": "attended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "dev",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #4"
+    },
+    {
+      "action": "db_query",
+      "environment": "dev",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "test",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #4"
+    },
+    {
+      "action": "db_query",
+      "environment": "test",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #3"
+    },
+    {
+      "action": "email",
+      "environment": "production",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "production",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "staging",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "staging",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "dev",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "dev",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "test",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "test",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "production",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "production",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "staging",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "staging",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "dev",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "dev",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "test",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture strict [[deny]] #2"
+    },
+    {
+      "action": "social_post",
+      "environment": "test",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture strict [[ask]] #2"
+    }
+  ],
+  "apply": {
+    "default": {
+      "unattended": {
+        "effect": "deny",
+        "source": "built-in default (no rule matches)"
+      },
+      "attended": {
+        "effect": "allow",
+        "source": "posture strict [[allow]] #1"
+      }
+    },
+    "rules": []
+  }
+}

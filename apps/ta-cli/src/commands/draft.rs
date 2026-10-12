@@ -7476,9 +7476,30 @@ fn apply_package(
     // guard takes below is also journaled, so a crash at any later step is
     // rolled back (or finished) by startup recovery. If the journal cannot be
     // written the apply stops here, with nothing changed.
+    let auto_applied_files: Vec<super::rules_gate::Planned>;
     {
         let registry = super::apply_queue::build_registry(&config.workspace_root);
-        let actions = super::apply_queue::queueable_actions(&pkg, &registry);
+        // v0.17.12.4: attendance is proven by the human gate, never claimed. It is
+        // stored with each queued action so the daemon applies the same rules later.
+        let attendance = super::rules_gate::apply_attendance();
+        let loaded_rules = super::rules_gate::load_for(&config.workspace_root);
+        let actions = super::apply_queue::queueable_actions(
+            &pkg,
+            &registry,
+            attendance,
+            super::rules_gate::ordered_actions(&loaded_rules),
+        );
+        // The single rules decision for every file and outside action in this
+        // draft, before anything is written or queued.
+        auto_applied_files = super::rules_gate::gate(
+            &loaded_rules,
+            &pkg,
+            &config.audit_log,
+            &config.workspace_root,
+            &goal.workspace_path,
+            attendance,
+            &super::rules_gate::verbs_of(&actions),
+        )?;
         let ps = super::apply_queue::open_state(&config.workspace_root)?;
         let prior_head = git_in(&target_dir, &["rev-parse", "HEAD"])
             .output()
@@ -9460,6 +9481,27 @@ fn apply_package(
         applied_via: ApplyProvenance::Manual,
     };
     save_package(config, &pkg)?;
+
+    // Content an unattended apply wrote was never reviewed by a person: mark it
+    // untrusted in the state directory (outside the tree) so prompt builders treat
+    // it as data.
+    if !auto_applied_files.is_empty() {
+        let marked = super::apply_queue::open_state(&config.workspace_root).and_then(|ps| {
+            super::rules_gate::mark_untrusted(
+                &ps.rules_dir(),
+                &package_id.to_string(),
+                &config.workspace_root,
+                &auto_applied_files,
+            )
+        });
+        match marked {
+            Ok(()) => eprintln!(
+                "[apply] Marked {} auto-applied file(s) untrusted (applied without a person).",
+                auto_applied_files.len()
+            ),
+            Err(e) => eprintln!("[apply] WARNING: {e}"),
+        }
+    }
 
     // COMMIT POINT passed (the status flip is one atomic file replace). Journal
     // it, then write every outside action into the durable queue in one step.

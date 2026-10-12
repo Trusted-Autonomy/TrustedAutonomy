@@ -323,6 +323,15 @@ pub fn handle_external_action(
                 (ActionOutcome::CapturedForReview, Some(pending))
             }
 
+            ActionPolicy::Auto if rules_refusal(&state.config, &params).is_some() => (
+                // v0.17.12.4: an agent's own call is always unattended. The
+                // rules table decides, and a refusal names the rule and the fix.
+                ActionOutcome::Blocked {
+                    reason: rules_refusal(&state.config, &params).unwrap_or_default(),
+                },
+                None,
+            ),
+
             ActionPolicy::Auto => {
                 let requesting_agent_id = goal_run_id.and_then(|id| state.agent_for_goal(id).ok());
                 let workspace_root = state.config.workspace_root.clone();
@@ -1053,6 +1062,54 @@ pub use crate::server::ExternalActionParams;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// The rules loader for this project. Tests substitute a state directory they
+/// control (per thread), because the real one is found from the environment.
+fn rules_loader(workspace_root: &std::path::Path) -> ta_actions::rules::RulesLoader {
+    #[cfg(test)]
+    if let Some(state_dir) = TEST_RULES_STATE.with(|d| d.borrow().clone()) {
+        return ta_actions::rules::RulesLoader::with_dirs(workspace_root, Some(state_dir), None);
+    }
+    ta_actions::rules::RulesLoader::for_project(workspace_root)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RULES_STATE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The refusal text when the rules table does not allow this action to run
+/// right now without a person, `None` when it does. An agent calling this tool
+/// is never attended: attendance is proven by a human credential at apply time
+/// and an agent cannot present one. Every decision is audited.
+fn rules_refusal(
+    config: &crate::config::GatewayConfig,
+    params: &ExternalActionParams,
+) -> Option<String> {
+    use ta_actions::rules::audit::{self, DecisionRecord};
+    use ta_actions::rules::{Request, TargetRef, When};
+
+    let loaded = rules_loader(&config.workspace_root).load(None);
+    let decision = loaded.decide(
+        &Request::new(&params.action_type, When::Unattended)
+            .with_target(TargetRef::from_params(&params.payload)),
+    );
+    if let Err(e) = audit::record(
+        &config.audit_log,
+        &DecisionRecord {
+            caller: "ta-mcp-gateway",
+            action: &params.action_type,
+            when: When::Unattended,
+            decision: &decision,
+            subject: None,
+            path: None,
+        },
+    ) {
+        tracing::warn!(action_type = %params.action_type, error = %e, "rules decision could not be audited");
+    }
+    (!decision.is_allow()).then(|| decision.refusal(&params.action_type, When::Unattended))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,7 +1121,44 @@ mod tests {
     use crate::server::GatewayState;
     use crate::tools::human_verify::{OpinionResult, ValidatorResult};
 
+    /// Action types the pre-rules-engine tests run unattended under `Auto`.
+    const TEST_AUTO_ACTIONS: &[&str] = &[
+        "api_call",
+        "connector.execute",
+        "trade.execute",
+        "social_post",
+    ];
+
+    /// A state whose owner rules (signed with a test key this machine trusts)
+    /// allow `allowed` to run unattended.
+    fn make_state_allowing(root: &std::path::Path, allowed: &[&str]) -> Arc<Mutex<GatewayState>> {
+        use ta_actions::rules::{load::sign_owner_file, signing, RulesLoader};
+        let state_dir = tempdir().expect("state dir").keep();
+        let seed = [11u8; 32];
+        std::fs::write(
+            state_dir.join("owner.pub"),
+            signing::public_to_b64(&signing::public_of(&seed)),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        let mut text = String::from("version = 1\n");
+        for a in allowed {
+            text.push_str(&format!(
+                "[[allow]]\naction = \"{a}\"\nwhen = \"unattended\"\n"
+            ));
+        }
+        std::fs::write(root.join(".ta").join("rules.toml"), &text).unwrap();
+        let loader = RulesLoader::with_dirs(root, Some(state_dir.clone()), None);
+        sign_owner_file(&loader, &seed, &text, chrono::Utc::now()).expect("sign test rules");
+        TEST_RULES_STATE.with(|d| *d.borrow_mut() = Some(state_dir));
+        make_state_unrestricted(root)
+    }
+
     fn make_state(root: &std::path::Path) -> Arc<Mutex<GatewayState>> {
+        make_state_allowing(root, TEST_AUTO_ACTIONS)
+    }
+
+    fn make_state_unrestricted(root: &std::path::Path) -> Arc<Mutex<GatewayState>> {
         let mut config = GatewayConfig::for_project(root);
         // Force file-based key custody for the credential vault: the OS
         // keychain is a process/OS-global resource (see
@@ -2249,6 +2343,38 @@ else:
             text.contains("executed") && text.contains(r#"\"saw_secret\":false"#),
             "expected a normal, secret-less execution: {}",
             text
+        );
+    }
+
+    #[test]
+    fn auto_policy_is_blocked_by_the_rules_table_unless_the_owner_allowed_it() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            b"[actions.api_call]\npolicy = \"auto\"\n",
+        )
+        .unwrap();
+        write_routing_decision(dir.path(), "auto");
+        // Owner rules exist but allow nothing for api_call.
+        let state = make_state_allowing(dir.path(), &["social_post"]);
+        let params = ExternalActionParams {
+            action_type: "api_call".into(),
+            payload: json!({"method": "GET", "url": "https://api.example.com/status"}),
+            goal_run_id: None,
+            target_uri: None,
+            dry_run: false,
+            budget: None,
+            connector: None,
+            session_token: None,
+        };
+        let result = handle_external_action(&state, params).unwrap();
+        let text = serde_json::to_string(&result.content[0]).unwrap();
+        assert!(text.contains("Blocked: unattended api_call"), "{text}");
+        assert!(
+            text.contains("ta rules sign"),
+            "the refusal names the fix: {text}"
         );
     }
 }

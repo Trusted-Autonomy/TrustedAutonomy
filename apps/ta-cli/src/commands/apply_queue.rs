@@ -54,7 +54,12 @@ pub(crate) fn build_registry(project_root: &Path) -> ActionRegistry {
 /// * `ta_propose_*` (replayed against Wayfinder by `draft_task_replay`),
 /// * anything the reviewer rejected or marked for discussion,
 /// * tools that are not `ta_external_action:<verb>` (no executor exists for them).
-pub(crate) fn queueable_actions(pkg: &DraftPackage, registry: &ActionRegistry) -> Vec<NewAction> {
+pub(crate) fn queueable_actions(
+    pkg: &DraftPackage,
+    registry: &ActionRegistry,
+    attendance: ta_actions::rules::When,
+    ordered: bool,
+) -> Vec<NewAction> {
     let draft_id = pkg.package_id.to_string();
     pkg.changes
         .pending_actions
@@ -79,6 +84,8 @@ pub(crate) fn queueable_actions(pkg: &DraftPackage, registry: &ActionRegistry) -
                 undo: decl.undo,
                 idempotency: decl.idempotency,
                 undo_of: None,
+                attendance,
+                ordered,
             })
         })
         .collect()
@@ -87,7 +94,16 @@ pub(crate) fn queueable_actions(pkg: &DraftPackage, registry: &ActionRegistry) -
 /// After an apply queued actions: say plainly which ones cannot be undone.
 pub(crate) fn print_irrecoverable_notice(config: &GatewayConfig, pkg: &DraftPackage) {
     let registry = build_registry(&config.workspace_root);
-    let actions = queueable_actions(pkg, &registry);
+    let ordered =
+        super::rules_gate::ordered_actions(&super::rules_gate::load_for(&config.workspace_root));
+    let actions = queueable_actions(pkg, &registry, ta_actions::rules::When::Attended, ordered);
+    if ordered && actions.len() > 1 {
+        eprintln!(
+            "[apply]   ordered actions (strict posture): they run one at a time in the order the \
+             draft declares. A failed step stops the rest, and `ta show actions` offers the \
+             recorded undo of the steps that completed."
+        );
+    }
     let count = |c: Reversibility| actions.iter().filter(|a| a.class == c).count();
     let (irrecoverable, compensable) = (
         count(Reversibility::Irrecoverable),
@@ -95,8 +111,13 @@ pub(crate) fn print_irrecoverable_notice(config: &GatewayConfig, pkg: &DraftPack
     );
     if irrecoverable > 0 {
         eprintln!(
-            "[apply]   {irrecoverable} cannot be undone once sent (irrecoverable). They run last, \
-             only after the other actions succeed."
+            "[apply]   {irrecoverable} cannot be undone once sent (irrecoverable). {}",
+            if ordered {
+                "In ordered mode they run at their declared position: put them last in the draft \
+                 if they should only go after the other steps succeed."
+            } else {
+                "They run last, only after the other actions succeed."
+            }
         );
     }
     if compensable > 0 {
@@ -341,6 +362,30 @@ pub(crate) fn render_actions(
                     );
                 }
             }
+            QueueState::Queued if e.action.ordered && e.action.undo_of.is_none() => {
+                if let Some(b) = rows.iter().find(|o| {
+                    o.action.draft_id == e.action.draft_id
+                        && o.action.undo_of.is_none()
+                        && o.seq < e.seq
+                        && o.state != QueueState::Done
+                }) {
+                    let _ = if b.state == QueueState::NeedsAttention {
+                        writeln!(
+                            out,
+                            "  STOPPED: step {} of this draft needs attention, so this step and the rest \
+                             did not run (ordered actions). Fix or drop that step, or undo the \
+                             completed steps listed as \"undo available\" below.",
+                            b.key
+                        )
+                    } else {
+                        writeln!(
+                            out,
+                            "  waits for the earlier step {} (ordered actions)",
+                            b.key
+                        )
+                    };
+                }
+            }
             QueueState::Queued if e.action.class == Reversibility::Irrecoverable => {
                 let waiting = rows
                     .iter()
@@ -478,7 +523,7 @@ mod tests {
             pending("gmail_send", ArtifactDisposition::Pending),
         ]);
         let reg = ActionRegistry::new();
-        let got = queueable_actions(&pkg, &reg);
+        let got = queueable_actions(&pkg, &reg, ta_actions::rules::When::Attended, false);
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|a| a.draft_id == pkg.package_id.to_string()));
         // Built-in stubs declare nothing, so every action is irrecoverable.
@@ -506,7 +551,7 @@ mod tests {
             "ta_external_action:slack.post",
             ArtifactDisposition::Pending,
         )]);
-        let got = queueable_actions(&pkg, &reg);
+        let got = queueable_actions(&pkg, &reg, ta_actions::rules::When::Attended, false);
         assert_eq!(got[0].class, Reversibility::Compensable);
         assert_eq!(got[0].undo.as_deref(), Some("slack.delete"));
         assert_eq!(got[0].idempotency, ta_actions::Idempotency::Key);
@@ -538,6 +583,8 @@ mod tests {
             undo: undo.map(str::to_string),
             idempotency: ta_actions::Idempotency::None,
             undo_of: None,
+            attendance: ta_actions::rules::When::Attended,
+            ordered: false,
         }
     }
 

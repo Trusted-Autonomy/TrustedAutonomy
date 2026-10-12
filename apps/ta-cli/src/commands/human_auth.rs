@@ -86,6 +86,29 @@ pub(crate) struct Delegation {
 }
 
 thread_local! {
+    /// The action most recently accepted by `require_human_for` on this thread.
+    /// Cleared at the start of every call, so a refused call proves nothing.
+    static LAST_PROVEN: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Did `require_human_for(action)` succeed earlier on this thread? This is the
+/// only source of "a person is present" for the rules table (v0.17.12.4): it
+/// is never read from an environment variable or a goal's origin tag. In unit
+/// tests, which call the apply internals directly, it is always true.
+pub(crate) fn proven_human_for(action: &str) -> bool {
+    #[cfg(test)]
+    {
+        let _ = action;
+        true
+    }
+    #[cfg(not(test))]
+    {
+        LAST_PROVEN.with(|p| p.borrow().as_deref() == Some(action))
+    }
+}
+
+thread_local! {
     /// The delegation accepted by the most recent `require_human_for` on this
     /// thread; cleared by every call so a direct action never inherits a label.
     static LAST_DELEGATION: std::cell::RefCell<Option<Delegation>> =
@@ -105,6 +128,7 @@ pub(crate) fn current_delegation(action: &str) -> Option<Delegation> {
 /// [`Delegation`] (see [`current_delegation`]) so the action is labeled.
 pub(crate) fn require_human_for(action: &str) -> anyhow::Result<()> {
     LAST_DELEGATION.with(|d| *d.borrow_mut() = None);
+    LAST_PROVEN.with(|p| *p.borrow_mut() = None);
     // Unit tests drive approve/apply in-process from whatever environment the
     // developer runs them in (often an agent session, often headless), so the
     // real detection is replaced by a per-thread setting: "no agent" unless a
@@ -123,6 +147,7 @@ pub(crate) fn require_human_for(action: &str) -> anyhow::Result<()> {
         true,
     )?;
     LAST_DELEGATION.with(|d| *d.borrow_mut() = delegation);
+    LAST_PROVEN.with(|p| *p.borrow_mut() = Some(action.to_string()));
     Ok(())
 }
 
