@@ -11123,7 +11123,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 9. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
 10. [ ] The legacy whole-document PLAN.md merge (`ta_changeset::plan_merge::merge_plan_md`, used only when an apply has no target phase) is not CRLF-faithful: on a CRLF checkout (Windows) a merge of identical inputs changes line endings. Make it byte-preserving like the scoped merge, or route every apply through the scoped merge; add a CRLF golden test.
 11. [ ] The phase-scoped plan merge matches a checked item by its full text, so an agent that appends implementation notes to an item when it checks it (seen in v0.17.11.27) gets the checkmark refused and the phase left not done. Match by item number plus a stable prefix, or tell agents to flip the box only; add a test with an item that gained a trailing note.
-12. [ ] **`ta doctor --fix` must be scriptable.** It asks one interactive y/N question per finding and the list of findings changes as fixes apply, so piped answers land on the wrong fix (seen twice on 2026-10-10: one `y` answered only the first of three prompts, and another run rewrote a tracked `.gitignore`). Add `--yes` (apply every non-destructive fix), `--fix <finding-id>` (apply only the named fixes, stable ids), `--dry-run`, and never rewrite a tracked file without naming it; destructive fixes (removing failed-goal staging) stay opt-in even with `--yes`.
+12. [x] Moved to v0.17.12.14 (Multi-Project Daemon Safety).
 13. [x] Moved to v0.17.12.13 (CI Reliability).
 14. [ ] **Goal build artifacts need a disk budget.** The per-goal `CARGO_TARGET_DIR` inside staging (v0.17.11.29) fixed baked staging paths but each goal now builds a full debug tree: 38 GB for the CR-02 goal on a machine with 4.5 GB free, and the staging cap warning ("staging exceeds 5.0 GB cap (currently 50.9 GB)") fires on every run. Cut it: build goal targets with `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0` (as CI does), or share one cache for registry dependencies across goals (workspace crates still rebuild per staging path), enforce a configurable per-goal and total budget with a clear message, and delete a goal's target directory as soon as its draft is built. Also report staging size per goal in `ta doctor`.
 15. [x] Moved to v0.17.12.13 (CI Reliability).
@@ -11168,6 +11168,25 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.13`
+
+### v0.17.12.14 - Multi-Project Daemon Safety and Credential Vault Key Custody
+<!-- status: pending -->
+**Depends on**: v0.17.12.1
+
+**Goal**: One project's `ta daemon restart` must never shut down another project's daemon, and the credential vault's own key must not sit next to the vault in the project tree. Found 2026-10-12 in the live end-to-end test: an agent ran `ta daemon restart` in a scratch project whose `daemon.toml` was empty, so it used the default port 7700, where the owner's daemon for a different project was running; TA waited for "1 running goal", then POSTed `/api/shutdown` to that daemon and started the scratch daemon on the same port while a goal was still running. Evidence: `/tmp/vt-live-test/evidence/run8/daemon-restart.out`. Urgent safety fix, ordered last by number only.
+
+1. [ ] **Daemon commands verify the project.** `/api/status` returns `project_root` (and `pid`); `ta daemon restart`, `stop` and `start` compare the answering daemon's `project_root` with the current project and refuse with a clear message naming both projects, the port and the daemon's pid when they differ ("port 7700 is held by the daemon for <other root>; this project's port is <p>; use `ta daemon status` there, or set [server] port in .ta/daemon.toml"). No override flag shuts down another project's daemon silently.
+2. [ ] **Projects do not collide on the default port.** A project without an explicit port picks a free one (stable, derived from the project id and checked for availability), records it where every client resolves ports (pid file and `.ta/daemon.toml`), and the start path fails with an actionable message on a collision. Existing projects with an explicit port, including 7700, are unchanged.
+3. [ ] **Waiting messages name what they wait on.** "Waiting: 1 running goal" names the goal id, title, project and how to see it, and the restart output states which project's daemon it is restarting.
+4. [ ] **Read-only commands do not write.** `ta show state` created `.ta/project-id`; make read paths read-only (report "no project id yet") and add `.ta/project-id` and `.ta/setup-progress.json` to the generated gitignore block, the runtime-path list and this repo's `.gitignore`.
+5. [ ] **`ta doctor --fix` is scriptable and consistent.** The summary count equals the prompts asked ("Found 3 issue(s)" then four prompts today); stable finding ids; `--yes` (apply every non-destructive fix), `--only <id,...>`, `--dry-run`; destructive fixes stay opt-in; never rewrite a tracked file without naming it. (Moved here from v0.17.12.11 item 12.)
+6. [ ] **Vault key custody.** The credential vault's age identity (`credentials.key`, 74 characters) moves out of the project tree: OS keychain first, otherwise an owner-only file in the per-user state directory; `ta doctor` secrets check and `--fix` migration cover `credentials.key` and any `*.cred` file; strict posture refuses them in the project tree. Document that a file credential store in the project tree is not safe from agents.
+7. [ ] Document the install id: it is per user by design (the assertion audience); cross-project use is prevented by the `item_id` and `project_id` claims, not by the audience.
+8. [ ] Tests: a second project on a busy port refuses to restart the first project's daemon; free-port selection and collision message; status carries project_root; waiting messages; read-only `ta show state` leaves the tree unchanged; doctor count equals prompts, `--yes` and `--only`; vault key migration and strict refusal; Windows-safe, tempdir, no real Keychain.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.14`
 
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
