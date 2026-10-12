@@ -44,6 +44,8 @@ pub async fn drain_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
         "active_sessions": snap.active_sessions,
         "inflight_launches": snap.inflight_launches,
         "applying": snap.applying,
+        "goals": snap.goals,
+        "project_root": snap.project_root,
     }))
     .into_response()
 }

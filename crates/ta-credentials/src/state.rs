@@ -430,16 +430,41 @@ pub enum ControlSecret {
     BrokerRootKey,
     /// HMAC key that signs the audit log and its checkpoints.
     AuditKey,
+    /// The credential vault's own age identity (`.ta/credentials.key` before
+    /// it moved). Whoever holds it can decrypt `.ta/credentials.json`, so it
+    /// must not sit next to the vault in the project tree. The vault tries
+    /// the OS keychain itself (service `trusted-autonomy-vault`); this entry
+    /// is its owner-only file fallback, always a file, never the control-plane
+    /// keychain service.
+    VaultKey,
 }
 
 impl ControlSecret {
-    pub const ALL: [ControlSecret; 2] = [ControlSecret::BrokerRootKey, ControlSecret::AuditKey];
+    pub const ALL: [ControlSecret; 3] = [
+        ControlSecret::BrokerRootKey,
+        ControlSecret::AuditKey,
+        ControlSecret::VaultKey,
+    ];
+
+    /// Custody options this secret really uses. The vault key is always held
+    /// in an owner-only file here: the keychain tier for it is the vault's
+    /// own, in `encryption.rs`.
+    pub fn custody(self, opts: CustodyOpts) -> CustodyOpts {
+        match self {
+            ControlSecret::VaultKey => CustodyOpts {
+                use_keychain: false,
+                ..opts
+            },
+            _ => opts,
+        }
+    }
 
     /// Name of the keychain user and of the fallback file in `secrets/`.
     pub fn name(self) -> &'static str {
         match self {
             ControlSecret::BrokerRootKey => "broker-root-key",
             ControlSecret::AuditKey => "audit-key",
+            ControlSecret::VaultKey => "vault-key",
         }
     }
     /// File name the secret had inside `<project>/.ta/`.
@@ -447,12 +472,14 @@ impl ControlSecret {
         match self {
             ControlSecret::BrokerRootKey => "broker_root.key",
             ControlSecret::AuditKey => "audit.key",
+            ControlSecret::VaultKey => "credentials.key",
         }
     }
     pub fn describe(self) -> &'static str {
         match self {
             ControlSecret::BrokerRootKey => "the capability-token root key",
             ControlSecret::AuditKey => "the audit-log signing key",
+            ControlSecret::VaultKey => "the credential vault's encryption key",
         }
     }
 }
@@ -564,6 +591,7 @@ pub fn load_secret_new(
     which: ControlSecret,
     opts: CustodyOpts,
 ) -> Option<LoadedSecret> {
+    let opts = which.custody(opts);
     if opts.use_keychain {
         if let Some(entry) = keychain_entry(ps, which) {
             if let Ok(v) = entry.get_password() {
@@ -602,6 +630,7 @@ pub fn load_secret(
     which: ControlSecret,
     opts: CustodyOpts,
 ) -> Result<Option<LoadedSecret>, StateError> {
+    let opts = which.custody(opts);
     let legacy_path = legacy_secret_file(ps, which);
     let legacy_exists = legacy_path.is_file();
     if legacy_exists && opts.posture == Posture::Strict {
@@ -651,6 +680,7 @@ pub fn store_secret(
     value: &str,
     opts: CustodyOpts,
 ) -> Result<StoreOutcome, StateError> {
+    let opts = which.custody(opts);
     let file = secret_file(ps, which);
     let mut reason = None;
     if opts.use_keychain {
@@ -717,6 +747,7 @@ pub fn load_or_create_secret(
 
 /// Remove a secret from its new home (keychain item and fallback file).
 pub fn remove_secret_new(ps: &ProjectState, which: ControlSecret, opts: CustodyOpts) -> bool {
+    let opts = which.custody(opts);
     let mut removed = std::fs::remove_file(secret_file(ps, which)).is_ok();
     if opts.use_keychain {
         if let Some(entry) = keychain_entry(ps, which) {
@@ -929,6 +960,7 @@ pub fn migrate_project(ps: &ProjectState, opts: CustodyOpts) -> MigrationReport 
 }
 
 fn migrate_secret(ps: &ProjectState, which: ControlSecret, opts: CustodyOpts) -> MigrationItem {
+    let opts = which.custody(opts);
     let from = legacy_secret_file(ps, which);
     let to = new_home_text(ps, which, opts);
     let mut item = MigrationItem {
@@ -1558,6 +1590,20 @@ mod tests {
             "{err}"
         );
         assert_eq!(legacy_findings(p.path()).len(), 5);
+    }
+
+    #[test]
+    fn strict_startup_refuses_the_vault_key_in_the_project_tree() {
+        let (p, _s, _loc) = fixture();
+        std::fs::create_dir_all(p.path().join(".ta")).unwrap();
+        std::fs::write(p.path().join(".ta/credentials.key"), "AGE-SECRET-KEY-1X").unwrap();
+        assert!(startup_check(p.path(), Posture::Default).is_ok());
+        let err = startup_check(p.path(), Posture::Strict).unwrap_err();
+        assert!(
+            err.contains("credentials.key") && err.contains("ta doctor --fix"),
+            "{err}"
+        );
+        assert_eq!(legacy_findings(p.path()).len(), 1);
     }
 
     #[test]

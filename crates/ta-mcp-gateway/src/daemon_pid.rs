@@ -25,9 +25,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// The port a daemon binds when nothing configures a different one. Only
-/// ever used as a resolution result when the project has no daemon
-/// configuration and no pid file at all.
+/// The daemon's built-in default port. Projects without an explicit
+/// `[server] port` no longer use it: they resolve a stable per-project port
+/// through [`crate::daemon_port::default_port_for`]. It remains the value of
+/// `ServerConfig::default()` for code that has no project (tests, examples).
 pub const DEFAULT_DAEMON_PORT: u16 = 7700;
 
 /// `.ta/daemon.pid` under `project_root`.
@@ -135,7 +136,7 @@ pub enum EndpointSource {
     PidFile(PathBuf),
     /// `[server]` in `.ta/daemon.toml` (no pid file present).
     DaemonToml(PathBuf),
-    /// Neither file exists: the daemon's built-in default.
+    /// Neither file exists: the project's derived default port.
     Default,
 }
 
@@ -176,7 +177,8 @@ fn connect_host(bind: &str) -> String {
 ///    `[server] port` (when present) must be a valid port. A daemon.toml with
 ///    no `[server] port` means the daemon itself binds its built-in default,
 ///    so that default is the configured port, not a guess.
-/// 3. Neither file exists: the built-in default (7700).
+/// 3. Neither file exists: the project's derived default port (see
+///    [`crate::daemon_port`]), not the shared 7700.
 pub fn resolve_daemon_endpoint(project_root: &Path) -> Result<DaemonEndpoint, String> {
     let pid = pid_path(project_root);
     match read_pid_file(project_root) {
@@ -234,7 +236,8 @@ pub fn resolve_daemon_endpoint(project_root: &Path) -> Result<DaemonEndpoint, St
             .and_then(|v| v.as_str())
             .unwrap_or("127.0.0.1");
         let port = match server.and_then(|s| s.get("port")) {
-            None => DEFAULT_DAEMON_PORT,
+            // No explicit port: the daemon derives a per-project one.
+            None => crate::daemon_port::default_port_for(project_root)?,
             Some(v) => v
                 .as_integer()
                 .and_then(|p| u16::try_from(p).ok())
@@ -257,7 +260,7 @@ pub fn resolve_daemon_endpoint(project_root: &Path) -> Result<DaemonEndpoint, St
 
     Ok(DaemonEndpoint {
         host: "127.0.0.1".to_string(),
-        port: DEFAULT_DAEMON_PORT,
+        port: crate::daemon_port::default_port_for(project_root)?,
         source: EndpointSource::Default,
     })
 }
@@ -333,11 +336,26 @@ mod tests {
     }
 
     #[test]
-    fn default_only_when_no_configuration_at_all() {
+    fn derived_port_when_no_configuration_at_all() {
         let dir = tempfile::tempdir().unwrap();
         let ep = resolve_daemon_endpoint(dir.path()).unwrap();
-        assert_eq!(ep.port, DEFAULT_DAEMON_PORT);
+        assert_eq!(
+            ep.port,
+            crate::daemon_port::default_port_for(dir.path()).unwrap()
+        );
+        assert!((7700..=7799).contains(&ep.port));
         assert_eq!(ep.source, EndpointSource::Default);
+    }
+
+    #[test]
+    fn daemon_toml_without_a_port_resolves_the_derived_port() {
+        let dir = project();
+        std::fs::write(daemon_toml_path(dir.path()), "[agent]\ndefault = \"x\"\n").unwrap();
+        let ep = resolve_daemon_endpoint(dir.path()).unwrap();
+        assert_eq!(
+            ep.port,
+            crate::daemon_port::default_port_for(dir.path()).unwrap()
+        );
     }
 
     #[test]

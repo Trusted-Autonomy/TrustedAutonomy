@@ -108,6 +108,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "*.lock", // replaces the specific release.lock entry
     "*.key",
     "*.pem",
+    "*.cred", // plaintext service-account credential files (for example wayfinder-service-account.cred): a secret, never commit
 ];
 
 /// True when `path` (repo-relative, forward slashes, e.g.
@@ -173,6 +174,8 @@ impl VcsBackend {
             .current_dir(project_root)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .map(|o| o.status.success())
@@ -675,6 +678,9 @@ mod tests {
             ".ta/broker_root.key",
             ".ta/*.key",
             ".ta/*.pem",
+            ".ta/*.cred",
+            ".ta/project-id",
+            ".ta/setup-progress.json",
             ".ta/tokens/",
             ".ta/daemon-tokens.json",
             ".ta/credentials.json",
@@ -691,6 +697,9 @@ mod tests {
             ".ta/team-sessions/s1/state.json",
             ".ta/broker_root.key",
             ".ta/credentials.key",
+            ".ta/wayfinder-service-account.cred",
+            ".ta/project-id",
+            ".ta/setup-progress.json",
             ".ta/tokens/t.json",
             ".ta/credentials.json",
         ] {

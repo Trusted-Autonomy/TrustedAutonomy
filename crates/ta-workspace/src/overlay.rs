@@ -1213,6 +1213,8 @@ pub fn three_way_merge(
                     .current_dir(&root)
                     .env_remove("GIT_DIR")
                     .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_INDEX_FILE")
+                    .env_remove("GIT_COMMON_DIR")
                     .output()
                     .ok();
                 if let Some(o) = out {
@@ -1373,6 +1375,8 @@ pub fn fetch_from_git_head(source_dir: &std::path::Path, relative_path: &str) ->
         .current_dir(&root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .output()
         .ok()?;
 
@@ -1403,6 +1407,8 @@ pub fn get_git_head_sha(project_root: &std::path::Path) -> Option<String> {
         .current_dir(project_root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .output()
         .ok()?;
     if out.status.success() {
@@ -3244,6 +3250,7 @@ mod tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .map(|o| o.status.success())
@@ -3256,6 +3263,7 @@ mod tests {
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
                 .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES")
                 .output()
                 .ok();
@@ -3267,6 +3275,7 @@ mod tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .ok();
@@ -3277,6 +3286,7 @@ mod tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .ok();
@@ -3293,6 +3303,7 @@ mod tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .ok();
@@ -3303,6 +3314,7 @@ mod tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .map(|o| o.status.success())
@@ -3729,6 +3741,7 @@ mod tests {
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
                 .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES")
                 .output()
                 .ok();
@@ -3741,6 +3754,7 @@ mod tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .map(|o| o.status.success())
@@ -3785,6 +3799,8 @@ mod tests {
             .current_dir(repo.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -3794,6 +3810,8 @@ mod tests {
                 .current_dir(repo.path())
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .output()
                 .ok();
         }

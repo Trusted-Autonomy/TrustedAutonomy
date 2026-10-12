@@ -59,6 +59,13 @@ impl StatusCache {
 #[derive(Debug, Serialize)]
 pub struct ProjectStatus {
     pub project: String,
+    /// Canonical absolute path of the project this daemon serves. CLI
+    /// lifecycle commands compare it with their own project before they
+    /// stop or restart anything, so one project can never shut down
+    /// another project's daemon that happens to hold the same port.
+    pub project_root: String,
+    /// Process id of this daemon.
+    pub pid: u32,
     pub version: String,
     /// Explicit daemon version field for version guard checks.
     /// Always matches `version` but provides a stable API contract.
@@ -267,6 +274,8 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
 
     ProjectStatus {
         project: project_name,
+        project_root: canonical_root_string(&active_root),
+        pid: std::process::id(),
         version: version.clone(),
         daemon_version: version,
         build_sha: env!("TA_GIT_HASH").to_string(),
@@ -288,6 +297,14 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
         active_project_path,
         update: crate::self_update::current_report(),
     }
+}
+
+/// Canonical absolute form of a project root, as the daemon reports it.
+pub fn canonical_root_string(root: &std::path::Path) -> String {
+    std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// Count community resources with stale or missing caches.
@@ -398,6 +415,22 @@ mod tests {
     fn no_pending_phase() {
         let plan = "### Done\n<!-- status: done -->";
         assert!(find_next_pending_phase(plan).is_none());
+    }
+
+    #[tokio::test]
+    async fn status_carries_the_canonical_project_root_and_pid() {
+        let project = tempfile::tempdir().unwrap();
+        let human_dir = tempfile::tempdir().unwrap();
+        let state = state_with_human_dir(project.path(), human_dir.path());
+        let v = serde_json::to_value(compute_project_status(&state).await).unwrap();
+        let reported = v["project_root"]
+            .as_str()
+            .expect("project_root is a string");
+        assert_eq!(
+            std::path::PathBuf::from(reported),
+            std::fs::canonicalize(project.path()).unwrap()
+        );
+        assert_eq!(v["pid"].as_u64(), Some(u64::from(std::process::id())));
     }
 
     fn state_with_human_dir(

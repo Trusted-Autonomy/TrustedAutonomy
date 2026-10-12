@@ -2,7 +2,8 @@
 //
 // Stores credentials as an age-encrypted blob at the configured vault path
 // (v0.17.6.2). The age identity is held in the OS keychain where available,
-// falling back to a chmod-0600 key file (see `encryption::load_or_create_identity`).
+// falling back to an owner-only key file in the per-user state directory for a
+// project vault, never next to the vault (see `encryption::load_or_create_identity`).
 // File permissions on the vault itself remain owner-only (0600) as a second
 // layer of protection. Vaults written by pre-v0.17.6.2 builds (plaintext
 // JSON) are transparently migrated to encrypted-at-rest on first open.
@@ -576,6 +577,29 @@ mod tests {
 
         let encrypted_bytes_after = fs::read(&config.vault_path).unwrap();
         assert_eq!(encrypted_bytes_before, encrypted_bytes_after);
+    }
+
+    #[test]
+    fn project_vault_round_trips_without_a_key_file_in_the_project_tree() {
+        let project = TempDir::new().unwrap();
+        let ta = project.path().join(".ta");
+        fs::create_dir_all(&ta).unwrap();
+        let config = CredentialsConfig {
+            vault_path: ta.join("credentials.json"),
+            use_keychain: false,
+        };
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault.add("n", "svc", "tree-secret", vec![]).unwrap();
+            match vault.key_custody() {
+                KeyCustody::FallbackFile(p) => assert!(!p.starts_with(project.path())),
+                other => panic!("expected a state-dir key file, got {other:?}"),
+            }
+        }
+        assert!(!ta.join(encryption::FALLBACK_KEY_FILENAME).exists());
+        let vault = FileVault::open(&config).unwrap();
+        let id = vault.list().unwrap()[0].id;
+        assert_eq!(vault.get(id).unwrap().secret, "tree-secret");
     }
 
     #[test]

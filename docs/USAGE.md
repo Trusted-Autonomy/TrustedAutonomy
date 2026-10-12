@@ -111,7 +111,7 @@ TA Studio is a browser dashboard — no terminal required. It's the recommended 
 
 **Windows**: Start Menu → **TA Studio** (installed by the MSI).
 
-**Linux / manual**: Run `ta daemon start` then open `http://localhost:7700` in your browser.
+**Linux / manual**: Run `ta daemon start` then open the URL it prints in your browser (each project has its own port in 7700 to 7799; see "Running Several Projects").
 
 All launchers start the TA daemon automatically if it isn't already running.
 
@@ -1280,7 +1280,7 @@ ta init --detect                        # Auto-detect toolchain, generate config
 ta shell                                # Starts daemon if needed, opens shell
 
 # Or manage daemon explicitly:
-# ta daemon start                       # Background daemon on port 7700
+# ta daemon start                       # Background daemon on this project's port (7700-7799)
 # ta shell                              # Open the shell
 ```
 
@@ -4247,34 +4247,43 @@ ta doctor
 
 Reports each check as ok/warning/failed with actionable suggestions.
 
-**Diagnosing and fixing health issues:** Use `ta doctor --fix` to interactively step through detected operational issues and apply fixes one at a time:
+**Diagnosing and fixing health issues:** `ta doctor --fix` lists every fixable finding once, each with a stable id, and then acts on that same list. The count in "Found N issue(s)" is the number of prompts you are asked, and applying one fix never reorders the others.
 
 ```bash
 ta doctor --fix
 # Found 2 issue(s):
 #
-# [warn] Disk pressure: .ta/staging/ is 79.3 GB (threshold: 20 GB)
-#   Fix: run `ta doctor --fix` to reclaim space
-#   Apply fix? [y/N]: y
-#   ✓ Ran gc to reclaim staging space
+# [warn] (id: secrets) 1 control-plane secret(s) are inside the project tree, reachable by any agent
+#        /work/app/.ta/credentials.key (the credential vault's encryption key)
+#   Fix: move them to the TA state directory (each copy is verified before the old one is removed)
 #
-# [warn] 3 draft(s) approved/pending but not applied for 3+ days
-#   Fix: run `ta doctor --fix` to close them automatically, or `ta draft list --stale` to review first
-#   Apply fix? [y/N]: y
-#   ✓ Closed 3 stale draft(s)
+# [warn] (id: vcs-gitignore) 2 .ta/ path(s) exist but are not ignored by version control
+#   Fix: ta setup vcs --force (rewrites the TA block of .gitignore)
+#   Rewrites: .gitignore (tracked by git)
 #
-# 2 fix(es) applied, 0 skipped.
+# Apply fix for secrets? [y/N]: y
+# Apply fix for vcs-gitignore? [y/N]: n
+# Summary: 2 found, 1 applied, 1 skipped, 0 failed.
 ```
 
-**Orphaned plan-phase claims.** `ta doctor` warns about every phase `PLAN.md` marks `in_progress` while no live goal holds it, and shows the exact `PLAN.md` lines (with line numbers) the fix would change. `ta doctor --fix` then offers, for each one, to reset the phase to `pending`, or, when it is an ad-hoc `v0.0.0.N` stub with nothing under its heading but the inserted-goal note, to remove the stub. Nothing is changed until you confirm (or pass `--yes`). To release one claim by hand, run `ta plan reset <phase>`.
-
-Stale-draft cleanup calls the same logic as `ta draft close --stale` directly (not a subprocess) — it only closes drafts already in `Approved`/`PendingReview` status that are older than `gc.stale_threshold_days`, and it's gated behind the same confirm/`--yes` prompt as every other `--fix` action.
-
-Use `--fix --yes` (equivalent to `ta gc`) for non-interactive cleanup in scripts or cron jobs:
+For scripts, name what you want instead of piping answers:
 
 ```bash
-ta doctor --fix --yes   # same as ta gc — auto-applies all fixes
+ta doctor --fix --dry-run                      # list the findings and what would change; change nothing
+ta doctor --fix --yes                          # apply every non-destructive fix
+ta doctor --fix --only secrets,vcs-gitignore   # apply exactly these ids, no prompts
 ```
+
+- **Destructive fixes are never part of `--yes`.** Fixes that delete staging directories (`orphan_staging`, `stale_failed_goals`, `stale_pr_ready`, `disk_staging`, `disk_free`) need their own id: `ta doctor --fix --only orphan_staging`. `--yes` lists them as "not applied" with the exact command.
+- **Tracked files are named.** A fix that rewrites a file your VCS tracks (`PLAN.md`, `.gitignore`, `.vscode/settings.json`) prints that file, marked "tracked by git", before it runs.
+- **No terminal, no guessing.** If standard input is not a terminal and you gave neither `--yes` nor `--only`, TA prints the findings and the exact commands, changes nothing and exits non-zero.
+- **Manual findings** (for example plaintext `*.cred` files) are listed but not counted or prompted, because TA has no safe automatic fix for them.
+
+**Orphaned plan-phase claims.** `ta doctor` warns about every phase `PLAN.md` marks `in_progress` while no live goal holds it, and shows the exact `PLAN.md` lines (with line numbers) the fix would change. `ta doctor --fix` then offers, for each one, to reset the phase to `pending`, or, when it is an ad-hoc `v0.0.0.N` stub with nothing under its heading but the inserted-goal note, to remove the stub. Nothing is changed until you confirm (or pass `--yes` or `--only orphaned-phase-<id>`). To release one claim by hand, run `ta plan reset <phase>`.
+
+Stale-draft cleanup calls the same logic as `ta draft close --stale` directly (not a subprocess). It only closes drafts already in `Approved`/`PendingReview` status that are older than `gc.stale_threshold_days`, and it is gated like every other `--fix` action (the `stale_drafts` id).
+
+For cron jobs, `ta doctor --fix --yes` applies the non-destructive fixes; add `--only <id>` for a destructive one you have reviewed.
 
 **Health signals in Studio:** The Studio web UI shows an ambient alert bar at the top that polls for health issues every 30 seconds. The Health tab lists all current signals and has a **"Run cleanup"** button that applies all fixes automatically.
 
@@ -4338,6 +4347,42 @@ Self-check the daemon's API, event system, plugins, disk space, and goal process
 ```bash
 ta daemon health
 ```
+
+### Running Several Projects
+
+Each project has its own daemon, and each daemon needs its own port. TA keeps them apart so one project can never shut down another's daemon.
+
+**Ports.** A project without an explicit `[server] port` in `.ta/daemon.toml` gets a port from 7700 to 7799, derived from its project id. `ta daemon start` checks the port is free (moving to the next free one if not) and records the choice in `.ta/daemon.toml`, so the CLI, the MCP gateway, the Discord listener and the editor plugins all use the same port. Pin a port yourself by setting it; an explicit port, including 7700, is never changed:
+
+```toml
+# .ta/daemon.toml
+[server]
+port = 7700
+```
+
+If every port in the range is taken, or an explicit port is held by a process that is not a TA daemon, `ta daemon start` stops with the project, the port and the fix.
+
+**Which daemon is this?** `/health` and `/api/status` report the daemon's `project_root` and `pid`. `ta daemon start`, `stop` and `restart` compare it with the current project's canonical path. If another project's daemon holds the port you are about to use, TA refuses and changes nothing:
+
+```
+Refusing to restart the daemon: port 7700 is held by the daemon for /work/other (pid 4242), not by this
+project (/work/app), whose configured port is 7700. Nothing was stopped or started. To check or stop that
+daemon, run `ta daemon status` or `ta daemon stop` from /work/other. TA never stops another project's
+daemon from here. To run this project's own daemon, set `[server] port = <a free port>` in
+/work/app/.ta/daemon.toml (ports 7700-7799 are free to use) or remove the explicit port there ...
+```
+
+There is no flag to override this. To stop that daemon, run `ta daemon stop` from its own project. `ta daemon status` says so when the port is held by a different project's daemon.
+
+**Waiting on work.** `ta daemon restart` waits for running goals and names them, with the project:
+
+```
+Restarting the daemon for project /work/app (port 7742, pid 31751).
+Checking for active work in the daemon for project /work/app (http://127.0.0.1:7742) before restart...
+  Waiting in project /work/app: 1 running goal: goal c5ee0b0a "Fix the parser" (see `ta goal status c5ee0b0a`) (28s remaining before timeout). Use `ta daemon restart --force` to interrupt it.
+```
+
+**Editors.** The VS Code and Neovim plugins read the open project's `.ta/daemon.pid` (then `.ta/daemon.toml`) unless you set `ta.daemonUrl` / `daemon_url` yourself. The Discord listener the daemon starts is told the daemon's own URL through `TA_DAEMON_URL`.
 
 ### Draft Follow-Up (PR Iteration)
 
@@ -5893,7 +5938,7 @@ curl -N 'http://127.0.0.1:7700/api/events?types=attention.created,attention.upda
 
 TA's signing keys and tokens are kept **outside your project**, in a per-user state directory, so an agent working in a staging copy cannot read them with `../../`. Nothing secret is written under `<project>/.ta/`.
 
-Print every location for the current project (this also creates the project's state directory on first use):
+Print every location for the current project. This is read-only: it never creates the project id or the state directory. A project that has not stored a secret yet shows "no project id yet".
 
 ```bash
 ta show state
@@ -5912,6 +5957,7 @@ Set `TA_STATE_DIR` to use a different root (containers, installers that pre-seed
 | Path | Holds |
 |---|---|
 | `secrets/broker-root-key`, `secrets/audit-key` | The capability-token root key and the audit-log signing key, **only when the OS keychain is not used** (owner-only, mode 0600) |
+| `secrets/vault-key` | The credential vault's encryption key, **only when the OS keychain is not used** (owner-only, mode 0600). See "The credential vault key" below |
 | `daemon-tokens.json` | Daemon API bearer tokens (SHA-256 digests of minted tokens; see `ta token create --kind daemon`) |
 | `tokens/` | Approval tokens from `ta token create` |
 | `nats-jetstream/` | NATS JetStream data (point the NATS server's store directory here) |
@@ -5921,17 +5967,35 @@ Set `TA_STATE_DIR` to use a different root (containers, installers that pre-seed
 
 **Key custody.** The root key and audit key go in the OS keychain when one is usable: macOS Keychain, Linux Secret Service, and on Windows the Credential Manager (which stores items protected by DPAPI, scoped to your user account). The keychain service is `trusted-autonomy-control-plane` and the item name is `<project-id>/<broker-root-key|audit-key>`. If the keychain is not usable, TA writes an owner-only file under `secrets/` and prints a warning saying so. Set `TA_NO_KEYCHAIN=1` to skip the keychain entirely (headless Linux, CI). On Windows the state directory sits under your profile, which already restricts access to your account.
 
-**Project id.** The first time a project needs a secret, TA writes a random-salted id such as `p_3f9c...` into `<project>/.ta/project-id` (not a secret; it is git-ignored). Two projects never share a state directory: if you copy a project, the copy gets its own id, and if you move a project, it keeps its id and its keys.
+**Project id.** The first time a project stores a secret, TA writes a random-salted id such as `p_3f9c...` into `<project>/.ta/project-id` (not a secret; it is git-ignored, as is `.ta/setup-progress.json`). Read-only commands such as `ta show state` and `ta doctor` never create it. Two projects never share a state directory: if you copy a project, the copy gets its own id, and if you move a project, it keeps its id and its keys.
 
 **Daemon pid and port file.** This does not move. The daemon still writes `<project>/.ta/daemon.pid`, with the lines `pid=`, `bind=host:port`, `port=` and `log=`. Installers and tools should keep reading it from there.
+
+#### The credential vault key
+
+`ta credentials add` keeps credentials in `.ta/credentials.json`, encrypted with an `age` key. Whoever holds that key can decrypt the vault, so the key must not sit next to the vault where an agent can read it.
+
+- **OS keychain first.** The key goes in the OS keychain (service `trusted-autonomy-vault`) whenever one is usable.
+- **Otherwise an owner-only file in the state directory.** The fallback is `secrets/vault-key` under the project's state directory (`ta show state` prints the path), mode 0600, never `.ta/credentials.key` in the project.
+- **A file credential store in the project tree is not safe from agents.** An agent that can read your project can read `.ta/credentials.key` or any `*.cred` file in it. Use the keychain or the state directory, and keep service-account files outside the project.
+
+Older installs have the key at `.ta/credentials.key`. TA keeps opening the vault with it and warns, and `ta doctor` reports it. Move it with:
+
+```bash
+ta doctor --fix --only secrets
+```
+
+The copy is re-read and compared before `.ta/credentials.key` is removed, a second run does nothing, and if the state directory already holds a different key nothing is deleted. Under the strict posture TA refuses the key in the project tree and tells you to run this command.
+
+`ta doctor` also flags every plaintext `*.cred` file in the project root and in `.ta/` (for example a `.ta/wayfinder-service-account.cred` written by a pairing script). TA cannot move such a file for the script that reads it, so the finding is manual: store the secret with `ta credentials add`, or keep the file in the state directory and point the script there, then delete the copy in the project.
 
 #### Moving an existing install out of the project tree
 
 Installs created before this change have keys and tokens inside `.ta/`. TA keeps working with them, but warns every time and tells you what to do:
 
 ```bash
-ta doctor            # reports old-location keys, tokens and NATS data
-ta doctor --fix      # moves them to the state directory
+ta doctor                       # reports old-location keys, tokens and NATS data
+ta doctor --fix --only secrets  # moves them to the state directory
 ta daemon restart    # the daemon picks up the new locations
 ```
 
@@ -5977,7 +6041,9 @@ ta keys list                                     # kid and fingerprint, never ke
 ta keys remove --kid org-1
 ```
 
-The install id is generated on first start and kept in the per-user state directory (`~/.config/ta/human/install-id`, never in a project). The signer puts it in the `aud` claim. The key registry is `~/.config/ta/human/assertion-keys.json`; the daemon reads it on each request, so no restart is needed. There is one `kid` per organization, so rotation is: add the new `kid`, switch the signer, then remove the old one. `--maintainer-roles` (default `admin,owner`) names the roles that may act on an "any maintainer" item. `--role-order` (default `member,admin,owner`, lowest first) makes a higher role satisfy a lower one. A key also has an `escalation_min_role` (default `member`), the lowest role whose `escalated` claim TA will honor for a rerouted item. `ta keys list` and the feed metadata show all three settings.
+The install id is generated on first start and kept in the per-user state directory (`~/.config/ta/human/install-id`, never in a project). The signer puts it in the `aud` claim.
+
+**The install id is per user, not per project, by design.** It names this installation of TA for you (the assertion audience), so one signing setup serves every project you run. Using an assertion on the wrong project is prevented by the `item_id` and `project_id` claims, which TA checks against the request and the item (rule 4 below), not by the audience. A copied assertion for another project's item, or for another item, is refused. The key registry is `~/.config/ta/human/assertion-keys.json`; the daemon reads it on each request, so no restart is needed. There is one `kid` per organization, so rotation is: add the new `kid`, switch the signer, then remove the old one. `--maintainer-roles` (default `admin,owner`) names the roles that may act on an "any maintainer" item. `--role-order` (default `member,admin,owner`, lowest first) makes a higher role satisfy a lower one. A key also has an `escalation_min_role` (default `member`), the lowest role whose `escalated` claim TA will honor for a rerouted item. `ta keys list` and the feed metadata show all three settings.
 
 Give the poller a token with the scope `relay` (`read` and `write` tokens keep their meaning). A relay token can read the feed and call `act`, and counts as a human for nothing. Mint it from the CLI instead of editing a file by hand:
 
@@ -8373,7 +8439,7 @@ project's vault is created. On a machine with nobody present to answer that prom
 (CI, an installer script, an SSH session), this **hangs indefinitely** rather than
 failing -- set the `TA_NO_KEYCHAIN` environment variable (to any value) before running
 `ta credentials add`/`update`/`revoke`/`grant` to force file-based key custody
-(chmod 0600) instead and skip the keychain entirely.
+(an owner-only file in the per-user state directory, not in the project) instead and skip the keychain entirely.
 
 `<credential-id>` accepts a full UUID or any unambiguous prefix, for `update`, `revoke`, and `grant` alike.
 
@@ -8415,9 +8481,11 @@ than handed over.
 available -- macOS Keychain, Windows Credential Manager, or a Secret Service
 daemon on Linux -- so the raw key never touches disk. When no keychain
 backend is reachable (common on headless Linux hosts with no Secret Service
-daemon running), TA falls back to a chmod-0600 key file next to the vault
-(`.ta/credentials.key`) and logs a warning. `ta doctor` reports which mode is
-active:
+daemon running), TA falls back to an owner-only key file in the per-user
+state directory (`secrets/vault-key`, see "The credential vault key" under
+"Where TA Keeps Its Secrets") and logs a warning. It is never placed next to the
+vault, because an agent that can read the project could then decrypt it. `ta doctor`
+reports which mode is active:
 
 ```
 [ok]   Credential vault     encrypted at rest; key held in the OS keychain
@@ -8427,8 +8495,8 @@ or, in fallback mode:
 
 ```
 [warn] Credential vault     encrypted at rest, but the encryption key is a fallback
-       file at .ta/credentials.key (the OS keychain was unavailable when the
-       vault was created)
+       file at ~/Library/Application Support/TrustedAutonomy/projects/p_.../secrets/vault-key
+       (the OS keychain was unavailable when the vault was created)
        Fix: Back up this file separately from the vault (losing it makes
        existing credentials unrecoverable) ...
 ```
@@ -9599,7 +9667,7 @@ The daemon writes its PID to `.ta/daemon.pid` and logs to `.ta/daemon.log`. On s
 
 **Ports, in one rule:** `--port N` sets the daemon API port and overrides `[server] port` in `.ta/daemon.toml`. The web dashboard is served by that same listener at `/ui`, so one daemon uses one port. The only way to get a second listener is the legacy `ta-daemon --web-port M` flag, and the daemon refuses to start, with an error naming both settings, if M equals the API port.
 
-`.ta/daemon.pid` records the port the daemon actually bound (lines `pid=`, `bind=host:port`, `port=`, `log=`). The CLI and the agent whiteboard tools read it to find this project's daemon. If the file exists but has no usable port, or `.ta/daemon.toml` is unreadable, the whiteboard tools refuse to guess the default 7700 (which could be a different project's daemon) and tell you to run `ta daemon restart`. Before sending a session token they also ask the daemon which project it serves and refuse if it is not this one.
+`.ta/daemon.pid` records the port the daemon actually bound (lines `pid=`, `bind=host:port`, `port=`, `log=`). The CLI and the agent whiteboard tools read it to find this project's daemon. If the file exists but has no usable port, or `.ta/daemon.toml` is unreadable, the whiteboard tools refuse to guess a port (the default could belong to a different project's daemon) and tell you to run `ta daemon restart`. Before sending a session token they also ask the daemon which project it serves and refuse if it is not this one.
 
 #### Stopping the daemon
 
@@ -9831,7 +9899,7 @@ The TA daemon exposes a full HTTP API that any interface (terminal, web, Discord
 
 #### Configuration
 
-The API listens on `127.0.0.1:7700` by default. Configure via `.ta/daemon.toml`:
+The API listens on `127.0.0.1` on a per-project port in 7700 to 7799 unless you set one (see "Running Several Projects"). The examples below use 7700. Configure via `.ta/daemon.toml`:
 
 ```toml
 [server]

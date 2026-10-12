@@ -472,27 +472,9 @@ fn get_daemon_url(project_root: &std::path::Path) -> String {
         return url;
     }
 
-    // Try to read from .ta/daemon.toml.
-    let config_path = project_root.join(".ta").join("daemon.toml");
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            if let Ok(config) = toml::from_str::<toml::Value>(&content) {
-                let bind = config
-                    .get("server")
-                    .and_then(|s| s.get("bind"))
-                    .and_then(|b| b.as_str())
-                    .unwrap_or("127.0.0.1");
-                let port = config
-                    .get("server")
-                    .and_then(|s| s.get("port"))
-                    .and_then(|p| p.as_integer())
-                    .unwrap_or(7700);
-                return format!("http://{}:{}", bind, port);
-            }
-        }
-    }
-
-    "http://127.0.0.1:7700".to_string()
+    // Same resolution as every other command: pid file, then `[server]` in
+    // .ta/daemon.toml, then the project's derived port.
+    super::daemon::resolve_daemon_url(project_root, None)
 }
 
 fn expand_home(path: &str) -> String {

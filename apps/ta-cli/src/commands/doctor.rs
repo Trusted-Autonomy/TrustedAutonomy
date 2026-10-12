@@ -69,15 +69,15 @@ impl CheckResult {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-/// Execute `ta doctor [--json] [--fix-denied] [--fix] [--yes]`.
+/// Execute `ta doctor [--json] [--fix-denied] [--fix [--yes] [--only ids] [--dry-run]]`.
 pub fn execute(
     config: &GatewayConfig,
     json: bool,
     fix_denied: bool,
     fix: bool,
-    yes: bool,
+    opts: &super::doctor_fix::FixOptions,
 ) -> anyhow::Result<()> {
-    execute_with_gh_check(config, json, fix_denied, fix, yes, &check_gh_cli)
+    execute_with_gh_check(config, json, fix_denied, fix, opts, &check_gh_cli)
 }
 
 /// [`execute`] with the `gh` check injected, so callers in unit tests never
@@ -87,14 +87,14 @@ pub(crate) fn execute_with_gh_check(
     json: bool,
     fix_denied: bool,
     fix: bool,
-    yes: bool,
+    opts: &super::doctor_fix::FixOptions,
     gh_check: &dyn Fn() -> CheckResult,
 ) -> anyhow::Result<()> {
     if fix_denied {
         return execute_fix_denied(config);
     }
     if fix {
-        return execute_fix(config, yes);
+        return super::doctor_fix::execute(config, opts);
     }
     let checks = run_all_checks_with(config, gh_check);
     let fail_count = checks
@@ -143,26 +143,35 @@ fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
     if summary.is_clean() {
         return CheckResult::ok(
             "secrets",
-            "no control-plane keys or tokens in the project tree",
+            "no keys, credential files or tokens in the project tree",
         );
     }
-    let mut parts: Vec<String> = summary
-        .legacy
-        .iter()
-        .map(|f| format!("{} ({})", f.path.display(), f.what))
-        .collect();
+    let mut parts = super::state_secrets::describe_items(&summary);
     parts.extend(
         summary
-            .token_files
+            .cred_files
             .iter()
-            .map(|f| format!("{} (live bearer token)", f.display())),
+            .map(|f| format!("{} (plaintext credential file)", f.display())),
     );
     let detail = format!(
         "{} item(s) inside the project tree, reachable by any agent: {}",
         parts.len(),
         parts.join("; ")
     );
-    let fix = "Run: ta doctor --fix   (copies are verified before the old ones are removed)";
+    let mut fix = String::new();
+    if summary.fixable_count() > 0 {
+        fix.push_str(
+            "Run: ta doctor --fix --only secrets   (copies are verified before the old ones are removed)",
+        );
+    }
+    if !summary.cred_files.is_empty() {
+        if !fix.is_empty() {
+            fix.push('\n');
+        }
+        fix.push_str(
+            "Plaintext *.cred files need manual action: use `ta credentials add`, or keep the file in the per-user state directory (`ta show state`) and delete the copy in the project.",
+        );
+    }
     if summary.posture == Posture::Strict {
         CheckResult::fail("secrets", detail, fix)
     } else {
@@ -965,245 +974,12 @@ fn execute_fix_denied(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── --fix handler (v0.15.30.6) ───────────────────────────────────────────────
-
-/// `ta doctor --fix [--yes]`
-///
-/// For each health signal, describe the issue and proposed fix, then:
-/// - Interactive mode (`--fix` only): prompt "fix? [y/N]" before taking action.
-/// - Non-interactive mode (`--fix --yes`): apply all fixes automatically (used by `ta gc` alias).
-fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
-    use std::io::{self, Write};
-
-    let signals = super::health_signals::compute_health_signals(config);
-    let vcs_gaps = vcs_gitignore_gaps(config);
-    let orphans = find_orphaned_claims(config);
-    let secrets_pending = !super::state_secrets::summarize(&config.workspace_root).is_clean();
-    let total = signals.len()
-        + usize::from(!vcs_gaps.is_empty())
-        + orphans.len()
-        + usize::from(secrets_pending);
-
-    if total == 0 {
-        println!("No health issues detected — nothing to fix.");
-        return Ok(());
-    }
-
-    println!("TA Doctor — Fix Mode");
-    println!();
-    println!("Found {} issue(s):", total);
-    println!();
-
-    let mut fixed = 0usize;
-    let mut skipped = 0usize;
-
-    // Control-plane secrets first: they are the highest-risk finding.
-    if secrets_pending {
-        let (f, s) = super::state_secrets::fix(config, yes)?;
-        fixed += f;
-        skipped += s;
-        println!();
-    }
-
-    for signal in &signals {
-        let label = match signal.severity {
-            super::health_signals::SignalSeverity::Crit => "[crit]",
-            super::health_signals::SignalSeverity::Warn => "[warn]",
-            super::health_signals::SignalSeverity::Info => "[info]",
-        };
-        println!("{} {}", label, signal.message);
-        println!("  Fix: {}", signal.action);
-
-        let should_fix = if yes {
-            println!("  → Applying (--yes)");
-            true
-        } else {
-            print!("  Apply fix? [y/N]: ");
-            io::stdout().flush().ok();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
-            input.trim().eq_ignore_ascii_case("y")
-        };
-
-        if should_fix {
-            match apply_fix(config, signal) {
-                Ok(msg) => {
-                    println!("  ✓ {}", msg);
-                    fixed += 1;
-                }
-                Err(e) => {
-                    println!("  ✗ Failed: {}", e);
-                }
-            }
-        } else {
-            println!("  Skipped.");
-            skipped += 1;
-        }
-        println!();
-    }
-
-    // Orphaned plan-phase claims: show the exact PLAN.md lines first.
-    for orphan in &orphans {
-        println!(
-            "[warn] Phase {} is in_progress but no live goal holds it{}",
-            orphan.phase_id,
-            if orphan.adhoc_stub {
-                " (ad-hoc stub)"
-            } else {
-                ""
-            }
-        );
-        for line in &orphan.plan_lines {
-            println!("       {}", line);
-        }
-        println!("  Fix: {}", orphan_fix_description(orphan));
-
-        let should_fix = if yes {
-            println!("  → Applying (--yes)");
-            true
-        } else {
-            print!("  Apply fix? [y/N]: ");
-            io::stdout().flush().ok();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
-            input.trim().eq_ignore_ascii_case("y")
-        };
-
-        if should_fix {
-            match fix_orphaned_claim(config, orphan) {
-                Ok(msg) => {
-                    println!("  ✓ {}", msg);
-                    fixed += 1;
-                }
-                Err(e) => println!(
-                    "  ✗ Failed: {}. Run `ta plan reset {}` or edit PLAN.md by hand.",
-                    e, orphan.phase_id
-                ),
-            }
-        } else {
-            println!("  Skipped.");
-            skipped += 1;
-        }
-        println!();
-    }
-
-    // VCS gitignore fix — runs ta setup vcs --force.
-    if !vcs_gaps.is_empty() {
-        println!(
-            "[warn] {} .ta/ path(s) exist but are not gitignored",
-            vcs_gaps.len()
-        );
-        for gap in &vcs_gaps {
-            println!("       .ta/{}", gap);
-        }
-        println!("  Fix: ta setup vcs --force (rewrites the TA gitignore block)");
-
-        let should_fix = if yes {
-            println!("  → Applying (--yes)");
-            true
-        } else {
-            print!("  Apply fix? [y/N]: ");
-            io::stdout().flush().ok();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
-            input.trim().eq_ignore_ascii_case("y")
-        };
-
-        if should_fix {
-            match super::setup::run_vcs_setup(config, true, false, None, None) {
-                Ok(_) => {
-                    println!("  ✓ Ran ta setup vcs --force — gitignore block updated");
-                    fixed += 1;
-                }
-                Err(e) => {
-                    println!("  ✗ Failed: {}", e);
-                }
-            }
-        } else {
-            println!("  Skipped.");
-            skipped += 1;
-        }
-        println!();
-    }
-
-    // VS Code settings.json fix.
-    let vscode_missing = vscode_missing_excludes(&config.workspace_root);
-    if !vscode_missing.is_empty() {
-        println!(
-            "[warn] .vscode/settings.json is missing {} TA runtime exclude(s)",
-            vscode_missing.len()
-        );
-        println!("  Fix: add missing entries to files.exclude and search.exclude");
-
-        let should_fix = if yes {
-            println!("  → Applying (--yes)");
-            true
-        } else {
-            print!("  Apply fix? [y/N]: ");
-            io::stdout().flush().ok();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
-            input.trim().eq_ignore_ascii_case("y")
-        };
-
-        if should_fix {
-            match crate::commands::init::write_vscode_settings_excludes(&config.workspace_root) {
-                Ok(_) => {
-                    println!("  ✓ Updated .vscode/settings.json with TA runtime excludes");
-                    fixed += 1;
-                }
-                Err(e) => {
-                    println!("  ✗ Failed: {}", e);
-                }
-            }
-        } else {
-            println!("  Skipped.");
-            skipped += 1;
-        }
-        println!();
-    }
-
-    // IDE exclude manifest fix.
-    if ide_manifest_needs_fix(&config.workspace_root) {
-        println!("[warn] .ta/ide-excludes.json is missing or out of date");
-        println!("  Fix: regenerate manifest from current ta_runtime_dirs()");
-
-        let should_fix = if yes {
-            println!("  → Applying (--yes)");
-            true
-        } else {
-            print!("  Apply fix? [y/N]: ");
-            io::stdout().flush().ok();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
-            input.trim().eq_ignore_ascii_case("y")
-        };
-
-        if should_fix {
-            match crate::commands::init::write_ide_excludes_manifest(&config.workspace_root) {
-                Ok(_) => {
-                    println!("  ✓ Regenerated .ta/ide-excludes.json");
-                    fixed += 1;
-                }
-                Err(e) => {
-                    println!("  ✗ Failed: {}", e);
-                }
-            }
-        } else {
-            println!("  Skipped.");
-            skipped += 1;
-        }
-        println!();
-    }
-
-    println!("{} fix(es) applied, {} skipped.", fixed, skipped);
-    Ok(())
-}
+// The `--fix` flow (finding ids, --yes, --only, --dry-run) lives in `doctor_fix.rs`.
 
 /// Returns LOCAL_TA_PATHS entries that exist on disk but are not ignored by the project's VCS.
 ///
 /// Returns empty vec if the project has no VCS (`VcsBackend::None`).
-fn vcs_gitignore_gaps(config: &GatewayConfig) -> Vec<&'static str> {
+pub(super) fn vcs_gitignore_gaps(config: &GatewayConfig) -> Vec<&'static str> {
     use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
 
     let vcs = VcsBackend::detect(&config.workspace_root);
@@ -1228,7 +1004,7 @@ fn vcs_gitignore_gaps(config: &GatewayConfig) -> Vec<&'static str> {
 
 /// Apply the fix for a given health signal.
 /// Returns a short description of what was done.
-fn apply_fix(
+pub(super) fn apply_fix(
     config: &GatewayConfig,
     signal: &super::health_signals::HealthSignal,
 ) -> anyhow::Result<String> {
@@ -1709,16 +1485,16 @@ fn check_links(config: &GatewayConfig) -> Vec<CheckResult> {
 
 /// A phase PLAN.md says is `in_progress` while no live goal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OrphanedClaim {
-    phase_id: String,
-    title: String,
+pub(super) struct OrphanedClaim {
+    pub(super) phase_id: String,
+    pub(super) title: String,
     /// An ad-hoc stub `ta run` inserted (`*Inserted goal*` note, nothing else
     /// under its heading): removing it is cleaner than resetting it.
-    adhoc_stub: bool,
+    pub(super) adhoc_stub: bool,
     /// 1-based PLAN.md line of the phase heading.
     heading_line: usize,
     /// The exact PLAN.md lines the fix touches, as `line: text`.
-    plan_lines: Vec<String>,
+    pub(super) plan_lines: Vec<String>,
 }
 
 const ADHOC_STUB_NOTE: &str = "*Inserted goal \u{2014} not in original plan.*";
@@ -1751,7 +1527,7 @@ fn phase_block(lines: &[&str], heading: usize) -> (usize, usize) {
 /// its phase until it reaches a state that ends the claim (completed, failed,
 /// closed, applied, merged), so a phase held only by finished goals, or by
 /// none, is orphaned.
-fn find_orphaned_claims(config: &GatewayConfig) -> Vec<OrphanedClaim> {
+pub(super) fn find_orphaned_claims(config: &GatewayConfig) -> Vec<OrphanedClaim> {
     use ta_goal::GoalRunStore;
 
     let content = match std::fs::read_to_string(config.workspace_root.join("PLAN.md")) {
@@ -1814,7 +1590,7 @@ fn find_orphaned_claims(config: &GatewayConfig) -> Vec<OrphanedClaim> {
 }
 
 /// What the fix will do, in words, for the prompt and the warning.
-fn orphan_fix_description(o: &OrphanedClaim) -> String {
+pub(super) fn orphan_fix_description(o: &OrphanedClaim) -> String {
     if o.adhoc_stub {
         format!(
             "remove the ad-hoc stub for {} from PLAN.md (it holds nothing but the inserted-goal \
@@ -1866,7 +1642,10 @@ fn check_orphaned_in_progress_phases(config: &GatewayConfig) -> Vec<CheckResult>
 }
 
 /// Apply the fix for one orphaned claim. Returns what was done.
-fn fix_orphaned_claim(config: &GatewayConfig, o: &OrphanedClaim) -> anyhow::Result<String> {
+pub(super) fn fix_orphaned_claim(
+    config: &GatewayConfig,
+    o: &OrphanedClaim,
+) -> anyhow::Result<String> {
     let plan_path = config.workspace_root.join("PLAN.md");
     if o.adhoc_stub {
         let content = std::fs::read_to_string(&plan_path)?;
@@ -2125,7 +1904,7 @@ fn diagnose_crash_stderr(lines: &[String]) -> CrashDiagnosis {
 ///
 /// Returns an empty vec when `.vscode/` does not exist (no VS Code project) or when
 /// `settings.json` cannot be parsed (conservative — don't warn on broken JSON).
-fn vscode_missing_excludes(project_root: &Path) -> Vec<String> {
+pub(super) fn vscode_missing_excludes(project_root: &Path) -> Vec<String> {
     use ta_workspace::partitioning::LOCAL_TA_PATHS;
 
     let settings_path = project_root.join(".vscode").join("settings.json");
@@ -2258,7 +2037,7 @@ fn check_ide_excludes_manifest(config: &GatewayConfig) -> Vec<CheckResult> {
 }
 
 /// Returns true when `.ta/ide-excludes.json` is absent or missing any `ta_runtime_dirs()` entry.
-fn ide_manifest_needs_fix(project_root: &Path) -> bool {
+pub(super) fn ide_manifest_needs_fix(project_root: &Path) -> bool {
     use ta_workspace::partitioning::ta_runtime_dirs;
 
     let ta_dir = project_root.join(".ta");
@@ -2421,6 +2200,15 @@ fn check_appcontainer(_config: &GatewayConfig) -> CheckResult {
 // ── Credential vault key custody check (v0.17.6.2) ─────────────────────────────
 
 fn check_credential_vault_key_custody(config: &GatewayConfig) -> CheckResult {
+    check_credential_vault_key_custody_with(config, &ta_credentials::encryption::probe_key_custody)
+}
+
+/// [`check_credential_vault_key_custody`] with the custody probe injected, so
+/// unit tests never reach the real OS keychain.
+fn check_credential_vault_key_custody_with(
+    config: &GatewayConfig,
+    probe: &dyn Fn(&Path) -> Option<ta_credentials::KeyCustody>,
+) -> CheckResult {
     let cred_config = ta_credentials::CredentialsConfig::for_project(&config.workspace_root);
     if !cred_config.vault_path.exists() {
         return CheckResult::ok(
@@ -2434,11 +2222,26 @@ fn check_credential_vault_key_custody(config: &GatewayConfig) -> CheckResult {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| Path::new(".").to_path_buf());
 
-    match ta_credentials::encryption::probe_key_custody(&vault_dir) {
+    match probe(&vault_dir) {
         Some(ta_credentials::KeyCustody::Keychain) => CheckResult::ok(
             "Credential vault",
             "encrypted at rest; key held in the OS keychain",
         ),
+        Some(ta_credentials::KeyCustody::InProjectFile(path)) => {
+            use ta_credentials::state::{Posture, StateLocator};
+            let detail = format!(
+                "the vault's encryption key {} sits next to the vault inside the project \
+                 tree, so any agent that can read the project can decrypt every credential",
+                path.display()
+            );
+            let fix = "Run: ta doctor --fix --only secrets   (moves the key to the per-user state \
+                       directory with a verified copy before removing this one)";
+            if Posture::resolve(&StateLocator::from_env()) == Posture::Strict {
+                CheckResult::fail("Credential vault", detail, fix)
+            } else {
+                CheckResult::warn("Credential vault", detail, fix)
+            }
+        }
         Some(ta_credentials::KeyCustody::FallbackFile(path)) => CheckResult::warn(
             "Credential vault",
             format!(
@@ -2447,10 +2250,10 @@ fn check_credential_vault_key_custody(config: &GatewayConfig) -> CheckResult {
                 path.display()
             ),
             "Back up this file separately from the vault (losing it makes existing \
-             credentials unrecoverable) and confirm it is chmod 0600. If this host \
+             credentials unrecoverable) and confirm it is owner-only. It lives in the \
+             per-user TA state directory, outside the project tree. If this host \
              should have a keychain (e.g. a Secret Service daemon), investigate why \
-             it wasn't reachable — future vault opens will keep using this file \
-             unless the entry is migrated manually.",
+             it wasn't reachable.",
         ),
         None => CheckResult::warn(
             "Credential vault",
@@ -2552,6 +2355,49 @@ mod tests {
 
     fn test_config(dir: &TempDir) -> GatewayConfig {
         GatewayConfig::for_project(dir.path())
+    }
+
+    #[test]
+    fn secrets_check_flags_the_vault_key_and_plaintext_cred_files() {
+        let dir = TempDir::new().unwrap();
+        let ta = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta).unwrap();
+        std::fs::write(ta.join("credentials.key"), "AGE-SECRET-KEY-1X").unwrap();
+        std::fs::write(ta.join("wayfinder-service-account.cred"), "secret").unwrap();
+        let r = check_control_plane_secrets(&test_config(&dir));
+        assert_ne!(r.status, CheckStatus::Ok);
+        assert!(r.detail.contains("credentials.key"), "{}", r.detail);
+        assert!(
+            r.detail.contains("wayfinder-service-account.cred"),
+            "{}",
+            r.detail
+        );
+        assert!(r.fix.contains("--only secrets"), "{}", r.fix);
+        assert!(r.fix.contains("*.cred"), "{}", r.fix);
+
+        // Clean project: ok.
+        let clean = TempDir::new().unwrap();
+        assert_eq!(
+            check_control_plane_secrets(&test_config(&clean)).status,
+            CheckStatus::Ok
+        );
+    }
+
+    #[test]
+    fn vault_custody_check_fails_loudly_for_a_key_next_to_the_vault() {
+        let dir = TempDir::new().unwrap();
+        let ta = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta).unwrap();
+        std::fs::write(ta.join("credentials.json"), "ciphertext").unwrap();
+        std::fs::write(ta.join("credentials.key"), "AGE-SECRET-KEY-1X").unwrap();
+        // The probe is injected: the real one would consult the OS keychain.
+        let in_tree = ta.join("credentials.key");
+        let r = check_credential_vault_key_custody_with(&test_config(&dir), &|_| {
+            Some(ta_credentials::KeyCustody::InProjectFile(in_tree.clone()))
+        });
+        assert_ne!(r.status, CheckStatus::Ok);
+        assert!(r.detail.contains("inside the project tree"), "{}", r.detail);
+        assert!(r.fix.contains("ta doctor --fix"), "{}", r.fix);
     }
 
     // ── v0.17.10.2 item 4: post-goal-completion stale-decisions check ────

@@ -1245,6 +1245,8 @@ fn execute_shell_step(
     command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CEILING_DIRECTORIES");
 
     // Null stdin so the subprocess cannot access or modify the controlling
@@ -3867,6 +3869,8 @@ fn has_git_remote(root: &Path) -> bool {
         .current_dir(root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CEILING_DIRECTORIES")
         .output();
     match output {
@@ -4344,6 +4348,8 @@ mod tests {
                 // git operates on the test's temp directory, not the staging repo.
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES")
                 .output()
                 .unwrap();
@@ -5373,6 +5379,8 @@ steps:
             // staging repo instead of the test's temp directory.
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -5890,6 +5898,8 @@ steps:
                 .current_dir(dir)
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES")
                 .output()
                 .unwrap();
@@ -5955,6 +5965,8 @@ steps:
             .current_dir(dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();

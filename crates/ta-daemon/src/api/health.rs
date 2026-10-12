@@ -52,9 +52,14 @@ use crate::api::AppState;
 /// ```
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let plugins = state.daemon_config.plugins.configured_slots();
+    let root = state.active_project_root.read().unwrap().clone();
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        // Identity of the answering daemon, so `ta daemon` commands can tell
+        // their own project's daemon from another project's on the same port.
+        "project_root": crate::api::status::canonical_root_string(&root),
+        "pid": std::process::id(),
         "timestamp": Utc::now().to_rfc3339(),
         "plugins": plugins,
     }))
@@ -115,6 +120,8 @@ mod tests {
         assert!(json["version"].is_string());
         assert!(json["timestamp"].is_string());
         assert!(json["plugins"].is_array());
+        assert!(json["project_root"].is_string());
+        assert_eq!(json["pid"].as_u64(), Some(u64::from(std::process::id())));
     }
 
     #[tokio::test]

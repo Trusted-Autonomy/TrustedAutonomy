@@ -408,11 +408,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_daemon_url_defaults_to_7700_only_when_project_has_no_daemon_config() {
+    fn resolve_daemon_url_uses_the_derived_port_when_project_has_no_daemon_config() {
         let dir = tempfile::tempdir().unwrap();
+        let want = crate::daemon_port::default_port_for(dir.path()).unwrap();
         assert_eq!(
             resolve_daemon_url(dir.path()).unwrap(),
-            "http://127.0.0.1:7700"
+            format!("http://127.0.0.1:{want}")
         );
     }
 

@@ -2,8 +2,9 @@
 //!
 //! * `ta show state` prints where everything lives, so installers and the
 //!   people running them do not guess.
-//! * `ta doctor` reports old-location secrets and bearer tokens left in the
-//!   project tree.
+//! * `ta doctor` reports old-location secrets (including the credential
+//!   vault's `credentials.key`), plaintext `*.cred` files and bearer tokens
+//!   left in the project tree.
 //! * `ta doctor --fix` moves them: each copy is verified before the old one is
 //!   removed, nothing is ever deleted unverified, a re-run is safe, and every
 //!   outcome is written to the audit log (never the secret itself).
@@ -23,11 +24,23 @@ pub struct SecretsSummary {
     pub legacy: Vec<LegacyFinding>,
     /// Files that still carry a live bearer token inside the project tree.
     pub token_files: Vec<PathBuf>,
+    /// Plaintext `*.cred` credential files inside the project tree (for
+    /// example the `.ta/wayfinder-service-account.cred` a pairing script
+    /// writes). TA cannot move these for the script that reads them, so they
+    /// are reported with a manual fix.
+    pub cred_files: Vec<PathBuf>,
 }
 
 impl SecretsSummary {
     pub fn is_clean(&self) -> bool {
-        self.legacy.is_empty() && self.token_files.is_empty()
+        self.legacy.is_empty() && self.token_files.is_empty() && self.cred_files.is_empty()
+    }
+    /// Items `ta doctor --fix` can move or scrub on its own.
+    pub fn fixable_count(&self) -> usize {
+        self.legacy.len() + self.token_files.len()
+    }
+    pub fn item_count(&self) -> usize {
+        self.fixable_count() + self.cred_files.len()
     }
 }
 
@@ -37,7 +50,43 @@ pub fn summarize(project_root: &Path) -> SecretsSummary {
         posture: Posture::resolve(&locator),
         legacy: state::legacy_findings(project_root),
         token_files: token_bearing_files(project_root),
+        cred_files: plaintext_cred_files(project_root),
     }
+}
+
+/// Plaintext `*.cred` files in the project root, in `.ta/`, and one level
+/// below `.ta/` (never inside `.ta/staging`, which holds whole project
+/// copies). Sorted for stable output.
+pub fn plaintext_cred_files(project_root: &Path) -> Vec<PathBuf> {
+    fn creds_in(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let is_cred = p
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("cred"));
+            if is_cred && e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                out.push(p);
+            }
+        }
+    }
+    let ta = project_root.join(".ta");
+    let mut out = Vec::new();
+    creds_in(project_root, &mut out);
+    creds_in(&ta, &mut out);
+    if let Ok(entries) = std::fs::read_dir(&ta) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let skip = p.file_name().is_some_and(|n| n == "staging");
+            if !skip && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                creds_in(&p, &mut out);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn has_live_token(value: &serde_json::Value) -> bool {
@@ -171,48 +220,63 @@ pub fn audit_migration(config: &GatewayConfig, project_id: &str, report: &Migrat
     }
 }
 
-/// `ta doctor --fix` for control-plane secrets. Returns (fixed, skipped).
-pub fn fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<(usize, usize)> {
-    use std::io::{self, Write};
-    let summary = summarize(&config.workspace_root);
-    if summary.is_clean() {
-        return Ok((0, 0));
-    }
-    println!("[warn] Control-plane secrets are inside the project tree:");
-    for f in &summary.legacy {
-        println!("  {} ({})", f.path.display(), f.what);
-    }
-    for f in &summary.token_files {
-        println!("  {} (a live bearer token)", f.display());
-    }
-    println!("  Fix: move them to the TA state directory (each copy is verified before the old one is removed)");
-    let go = if yes {
-        println!("  -> Applying (--yes)");
-        true
-    } else {
-        print!("  Apply fix? [y/N]: ");
-        io::stdout().flush().ok();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
-        input.trim().eq_ignore_ascii_case("y")
-    };
-    if !go {
-        println!("  Skipped. The strict posture will keep refusing these until they are moved.");
-        return Ok((0, 1));
-    }
+/// The lines `ta doctor` shows for the secrets finding: every item that
+/// `ta doctor --fix` would move or scrub, then the files it cannot fix itself.
+pub fn describe_items(summary: &SecretsSummary) -> Vec<String> {
+    let mut out: Vec<String> = summary
+        .legacy
+        .iter()
+        .map(|f| format!("{} ({})", f.path.display(), f.what))
+        .collect();
+    out.extend(
+        summary
+            .token_files
+            .iter()
+            .map(|f| format!("{} (a live bearer token)", f.display())),
+    );
+    out
+}
 
+/// Result of applying the secrets fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretsFixOutcome {
+    /// Items moved, verified and removed from the project tree.
+    pub moved: usize,
+    /// Items that still need attention (nothing unverified was deleted).
+    pub problems: usize,
+}
+
+/// `ta doctor --fix` for control-plane secrets: move every old-location
+/// secret (including `credentials.key`) to the state directory with a
+/// verified copy, and scrub bearer tokens. Never prompts; the caller has
+/// already decided. Safe to re-run.
+pub fn apply_fix(config: &GatewayConfig) -> anyhow::Result<SecretsFixOutcome> {
     let locator = StateLocator::from_env();
     let ps = ProjectState::open(&config.workspace_root, &locator)?;
     let opts = CustodyOpts::from_env(&locator);
     let report = state::migrate_project(&ps, opts);
     print_report(&report);
     audit_migration(config, &ps.project_id, &report);
+    let moved = report
+        .items
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.status,
+                MigrationStatus::Migrated | MigrationStatus::StaleCopyRemoved
+            )
+        })
+        .count();
 
     let tokens = token_bearing_files(&config.workspace_root);
     let mut token_problems = 0usize;
+    let mut scrubbed = 0usize;
     for (path, res) in scrub_token_files(&tokens) {
         match res {
-            Ok(()) => println!("  ok  removed the bearer token from {}", path.display()),
+            Ok(()) => {
+                scrubbed += 1;
+                println!("  ok  removed the bearer token from {}", path.display());
+            }
             Err(e) => {
                 token_problems += 1;
                 println!("  FAILED {e}");
@@ -225,14 +289,17 @@ pub fn fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<(usize, usize)> 
             "  {problems} item(s) need attention (nothing was deleted that could not be verified). \
              Resolve them, then re-run `ta doctor --fix`."
         );
-        return Ok((0, 1));
+    } else {
+        println!("  State directory: {}", ps.dir.display());
+        println!(
+            "  Restart the daemon so it picks up the new locations: `ta daemon restart` (stop \
+             NATS first if it was using the old nats-jetstream directory)."
+        );
     }
-    println!("  State directory: {}", ps.dir.display());
-    println!(
-        "  Restart the daemon so it picks up the new locations: `ta daemon restart` (stop NATS \
-         first if it was using the old nats-jetstream directory)."
-    );
-    Ok((1, 0))
+    Ok(SecretsFixOutcome {
+        moved: moved + scrubbed,
+        problems,
+    })
 }
 
 fn print_report(report: &MigrationReport) {
@@ -304,32 +371,51 @@ pub fn pin_launch_configs(project_root: &Path, persona: Option<&str>, agent: &st
 }
 
 /// `ta show state`: every location an installer or operator needs.
+///
+/// Strictly read-only: it never mints a project id, never creates the state
+/// directory and never touches the project tree. A project that has not stored
+/// a secret yet reports "no project id yet" and where state will go.
 pub fn show_state(project_root: &Path) -> anyhow::Result<()> {
-    let locator = StateLocator::from_env();
-    let ps = ProjectState::open(project_root, &locator)?;
-    let opts = CustodyOpts::from_env(&locator);
+    show_state_with(project_root, &StateLocator::from_env())
+}
+
+pub(crate) fn show_state_with(project_root: &Path, locator: &StateLocator) -> anyhow::Result<()> {
+    let opts = CustodyOpts::from_env(locator);
     let os = match Os::current() {
         Os::MacOs => "macOS",
         Os::Linux => "Linux",
         Os::Windows => "Windows",
     };
+    let id_file = project_root.join(".ta").join(state::PROJECT_ID_FILENAME);
     println!("TA state directory ({os})");
     println!("  State root:       {}", locator.root().display());
-    println!(
-        "  Project id:       {}   (recorded in {})",
-        ps.project_id,
-        project_root
-            .join(".ta")
-            .join(state::PROJECT_ID_FILENAME)
-            .display()
-    );
-    println!("  Project state:    {}", ps.dir.display());
-    println!("  Secrets (files):  {}", ps.secrets_dir().display());
-    println!("  Daemon tokens:    {}", ps.daemon_tokens_path().display());
-    println!("  Approval tokens:  {}", ps.tokens_dir().display());
-    println!("  NATS JetStream:   {}", ps.nats_data_dir().display());
-    println!("  Audit checkpoints:{}", ps.checkpoints_path().display());
-    println!("  Config hashes:    {}", ps.hashes_path().display());
+    match ProjectState::locate(project_root, locator)? {
+        Some(ps) => {
+            println!(
+                "  Project id:       {}   (recorded in {})",
+                ps.project_id,
+                id_file.display()
+            );
+            println!("  Project state:    {}", ps.dir.display());
+            println!("  Secrets (files):  {}", ps.secrets_dir().display());
+            println!("  Daemon tokens:    {}", ps.daemon_tokens_path().display());
+            println!("  Approval tokens:  {}", ps.tokens_dir().display());
+            println!("  NATS JetStream:   {}", ps.nats_data_dir().display());
+            println!("  Audit checkpoints:{}", ps.checkpoints_path().display());
+            println!("  Config hashes:    {}", ps.hashes_path().display());
+        }
+        None => {
+            println!(
+                "  Project id:       no project id yet (nothing has been stored for this \
+                 project; {} is created the first time a command stores a secret)",
+                id_file.display()
+            );
+            println!(
+                "  Project state:    {}/<project-id>/ (not created yet)",
+                locator.projects_dir().display()
+            );
+        }
+    }
     println!(
         "  Key custody:      {}",
         if opts.use_keychain {
@@ -355,7 +441,7 @@ pub fn show_state(project_root: &Path) -> anyhow::Result<()> {
     } else {
         println!(
             "  Old locations:    {} item(s) still in the project tree; run `ta doctor --fix`",
-            summary.legacy.len() + summary.token_files.len()
+            summary.item_count()
         );
     }
     Ok(())
@@ -422,5 +508,102 @@ mod tests {
     fn summarize_is_clean_for_an_empty_project() {
         let dir = tempfile::tempdir().unwrap();
         assert!(summarize(dir.path()).is_clean());
+    }
+
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, root, out);
+                } else {
+                    let rel = p
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.insert(rel, std::fs::read(&p).unwrap_or_default());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn show_state_is_read_only_and_leaves_the_tree_byte_identical() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        std::fs::write(project.path().join(".ta/workflow.toml"), "x = 1\n").unwrap();
+        std::fs::write(project.path().join("PLAN.md"), "# plan\n").unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let locator = StateLocator::at(state.path());
+        let (before_tree, before_state) = (snapshot(project.path()), snapshot(state.path()));
+        let dirs_before = std::fs::read_dir(state.path()).unwrap().count();
+
+        show_state_with(project.path(), &locator).unwrap();
+
+        assert_eq!(snapshot(project.path()), before_tree);
+        assert_eq!(snapshot(state.path()), before_state);
+        assert_eq!(
+            std::fs::read_dir(state.path()).unwrap().count(),
+            dirs_before
+        );
+        assert!(
+            !project.path().join(".ta/project-id").exists(),
+            "a read-only command must not mint a project id"
+        );
+    }
+
+    #[test]
+    fn show_state_reports_the_recorded_id_when_one_exists_without_writing() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let locator = StateLocator::at(state.path());
+        // A real write path (what a command that stores a secret does).
+        ProjectState::open(project.path(), &locator).unwrap();
+        let (before_tree, before_state) = (snapshot(project.path()), snapshot(state.path()));
+        show_state_with(project.path(), &locator).unwrap();
+        assert_eq!(snapshot(project.path()), before_tree);
+        assert_eq!(snapshot(state.path()), before_state);
+    }
+
+    #[test]
+    fn plaintext_cred_files_are_found_in_the_root_and_under_dot_ta_but_not_in_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta = dir.path().join(".ta");
+        std::fs::create_dir_all(ta.join("sub")).unwrap();
+        std::fs::create_dir_all(ta.join("staging/g1/.ta")).unwrap();
+        std::fs::write(ta.join("wayfinder-service-account.cred"), "s").unwrap();
+        std::fs::write(ta.join("sub/other.CRED"), "s").unwrap();
+        std::fs::write(dir.path().join("root.cred"), "s").unwrap();
+        std::fs::write(ta.join("staging/g1/.ta/copy.cred"), "s").unwrap();
+        std::fs::write(ta.join("notes.txt"), "s").unwrap();
+        let found: Vec<String> = plaintext_cred_files(dir.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.contains(&"wayfinder-service-account.cred".to_string()));
+        assert!(!found.contains(&"copy.cred".to_string()));
+        let summary = summarize(dir.path());
+        assert!(!summary.is_clean());
+        assert_eq!(summary.fixable_count(), 0);
+        assert_eq!(summary.item_count(), 3);
+    }
+
+    #[test]
+    fn the_vault_key_in_the_tree_is_a_secrets_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(dir.path().join(".ta/credentials.key"), "AGE-SECRET-KEY-1X").unwrap();
+        let summary = summarize(dir.path());
+        assert_eq!(summary.fixable_count(), 1);
+        assert!(describe_items(&summary)[0].contains("credentials.key"));
+        assert!(describe_items(&summary)[0].contains("vault"));
     }
 }

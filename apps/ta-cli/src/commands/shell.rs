@@ -1148,9 +1148,13 @@ mod tests {
 
     #[test]
     fn resolve_default_daemon_url() {
-        // Nonexistent project root should give default URL.
-        let url = resolve_daemon_url(Path::new("/nonexistent"));
-        assert_eq!(url, "http://127.0.0.1:7700");
+        // A project root with no daemon configuration resolves to its derived
+        // per-project port, which is inside the documented range.
+        let root = Path::new("/nonexistent");
+        let url = resolve_daemon_url(root);
+        let port = ta_mcp_gateway::daemon_port::default_port_lenient(root);
+        assert_eq!(url, format!("http://127.0.0.1:{port}"));
+        assert!((7700..=7799).contains(&port));
     }
 
     #[test]

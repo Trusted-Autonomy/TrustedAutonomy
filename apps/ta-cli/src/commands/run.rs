@@ -6139,6 +6139,8 @@ fn install_credential_shims(
                     // (the normal, non-nested case).
                     .env_remove("GIT_DIR")
                     .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_INDEX_FILE")
+                    .env_remove("GIT_COMMON_DIR")
                     .env_remove("GIT_CEILING_DIRECTORIES")
                     .status();
                 match status {
@@ -9786,6 +9788,8 @@ fn commit_and_push_plan_status(
             .current_dir(project_root)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .ok()
     };
@@ -9937,6 +9941,8 @@ fn auto_commit_ta_jsonl(project_root: &std::path::Path) {
             .current_dir(project_root)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .ok()
     };
@@ -10041,6 +10047,8 @@ fn expand_collapsed_ta_dir(project_root: &std::path::Path, porcelain: &str) -> S
         ])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CEILING_DIRECTORIES")
         .output();
     match expanded {
@@ -10095,6 +10103,8 @@ fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Re
         // `project_root`. A no-op when unset (the normal, non-nested case).
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CEILING_DIRECTORIES")
         .output()
     {
@@ -12508,6 +12518,10 @@ pre_launch:
         let out = std::process::Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .unwrap();
         let porcelain = String::from_utf8_lossy(&out.stdout).to_string();
@@ -12524,6 +12538,10 @@ pre_launch:
         let out = std::process::Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .unwrap();
         let expanded = expand_collapsed_ta_dir(dir.path(), &String::from_utf8_lossy(&out.stdout));
@@ -14535,18 +14553,24 @@ plan_pending_window = 7
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         std::fs::write(dir.path().join("README.md"), "hello").unwrap();
         let _ = std::process::Command::new("git")
@@ -14554,12 +14578,16 @@ plan_pending_window = 7
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         let _ = std::process::Command::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
 
         let result = check_vcs_clean(dir.path(), false);
@@ -14577,24 +14605,32 @@ plan_pending_window = 7
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         let _ = std::process::Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         let _ = std::process::Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output();
         // Write an uncommitted file to make the tree dirty.
         std::fs::write(dir.path().join("dirty.txt"), "change").unwrap();
@@ -14616,6 +14652,8 @@ plan_pending_window = 7
                 .current_dir(dir)
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .output();
         };
         run(&["init"]);
@@ -14632,6 +14670,8 @@ plan_pending_window = 7
             .current_dir(dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout)
@@ -14751,6 +14791,8 @@ plan_pending_window = 7
             .current_dir(dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .unwrap();
         let committed_files = String::from_utf8_lossy(&out.stdout);
@@ -15932,6 +15974,8 @@ plan_pending_window = 7
             .current_dir(&repo)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .status();
         if !matches!(init, Ok(s) if s.success()) {
@@ -15966,6 +16010,8 @@ plan_pending_window = 7
             .current_dir(&repo)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();

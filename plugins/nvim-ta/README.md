@@ -33,7 +33,7 @@ Credential" in `docs/USAGE.md`.
   subdir = "plugins/nvim-ta",
   config = function()
     require("ta").setup({
-      -- daemon_url = "http://127.0.0.1:7700",  -- default
+      -- daemon_url = "http://127.0.0.1:7710",  -- default: this project's daemon (from .ta/daemon.pid or .ta/daemon.toml)
       -- api_token  = "",                        -- leave empty for localhost
       -- poll_interval = 15,                     -- seconds between status polls
       -- notify_draft_ready = true,
@@ -135,7 +135,7 @@ The SSE stream reconnects automatically with exponential backoff (5 s → 60 s).
 
 ```lua
 require("ta").setup({
-  daemon_url         = "http://127.0.0.1:7700",
+  daemon_url         = "http://127.0.0.1:7710",  -- default: read from the project's .ta/daemon.pid or .ta/daemon.toml, else 7700
   api_token          = "",      -- Bearer token; empty = no auth (localhost default)
   notify_draft_ready = true,    -- toast when a draft is ready for review
   notify_goal_failed = true,    -- toast when a goal fails

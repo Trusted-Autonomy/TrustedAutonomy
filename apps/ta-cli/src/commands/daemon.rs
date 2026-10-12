@@ -11,6 +11,9 @@ use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::daemon_ownership::{self, DaemonProbe, HttpProbe, PortHolder};
+use ta_mcp_gateway::daemon_port;
+
 // ─── macOS code signing (self-healing, best-effort) ─────────────────────────
 //
 // install_local.sh signs ta/ta-daemon with a stable local identity so
@@ -192,61 +195,40 @@ pub fn is_process_alive(pid: u32) -> bool {
     ta_lifecycle::process_is_alive(pid)
 }
 
-/// `[server] bind` and `[server] port` from `.ta/daemon.toml`, defaulting
-/// to `127.0.0.1` and 7700 (the daemon's own defaults) when absent.
+/// `[server] bind` and `[server] port` from `.ta/daemon.toml`. A project
+/// without an explicit port gets its derived per-project port (see
+/// `ta_mcp_gateway::daemon_port`), never the shared 7700.
 fn daemon_toml_bind_port(project_root: &Path) -> (String, u16) {
-    let config_path = project_root.join(".ta").join("daemon.toml");
-    let mut bind = "127.0.0.1".to_string();
-    let mut port: u16 = ta_mcp_gateway::daemon_pid::DEFAULT_DAEMON_PORT;
-
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(config) = content.parse::<toml::Table>() {
-            if let Some(b) = config
-                .get("server")
-                .and_then(|s| s.get("bind"))
-                .and_then(|v| v.as_str())
-            {
-                bind = b.to_string();
-            }
-            if let Some(p) = config
-                .get("server")
-                .and_then(|s| s.get("port"))
-                .and_then(|v| v.as_integer())
-            {
-                port = p as u16;
-            }
-        }
-    }
-    (bind, port)
+    let bind = daemon_port::read_server_table(project_root)
+        .ok()
+        .and_then(|(b, _)| b)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    (bind, daemon_port::default_port_lenient(project_root))
 }
 
-/// Resolve the daemon URL for `project_root`, with optional port override.
-///
-/// Order: `port_override`, then the live daemon's `.ta/daemon.pid` (the
-/// port it actually bound, which can differ from daemon.toml after
-/// `ta daemon start --port`), then `[server] port` in `.ta/daemon.toml`,
-/// then the daemon's default 7700. A pid file that exists but carries no
-/// readable port is reported loudly on stderr rather than silently
-/// ignored. (Whiteboard tools, which send session tokens, go further and
-/// refuse outright: see `ta_mcp_gateway::daemon_pid::resolve_daemon_endpoint`.)
-pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> String {
+/// Host and port to reach `project_root`'s daemon on, with optional port
+/// override. Order: `port_override`, then the live daemon's `.ta/daemon.pid`
+/// (the port it actually bound), then `[server] port` in `.ta/daemon.toml`,
+/// then the project's derived port. A pid file that exists but carries no
+/// readable port is reported loudly on stderr rather than silently ignored.
+fn resolve_daemon_addr(project_root: &Path, port_override: Option<u16>) -> (String, u16) {
     let (bind, toml_port) = daemon_toml_bind_port(project_root);
 
     if let Some(p) = port_override {
-        return format!("http://{}:{}", bind, p);
+        return (bind, p);
     }
 
     match ta_mcp_gateway::daemon_pid::read_pid_file(project_root) {
         Ok(Some(pf)) => match pf.port {
             Some(p) => {
                 let host = pf.host.unwrap_or(bind);
-                return format!("http://{}:{}", host, p);
+                return (host, p);
             }
             None => {
                 eprintln!(
                     "[warn] {} has no usable port line (expected `bind=<host>:<port>` or \
-                     `port=<port>`). Using [server] port = {} from .ta/daemon.toml instead. \
-                     Run `ta daemon restart` to rewrite the pid file.",
+                     `port=<port>`). Using port {} from .ta/daemon.toml or the project default \
+                     instead. Run `ta daemon restart` to rewrite the pid file.",
                     pid_path(project_root).display(),
                     toml_port
                 );
@@ -260,7 +242,8 @@ pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> St
         Ok(None) => {}
         Err(e) => {
             eprintln!(
-                "[warn] Could not read {}: {}. Using [server] port = {} from .ta/daemon.toml.",
+                "[warn] Could not read {}: {}. Using port {} from .ta/daemon.toml or the \
+                 project default.",
                 pid_path(project_root).display(),
                 e,
                 toml_port
@@ -268,7 +251,63 @@ pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> St
         }
     }
 
-    format!("http://{}:{}", bind, toml_port)
+    (bind, toml_port)
+}
+
+/// Resolve the daemon URL for `project_root`, with optional port override.
+/// See [`resolve_daemon_addr`] for the order. (Whiteboard tools, which send
+/// session tokens, go further and refuse outright: see
+/// `ta_mcp_gateway::daemon_pid::resolve_daemon_endpoint`.)
+pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> String {
+    let (host, port) = resolve_daemon_addr(project_root, port_override);
+    format!("http://{}:{}", host, port)
+}
+
+/// The port `project_root`'s daemon is (or will be) reachable on: the live
+/// pid file, else `[server] port`, else the project's derived port.
+pub fn resolve_daemon_port(project_root: &Path) -> u16 {
+    resolve_daemon_addr(project_root, None).1
+}
+
+/// Error unless whatever answers on this project's daemon port is this
+/// project's own daemon (or nothing answers). For commands that are about to
+/// talk to "the daemon" and must not talk to another project's.
+pub fn ensure_own_daemon_on_port(project_root: &Path) -> anyhow::Result<()> {
+    ensure_port_is_ours(
+        "use the daemon on this port",
+        project_root,
+        None,
+        &HttpProbe,
+    )
+    .map(|_| ())
+}
+
+/// `(pid, port)` from this project's pid file when that pid is alive, used to
+/// recognise an older daemon that does not report its project.
+fn live_local_pid_file(project_root: &Path) -> Option<(u32, Option<u16>)> {
+    let pid = read_pid(project_root)?;
+    is_process_alive(pid).then(|| (pid, read_pid_port(project_root)))
+}
+
+/// Refuse (with an error naming both projects) unless the daemon port is free
+/// or held by this project's own daemon. `action` completes "Refusing to ...".
+fn ensure_port_is_ours(
+    action: &str,
+    project_root: &Path,
+    port_override: Option<u16>,
+    probe: &dyn DaemonProbe,
+) -> anyhow::Result<PortHolder> {
+    let (host, port) = resolve_daemon_addr(project_root, port_override);
+    let configured = daemon_toml_bind_port(project_root).1;
+    daemon_ownership::guard(
+        action,
+        project_root,
+        &format!("http://{}:{}", host, port),
+        port,
+        configured,
+        probe,
+        live_local_pid_file(project_root),
+    )
 }
 
 /// Arguments `ta daemon start` passes to `ta-daemon`. `--port` sets the API
@@ -293,33 +332,131 @@ fn daemon_spawn_args(
     args
 }
 
+/// The port a daemon start will use, after every safety check.
+struct StartPlan {
+    port: u16,
+}
+
+/// Choose the port for a daemon start and refuse unless it is usable: an
+/// explicit `--port` or `[server] port` is used as is, otherwise a free port
+/// derived from the project id. Whatever already answers on that port must
+/// not be another project's daemon (or anything else), and a derived choice
+/// is recorded in `.ta/daemon.toml` so every client resolves the same port.
+fn plan_start(
+    project_root: &Path,
+    port_override: Option<u16>,
+    probe: &dyn DaemonProbe,
+) -> anyhow::Result<StartPlan> {
+    let (bind, _) = daemon_toml_bind_port(project_root);
+    let choice = match port_override {
+        Some(p) => daemon_port::StartPort {
+            port: p,
+            explicit: true,
+            derived: p,
+        },
+        None => {
+            daemon_port::choose_start_port(project_root, &|p| daemon_port::port_is_free(&bind, p))
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        }
+    };
+    let port = choice.port;
+    let configured = daemon_toml_bind_port(project_root).1;
+
+    // Whatever already answers on that port must not be mistaken for ours.
+    let base_url = format!("http://{}:{}", bind, port);
+    let holder = daemon_ownership::identify_holder(
+        project_root,
+        &base_url,
+        port,
+        probe,
+        live_local_pid_file(project_root),
+    );
+    if let Some(msg) =
+        daemon_ownership::refusal("start the daemon", project_root, port, configured, &holder)
+    {
+        return Err(anyhow::anyhow!(msg));
+    }
+    if let PortHolder::ThisProject { pid, .. } = holder {
+        return Err(anyhow::anyhow!(
+            "A daemon for this project ({}) is already responding at {}{} (no live pid file \
+             matched). Use `ta daemon stop` to shut it down, or `ta daemon restart` to replace it.",
+            project_root.display(),
+            base_url,
+            pid.map(|p| format!(", pid {p}")).unwrap_or_default()
+        ));
+    }
+    // A derived port was verified free a moment ago by `choose_start_port`;
+    // only an explicit port still needs this check.
+    if choice.explicit && !daemon_port::port_is_free(&bind, port) {
+        return Err(anyhow::anyhow!(
+            "Cannot start the daemon for {}: port {} on {} is in use by a process that does not \
+             answer like a TA daemon. Find it with `lsof -i :{}` (macOS, Linux) or \
+             `netstat -ano | findstr :{}` (Windows), stop it, or set `[server] port = <free port>` \
+             in {}.",
+            project_root.display(),
+            port,
+            bind,
+            port,
+            port,
+            ta_mcp_gateway::daemon_pid::daemon_toml_path(project_root).display()
+        ));
+    }
+
+    // A derived port is recorded before the daemon starts so every client
+    // (CLI, MCP gateway, editor plugins) resolves the same value.
+    if !choice.explicit {
+        match daemon_port::record_port(project_root, port) {
+            Ok(path) => eprintln!(
+                "  No [server] port is set for this project: chose port {} (derived from the \
+                 project id, range {}-{}) and recorded it in {}.",
+                port,
+                daemon_port::PORT_RANGE_START,
+                daemon_port::PORT_RANGE_END,
+                path.display()
+            ),
+            Err(e) => {
+                tracing::warn!(port, error = %e, "could not record the chosen daemon port");
+                eprintln!("[warn] {e}");
+            }
+        }
+    }
+    Ok(StartPlan { port })
+}
+
 /// Start the daemon in the background. Returns the child PID on success.
 ///
-/// If a daemon is already running (live PID or port responding), returns an error.
-/// Stale PID files are cleaned up automatically.
+/// If this project's daemon is already running, returns an error. If the port
+/// is held by another project's daemon (or anything else), refuses with a
+/// message naming both projects. A project without an explicit port gets a
+/// free per-project port, recorded in `.ta/daemon.toml`. Stale PID files are
+/// cleaned up automatically.
 pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
     start_with_binary(
         project_root,
         port_override,
         &super::version_guard::find_daemon_binary,
+        &HttpProbe,
     )
 }
 
-/// [`start`] with the daemon binary lookup injected. Unit tests pass a lookup
-/// that fails, so a test can never launch a real `ta-daemon`. On Windows the
-/// test runner's `PATH` includes `target\debug`, where the normal lookup
-/// finds a real daemon that the test would then leave running.
+/// [`start`] with the daemon binary lookup and the ownership probe injected.
+/// Unit tests pass a lookup that fails, so a test can never launch a real
+/// `ta-daemon`. On Windows the test runner's `PATH` includes `target\debug`,
+/// where the normal lookup finds a real daemon that the test would then leave
+/// running.
 fn start_with_binary(
     project_root: &Path,
     port_override: Option<u16>,
     find_daemon_binary: &dyn Fn() -> anyhow::Result<std::path::PathBuf>,
+    probe: &dyn DaemonProbe,
 ) -> anyhow::Result<u32> {
     // Check for existing PID file.
     if let Some(pid) = read_pid(project_root) {
         if is_process_alive(pid) {
             return Err(anyhow::anyhow!(
-                "Daemon already running (pid {}). Use `ta daemon stop` first, or \
+                "Daemon already running for {} (pid {}). Use `ta daemon stop` first, or \
                  `ta daemon restart` to replace it.",
+                project_root.display(),
                 pid
             ));
         }
@@ -327,22 +464,8 @@ fn start_with_binary(
         remove_pid_file(project_root);
     }
 
-    // Check if the port is already responding (daemon started externally without
-    // a PID file, e.g., by ta shell or a previous manual invocation).
-    let base_url = resolve_daemon_url(project_root, port_override);
-    let status_url = format!("{}/api/status", base_url);
-    if let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(1))
-        .build()
-    {
-        if client.get(&status_url).send().is_ok() {
-            return Err(anyhow::anyhow!(
-                "A daemon is already responding at {} (started externally, no PID file).\n  \
-                 Use `ta daemon stop` to shut it down, or `ta daemon restart` to replace it.",
-                base_url
-            ));
-        }
-    }
+    let StartPlan { port, .. } = plan_start(project_root, port_override, probe)?;
+    let port_override = Some(port);
 
     let daemon_bin = find_daemon_binary()?;
     ensure_stable_codesign(&daemon_bin, project_root);
@@ -372,9 +495,6 @@ fn start_with_binary(
         .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", daemon_bin.display(), e))?;
 
     let pid = child.id();
-    // The pid file was removed above (stale) or never existed, so the
-    // daemon will bind `--port` if given, else daemon.toml's port.
-    let port = port_override.unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
     write_pid_file(project_root, pid, port)?;
 
@@ -394,7 +514,16 @@ fn start_with_binary(
 
 /// Stop the running daemon. Sends POST /api/shutdown, waits up to 5s for exit,
 /// then cleans up the PID file.
+///
+/// Refuses, without sending anything, when the daemon answering on this
+/// project's port belongs to a different project.
 pub fn stop(project_root: &Path) -> anyhow::Result<()> {
+    stop_with(project_root, &HttpProbe)
+}
+
+/// [`stop`] with the ownership probe injected.
+fn stop_with(project_root: &Path, probe: &dyn DaemonProbe) -> anyhow::Result<()> {
+    ensure_port_is_ours("stop the daemon", project_root, None, probe)?;
     let base_url = resolve_daemon_url(project_root, None);
     let shutdown_url = format!("{}/api/shutdown", base_url);
 
@@ -495,8 +624,24 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
 /// Stops the daemon gracefully (HTTP shutdown). "Not running" errors are ignored
 /// so this can be called when the daemon may or may not be live.
 pub fn restart(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
+    restart_with(project_root, port_override, &HttpProbe, &|| {
+        start(project_root, port_override)
+    })
+}
+
+/// [`restart`] with the ownership probe and the start step injected.
+fn restart_with(
+    project_root: &Path,
+    port_override: Option<u16>,
+    probe: &dyn DaemonProbe,
+    start_step: &dyn Fn() -> anyhow::Result<u32>,
+) -> anyhow::Result<u32> {
+    // A port held by another project is a refusal, not "was not running":
+    // check before stopping and before the stop error filter below.
+    ensure_port_is_ours("restart the daemon", project_root, port_override, probe)?;
+
     // Stop the daemon, ignoring errors that simply mean it was not running.
-    match stop(project_root) {
+    match stop_with(project_root, probe) {
         Ok(_) => {}
         Err(e) => {
             let msg = e.to_string();
@@ -513,7 +658,7 @@ pub fn restart(project_root: &Path, port_override: Option<u16>) -> anyhow::Resul
     // Brief pause to let the port be released.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    start(project_root, port_override)
+    start_step()
 }
 
 /// Force-kill the daemon (SIGKILL) and start a fresh one.
@@ -521,6 +666,13 @@ pub fn restart(project_root: &Path, port_override: Option<u16>) -> anyhow::Resul
 /// Sends SIGKILL to the daemon process (if a PID is known), waits 1s for exit,
 /// then starts a new daemon. Skips the graceful drain — active goal runs are interrupted.
 pub fn force_restart(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
+    // --force skips the drain, never the ownership check.
+    ensure_port_is_ours(
+        "force-restart the daemon",
+        project_root,
+        port_override,
+        &HttpProbe,
+    )?;
     if let Some(pid) = read_pid(project_root) {
         if is_process_alive(pid) {
             eprintln!("Force-killing daemon (pid {})...", pid);
@@ -599,22 +751,43 @@ fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Re
         timeout: std::time::Duration::from_secs(DRAIN_TIMEOUT_SECS),
         poll_interval: std::time::Duration::from_secs(DRAIN_POLL_SECS),
     };
-    eprintln!("Checking for active work before restart...");
+    let root = project_root.display().to_string();
+    eprintln!(
+        "Checking for active work in the daemon for project {} ({}) before restart...",
+        root, base_url
+    );
     ta_lifecycle::wait_for_idle(
         &source,
         &ta_lifecycle::SystemClock,
         &opts,
         &mut |snap, remaining| {
-            eprintln!(
-                "  Waiting: {} ({}s remaining before timeout)...",
-                snap.blockers().join(", "),
-                remaining
-            );
+            eprintln!("{}", waiting_message(&root, snap, remaining));
         },
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "{e}\n  Project: {root}\n  Daemon: {base_url}\n  Wait for the work above to finish, \
+             or interrupt it with `ta daemon restart --force`."
+        )
+    })?;
     eprintln!("  No active work: restarting.");
     Ok(())
+}
+
+/// One progress line while a restart waits for work to drain: names the
+/// project, each running goal (id and title) and how to look at it.
+fn waiting_message(
+    project_root: &str,
+    snap: &ta_lifecycle::DrainSnapshot,
+    remaining: u64,
+) -> String {
+    format!(
+        "  Waiting in project {}: {} ({}s remaining before timeout). \
+         Use `ta daemon restart --force` to interrupt it.",
+        project_root,
+        snap.describe_blockers().join("; "),
+        remaining
+    )
 }
 
 /// Ensure the daemon is running. If it's already responding, return Ok.
@@ -635,6 +808,14 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
     let reachable = client.get(&status_url).send().is_ok();
 
     if reachable {
+        // Something answers. Using another project's daemon would run this
+        // project's commands against the wrong project, so say so.
+        ensure_port_is_ours(
+            "use the daemon on this port",
+            project_root,
+            None,
+            &HttpProbe,
+        )?;
         return Ok(());
     }
 
@@ -671,10 +852,12 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
 
 fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow::Result<()> {
     if foreground {
-        // Foreground mode: exec the daemon binary directly.
+        // Foreground mode: exec the daemon binary directly, after the same
+        // ownership and port checks as a background start.
+        let StartPlan { port: chosen, .. } = plan_start(project_root, port, &HttpProbe)?;
         let daemon_bin = super::version_guard::find_daemon_binary()?;
         let mut cmd = Command::new(&daemon_bin);
-        cmd.args(daemon_spawn_args(project_root, port, true));
+        cmd.args(daemon_spawn_args(project_root, Some(chosen), true));
 
         println!(
             "Starting daemon in foreground: {} --api --project-root {}",
@@ -740,6 +923,17 @@ fn cmd_stop(project_root: &Path) -> anyhow::Result<()> {
 
 fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::Result<()> {
     let old_pid = read_pid(project_root);
+
+    // Refuse before announcing or draining anything when the port belongs to
+    // another project.
+    ensure_port_is_ours("restart the daemon", project_root, port, &HttpProbe)?;
+    let (_, target_port) = resolve_daemon_addr(project_root, port);
+    eprintln!(
+        "Restarting the daemon for project {} (port {}{}).",
+        project_root.display(),
+        target_port,
+        old_pid.map(|p| format!(", pid {p}")).unwrap_or_default()
+    );
 
     let new_pid = if force {
         // --force: skip drain and SIGKILL immediately.
@@ -821,6 +1015,16 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     println!("  Version:        {}", version);
                     println!("  Project:        {}", project);
                     println!("  Project root:   {}", project_root.display());
+                    if let Some(reported) = json["project_root"].as_str() {
+                        if !daemon_port::same_project_root(project_root, reported) {
+                            println!(
+                                "  WARNING:        the daemon on {} serves {}, not this project. \
+                                 Run `ta daemon status` there; `ta daemon stop` and `restart` \
+                                 here refuse to touch it.",
+                                base_url, reported
+                            );
+                        }
+                    }
                     println!("  Active goals:   {}", active_goals);
                     println!("  Active agents:  {}", active_count);
                     println!("  Pending drafts: {}", pending_drafts);
@@ -898,6 +1102,30 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
             if let Ok(resp) = client.get(&status_url).send() {
                 if resp.status().is_success() {
                     let json: serde_json::Value = resp.json()?;
+                    if let Some(other) = json["project_root"]
+                        .as_str()
+                        .filter(|r| !daemon_port::same_project_root(project_root, r))
+                    {
+                        println!(
+                            "No daemon is running for this project ({}).",
+                            project_root.display()
+                        );
+                        println!(
+                            "  {} answers with the daemon for {}{}, a different project.",
+                            base_url,
+                            other,
+                            json["pid"]
+                                .as_u64()
+                                .map(|p| format!(" (pid {p})"))
+                                .unwrap_or_default()
+                        );
+                        println!(
+                            "  Manage that daemon with `ta daemon status` from {}.",
+                            other
+                        );
+                        println!("  Start this project's own daemon with: ta daemon start");
+                        return Ok(());
+                    }
                     let version = json["version"].as_str().unwrap_or("?");
                     println!("Daemon is running (started externally, no PID file).");
                     println!("  URL:     {}", base_url);
@@ -1533,6 +1761,278 @@ fn cmd_config_show(project_root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::daemon_ownership::test_support::{CannedProbe, FakeDaemon};
+    use crate::commands::daemon_ownership::ProbeAnswer;
+
+    fn project_with_port(port: Option<u16>) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".ta")).unwrap();
+        if let Some(p) = port {
+            std::fs::write(
+                d.path().join(".ta/daemon.toml"),
+                format!("[server]\nport = {p}\n"),
+            )
+            .unwrap();
+        }
+        d
+    }
+
+    fn no_binary() -> anyhow::Result<std::path::PathBuf> {
+        Err(anyhow::anyhow!("ta-daemon lookup disabled in this test"))
+    }
+
+    /// Project A's daemon (a real local listener) holds the port that project
+    /// B is configured for, as in the live incident.
+    fn two_projects_one_port() -> (tempfile::TempDir, tempfile::TempDir, FakeDaemon) {
+        let a = project_with_port(None);
+        let canon_a = std::fs::canonicalize(a.path()).unwrap();
+        let fake = FakeDaemon::spawn(
+            Some(&canon_a.display().to_string()),
+            31337,
+            &[("c5ee0b0a-0000-0000-0000-000000000000", "Owner's long goal")],
+        );
+        let b = project_with_port(Some(fake.port));
+        (a, b, fake)
+    }
+
+    fn assert_refusal_names_everything(err: &str, a: &Path, b: &Path, port: u16) {
+        assert!(err.contains(&format!("port {port}")), "{err}");
+        assert!(err.contains(&a.display().to_string()), "{err}");
+        assert!(err.contains(&b.display().to_string()), "{err}");
+        assert!(err.contains("pid 31337"), "{err}");
+        assert!(err.contains("ta daemon status"), "{err}");
+        assert!(err.contains("Nothing was stopped"), "{err}");
+    }
+
+    #[test]
+    fn second_project_on_a_busy_port_refuses_to_stop_the_first_projects_daemon() {
+        let (a, b, fake) = two_projects_one_port();
+        let err = stop_with(b.path(), &HttpProbe).unwrap_err().to_string();
+        assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
+        assert!(
+            !fake.saw("POST"),
+            "no write request may reach the other daemon"
+        );
+        assert!(!fake.saw("shutdown"));
+    }
+
+    #[test]
+    fn second_project_on_a_busy_port_refuses_to_restart_the_first_projects_daemon() {
+        let (a, b, fake) = two_projects_one_port();
+        let started = std::cell::Cell::new(false);
+        let err = restart_with(b.path(), None, &HttpProbe, &|| {
+            started.set(true);
+            Ok(1)
+        })
+        .unwrap_err()
+        .to_string();
+        assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
+        assert!(!started.get(), "the start step must not run");
+        assert!(!fake.saw("shutdown") && !fake.saw("POST"));
+
+        // The CLI commands refuse the same way, before draining anything.
+        let err = cmd_restart(b.path(), None, false).unwrap_err().to_string();
+        assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
+        let err = cmd_restart(b.path(), None, true).unwrap_err().to_string();
+        assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
+        let err = cmd_stop(b.path()).unwrap_err().to_string();
+        assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
+        assert!(
+            !fake.saw("drain"),
+            "must not even poll the other daemon's goals"
+        );
+        assert!(!fake.saw("POST") && !fake.saw("shutdown"));
+    }
+
+    #[test]
+    fn second_project_on_a_busy_port_refuses_to_start_with_the_same_clarity() {
+        let (a, b, fake) = two_projects_one_port();
+        let err = start_with_binary(b.path(), None, &no_binary, &HttpProbe)
+            .unwrap_err()
+            .to_string();
+        assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
+        // An explicit --port that lands on the other daemon refuses too.
+        let c = project_with_port(None);
+        let err = start_with_binary(c.path(), Some(fake.port), &no_binary, &HttpProbe)
+            .unwrap_err()
+            .to_string();
+        assert_refusal_names_everything(&err, a.path(), c.path(), fake.port);
+        assert!(!fake.saw("POST"));
+    }
+
+    #[test]
+    fn a_projects_own_daemon_on_its_port_is_not_refused() {
+        let a = project_with_port(None);
+        let canon_a = std::fs::canonicalize(a.path()).unwrap();
+        let fake = FakeDaemon::spawn(Some(&canon_a.display().to_string()), 1, &[]);
+        std::fs::write(
+            a.path().join(".ta/daemon.toml"),
+            format!("[server]\nport = {}\n", fake.port),
+        )
+        .unwrap();
+        let holder = ensure_port_is_ours("stop the daemon", a.path(), None, &HttpProbe).unwrap();
+        assert!(
+            matches!(holder, PortHolder::ThisProject { .. }),
+            "{holder:?}"
+        );
+        // start() says it is already running rather than starting a second one.
+        let err = start_with_binary(a.path(), None, &no_binary, &HttpProbe)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already responding"), "{err}");
+    }
+
+    #[test]
+    fn start_picks_a_free_derived_port_and_records_it() {
+        let d = project_with_port(None);
+        let _ = start_with_binary(
+            d.path(),
+            None,
+            &no_binary,
+            &CannedProbe(ProbeAnswer::NoAnswer),
+        )
+        .unwrap_err();
+        let recorded = daemon_port::explicit_server_port(d.path())
+            .unwrap()
+            .expect("the chosen port is recorded in .ta/daemon.toml");
+        assert!((7700..=7799).contains(&recorded), "{recorded}");
+        // Every client resolves the same port from then on.
+        assert_eq!(
+            resolve_daemon_url(d.path(), None),
+            format!("http://127.0.0.1:{recorded}")
+        );
+        assert_eq!(daemon_port::default_port_for(d.path()).unwrap(), recorded);
+        // Starting again keeps the recorded choice.
+        let _ = start_with_binary(
+            d.path(),
+            None,
+            &no_binary,
+            &CannedProbe(ProbeAnswer::NoAnswer),
+        )
+        .unwrap_err();
+        assert_eq!(
+            daemon_port::explicit_server_port(d.path()).unwrap(),
+            Some(recorded)
+        );
+    }
+
+    #[test]
+    fn busy_derived_port_is_skipped_not_shared() {
+        let d = project_with_port(None);
+        let derived = daemon_port::default_port_for(d.path()).unwrap();
+        // Hold the derived port with a plain listener (any process).
+        let hold = std::net::TcpListener::bind(("127.0.0.1", derived));
+        let _ = start_with_binary(
+            d.path(),
+            None,
+            &no_binary,
+            &CannedProbe(ProbeAnswer::NoAnswer),
+        )
+        .unwrap_err();
+        let recorded = daemon_port::explicit_server_port(d.path())
+            .unwrap()
+            .unwrap();
+        if hold.is_ok() {
+            assert_ne!(recorded, derived, "must not pick the busy port");
+        }
+    }
+
+    #[test]
+    fn explicit_port_held_by_a_non_daemon_process_fails_with_the_fix() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let d = project_with_port(Some(port));
+        let err = start_with_binary(
+            d.path(),
+            None,
+            &no_binary,
+            &CannedProbe(ProbeAnswer::NoAnswer),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&format!("port {port}")), "{err}");
+        assert!(err.contains("lsof -i"), "{err}");
+        assert!(err.contains("[server] port"), "{err}");
+        assert!(err.contains(&d.path().display().to_string()), "{err}");
+        // An explicit port is never rewritten.
+        assert_eq!(
+            daemon_port::explicit_server_port(d.path()).unwrap(),
+            Some(port)
+        );
+    }
+
+    /// Every client resolves the daemon port through `resolve_daemon_url` /
+    /// `ta_mcp_gateway::daemon_port`. A literal 7700 in command code is the
+    /// shared-default bug coming back.
+    #[test]
+    fn no_cli_command_hardcodes_the_shared_default_port() {
+        fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    rust_files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rust_files(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 20, "found only {} source files", files.len());
+        let mut offenders = Vec::new();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            if name.ends_with("tests.rs") {
+                continue;
+            }
+            // Normalize CRLF so a Windows checkout scans the same text.
+            let text = std::fs::read_to_string(&f).unwrap().replace("\r\n", "\n");
+            let production = text.split("\n#[cfg(test)]\nmod ").next().unwrap();
+            for (n, line) in production.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if code.contains("7700") {
+                    offenders.push(format!("{}:{}: {}", f.display(), n + 1, code));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "hardcoded 7700 in command code (resolve through daemon::resolve_daemon_url or \
+             ta_mcp_gateway::daemon_port instead):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    #[test]
+    fn waiting_message_names_goal_id_title_project_and_how_to_look() {
+        let a = project_with_port(None);
+        let canon = std::fs::canonicalize(a.path()).unwrap();
+        let fake = FakeDaemon::spawn(
+            Some(&canon.display().to_string()),
+            9,
+            &[("c5ee0b0a-0000-0000-0000-000000000000", "Owner's long goal")],
+        );
+        let source = HttpDrainSource {
+            client: reqwest::blocking::Client::new(),
+            url: format!("{}/api/drain/status", fake.url()),
+        };
+        use ta_lifecycle::DrainSource;
+        let snap = source.drain_status().unwrap().unwrap();
+        let line = waiting_message(&canon.display().to_string(), &snap, 28);
+        assert!(line.contains(&canon.display().to_string()), "{line}");
+        assert!(line.contains("c5ee0b0a"), "{line}");
+        assert!(line.contains("Owner's long goal"), "{line}");
+        assert!(line.contains("ta goal status c5ee0b0a"), "{line}");
+        assert!(line.contains("28s remaining"), "{line}");
+        assert!(line.contains("--force"), "{line}");
+        assert!(!line.contains("Waiting: 1 running goal ("), "{line}");
+    }
 
     /// Public-install safety: when the named local signing identity does not
     /// exist (every end user's machine), `ensure_stable_codesign` must leave
@@ -1604,10 +2104,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_daemon_url_default() {
+    fn resolve_daemon_url_default_is_the_projects_derived_port_not_7700() {
         let dir = tempfile::tempdir().unwrap();
         let url = resolve_daemon_url(dir.path(), None);
-        assert_eq!(url, "http://127.0.0.1:7700");
+        let port = daemon_port::default_port_for(dir.path()).unwrap();
+        assert_eq!(url, format!("http://127.0.0.1:{port}"));
+        assert!((7700..=7799).contains(&port));
+    }
+
+    #[test]
+    fn resolve_daemon_url_explicit_7700_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/daemon.toml"),
+            "[server]\nport = 7700\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_daemon_url(dir.path(), None),
+            "http://127.0.0.1:7700"
+        );
     }
 
     #[test]
@@ -1683,17 +2200,15 @@ mod tests {
         // The lookup always fails, so no real ta-daemon is ever launched
         // (it would outlive the test). start() must still clean up the stale
         // PID file before it reaches the binary lookup.
-        let result = start_with_binary(project, None, &|| {
-            Err(anyhow::anyhow!("ta-daemon lookup disabled in this test"))
-        });
-        let err = result.expect_err("start must fail when no daemon binary is found");
-        // On a machine whose own daemon answers on the default port, start()
-        // refuses earlier with "already responding"; both are fine here.
-        let msg = err.to_string();
-        assert!(
-            msg.contains("lookup disabled") || msg.contains("already responding"),
-            "{msg}"
+        let result = start_with_binary(
+            project,
+            None,
+            &|| Err(anyhow::anyhow!("ta-daemon lookup disabled in this test")),
+            &CannedProbe(ProbeAnswer::NoAnswer),
         );
+        let err = result.expect_err("start must fail when no daemon binary is found");
+        let msg = err.to_string();
+        assert!(msg.contains("lookup disabled"), "{msg}");
         assert!(
             !pid_path(project).exists() || read_pid(project) != Some(99999999),
             "Stale PID file should have been removed"

@@ -43,13 +43,28 @@ use crate::config::DiscordListenerConfig;
 ///
 /// Returns immediately (the manager runs as a background tokio task).
 /// Call this once at daemon startup when discord_listener.enabled = true.
-pub fn start(project_root: PathBuf, config: DiscordListenerConfig, shutdown: Arc<Notify>) {
+///
+/// `daemon_url` is this daemon's own API URL. It is handed to the listener as
+/// `TA_DAEMON_URL` (unless the environment already sets one) so the listener
+/// never falls back to a shared default port that may belong to another
+/// project's daemon.
+pub fn start(
+    project_root: PathBuf,
+    config: DiscordListenerConfig,
+    shutdown: Arc<Notify>,
+    daemon_url: String,
+) {
     tokio::spawn(async move {
-        run_manager(project_root, config, shutdown).await;
+        run_manager(project_root, config, shutdown, daemon_url).await;
     });
 }
 
-async fn run_manager(project_root: PathBuf, config: DiscordListenerConfig, shutdown: Arc<Notify>) {
+async fn run_manager(
+    project_root: PathBuf,
+    config: DiscordListenerConfig,
+    shutdown: Arc<Notify>,
+    daemon_url: String,
+) {
     let binary = resolve_binary(&project_root, &config.binary);
     let max_restarts = config.max_restarts;
     let restart_fail_threshold = config.restart_fail_threshold;
@@ -134,7 +149,7 @@ async fn run_manager(project_root: PathBuf, config: DiscordListenerConfig, shutd
             "Spawning Discord listener"
         );
 
-        let mut child = match spawn_listener(&binary) {
+        let mut child = match spawn_listener(&binary, &daemon_url) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(
@@ -313,18 +328,32 @@ fn write_crash_state(project_root: &Path, consecutive_failures: u32, last_stderr
 }
 
 /// Spawn the Discord listener process, returning a tokio Child handle with stderr piped.
-fn spawn_listener(binary: &Path) -> std::io::Result<Child> {
-    tokio::process::Command::new(binary)
-        .arg("--listen")
+fn spawn_listener(binary: &Path, daemon_url: &str) -> std::io::Result<Child> {
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.arg("--listen")
         // Inherit the daemon's environment (TA_DISCORD_TOKEN etc. flow through).
         .env_clear()
-        .envs(std::env::vars())
+        .envs(listener_env(daemon_url, std::env::vars()));
+    cmd
         // Detach stdout/stdin; pipe stderr so we can capture crash output.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true) // Drop = SIGKILL on Unix
         .spawn()
+}
+
+/// The environment handed to the listener: the daemon's own, plus
+/// `TA_DAEMON_URL` pointing at this daemon unless one is already set.
+fn listener_env(
+    daemon_url: &str,
+    inherited: impl Iterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = inherited.collect();
+    if !env.iter().any(|(k, _)| k == "TA_DAEMON_URL") {
+        env.push(("TA_DAEMON_URL".to_string(), daemon_url.to_string()));
+    }
+    env
 }
 
 /// Wait for a child process to exit, returning its exit status.
@@ -437,6 +466,27 @@ fn resolve_binary(project_root: &Path, name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn listener_env_points_the_listener_at_this_daemon_unless_overridden() {
+        let env = listener_env(
+            "http://127.0.0.1:7742",
+            vec![("TA_DISCORD_TOKEN".to_string(), "t".to_string())].into_iter(),
+        );
+        assert!(env.contains(&(
+            "TA_DAEMON_URL".to_string(),
+            "http://127.0.0.1:7742".to_string()
+        )));
+        assert!(env.contains(&("TA_DISCORD_TOKEN".to_string(), "t".to_string())));
+
+        let env = listener_env(
+            "http://127.0.0.1:7742",
+            vec![("TA_DAEMON_URL".to_string(), "http://example:1".to_string())].into_iter(),
+        );
+        let urls: Vec<_> = env.iter().filter(|(k, _)| k == "TA_DAEMON_URL").collect();
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].1, "http://example:1");
+    }
+
     use super::*;
     use std::path::PathBuf;
 

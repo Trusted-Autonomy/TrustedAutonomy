@@ -11,10 +11,10 @@ use std::time::Duration;
 /// 1. Ensure the daemon is running (start if needed).
 /// 2. Open the setup wizard at http://localhost:<port>/setup.
 pub fn execute(project_root: &Path) -> anyhow::Result<()> {
-    // Determine the port from daemon config (default 7700).
-    let port = resolve_port(project_root);
-    let studio_url = format!("http://localhost:{}/setup", port);
-    let health_url = format!("http://localhost:{}/health", port);
+    // Determine the port from the pid file or daemon config (per-project default).
+    let mut port = resolve_port(project_root);
+    let mut studio_url = format!("http://localhost:{}/setup", port);
+    let mut health_url = format!("http://localhost:{}/health", port);
 
     println!("TA Studio — Setup Wizard");
     println!();
@@ -23,12 +23,18 @@ pub fn execute(project_root: &Path) -> anyhow::Result<()> {
     let daemon_running = check_daemon_health(&health_url);
 
     if daemon_running {
+        // Whatever answers must be this project's daemon, not another one's.
+        super::daemon::ensure_own_daemon_on_port(project_root)?;
         println!("  Daemon is running at http://localhost:{}", port);
     } else {
         println!("  Starting TA daemon...");
-        match super::daemon::start(project_root, Some(port)) {
+        match super::daemon::start(project_root, None) {
             Ok(pid) => {
                 println!("  Daemon started (PID {}).", pid);
+                // The start may have chosen a free per-project port.
+                port = resolve_port(project_root);
+                studio_url = format!("http://localhost:{}/setup", port);
+                health_url = format!("http://localhost:{}/health", port);
                 // Brief wait for the daemon to become ready.
                 let start = std::time::Instant::now();
                 let ready = loop {
@@ -74,20 +80,11 @@ pub fn execute(project_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve the daemon port from `.ta/daemon.toml` (default 7700).
+/// Resolve the daemon port the same way every other command does: the live
+/// pid file, then `[server] port` in `.ta/daemon.toml`, then the project's
+/// derived port.
 fn resolve_port(project_root: &Path) -> u16 {
-    let config_path = project_root.join(".ta").join("daemon.toml");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        // Parse just the [server] section to get the port.
-        if let Ok(table) = toml::from_str::<toml::Table>(&content) {
-            if let Some(server) = table.get("server").and_then(|v| v.as_table()) {
-                if let Some(port) = server.get("port").and_then(|v| v.as_integer()) {
-                    return port as u16;
-                }
-            }
-        }
-    }
-    7700
+    super::daemon::resolve_daemon_port(project_root)
 }
 
 /// Returns true if `GET <url>` responds with HTTP 200.
@@ -99,14 +96,14 @@ fn check_daemon_health(health_url: &str) -> bool {
         .trim_start_matches("https://");
     let (host_port, _path) = url_stripped.split_once('/').unwrap_or((url_stripped, ""));
 
-    use std::net::TcpStream;
-    TcpStream::connect_timeout(
-        &host_port
-            .parse()
-            .unwrap_or_else(|_| "127.0.0.1:7700".parse().unwrap()),
-        Duration::from_millis(500),
-    )
-    .is_ok()
+    use std::net::{TcpStream, ToSocketAddrs};
+    // "localhost:<port>" resolves; an unparseable address is simply not reachable.
+    host_port
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .map(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok())
+        .unwrap_or(false)
 }
 
 /// Open a URL in the default browser.

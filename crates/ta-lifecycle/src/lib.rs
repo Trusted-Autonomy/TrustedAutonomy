@@ -71,8 +71,8 @@ pub use codesign::{
 };
 pub use drain::{
     apply_lock_state, drain_then_restart, process_is_alive, wait_for_idle, ApplyLockState,
-    DrainSnapshot, DrainSource, DrainTimeout, DrainWaitOptions, InflightCounter, InflightGuard,
-    RestartError,
+    DrainGoal, DrainSnapshot, DrainSource, DrainTimeout, DrainWaitOptions, InflightCounter,
+    InflightGuard, RestartError,
 };
 pub use guard::{GuardDecision, GuardState, RestartGuard};
 pub use mode::{AutoUpdateMode, ACCEPTED_VALUES};
