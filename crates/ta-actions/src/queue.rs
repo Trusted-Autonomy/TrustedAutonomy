@@ -227,6 +227,19 @@ pub struct NewAction {
     /// Set when this entry IS an undo, naming the key it counters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo_of: Option<String>,
+    /// Whether a person was present when this was queued (v0.17.12.4). Proven
+    /// at apply time and stored with the action, because the daemon sends it
+    /// later with nobody watching and must apply the rules the apply used.
+    /// Entries queued before this field existed read as unattended, which is
+    /// the strict reading.
+    #[serde(default)]
+    pub attendance: crate::rules::When,
+    /// Saga order (v0.17.12.4, `strict` posture): this action runs only after
+    /// every earlier action of its draft is done, one at a time. A failed step
+    /// stops the rest. Stored with the action so the daemon keeps the order the
+    /// apply was made under.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ordered: bool,
 }
 
 impl NewAction {
@@ -732,6 +745,9 @@ impl ActionQueue {
             undo: None,
             idempotency: e.action.idempotency,
             undo_of: Some(key.to_string()),
+            // A person asked for the undo (`ta show actions` is gated on the human credential).
+            attendance: crate::rules::When::Attended,
+            ordered: false,
         };
         let undo_key = undo.key();
         self.append_locked(&[Event::Enqueued {
@@ -895,6 +911,9 @@ pub struct RunReport {
     pub needs_attention: Vec<String>,
     /// Irrecoverable actions held back because something else of their draft is not done.
     pub held: Vec<String>,
+    /// Ordered (saga) actions that did not run because an earlier step of their draft
+    /// is waiting, retrying or needs attention.
+    pub stopped: Vec<String>,
 }
 
 pub struct QueueWorker<'a> {
@@ -925,7 +944,14 @@ impl<'a> QueueWorker<'a> {
             .entries
             .iter()
             .filter(|e| e.due(now))
-            .map(|e| (class_rank(e.action.class), e.seq, e.key.clone()))
+            .map(|e| {
+                let rank = if e.action.ordered {
+                    0
+                } else {
+                    class_rank(e.action.class)
+                };
+                (rank, e.seq, e.key.clone())
+            })
             .collect();
         due.sort();
         for (_, _, key) in due {
@@ -934,7 +960,26 @@ impl<'a> QueueWorker<'a> {
             let Some(entry) = fresh.get(&key) else {
                 continue;
             };
-            if entry.action.class == Reversibility::Irrecoverable && entry.action.undo_of.is_none()
+            if entry.action.ordered && entry.action.undo_of.is_none() {
+                // Saga order: strictly declared order, one at a time.
+                let earlier = fresh.entries.iter().find(|o| {
+                    o.action.draft_id == entry.action.draft_id
+                        && o.action.undo_of.is_none()
+                        && o.seq < entry.seq
+                        && o.state != QueueState::Done
+                });
+                if let Some(b) = earlier {
+                    tracing::info!(key = %entry.key, waiting_on = %b.key, state = b.state.label(),
+                        "ordered action held: an earlier action of the draft is not done");
+                    if b.state == QueueState::NeedsAttention {
+                        report.stopped.push(key);
+                    } else {
+                        report.held.push(key);
+                    }
+                    continue;
+                }
+            } else if entry.action.class == Reversibility::Irrecoverable
+                && entry.action.undo_of.is_none()
             {
                 let blocked_by = fresh.entries.iter().find(|o| {
                     o.action.draft_id == entry.action.draft_id
@@ -1075,6 +1120,8 @@ mod tests {
             },
             idempotency: Idempotency::Key,
             undo_of: None,
+            attendance: crate::rules::When::Attended,
+            ordered: false,
         }
     }
 
@@ -1403,6 +1450,125 @@ mod tests {
         assert_eq!(r.done, vec!["d1:slack".to_string(), "d1:mail".to_string()]);
         let order: Vec<_> = ex.calls.borrow().iter().map(|c| c.0.clone()).collect();
         assert_eq!(order, vec!["d1:slack", "d1:slack", "d1:mail"]);
+    }
+
+    fn ordered(mut a: NewAction) -> NewAction {
+        a.ordered = true;
+        a
+    }
+
+    #[test]
+    fn ordered_actions_run_one_at_a_time_in_declared_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = ActionQueue::open(dir.path().join("q")).unwrap();
+        let clock = ManualClock::new(t0());
+        // Declared order wins over "irrecoverable last" in ordered (strict) mode.
+        q.enqueue_batch(
+            &[
+                ordered(act("d1", "mail", Reversibility::Irrecoverable)),
+                ordered(act("d1", "slack", Reversibility::Compensable)),
+                ordered(act("d1", "wiki", Reversibility::Reversible)),
+            ],
+            &clock,
+        )
+        .unwrap();
+        let ex = Script::new(vec![]);
+        let r = worker(&q, &clock, &ex, &Allow).run_once().unwrap();
+        assert_eq!(r.done, vec!["d1:mail", "d1:slack", "d1:wiki"]);
+        assert!(r.stopped.is_empty() && r.held.is_empty());
+    }
+
+    #[test]
+    fn a_failed_step_stops_the_rest_and_the_completed_step_keeps_its_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = ActionQueue::open(dir.path().join("q")).unwrap();
+        let clock = ManualClock::new(t0());
+        q.enqueue_batch(
+            &[
+                ordered(act("d1", "s1", Reversibility::Compensable)),
+                ordered(act("d1", "s2", Reversibility::Compensable)),
+                ordered(act("d1", "s3", Reversibility::Compensable)),
+                // Another draft is not affected by d1's failure.
+                ordered(act("d2", "t1", Reversibility::Compensable)),
+            ],
+            &clock,
+        )
+        .unwrap();
+        let ex = Script::new(vec![
+            Script::ok(),
+            ExecOutcome::Rejected {
+                message: "bad token".into(),
+            },
+        ]);
+        let r = worker(&q, &clock, &ex, &Allow).run_once().unwrap();
+        assert_eq!(r.done, vec!["d1:s1", "d2:t1"]);
+        assert_eq!(r.needs_attention, vec!["d1:s2"]);
+        assert_eq!(
+            r.stopped,
+            vec!["d1:s3"],
+            "the step after the failure must not run"
+        );
+        assert_eq!(ex.calls.borrow().len(), 3, "s3 was never attempted");
+        // Passing again does not run s3 either.
+        let r = worker(&q, &clock, &ex, &Allow).run_once().unwrap();
+        assert_eq!(r.stopped, vec!["d1:s3"]);
+        assert_eq!(ex.calls.borrow().len(), 3);
+        // The completed compensable step offers its recorded undo.
+        let undo = q.request_undo("d1:s1", &clock).unwrap();
+        assert!(undo.contains("s1"), "{undo}");
+    }
+
+    #[test]
+    fn a_retrying_step_holds_later_ordered_steps_without_stopping_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = ActionQueue::open(dir.path().join("q")).unwrap();
+        let clock = ManualClock::new(t0());
+        q.enqueue_batch(
+            &[
+                ordered(act("d1", "s1", Reversibility::Compensable)),
+                ordered(act("d1", "s2", Reversibility::Compensable)),
+            ],
+            &clock,
+        )
+        .unwrap();
+        let ex = Script::new(vec![ExecOutcome::Retryable {
+            message: "503".into(),
+        }]);
+        let w = worker(&q, &clock, &ex, &Allow);
+        let r = w.run_once().unwrap();
+        assert_eq!(r.retrying, vec!["d1:s1"]);
+        assert_eq!(r.held, vec!["d1:s2"]);
+        assert!(r.stopped.is_empty());
+        clock.advance(Duration::minutes(1));
+        let r = w.run_once().unwrap();
+        assert_eq!(r.done, vec!["d1:s1", "d1:s2"]);
+    }
+
+    #[test]
+    fn attendance_and_order_survive_a_restart_and_old_entries_read_unattended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("q");
+        let clock = ManualClock::new(t0());
+        {
+            let q = ActionQueue::open(&path).unwrap();
+            q.enqueue_batch(
+                &[ordered(act("d1", "s1", Reversibility::Compensable))],
+                &clock,
+            )
+            .unwrap();
+        }
+        let q = ActionQueue::open(&path).unwrap();
+        let e = &q.snapshot().unwrap().entries[0];
+        assert!(e.action.ordered);
+        assert_eq!(e.action.attendance, crate::rules::When::Attended);
+        // A journal line written before these fields existed.
+        let old: NewAction = serde_json::from_value(serde_json::json!({
+            "draft_id": "d", "action_id": "a", "tool_name": "ta_external_action:email",
+            "parameters": {}, "class": "irrecoverable"
+        }))
+        .unwrap();
+        assert_eq!(old.attendance, crate::rules::When::Unattended);
+        assert!(!old.ordered);
     }
 
     #[test]

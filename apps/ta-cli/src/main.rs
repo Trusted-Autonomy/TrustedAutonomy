@@ -962,6 +962,15 @@ enum Commands {
         #[command(subcommand)]
         command: commands::team::TeamCommands,
     },
+    /// Owner rules: what agents may do without you (signed, tighten-only presets).
+    ///
+    /// `ta rules show` prints the table with the source of every cell,
+    /// `ta rules effective --role <name> --json` the resolved policy for a role,
+    /// `ta rules init` and `ta rules sign` create and sign your rules file.
+    Rules {
+        #[command(subcommand)]
+        command: commands::rules::RulesCommands,
+    },
     /// Manage the project behavioral constitution (.ta/constitution.md).
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
@@ -2121,6 +2130,7 @@ fn dispatch_raw(
             commands::team::execute(command, config)
         }
         Commands::Constitution { command } => commands::constitution::execute(command, config),
+        Commands::Rules { command } => commands::rules::execute(command, config),
         Commands::Memory { command } => commands::memory::execute(command, config),
         Commands::Adapter { command } => commands::adapter::execute(command, project_root),
         Commands::Install => commands::install::execute(project_root),

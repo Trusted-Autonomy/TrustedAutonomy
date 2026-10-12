@@ -1,0 +1,24 @@
+# open: sandboxes and demos only. A person is asked about anything risky.
+# The design allows unattended email and posting "up to rate limits"; there is
+# no limits engine yet, so email and posting still need a person here. Unattended
+# production access is asked, which an unattended run reads as a refusal.
+revision = 1
+description = "For sandboxes and demos. Risky actions ask a person; dev and test are open."
+
+[[ask]]
+action = "email"
+
+[[ask]]
+action = "social_post"
+
+[[ask]]
+action = "db_query"
+environment = ["production", "staging"]
+
+[[allow]]
+action = "db_query"
+environment = ["dev", "test"]
+
+[[allow]]
+action = "apply"
+when = "attended"

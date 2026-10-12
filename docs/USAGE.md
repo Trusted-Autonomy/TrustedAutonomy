@@ -7649,6 +7649,141 @@ Connector authors: to let TA retry a failed send safely, start the error message
 - A commit that was pushed is a remote effect. Recovery undoes an unpushed local commit but never rewrites pushed history.
 - The queue and the apply journal live in the per-user state directory. A process running in a goal's staging workspace cannot reach them.
 
+### Rules: What Agents May Do Without You
+
+One signed rules file decides what can happen when nobody is watching. Every
+path that can cause an effect asks the same table: `ta draft apply` (for each
+changed file and each outside action), the queue worker before every send, and
+an agent's own `ta_external_action` call. Nothing keeps a rule of its own.
+
+The table answers `allow`, `ask` or `deny` for an action, the target's
+environment (`production`, `staging`, `dev`, `test`) and whether a person is
+present (`attended` or `unattended`). The rules that always hold:
+
+- Unattended is denied unless a rule allows it. An `ask` with nobody present is a deny.
+- `deny` beats `allow`. A bad or unsigned file fails closed: nothing runs unattended.
+- A target that is not declared is `production`.
+- "Attended" is proven by the human credential, never by an environment variable or a goal's origin tag.
+
+#### Choose a posture
+
+Three postures ship as data. A project with no rules file runs on `strict`.
+
+| Posture | What it does |
+| --- | --- |
+| `strict` | Nothing runs without a person. Production and staging are never touched. A draft's outside actions run one at a time, in the order the draft declares. |
+| `balanced` | Dev and test databases run unattended. Email, posting and production need a person. |
+| `open` | For sandboxes and demos. Dev and test databases are open; email, posting and production-like databases ask a person. |
+
+```bash
+ta rules init --posture balanced   # creates your owner key, writes .ta/rules.toml, signs it
+ta rules show                      # the table, with the rule behind every cell
+```
+
+#### The rules file
+
+`.ta/rules.toml` is yours. It is signed with a key held outside the project
+(the keychain, or an owner-only file in the TA state directory), and the
+signature is checked every time the rules are used. An agent cannot edit,
+sign or replace the file or the key, and a change that arrives in a draft is
+never applied without a person (`.ta/` is never an apply target).
+
+```toml
+version = 1
+posture = "balanced"
+
+[targets.scratch]                  # bind a name to a real connection
+type = "database"
+environment = "dev"
+connection = "postgres://dev.example.com/scratch"
+
+[[allow]]                          # let unattended runs update research notes
+action = "apply"
+when = "unattended"
+paths = ["docs/research"]          # literal folder prefixes, no wildcards needed
+
+[[deny]]
+action = "social_post"
+reason = "Posting always needs a person."
+```
+
+After editing, run `ta rules sign`. It validates the file, signs it and prints
+every cell that became looser. `ta rules status` says whether the rules are in
+effect and what is wrong if not. A misspelled field is an error, not a silent
+widening.
+
+File rules (`action = "apply"`) can never reach `.ta`, `.git`, `.claude`,
+`.mcp.json`, `.github` or hook folders, files that agent prompts are built
+from (such as `CLAUDE.md`), or paths with `..`, drive prefixes, non-ASCII
+characters or alternate-stream syntax. Case and `\` versus `/` do not matter.
+An unattended apply refuses symbolic and hard links. Files applied without a
+person are recorded as untrusted in the TA state directory (outside the
+project) so tools that build agent prompts can treat them as data.
+
+Optional, for teams: an organization floor (`floor.toml` signed with the
+organization's key, in the directory named by `TA_ORG_RULES_DIR`) can only
+tighten. Nothing in the project, a posture or a role preset can loosen it.
+
+#### Role presets
+
+A role preset at `.ta/rules-presets/<role>.toml` uses the same format and can
+only tighten: its `deny` and `ask` rules apply on top of yours. An `allow` that
+your own rules do not already grant is an error that names the line, and the
+table for that role is not built (nothing runs unattended for it). To adopt a
+preset's allow, add it to your own file and run `ta rules sign`.
+
+#### See what is in effect
+
+```bash
+ta rules show                          # the table, source of every cell
+ta rules show --role research          # as seen by a role
+ta rules diff                          # what changed since you last signed
+ta rules diff --posture strict         # how your rules differ from a posture
+ta rules effective --role research --json   # stable JSON for installers and the VT UI
+```
+
+A refusal names the rule and the fix:
+
+```text
+Blocked: unattended email is not allowed by your rules (posture strict [[deny]] #1). Email always needs a person.
+To allow it, add [[allow]] action = "email" when = "unattended" to .ta/rules.toml, then run `ta rules sign`.
+```
+
+#### Moving from the older files
+
+`.ta/constitution.toml` block rules and `[actions.<verb>] policy = "block"` or
+`"auto"` in `workflow.toml` keep working: blocks still deny. To fold them into
+one file:
+
+```bash
+ta rules migrate           # prints the plan and the file it would write
+ta rules migrate --write   # writes .ta/rules.toml (never overwrites)
+ta rules sign
+```
+
+The old files are left alone. An `auto` policy becomes an unattended `allow`
+for every environment: narrow it with `environment = ["dev", "test"]`. Email
+never ran unattended and still does not. Warn rules, database row-count and
+schema checks, and rate limits stay where they are.
+
+#### Ordered actions (strict)
+
+Under `strict`, a draft's outside actions run one at a time in declared order.
+If a step fails, the rest do not run. `ta show actions` marks them
+`STOPPED` and offers the recorded undo for the steps that completed. Put an
+irrecoverable action (an email, say) last in the draft, because in ordered
+mode it runs at its declared position instead of last.
+
+#### Keys
+
+```bash
+ta rules trust <public-key>      # trust the owner key made on another machine
+ta rules rotate-key --yes        # remove the owner key; run `ta rules init` again
+```
+
+`init`, `sign`, `trust`, `rotate-key` and `migrate --write` need the human
+credential; the read-only commands do not.
+
 ### Selective Approval
 
 Approve, reject, or discuss individual files using glob patterns:

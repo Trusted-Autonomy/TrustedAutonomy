@@ -45,6 +45,7 @@ pub mod queue;
 pub mod rate_limit;
 pub mod ratelimit;
 pub mod reversibility;
+pub mod rules;
 pub mod send;
 
 // Re-export the most commonly used types.

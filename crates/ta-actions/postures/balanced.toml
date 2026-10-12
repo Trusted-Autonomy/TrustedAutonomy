@@ -1,0 +1,35 @@
+# balanced: a team working in dev and test every day. Dev and test databases
+# are fine without a person; email, posting and production are not.
+revision = 1
+description = "Dev and test databases run unattended. Email, posting and production need a person."
+
+[[deny]]
+action = "email"
+when = "unattended"
+reason = "Email always needs a person."
+
+[[ask]]
+action = "email"
+when = "attended"
+
+[[deny]]
+action = "social_post"
+when = "unattended"
+reason = "Posting always needs a person."
+
+[[ask]]
+action = "social_post"
+when = "attended"
+
+[[deny]]
+action = "db_query"
+environment = ["production", "staging"]
+reason = "Production-like databases are never touched by a draft."
+
+[[allow]]
+action = "db_query"
+environment = ["dev", "test"]
+
+[[allow]]
+action = "apply"
+when = "attended"

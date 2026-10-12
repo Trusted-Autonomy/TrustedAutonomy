@@ -10988,18 +10988,18 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.3`
 
 ### v0.17.12.4 - Rules Engine: Owner Rules File, Postures and Effective-Policy Output
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12, v0.17.12.1, v0.17.12.3
 
 **Goal**: What agents may do unattended is decided by one deterministic table compiled from the owner's rules, with VT presets that can only tighten. Design: `docs/superpowers/specs/2026-10-07-compiled-constitution-automation-rules-design.md` (Revision 2, PR #644).
 
-1. [ ] One owner rules file per project, signed by an owner key held outside the tree; the daemon verifies the signature on every compile; edits through a draft always need a human. Optional organization floor file that nothing below can loosen.
-2. [ ] Compiled table: action, target environment, `when` (unattended or attended) to allow, deny or ask; default deny for unattended; deny beats allow; fail closed on bad config; unknown target environment is production; environment bound to the connection identity.
-3. [ ] File apply in the same table (`action = "apply"` with literal, normalized path prefixes that can never reach `.ta`, `.git`, `.claude` or `.mcp.json`); links refused; auto-applied content marked untrusted.
-4. [ ] Postures `strict`, `balanced`, `open` shipped as data; `ta rules show` (with the source of every cell), `ta rules diff`, `ta rules effective --role <name> --json`.
-5. [ ] Migration folds `.ta/constitution.toml` and the `[actions]` tables in `workflow.toml` into the rules file.
-6. [ ] The single `decide()` replaces the blanket "automated applies never send" rule and is called by every path that can cause an effect.
-7. [ ] Saga order for multi-action drafts under the `strict` posture (moved from v0.17.12.3 item 6): actions run one at a time in declared order, a failed step stops the rest and offers the recorded undo of the completed compensable steps.
+1. [x] One owner rules file per project, signed by an owner key held outside the tree; the daemon verifies the signature on every compile; edits through a draft always need a human. Optional organization floor file that nothing below can loosen.
+2. [x] Compiled table: action, target environment, `when` (unattended or attended) to allow, deny or ask; default deny for unattended; deny beats allow; fail closed on bad config; unknown target environment is production; environment bound to the connection identity.
+3. [x] File apply in the same table (`action = "apply"` with literal, normalized path prefixes that can never reach `.ta`, `.git`, `.claude` or `.mcp.json`); links refused; auto-applied content marked untrusted.
+4. [x] Postures `strict`, `balanced`, `open` shipped as data; `ta rules show` (with the source of every cell), `ta rules diff`, `ta rules effective --role <name> --json`.
+5. [x] Migration folds `.ta/constitution.toml` and the `[actions]` tables in `workflow.toml` into the rules file.
+6. [x] The single `decide()` replaces the blanket "automated applies never send" rule and is called by every path that can cause an effect.
+7. [x] Saga order for multi-action drafts under the `strict` posture (moved from v0.17.12.3 item 6): actions run one at a time in declared order, a failed step stops the rest and offers the recorded undo of the completed compensable steps.
 
 **Effort**: L. **Unblocks VT**: V8 (preset overlay and effective-policy view).
 

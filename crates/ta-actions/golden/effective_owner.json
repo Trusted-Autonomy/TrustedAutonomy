@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "role": null,
+  "preset_found": false,
+  "valid": true,
+  "status": "verified",
+  "key_id": "ed25519:b62e867fa2f33afe",
+  "fail_closed": false,
+  "posture": "balanced",
+  "posture_revision": 1,
+  "org_floor": false,
+  "ordered_actions": false,
+  "problems": [],
+  "warnings": [],
+  "default": {
+    "unattended": "deny",
+    "attended": "ask"
+  },
+  "cells": [
+    {
+      "action": "db_query",
+      "environment": "production",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "production",
+      "when": "attended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "staging",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "staging",
+      "when": "attended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #3"
+    },
+    {
+      "action": "db_query",
+      "environment": "dev",
+      "when": "unattended",
+      "effect": "allow",
+      "source": "posture balanced [[allow]] #1"
+    },
+    {
+      "action": "db_query",
+      "environment": "dev",
+      "when": "attended",
+      "effect": "allow",
+      "source": "posture balanced [[allow]] #1"
+    },
+    {
+      "action": "db_query",
+      "environment": "test",
+      "when": "unattended",
+      "effect": "allow",
+      "source": "posture balanced [[allow]] #1"
+    },
+    {
+      "action": "db_query",
+      "environment": "test",
+      "when": "attended",
+      "effect": "allow",
+      "source": "posture balanced [[allow]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "production",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "production",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture balanced [[ask]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "staging",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "staging",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture balanced [[ask]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "dev",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "dev",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture balanced [[ask]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "test",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "posture balanced [[deny]] #1"
+    },
+    {
+      "action": "email",
+      "environment": "test",
+      "when": "attended",
+      "effect": "ask",
+      "source": "posture balanced [[ask]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "production",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "production",
+      "when": "attended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "staging",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "staging",
+      "when": "attended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "dev",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "dev",
+      "when": "attended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "test",
+      "when": "unattended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    },
+    {
+      "action": "social_post",
+      "environment": "test",
+      "when": "attended",
+      "effect": "deny",
+      "source": "owner rules [[deny]] #1"
+    }
+  ],
+  "apply": {
+    "default": {
+      "unattended": {
+        "effect": "deny",
+        "source": "built-in default (no rule matches)"
+      },
+      "attended": {
+        "effect": "allow",
+        "source": "posture balanced [[allow]] #2"
+      }
+    },
+    "rules": [
+      {
+        "effect": "allow",
+        "when": "unattended",
+        "paths": [
+          "docs/research"
+        ],
+        "source": "owner rules [[allow]] #1"
+      }
+    ]
+  }
+}

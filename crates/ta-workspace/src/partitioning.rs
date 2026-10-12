@@ -31,6 +31,9 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "velocity-history.jsonl", // append-only committed velocity log (multi-machine)
     "goal-audit.jsonl",     // append-only goal lifecycle audit — auto-staged on apply
     "pr-template.md",
+    "rules.toml", // owner rules file (v0.17.12.4): policy, VCS-committed; only valid with its signature
+    "rules.toml.sig", // detached Ed25519 signature of rules.toml; verified against a key held outside the tree
+    "rules-presets/", // tighten-only role presets (v0.17.12.4): team policy, VCS-committed
 ];
 
 /// Paths inside `.ta/` that are local runtime state and must NOT be committed.

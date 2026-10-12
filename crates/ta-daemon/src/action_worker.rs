@@ -216,6 +216,8 @@ mod tests {
             undo: None,
             idempotency: Idempotency::None,
             undo_of: None,
+            attendance: ta_actions::rules::When::Unattended,
+            ordered: false,
         }
     }
 

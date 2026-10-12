@@ -399,6 +399,13 @@ impl ProjectState {
     pub fn apply_journal_dir(&self) -> PathBuf {
         self.dir.join("apply-journal")
     }
+    /// Rules trust anchor and signed snapshots (v0.17.12.4): the owner's
+    /// public key, the last signed copy of the rules file, and the log of
+    /// auto-applied (untrusted) content. Outside the project tree and every
+    /// staging workspace, so an agent cannot replace the key it is checked by.
+    pub fn rules_dir(&self) -> PathBuf {
+        self.dir.join("rules")
+    }
 }
 
 fn human_write(path: &Path, contents: &str) -> Result<(), StateError> {
@@ -457,6 +464,11 @@ pub enum ControlSecret {
     /// is its owner-only file fallback, always a file, never the control-plane
     /// keychain service.
     VaultKey,
+    /// Ed25519 seed (base64) of the project owner's rules-signing key
+    /// (v0.17.12.4). It is NOT in [`ControlSecret::ALL`]: it never lived in the
+    /// project tree, only `ta rules sign` ever reads it, and the daemon verifies
+    /// with the public half in the state directory instead.
+    RulesOwnerKey,
 }
 
 impl ControlSecret {
@@ -485,6 +497,7 @@ impl ControlSecret {
             ControlSecret::BrokerRootKey => "broker-root-key",
             ControlSecret::AuditKey => "audit-key",
             ControlSecret::VaultKey => "vault-key",
+            ControlSecret::RulesOwnerKey => "rules-owner-key",
         }
     }
     /// File name the secret had inside `<project>/.ta/`.
@@ -493,6 +506,7 @@ impl ControlSecret {
             ControlSecret::BrokerRootKey => "broker_root.key",
             ControlSecret::AuditKey => "audit.key",
             ControlSecret::VaultKey => "credentials.key",
+            ControlSecret::RulesOwnerKey => "rules_owner.key",
         }
     }
     pub fn describe(self) -> &'static str {
@@ -500,6 +514,7 @@ impl ControlSecret {
             ControlSecret::BrokerRootKey => "the capability-token root key",
             ControlSecret::AuditKey => "the audit-log signing key",
             ControlSecret::VaultKey => "the credential vault's encryption key",
+            ControlSecret::RulesOwnerKey => "the project owner's rules-signing key",
         }
     }
 }
