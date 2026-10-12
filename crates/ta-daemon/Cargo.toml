@@ -23,6 +23,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
 toml = { workspace = true }
 serde_yaml = { workspace = true }
 rand = { workspace = true }
@@ -66,5 +67,4 @@ tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 tempfile = { workspace = true }

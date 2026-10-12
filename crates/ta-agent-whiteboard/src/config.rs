@@ -109,6 +109,21 @@ pub struct WhiteboardConfig {
     /// `nats-credentials`.
     #[serde(default = "default_nats_credentials_env")]
     pub nats_credentials_env: String,
+
+    /// Daemon wake listeners: seconds before the FIRST retry of a failed NATS
+    /// connection (or after a dropped one). Each further failed attempt
+    /// doubles the wait, with jitter, up to `connect_retry_max_secs`.
+    /// Default 1. `0` is treated as 1.
+    #[serde(default = "default_connect_retry_initial_secs")]
+    pub connect_retry_initial_secs: u64,
+
+    /// Daemon wake listeners: the longest wait between connection attempts,
+    /// in seconds. This cap is what keeps a down NATS server from being
+    /// hammered: after a few failures the daemon tries once per this many
+    /// seconds, and keeps trying until the server is back. Default 60.
+    /// Never below `connect_retry_initial_secs`.
+    #[serde(default = "default_connect_retry_max_secs")]
+    pub connect_retry_max_secs: u64,
 }
 
 impl Default for WhiteboardConfig {
@@ -127,8 +142,18 @@ impl Default for WhiteboardConfig {
             outcome_roles: default_outcome_roles(),
             outcome_max_age_secs: default_outcome_max_age_secs(),
             nats_credentials_env: default_nats_credentials_env(),
+            connect_retry_initial_secs: default_connect_retry_initial_secs(),
+            connect_retry_max_secs: default_connect_retry_max_secs(),
         }
     }
+}
+
+fn default_connect_retry_initial_secs() -> u64 {
+    1
+}
+
+fn default_connect_retry_max_secs() -> u64 {
+    60
 }
 
 fn default_outcome_roles() -> Vec<String> {
@@ -237,6 +262,27 @@ fn select_transport_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_retry_settings_default_to_1s_and_60s_and_parse() {
+        let c = WhiteboardConfig::default();
+        assert_eq!(
+            (c.connect_retry_initial_secs, c.connect_retry_max_secs),
+            (1, 60)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nconnect_retry_initial_secs = 2\nconnect_retry_max_secs = 30\n",
+        )
+        .unwrap();
+        let c = WhiteboardConfig::load(dir.path());
+        assert_eq!(
+            (c.connect_retry_initial_secs, c.connect_retry_max_secs),
+            (2, 30)
+        );
+    }
 
     #[test]
     fn load_missing_file_returns_disabled_default() {

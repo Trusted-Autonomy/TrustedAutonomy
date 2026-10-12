@@ -47,7 +47,7 @@ pub const POSTURE_FILENAME: &str = "posture";
 pub const PROJECT_ID_FILENAME: &str = "project-id";
 /// Marker (inside the project state directory) naming the project path that owns it.
 const PROJECT_PATH_MARKER: &str = "project-path";
-const KEYRING_SERVICE: &str = "trusted-autonomy-control-plane";
+use crate::keychain::CONTROL_PLANE_SERVICE as KEYRING_SERVICE;
 const SECRETS_DIRNAME: &str = "secrets";
 
 /// Errors from state-directory handling. Every message says what was being
@@ -61,6 +61,17 @@ pub enum StateError {
     Io {
         path: PathBuf,
         source: std::io::Error,
+    },
+    #[error(
+        "{what} is held in the OS keychain ({item}) but the keychain could not be read: \
+         {reason}. TA will not create a replacement key over it. Unlock the keychain, \
+         approve the TA access prompt (choose Always Allow), then run `ta daemon restart` \
+         (or re-run your command). To use file custody instead, set TA_NO_KEYCHAIN=1."
+    )]
+    KeychainUnavailable {
+        what: String,
+        item: String,
+        reason: String,
     },
     #[error(
         "the old-location secret {path} ({what}) is still inside the project tree and the \
@@ -536,12 +547,9 @@ pub struct LoadedSecret {
     pub origin: SecretOrigin,
 }
 
-fn keychain_entry(ps: &ProjectState, which: ControlSecret) -> Option<keyring::Entry> {
-    keyring::Entry::new(
-        KEYRING_SERVICE,
-        &format!("{}/{}", ps.project_id, which.name()),
-    )
-    .ok()
+/// Keychain item name (the "user" half of service/user) for a secret.
+fn keychain_user(ps: &ProjectState, which: ControlSecret) -> String {
+    format!("{}/{}", ps.project_id, which.name())
 }
 
 fn secret_file(ps: &ProjectState, which: ControlSecret) -> PathBuf {
@@ -586,27 +594,48 @@ fn read_trimmed(path: &Path) -> Option<String> {
 }
 
 /// Read a secret from its NEW home only (keychain, then state file).
+///
+/// A keychain that could not be read (as opposed to one that holds no such
+/// item) is reported through `keychain_error`, so the caller never mistakes
+/// "locked or denied" for "does not exist yet" and generates a replacement
+/// key over the real one.
+fn read_new_home(
+    ps: &ProjectState,
+    which: ControlSecret,
+    opts: CustodyOpts,
+) -> (Option<LoadedSecret>, Option<String>) {
+    let opts = which.custody(opts);
+    let mut keychain_error = None;
+    if opts.use_keychain {
+        match crate::keychain::get(KEYRING_SERVICE, &keychain_user(ps, which)) {
+            Ok(Some(v)) => {
+                return (
+                    Some(LoadedSecret {
+                        value: v,
+                        origin: SecretOrigin::Keychain,
+                    }),
+                    None,
+                )
+            }
+            Ok(None) => {}
+            Err(e) => keychain_error = Some(e),
+        }
+    }
+    let path = secret_file(ps, which);
+    let found = read_trimmed(&path).map(|value| LoadedSecret {
+        value,
+        origin: SecretOrigin::StateFile(path),
+    });
+    (found, keychain_error)
+}
+
+/// Read a secret from its NEW home only (keychain, then state file).
 pub fn load_secret_new(
     ps: &ProjectState,
     which: ControlSecret,
     opts: CustodyOpts,
 ) -> Option<LoadedSecret> {
-    let opts = which.custody(opts);
-    if opts.use_keychain {
-        if let Some(entry) = keychain_entry(ps, which) {
-            if let Ok(v) = entry.get_password() {
-                return Some(LoadedSecret {
-                    value: v,
-                    origin: SecretOrigin::Keychain,
-                });
-            }
-        }
-    }
-    let path = secret_file(ps, which);
-    read_trimmed(&path).map(|value| LoadedSecret {
-        value,
-        origin: SecretOrigin::StateFile(path),
-    })
+    read_new_home(ps, which, opts).0
 }
 
 fn new_home_text(ps: &ProjectState, which: ControlSecret, opts: CustodyOpts) -> String {
@@ -640,7 +669,8 @@ pub fn load_secret(
             new_home: new_home_text(ps, which, opts),
         });
     }
-    if let Some(found) = load_secret_new(ps, which, opts) {
+    let (found, keychain_error) = read_new_home(ps, which, opts);
+    if let Some(found) = found {
         if legacy_exists {
             warn_legacy_once(
                 &legacy_path,
@@ -649,6 +679,15 @@ pub fn load_secret(
             );
         }
         return Ok(Some(found));
+    }
+    if let Some(reason) = keychain_error {
+        if !legacy_exists {
+            return Err(StateError::KeychainUnavailable {
+                what: which.describe().to_string(),
+                item: format!("{KEYRING_SERVICE}/{}", keychain_user(ps, which)),
+                reason,
+            });
+        }
     }
     if legacy_exists {
         warn_legacy_once(
@@ -684,8 +723,8 @@ pub fn store_secret(
     let file = secret_file(ps, which);
     let mut reason = None;
     if opts.use_keychain {
-        match keychain_entry(ps, which).map(|e| e.set_password(value)) {
-            Some(Ok(())) => {
+        match crate::keychain::set(KEYRING_SERVICE, &keychain_user(ps, which), value) {
+            Ok(()) => {
                 // A stale fallback file must not outlive the keychain item.
                 let _ = std::fs::remove_file(&file);
                 return Ok(StoreOutcome {
@@ -693,8 +732,7 @@ pub fn store_secret(
                     keychain_fallback_reason: None,
                 });
             }
-            Some(Err(e)) => reason = Some(e.to_string()),
-            None => reason = Some("the keychain entry could not be created".to_string()),
+            Err(e) => reason = Some(e),
         }
     }
     human::write_private(&file, value).map_err(|e| StateError::Store {
@@ -750,9 +788,8 @@ pub fn remove_secret_new(ps: &ProjectState, which: ControlSecret, opts: CustodyO
     let opts = which.custody(opts);
     let mut removed = std::fs::remove_file(secret_file(ps, which)).is_ok();
     if opts.use_keychain {
-        if let Some(entry) = keychain_entry(ps, which) {
-            removed |= entry.delete_credential().is_ok();
-        }
+        removed |=
+            crate::keychain::delete(KEYRING_SERVICE, &keychain_user(ps, which)).unwrap_or(false);
     }
     removed
 }

@@ -112,9 +112,19 @@ pub struct AppState {
     pub cmd_semaphore: Arc<Semaphore>,
     /// Rate-limits `POST /api/shutdown` to at most 1 call per 60 seconds (v0.17.0.9).
     pub last_shutdown_attempt: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Readiness shared with the startup gate: keychain loading and the
+    /// whiteboard link. `/health` and `/api/status` report it (v0.17.12.16).
+    pub health: Arc<crate::startup::DaemonHealth>,
 }
 
 impl AppState {
+    /// Share the daemon's readiness state (keychain loading, whiteboard link)
+    /// with this `AppState`. Tests that never call it report `ok`.
+    pub fn with_health(mut self, health: Arc<crate::startup::DaemonHealth>) -> Self {
+        self.health = health;
+        self
+    }
+
     pub fn new(project_root: PathBuf, daemon_config: DaemonConfig) -> Self {
         let ta_dir = project_root.join(".ta");
         let shell_config = ShellConfig::load(&project_root);
@@ -171,6 +181,7 @@ impl AppState {
             plan_cache: Arc::new(plan::PlanCache::new()),
             cmd_semaphore: Arc::new(Semaphore::new(cmd_max)),
             last_shutdown_attempt: Arc::new(std::sync::Mutex::new(None)),
+            health: crate::startup::DaemonHealth::ready(),
             whiteboard_transport,
             project_root,
             daemon_config,

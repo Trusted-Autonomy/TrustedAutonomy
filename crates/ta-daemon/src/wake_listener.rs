@@ -142,6 +142,7 @@ fn spawn_new_listeners(
     shutdown: &Arc<tokio::sync::Notify>,
     known: &mut std::collections::HashSet<ListenerIdentity>,
     handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    health: &Arc<crate::startup::DaemonHealth>,
 ) {
     for id in TeamSessionState::list_ids(project_root) {
         let Ok(Some(state)) = TeamSessionState::load(project_root, &id) else {
@@ -163,6 +164,7 @@ fn spawn_new_listeners(
             let sd = shutdown.clone();
             let t = transport.clone();
             let session_id = id.clone();
+            let h = health.clone();
             tracing::info!(
                 session = %session_id,
                 role = %listener.role,
@@ -170,7 +172,7 @@ fn spawn_new_listeners(
                 "wake_listener: starting listener"
             );
             handles.push(tokio::spawn(async move {
-                run_listener_loop(pr, session_id, listener, bin, t, sd).await;
+                run_listener_loop(pr, session_id, listener, bin, t, sd, h).await;
             }));
         }
     }
@@ -203,6 +205,7 @@ pub fn start(
     let mut handles = Vec::new();
     let mut known: std::collections::HashSet<ListenerIdentity> = std::collections::HashSet::new();
 
+    let health = app_state.health.clone();
     spawn_new_listeners(
         &project_root,
         &ta_bin,
@@ -210,9 +213,11 @@ pub fn start(
         &shutdown,
         &mut known,
         &mut handles,
+        &health,
     );
 
     {
+        let health = health.clone();
         let pr = project_root.clone();
         let bin = ta_bin.clone();
         let sd = shutdown.clone();
@@ -224,7 +229,7 @@ pub fn start(
                     _ = sd.notified() => return,
                 }
                 let mut discovered = Vec::new();
-                spawn_new_listeners(&pr, &bin, &t, &sd, &mut known, &mut discovered);
+                spawn_new_listeners(&pr, &bin, &t, &sd, &mut known, &mut discovered, &health);
             }
         }));
     }
@@ -299,6 +304,7 @@ pub(crate) async fn run_listener_loop(
     ta_bin: PathBuf,
     transport: Arc<dyn WhiteboardTransport>,
     shutdown: Arc<tokio::sync::Notify>,
+    health: Arc<crate::startup::DaemonHealth>,
 ) {
     let consumer = format!("wake-listener:{}", listener.role);
     let attempts = AttemptStore::for_listener(&project_root, &session_id, &listener.role);
@@ -314,14 +320,25 @@ pub(crate) async fn run_listener_loop(
         );
         return;
     }
-    if let Err(e) = transport.connect().await {
-        tracing::error!(
-            role = %listener.role,
-            error = %e,
-            "wake_listener: failed to connect transport, listener not started"
-        );
+    // Connect with bounded exponential backoff and jitter. A server that is
+    // not up yet (or goes away) is retried for as long as the daemon runs;
+    // each attempt is logged and the state shows in `/api/status`.
+    let server = crate::whiteboard_link::describe_server(transport.as_ref(), &project_root);
+    if !crate::whiteboard_link::connect_with_retry(
+        transport.as_ref(),
+        &health,
+        &server,
+        &listener.role,
+        crate::whiteboard_link::ConnectBackoff::load(&project_root),
+        &shutdown,
+    )
+    .await
+    {
         return;
     }
+    // Consecutive failed reads since the link last worked; drives the retry
+    // wait after a drop and the "reconnected" line.
+    let mut read_failures: u32 = 0;
 
     // Ack wait last applied to this listener's consumer, per key.
     let mut applied_ack_wait: Option<Duration> = None;
@@ -330,7 +347,7 @@ pub(crate) async fn run_listener_loop(
     // as soon as the ack wait has been applied.
     let mut recovered = false;
 
-    loop {
+    'poll: loop {
         // Live pause/stop check, re-read fresh every round -- not just once
         // at startup -- so `ta team-session pause <id>` actually stops new
         // inference from being spawned by this listener, the same way it
@@ -450,17 +467,64 @@ pub(crate) async fn run_listener_loop(
                 _ = shutdown.notified() => return,
             };
 
+            if next.is_ok() && read_failures > 0 {
+                tracing::info!(
+                    role = %listener.role,
+                    server = %server,
+                    failed_attempts = read_failures,
+                    "wake_listener: whiteboard reconnected to {server} after {read_failures} \
+                     failed attempt(s)"
+                );
+                read_failures = 0;
+                health.set_whiteboard(crate::startup::WhiteboardLink::Connected {
+                    server: server.clone(),
+                });
+            }
             let envelope = match next {
                 Ok(Some(envelope)) => envelope,
                 Ok(None) => continue,
                 Err(e) => {
+                    // The link dropped or the server stopped answering. Say so
+                    // in the status, wait with bounded backoff (never a hot
+                    // loop against a struggling server), re-run the connect
+                    // (a no-op while the client is still connected) and try
+                    // again. This never gives up.
+                    read_failures += 1;
+                    let backoff = crate::whiteboard_link::ConnectBackoff::load(&project_root);
+                    let delay = backoff.next_delay(read_failures);
                     tracing::warn!(
                         role = %listener.role,
                         key = %key,
+                        server = %server,
+                        attempt = read_failures,
+                        next_delay_ms = delay.as_millis() as u64,
                         error = %e,
-                        "wake_listener: stream_read_next failed, will retry next poll"
+                        "wake_listener: whiteboard disconnected from {server} ({e}); retry \
+                         attempt {read_failures} in {}s. The daemon reconnects by itself; check \
+                         the NATS server if this persists",
+                        delay.as_secs_f32().round() as u64,
                     );
-                    continue;
+                    health.set_whiteboard(crate::startup::WhiteboardLink::Disconnected {
+                        server: server.clone(),
+                        attempt: read_failures,
+                        error: e.to_string(),
+                        retry_in: delay,
+                    });
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = shutdown.notified() => return,
+                    }
+                    if let Err(ce) = transport.connect().await {
+                        tracing::warn!(
+                            role = %listener.role,
+                            server = %server,
+                            error = %ce,
+                            "wake_listener: reconnect to {server} failed ({ce}); will retry"
+                        );
+                    }
+                    // Start a fresh round: it re-reads the pause/stop state,
+                    // then probes every key again.
+                    continue 'poll;
                 }
             };
 
@@ -877,6 +941,7 @@ mod tests {
         let ta_bin = Path::new("ta");
         let mut known = std::collections::HashSet::new();
         let mut handles = Vec::new();
+        let health = crate::startup::DaemonHealth::ready();
 
         spawn_new_listeners(
             tmp.path(),
@@ -885,6 +950,7 @@ mod tests {
             &shutdown,
             &mut known,
             &mut handles,
+            &health,
         );
         assert_eq!(
             handles.len(),
@@ -901,6 +967,7 @@ mod tests {
             &shutdown,
             &mut known,
             &mut handles,
+            &health,
         );
         assert_eq!(
             handles.len(),
@@ -929,6 +996,7 @@ mod tests {
             &shutdown,
             &mut known,
             &mut handles,
+            &health,
         );
         assert_eq!(
             handles.len(),
@@ -1342,6 +1410,7 @@ mod tests {
             ta_bin,
             transport,
             shutdown,
+            crate::startup::DaemonHealth::ready(),
         ));
 
         let count = || {
@@ -1369,5 +1438,95 @@ mod tests {
         assert_eq!(state.findings.len(), 1);
         assert_eq!(state.findings[0].stage, "wake-on-demand");
         assert_eq!(state.findings[0].role, "chief-of-staff");
+    }
+
+    /// The listener connects with retry (fails twice, then succeeds), notices
+    /// a dropped link, reports it in the status, and reconnects by itself.
+    #[tokio::test]
+    async fn listener_retries_the_connect_and_reconnects_after_a_drop() {
+        use crate::startup::{Phase, WhiteboardLink};
+        use crate::whiteboard_link::testing::FlakyTransport;
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // 1 s initial wait would slow the test; shorten it through workflow.toml.
+        std::fs::create_dir_all(tmp.path().join(".ta")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ta/workflow.toml"),
+            "[whiteboard]\nconnect_retry_initial_secs = 1\nconnect_retry_max_secs = 1\n",
+        )
+        .unwrap();
+        let listener =
+            WakeListenerConfig::new("chief-of-staff", vec!["intake-a".to_string()], None);
+        TeamSessionState::new("sess-1".to_string(), sample_config(), Vec::new())
+            .with_wake_on_demand_listeners(vec![listener.clone()])
+            .save(tmp.path())
+            .unwrap();
+
+        let flaky = Arc::new(FlakyTransport::new(2));
+        let transport: Arc<dyn WhiteboardTransport> = flaky.clone();
+        let health = crate::startup::DaemonHealth::ready();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_listener_loop(
+            tmp.path().to_path_buf(),
+            "sess-1".to_string(),
+            listener,
+            PathBuf::from("ta"),
+            transport,
+            shutdown.clone(),
+            health.clone(),
+        ));
+
+        let wait_for = |what: &'static str, cond: Box<dyn Fn() -> bool>| async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !cond() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for: {what}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+
+        // Two failed connects are visible as "disconnected", then it connects.
+        let h = health.clone();
+        wait_for(
+            "status to show the failed connect",
+            Box::new(move || matches!(h.whiteboard(), WhiteboardLink::Disconnected { .. })),
+        )
+        .await;
+        assert_eq!(health.phase(), Phase::Degraded);
+        let h = health.clone();
+        wait_for(
+            "connect to succeed on the third attempt",
+            Box::new(move || matches!(h.whiteboard(), WhiteboardLink::Connected { .. })),
+        )
+        .await;
+        assert_eq!(flaky.connect_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(health.phase(), Phase::Ok);
+
+        // The link drops: status says so, with the reason.
+        flaky.dropped.store(true, Ordering::SeqCst);
+        let h = health.clone();
+        wait_for(
+            "status to show the drop",
+            Box::new(move || matches!(h.whiteboard(), WhiteboardLink::Disconnected { .. })),
+        )
+        .await;
+        assert_eq!(health.phase(), Phase::Degraded);
+        assert!(health.reasons()[0]
+            .reason
+            .contains("whiteboard disconnected"));
+
+        // The link returns: the listener reconnects with no restart.
+        flaky.dropped.store(false, Ordering::SeqCst);
+        let h = health.clone();
+        wait_for(
+            "status to show the reconnect",
+            Box::new(move || matches!(h.whiteboard(), WhiteboardLink::Connected { .. })),
+        )
+        .await;
+        assert_eq!(health.phase(), Phase::Ok);
+        task.abort();
     }
 }

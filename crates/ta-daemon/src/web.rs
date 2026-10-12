@@ -1290,8 +1290,10 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
 pub fn build_full_router(
     project_root: std::path::PathBuf,
     daemon_config: crate::config::DaemonConfig,
+    health: Arc<crate::startup::DaemonHealth>,
 ) -> (Router, Arc<crate::api::AppState>) {
-    let app_state = Arc::new(crate::api::AppState::new(project_root, daemon_config));
+    let app_state =
+        Arc::new(crate::api::AppState::new(project_root, daemon_config).with_health(health));
 
     // Web UI routes use their own state (legacy).
     let web_state = Arc::new(WebState {
@@ -1417,6 +1419,7 @@ pub async fn serve_daemon_api(
     project_root: std::path::PathBuf,
     daemon_config: crate::config::DaemonConfig,
     shutdown: std::sync::Arc<tokio::sync::Notify>,
+    health: std::sync::Arc<crate::startup::DaemonHealth>,
 ) -> anyhow::Result<()> {
     let bind = format!(
         "{}:{}",
@@ -1445,7 +1448,52 @@ pub async fn serve_daemon_api(
     let web_ui_port = daemon_config.server.port;
     let web_ui_bind = daemon_config.server.bind.clone();
 
-    let (app, app_state) = build_full_router(project_root, daemon_config);
+    // Bind first and answer `/health` immediately, before any keychain item
+    // is read. A person may need to click a system dialog during startup;
+    // until they do, the daemon says `starting` and why instead of looking
+    // dead or healthy (v0.17.12.16).
+    let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| {
+        anyhow::anyhow!(
+            "cannot listen on {bind}: {e}. Another process may hold the port; check \
+             `ta daemon status`, or set [server] port in .ta/daemon.toml"
+        )
+    })?;
+    let gate = StartupGate::new(project_root.clone(), health.clone());
+    let gate_app = Router::new()
+        .fallback(startup_gate_handler)
+        .with_state(gate.clone());
+    tracing::info!(
+        "Daemon API listening on http://{} (startup in progress)",
+        bind
+    );
+    let server_shutdown = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            gate_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            server_shutdown.notified().await;
+            tracing::info!("Daemon API shutting down gracefully");
+        })
+        .await
+    });
+
+    // Wait for the keychain verdict. Nothing below reads a secret before this.
+    health.wait_resolved().await;
+    if let Some(reason) = health.refusal() {
+        shutdown.notify_waiters();
+        server.abort();
+        let _ = std::fs::remove_file(&pid_path);
+        anyhow::bail!(
+            "Refusing to start: {reason}. The strict posture does not start without its \
+             keychain secrets. Approve the Keychain dialog (Always Allow) and run \
+             `ta daemon start` again, or use the default posture"
+        );
+    }
+
+    let (app, app_state) = build_full_router(project_root, daemon_config, health.clone());
+    gate.install(app);
 
     // Startup recovery: resume state-poll tasks for any goals that were
     // in-flight when the daemon was last restarted (v0.12.6 item 11).
@@ -1472,8 +1520,11 @@ pub async fn serve_daemon_api(
         supervisor_shutdown,
     ));
 
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!("Daemon API listening on http://{}", bind);
+    tracing::info!(
+        status = health.phase().as_str(),
+        "Daemon API ready on http://{}",
+        bind
+    );
     if web_ui_enabled {
         tracing::info!(
             "Web UI available at http://{}:{}/ui",
@@ -1481,22 +1532,85 @@ pub async fn serve_daemon_api(
             web_ui_port
         );
     }
-    // Use into_make_service_with_connect_info so that ConnectInfo<SocketAddr> is
-    // populated in request extensions (needed by webhook and auth handlers).
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown.notified().await;
-        tracing::info!("Daemon API shutting down gracefully");
-    })
-    .await?;
+    server
+        .await
+        .map_err(|e| anyhow::anyhow!("daemon API server task failed: {e}"))??;
 
     // Clean up PID file on normal exit too.
     let _ = std::fs::remove_file(&pid_path);
 
     Ok(())
+}
+
+/// Answers while the daemon is still starting, then hands every request to
+/// the full router. Before the router is installed only `GET /health` and
+/// `GET /api/status` answer (with `status: "starting"` and the reasons);
+/// everything else gets `503` with the same reasons and a `Retry-After`.
+#[derive(Clone)]
+struct StartupGate {
+    project_root: std::path::PathBuf,
+    health: Arc<crate::startup::DaemonHealth>,
+    router: Arc<std::sync::OnceLock<Router>>,
+}
+
+impl StartupGate {
+    fn new(project_root: std::path::PathBuf, health: Arc<crate::startup::DaemonHealth>) -> Self {
+        Self {
+            project_root,
+            health,
+            router: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    fn install(&self, router: Router) {
+        let _ = self.router.set(router);
+    }
+
+    fn starting_body(&self) -> serde_json::Value {
+        let mut body =
+            crate::api::health::health_body(&self.health, Vec::new(), &self.project_root);
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("daemon_version".into(), env!("CARGO_PKG_VERSION").into());
+            obj.insert("build_sha".into(), env!("TA_GIT_HASH").into());
+        }
+        body
+    }
+}
+
+async fn startup_gate_handler(
+    State(gate): State<StartupGate>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::http::{header, Method, StatusCode};
+    use tower::ServiceExt;
+
+    if let Some(router) = gate.router.get() {
+        return match router.clone().oneshot(request).await {
+            Ok(resp) => resp,
+            Err(never) => match never {},
+        };
+    }
+    let path = request.uri().path();
+    if request.method() == Method::GET && (path == "/health" || path == "/api/status") {
+        return Json(gate.starting_body()).into_response();
+    }
+    let mut body = gate.starting_body();
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "error".into(),
+            "the daemon is still starting and cannot serve this request yet".into(),
+        );
+        obj.insert(
+            "next_step".into(),
+            "Retry in a few seconds. `ta daemon status` shows what startup is waiting for".into(),
+        );
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "2")],
+        Json(body),
+    )
+        .into_response()
 }
 
 /// Write `.ta/daemon.pid` through the shared writer
@@ -3307,5 +3421,249 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "test-entry");
         assert_eq!(entries[0].category.as_deref(), Some("convention"));
+    }
+
+    /// Minimal HTTP/1.1 GET over a raw socket: (status line, headers, body).
+    async fn raw_get(port: u16, path: &str) -> Option<(u16, String, serde_json::Value)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .ok()?;
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).await.ok()?;
+        let (head, body) = raw.split_once("\r\n\r\n")?;
+        let code: u16 = head.split_whitespace().nth(1)?.parse().ok()?;
+        Some((
+            code,
+            head.to_ascii_lowercase(),
+            serde_json::from_str(body.trim()).unwrap_or(serde_json::Value::Null),
+        ))
+    }
+
+    /// While a keychain approval is pending the daemon already answers
+    /// `/health` with `starting` and a reason; other routes get a 503 with a
+    /// retry hint; once startup resolves the full API takes over.
+    #[tokio::test]
+    async fn health_answers_starting_during_keychain_wait_then_the_full_api_takes_over() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut config = crate::config::DaemonConfig::default();
+        config.server.bind = "127.0.0.1".into();
+        config.server.port = port;
+        let health = crate::startup::DaemonHealth::starting(std::time::Duration::from_secs(60));
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let server = tokio::spawn(serve_daemon_api(
+            dir.path().to_path_buf(),
+            config,
+            shutdown.clone(),
+            health.clone(),
+        ));
+
+        // /health answers while startup is blocked.
+        let mut first = None;
+        for _ in 0..100 {
+            if let Some(r) = raw_get(port, "/health").await {
+                first = Some(r);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let (code, _, body) = first.expect("/health must answer while startup is blocked");
+        assert_eq!(code, 200);
+        assert_eq!(body["status"], "starting");
+        assert_eq!(body["reasons"][0]["component"], "keychain");
+        assert!(body["pid"].is_u64() && body["version"].is_string());
+
+        let (code, _, status) = raw_get(port, "/api/status").await.unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(status["status"], "starting");
+
+        let (code, head, body) = raw_get(port, "/api/goals").await.unwrap();
+        assert_eq!(code, 503, "{body}");
+        assert!(head.contains("retry-after"), "{head}");
+        assert!(body["next_step"].is_string());
+
+        // The approval arrives: the real router replaces the startup gate.
+        health.set_keychain_ready();
+        let mut ok = None;
+        for _ in 0..100 {
+            if let Some((200, _, b)) = raw_get(port, "/health").await {
+                if b["status"] == "ok" {
+                    ok = Some(b);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let body = ok.expect("/health should report ok after startup resolves");
+        assert!(body["reasons"].as_array().unwrap().is_empty());
+        let (code, _, status) = raw_get(port, "/api/status").await.unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(status["status"], "ok");
+        assert!(
+            status["project"].is_string(),
+            "full status served: {status}"
+        );
+        assert_eq!(status["whiteboard"]["state"], "disabled");
+
+        for _ in 0..50 {
+            shutdown.notify_waiters();
+            if server.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The strict posture refuses to start when keychain loading is refused.
+    #[tokio::test]
+    async fn serve_refuses_to_start_when_the_strict_posture_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut config = crate::config::DaemonConfig::default();
+        config.server.bind = "127.0.0.1".into();
+        config.server.port = port;
+        let health = crate::startup::DaemonHealth::starting(std::time::Duration::from_secs(1));
+        health.refuse_for_test("timed out after 1s waiting for keychain approval");
+        let err = serve_daemon_api(
+            dir.path().to_path_buf(),
+            config,
+            Arc::new(tokio::sync::Notify::new()),
+            health,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Refusing to start"), "{err}");
+        assert!(err.contains("keychain approval"), "{err}");
+        assert!(err.contains("ta daemon start"), "no next step: {err}");
+    }
+
+    /// An injected keychain that blocks (no real Keychain): `/health` keeps
+    /// answering over HTTP with the waiting reason, then the default posture
+    /// falls back to `degraded` once the timeout passes.
+    #[tokio::test]
+    async fn a_blocked_keychain_leaves_http_answering_and_the_default_posture_degrades() {
+        use crate::startup::testing::{Blocked, LOCK};
+        use ta_credentials::keychain::{self, KeychainItem};
+        let _g = LOCK.lock().await;
+        keychain::reset();
+        let backend = Blocked::new(true);
+        keychain::install_backend(backend.clone());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut config = crate::config::DaemonConfig::default();
+        config.server.bind = "127.0.0.1".into();
+        config.server.port = port;
+
+        let timeout = std::time::Duration::from_millis(1500);
+        let health = crate::startup::DaemonHealth::starting(timeout);
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let preload = {
+            let h = health.clone();
+            tokio::spawn(async move {
+                crate::startup::run_preload(
+                    vec![KeychainItem {
+                        service: "svc".into(),
+                        user: "proj/broker-root-key".into(),
+                        purpose: "capability-token root key",
+                    }],
+                    crate::startup::PreloadSettings {
+                        timeout,
+                        grace: std::time::Duration::from_millis(50),
+                        posture: ta_credentials::state::Posture::Default,
+                    },
+                    &h,
+                )
+                .await
+            })
+        };
+        let server = tokio::spawn(serve_daemon_api(
+            dir.path().to_path_buf(),
+            config,
+            shutdown.clone(),
+            health.clone(),
+        ));
+
+        // While the keychain read is blocked, /health answers `starting` and
+        // names what it is waiting for.
+        let mut waiting = None;
+        for _ in 0..60 {
+            if let Some((200, _, b)) = raw_get(port, "/health").await {
+                if b["reasons"][0]["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("waiting for keychain approval"))
+                {
+                    waiting = Some(b);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let body = waiting.expect("/health should name the pending keychain approval");
+        assert_eq!(body["status"], "starting");
+        assert!(body["reasons"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("capability-token root key"));
+
+        // Timeout, default posture: the daemon comes up degraded, not dead.
+        assert!(matches!(
+            preload.await.unwrap(),
+            crate::startup::PreloadOutcome::Degraded(_)
+        ));
+        let mut degraded = None;
+        for _ in 0..100 {
+            if let Some((200, _, b)) = raw_get(port, "/health").await {
+                if b["status"] == "degraded" {
+                    degraded = Some(b);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let body = degraded.expect("default posture should start degraded after the timeout");
+        assert_eq!(body["reasons"][0]["component"], "keychain");
+        assert!(body["reasons"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("timed out"));
+        let (code, _, status) = raw_get(port, "/api/status").await.unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(status["status"], "degraded");
+        assert!(status["reasons"][0]["next_step"]
+            .as_str()
+            .unwrap()
+            .contains("ta daemon restart"));
+
+        backend.release();
+        for _ in 0..50 {
+            shutdown.notify_waiters();
+            if server.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        keychain::reset();
     }
 }

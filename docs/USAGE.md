@@ -9669,6 +9669,61 @@ The daemon writes its PID to `.ta/daemon.pid` and logs to `.ta/daemon.log`. On s
 
 `.ta/daemon.pid` records the port the daemon actually bound (lines `pid=`, `bind=host:port`, `port=`, `log=`). The CLI and the agent whiteboard tools read it to find this project's daemon. If the file exists but has no usable port, or `.ta/daemon.toml` is unreadable, the whiteboard tools refuse to guess a port (the default could belong to a different project's daemon) and tell you to run `ta daemon restart`. Before sending a session token they also ask the daemon which project it serves and refuse if it is not this one.
 
+#### Starting the daemon unattended
+
+On macOS the daemon keeps its capability-token root key, its audit-log signing key and the credential vault key in the Keychain. The first time a newly installed or rebuilt `ta-daemon` reads each of those, macOS shows a dialog that needs a person's click. The daemon asks for them all at startup, so the dialog appears when you start it, not in the middle of the first piece of real work.
+
+**Approve it once.** Run `ta daemon start` (or `restart`) where you can see the screen. When the dialog appears, choose **Always Allow**. macOS remembers the choice for the signed `ta-daemon`, so later starts are silent. Installing with `./install_local.sh` signs the binary so the choice survives rebuilds.
+
+While the dialog is open the daemon is already listening and tells you what it is waiting for:
+
+```
+$ ta daemon start
+Daemon started.
+  ...
+  Health: starting (listening on http://127.0.0.1:7733)
+    - keychain: waiting for keychain approval for audit-log signing key (12s of 60s)
+      Next step: Click Always Allow in the macOS Keychain dialog (it may be behind other windows)...
+  Check progress with: ta daemon status
+```
+
+The daemon log has the matching line (`waiting for keychain approval for ... click Always Allow in the macOS dialog; timeout 60s`) and a second line when startup resumes.
+
+**If nobody clicks.** The wait is limited to one dialog at a time, 60 seconds by default:
+
+```toml
+# .ta/daemon.toml
+[daemon]
+keychain_approval_timeout_secs = 60   # 0 means the default
+```
+
+When it runs out:
+
+- **Default posture:** the daemon starts *degraded*. It serves requests, but anything that needs the missing key (capability tokens, audit signing, the credential vault) refuses with an error that names the key and says to approve the dialog and run `ta daemon restart`. If you click Always Allow later, the daemon notices, loads the key and goes back to `ok` without a restart.
+- **Strict posture** (`TA_POSTURE=strict`, or the word `strict` in the `posture` file in the state directory): the daemon refuses to start and exits with the reason. Start it again where someone can approve the dialog.
+
+To skip the Keychain entirely (a headless machine, a CI box), set `TA_NO_KEYCHAIN=1`; keys are then kept in owner-only files in the per-user state directory (`ta show state`).
+
+After startup the daemon never reads the Keychain while handling a request. Secrets come from memory loaded at start, so a locked or revoked Keychain cannot freeze the daemon. A secret that was not loaded at start fails with an error telling you to run `ta daemon restart`. If the Keychain holds a key but cannot be read, TA will not create a replacement key over it.
+
+**Reading the status.** `GET /health` and `GET /api/status` (and `ta daemon status`, `ta doctor`) report one of three states, with the existing fields unchanged:
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Startup finished and nothing is wrong. |
+| `starting` | Still loading keychain items. The process is alive; most routes answer `503` with `Retry-After` until it finishes. |
+| `degraded` | Running, but a part is unavailable. |
+
+`reasons` lists why, each with a `component` (`keychain` or `whiteboard`), a `reason` and a `next_step`. `ta daemon start`, `status` and `restart` print them. `/api/status` also has a `whiteboard` object (`state` is `disabled`, `connecting`, `connected` or `disconnected`, with the server, attempt and last error). `ta doctor` shows the same reasons as a warning.
+
+**NATS that is not up yet.** When the whiteboard uses NATS and the server is down at start, or goes away later, the daemon keeps retrying instead of giving up. The wait starts at 1 second and doubles after each failure, with random jitter, up to a cap of 60 seconds, so a dead server is tried about once a minute and never hammered. Every attempt is logged with the server, the attempt number and the next delay, and `/health` shows `degraded` with "whiteboard disconnected" until it reconnects. No restart is needed. Tune it in `.ta/workflow.toml`:
+
+```toml
+[whiteboard]
+connect_retry_initial_secs = 1   # first wait; doubles each failure (0 means 1)
+connect_retry_max_secs = 60      # longest wait between attempts (the cap)
+```
+
 #### Stopping the daemon
 
 ```bash

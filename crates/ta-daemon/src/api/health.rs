@@ -47,23 +47,41 @@ use crate::api::AppState;
 ///   "status": "ok",
 ///   "version": "0.14.4-alpha",
 ///   "timestamp": "2026-03-26T00:00:00Z",
-///   "plugins": ["auth"]
+///   "plugins": ["auth"],
+///   "reasons": []
 /// }
 /// ```
+///
+/// `status` is `starting` or `degraded` (with `reasons`) while the daemon
+/// waits for a keychain approval or cannot reach a part it needs; the
+/// answer is still `200 OK` because the process is alive.
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let plugins = state.daemon_config.plugins.configured_slots();
     let root = state.active_project_root.read().unwrap().clone();
-    Json(serde_json::json!({
+    Json(health_body(&state.health, plugins, &root)).into_response()
+}
+
+/// The `/health` JSON body. `status` is `ok`, `starting` (keychain items are
+/// still loading, for example waiting for a person to approve the macOS
+/// dialog) or `degraded` (running, but a part is unavailable). `reasons`
+/// explains any status other than `ok` and says what to do about it.
+pub fn health_body(
+    health: &crate::startup::DaemonHealth,
+    plugins: Vec<&str>,
+    root: &std::path::Path,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         // Identity of the answering daemon, so `ta daemon` commands can tell
         // their own project's daemon from another project's on the same port.
-        "project_root": crate::api::status::canonical_root_string(&root),
+        "project_root": crate::api::status::canonical_root_string(root),
         "pid": std::process::id(),
         "timestamp": Utc::now().to_rfc3339(),
         "plugins": plugins,
-    }))
-    .into_response()
+    });
+    health.apply_to(&mut body);
+    body
 }
 
 /// `GET /metrics` — plugin hook for Prometheus/OpenMetrics scrape endpoint.
@@ -122,6 +140,40 @@ mod tests {
         assert!(json["plugins"].is_array());
         assert!(json["project_root"].is_string());
         assert_eq!(json["pid"].as_u64(), Some(u64::from(std::process::id())));
+    }
+
+    #[tokio::test]
+    async fn health_reports_starting_with_a_keychain_reason_and_keeps_answering() {
+        let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
+        let health = crate::startup::DaemonHealth::starting(std::time::Duration::from_secs(60));
+        state.health = health.clone();
+        let state = Arc::new(state);
+        let app = Router::new()
+            .route("/health", get(health_handler_for_test))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                Request::get("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Still 200: the process is alive, `status` carries the nuance.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "starting");
+        assert_eq!(json["reasons"][0]["component"], "keychain");
+        assert!(json["reasons"][0]["next_step"].is_string());
+        // Existing contract fields are unchanged.
+        assert!(json["version"].is_string());
+        assert_eq!(json["pid"].as_u64(), Some(u64::from(std::process::id())));
+        assert!(json["project_root"].is_string());
+    }
+
+    async fn health_handler_for_test(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+        health(State(s)).await
     }
 
     #[tokio::test]
