@@ -46,6 +46,7 @@ pub mod notify;
 pub mod office;
 pub mod onboard;
 pub mod operations;
+pub mod outcome_key;
 pub mod persona;
 pub mod plan;
 pub mod plugin;

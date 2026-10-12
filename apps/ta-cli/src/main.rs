@@ -798,6 +798,14 @@ enum Commands {
         #[command(subcommand)]
         command: commands::events::EventsCommands,
     },
+    /// Rotate or revoke the key that signs whiteboard outcome envelopes.
+    ///
+    /// Examples: `ta outcome-key rotate`, `ta outcome-key promote`, `ta show outcome-key`
+    #[command(name = "outcome-key")]
+    OutcomeKey {
+        #[command(subcommand)]
+        command: commands::outcome_key::OutcomeKeyCommands,
+    },
     /// Manage approval tokens for non-interactive workflows.
     #[command(hide = true)]
     Token {
@@ -1661,6 +1669,10 @@ fn dispatch_raw(
             no_version_check,
         ),
         Commands::Show { noun, .. } if noun == "install" => commands::login::show_install(),
+        Commands::Show { noun, .. } if noun == "outcome-key" => {
+            commands::outcome_key::show(project_root)
+        }
+        Commands::OutcomeKey { command } => commands::outcome_key::execute(command, config),
         Commands::Show { noun, .. } if noun == "state" => {
             commands::state_secrets::show_state(project_root)
         }

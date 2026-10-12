@@ -31,6 +31,14 @@ pub enum AuditAction {
     /// A control-plane secret was moved out of the project tree into the TA
     /// state directory by `ta doctor --fix`, or the move was refused or failed.
     SecretMigration,
+    /// A daemon service-account token was minted (`ta token create --kind daemon`).
+    /// The event records the id, label and scope, never the secret.
+    TokenIssued,
+    /// A daemon service-account token was revoked (`ta token revoke --kind daemon`).
+    TokenRevoked,
+    /// An outcome signing key was staged, promoted or revoked (`ta outcome-key`).
+    /// Records the key id and action, never key material.
+    OutcomeKeyChanged,
 }
 
 // ── Decision Observability (v0.3.3) ──

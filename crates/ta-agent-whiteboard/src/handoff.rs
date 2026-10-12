@@ -20,8 +20,17 @@ use crate::transport::WhiteboardTransport;
 /// The handoff stream name for a given recipient. Each `RoleRef` gets its
 /// own stream+consumer pair so a message addressed to `RoleRef::Agent("x")`
 /// never competes for delivery with one addressed to `RoleRef::Role(...)`.
-fn stream_for(recipient: &RoleRef) -> String {
-    format!("handoff-{}", sanitize(&recipient.to_string()))
+fn stream_for(team_session: Option<&str>, recipient: &RoleRef) -> String {
+    let route = sanitize(&recipient.to_string());
+    match team_session {
+        // `<encoded session>_<route>`: the encoded session never contains
+        // `_`, so the first `_` ends the session part unambiguously.
+        Some(session) => format!(
+            "handoff-{}_{route}",
+            crate::presence::encode_key_component(session)
+        ),
+        None => format!("handoff-{route}"),
+    }
 }
 
 /// A single fixed consumer name per stream — handoff streams are
@@ -47,6 +56,10 @@ pub struct HandoffMessage {
     pub recipient: RoleRef,
     pub payload: String,
     pub created_at: DateTime<Utc>,
+    /// Session the message was sent in; stamped by the daemon from the
+    /// verified token. `None` for a message sent outside any session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_session: Option<String>,
 }
 
 impl HandoffMessage {
@@ -56,7 +69,13 @@ impl HandoffMessage {
             recipient,
             payload: payload.into(),
             created_at: Utc::now(),
+            team_session: None,
         }
+    }
+
+    pub fn with_team_session(mut self, team_session: impl Into<String>) -> Self {
+        self.team_session = Some(team_session.into());
+        self
     }
 }
 
@@ -78,7 +97,7 @@ pub async fn send_handoff(
     transport: &dyn WhiteboardTransport,
     message: &HandoffMessage,
 ) -> Result<()> {
-    let stream = stream_for(&message.recipient);
+    let stream = stream_for(message.team_session.as_deref(), &message.recipient);
     let payload = serde_json::to_vec(message)?;
     transport.stream_append(&stream, payload).await
 }
@@ -90,7 +109,18 @@ pub async fn receive_handoff(
     transport: &dyn WhiteboardTransport,
     recipient: &RoleRef,
 ) -> Result<Option<DeliveredHandoff>> {
-    let stream = stream_for(recipient);
+    receive_handoff_in(transport, None, recipient).await
+}
+
+/// Receive the next handoff addressed to `recipient` within `team_session`.
+/// A handoff sent in another session lives on a different stream and is
+/// never delivered here.
+pub async fn receive_handoff_in(
+    transport: &dyn WhiteboardTransport,
+    team_session: Option<&str>,
+    recipient: &RoleRef,
+) -> Result<Option<DeliveredHandoff>> {
+    let stream = stream_for(team_session, recipient);
     let Some(envelope) = transport.stream_read_next(&stream, CONSUMER_NAME).await? else {
         return Ok(None);
     };

@@ -337,13 +337,40 @@ impl CredentialBroker {
     /// it was actually narrowed to.
     pub fn authorize_scope(&self, token: &str, scope: &str) -> Result<VerifiedGrant, BrokerError> {
         let biscuit = self.decode_checked(token)?;
-        let (credential_id, agent_id, _root_scopes) = root_claims(&biscuit)?;
+        let (credential_id, agent_id, root_scopes) = root_claims(&biscuit)?;
+        // The scope must have been granted at mint time. Attenuation checks
+        // alone only ever narrow; without this a token minted for one scope
+        // would authorize any other scope nobody had narrowed away.
+        if !root_scopes.iter().any(|s| s == scope) {
+            return Err(BrokerError::InvalidGrant(format!(
+                "scope {scope:?} was never granted to this token (it carries: {})",
+                if root_scopes.is_empty() {
+                    "no scopes".to_string()
+                } else {
+                    root_scopes.join(", ")
+                }
+            )));
+        }
         authorize_with_scope(&biscuit, scope)?;
         Ok(VerifiedGrant {
             credential_id,
             agent_id,
             allowed_scopes: vec![scope.to_string()],
         })
+    }
+
+    /// Every scope `token` currently authorizes: the scopes granted at mint
+    /// time that still clear signature, denylist, expiry and every
+    /// attenuation hop. Used by the whiteboard to read a token's role and
+    /// rights from the token itself rather than from anything the client
+    /// sends.
+    pub fn effective_scopes(&self, token: &str) -> Result<Vec<String>, BrokerError> {
+        let biscuit = self.decode_checked(token)?;
+        let (_credential_id, _agent_id, root_scopes) = root_claims(&biscuit)?;
+        Ok(root_scopes
+            .into_iter()
+            .filter(|s| authorize_with_scope(&biscuit, s).is_ok())
+            .collect())
     }
 
     /// Signature + denylist check shared by [`Self::attenuate`] and
@@ -870,5 +897,31 @@ mod tests {
         assert!(broker_b
             .attenuate(&root.token, vec!["read".into()], 1800)
             .is_err());
+    }
+
+    #[test]
+    fn authorize_scope_refuses_a_scope_the_token_was_never_granted() {
+        let dir = TempDir::new().unwrap();
+        let broker = CredentialBroker::open(dir.path()).unwrap();
+        let t = broker
+            .grant(
+                Uuid::new_v4(),
+                "a",
+                vec!["whiteboard:team_session:s1".into()],
+                3600,
+            )
+            .unwrap();
+        assert!(broker
+            .authorize_scope(&t.token, "whiteboard:team_session:s1")
+            .is_ok());
+        let err = broker
+            .authorize_scope(&t.token, "whiteboard:team_session:s2")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("never granted"), "{err}");
+        assert_eq!(
+            broker.effective_scopes(&t.token).unwrap(),
+            vec!["whiteboard:team_session:s1".to_string()]
+        );
     }
 }

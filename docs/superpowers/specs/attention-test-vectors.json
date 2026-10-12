@@ -1,0 +1,1968 @@
+{
+  "contract": "docs/superpowers/specs/2026-10-11-attention-feed-and-human-assertions-contract.md",
+  "format": "ta-attention-test-vectors/1",
+  "generated_by": "crates/ta-daemon/src/attention/vectors.rs",
+  "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+  "items": [
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_352838d8\",\"kind\":\"draft_review\",\"provenance\":{\"chain\":{\"candidate_id\":\"wayfinder-task:939b7d40#9d23c037\",\"cos_goal_id\":\"ea60c2dc-0000-4000-8000-000000000001\",\"worker_goal_id\":\"066e4e44-0000-4000-8000-000000000002\"},\"excerpt\":{\"text\":\"Please add a notes file for run 6.\",\"truncated\":false,\"untrusted\":true},\"objective\":\"Create notes/live-run6.md\",\"reason\":\"The task asks for a one-line file.\",\"requester\":{\"channel\":\"wayfinder cos chat\",\"display_name\":\"Michael\",\"id\":\"user-123\"}},\"summary\":\"Add notes/live-run6.md (CoS delegate implement 066e4e44)\"}",
+      "id": "att_draft_352838d8",
+      "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+      "kind": "draft_review",
+      "name": "draft_review_with_provenance",
+      "provenance": {
+        "chain": {
+          "candidate_id": "wayfinder-task:939b7d40#9d23c037",
+          "cos_goal_id": "ea60c2dc-0000-4000-8000-000000000001",
+          "worker_goal_id": "066e4e44-0000-4000-8000-000000000002"
+        },
+        "excerpt": {
+          "text": "Please add a notes file for run 6.",
+          "truncated": false,
+          "untrusted": true
+        },
+        "objective": "Create notes/live-run6.md",
+        "reason": "The task asks for a one-line file.",
+        "requester": {
+          "channel": "wayfinder cos chat",
+          "display_name": "Michael",
+          "id": "user-123"
+        }
+      },
+      "summary": "Add notes/live-run6.md (CoS delegate implement 066e4e44)",
+      "summary_chars": 56
+    },
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_0b1c2d3e\",\"kind\":\"draft_review\",\"provenance\":null,\"summary\":\"Add notes/live-run6.md (CoS delegate implement 066e4e44)\"}",
+      "id": "att_draft_0b1c2d3e",
+      "item_digest": "sha256:23dac32a6f7d286cb6f0b0ac847afbd99b835eb4eb212b683ca6f050ce1e515e",
+      "kind": "draft_review",
+      "name": "draft_review_provenance_null",
+      "provenance": null,
+      "summary": "Add notes/live-run6.md (CoS delegate implement 066e4e44)",
+      "summary_chars": 56
+    },
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_5e6f7a8b\",\"kind\":\"draft_review\",\"provenance\":{\"chain\":{\"candidate_id\":\"wayfinder-task:939b7d40#9d23c037\",\"cos_goal_id\":\"ea60c2dc-0000-4000-8000-000000000001\",\"worker_goal_id\":\"066e4e44-0000-4000-8000-000000000002\"},\"excerpt\":{\"text\":\"\",\"truncated\":false,\"untrusted\":true},\"objective\":\"Create notes/live-run6.md\",\"reason\":\"The task asks for a one-line file.\",\"requester\":{\"channel\":\"wayfinder cos chat\",\"display_name\":\"Michael\",\"id\":\"user-123\"}},\"summary\":\"Add notes/live-run6.md (CoS delegate implement 066e4e44)\"}",
+      "id": "att_draft_5e6f7a8b",
+      "item_digest": "sha256:2cd89b3d87c260625bc0f15b52281b65d127660f26605698e04f8a0640ac0d5e",
+      "kind": "draft_review",
+      "name": "draft_review_empty_excerpt",
+      "provenance": {
+        "chain": {
+          "candidate_id": "wayfinder-task:939b7d40#9d23c037",
+          "cos_goal_id": "ea60c2dc-0000-4000-8000-000000000001",
+          "worker_goal_id": "066e4e44-0000-4000-8000-000000000002"
+        },
+        "excerpt": {
+          "text": "",
+          "truncated": false,
+          "untrusted": true
+        },
+        "objective": "Create notes/live-run6.md",
+        "reason": "The task asks for a one-line file.",
+        "requester": {
+          "channel": "wayfinder cos chat",
+          "display_name": "Michael",
+          "id": "user-123"
+        }
+      },
+      "summary": "Add notes/live-run6.md (CoS delegate implement 066e4e44)",
+      "summary_chars": 56
+    },
+    {
+      "actions": [
+        "answer"
+      ],
+      "canonical_json": "{\"actions\":[\"answer\"],\"id\":\"att_question_7a1f3c20\",\"kind\":\"agent_question\",\"provenance\":{\"chain\":{\"candidate_id\":\"wayfinder-task:939b7d40#9d23c037\",\"cos_goal_id\":\"ea60c2dc-0000-4000-8000-000000000001\",\"worker_goal_id\":\"066e4e44-0000-4000-8000-000000000002\"},\"excerpt\":{\"text\":\"Add the notes file, ask me if unsure.\",\"truncated\":false,\"untrusted\":true},\"objective\":\"Create notes/live-run6.md\",\"reason\":\"The task asks for a one-line file.\",\"requester\":{\"channel\":\"wayfinder cos chat\",\"display_name\":\"Michael\",\"id\":\"user-123\"}},\"summary\":\"Which branch should the notes file go on?\"}",
+      "id": "att_question_7a1f3c20",
+      "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+      "kind": "agent_question",
+      "name": "agent_question",
+      "provenance": {
+        "chain": {
+          "candidate_id": "wayfinder-task:939b7d40#9d23c037",
+          "cos_goal_id": "ea60c2dc-0000-4000-8000-000000000001",
+          "worker_goal_id": "066e4e44-0000-4000-8000-000000000002"
+        },
+        "excerpt": {
+          "text": "Add the notes file, ask me if unsure.",
+          "truncated": false,
+          "untrusted": true
+        },
+        "objective": "Create notes/live-run6.md",
+        "reason": "The task asks for a one-line file.",
+        "requester": {
+          "channel": "wayfinder cos chat",
+          "display_name": "Michael",
+          "id": "user-123"
+        }
+      },
+      "summary": "Which branch should the notes file go on?",
+      "summary_chars": 41
+    },
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_unicode_nfc\",\"kind\":\"draft_review\",\"provenance\":null,\"summary\":\"Review Café menu: résumé 日本語 🎉\"}",
+      "id": "att_draft_unicode_nfc",
+      "item_digest": "sha256:4d685a31b1a2805e4d9c58aa5278347892c26873f3ae08f0d1418f5bf8cb680f",
+      "kind": "draft_review",
+      "name": "unicode_summary_nfc",
+      "provenance": null,
+      "summary": "Review Café menu: résumé 日本語 🎉",
+      "summary_chars": 30
+    },
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_unicode_nfd\",\"kind\":\"draft_review\",\"provenance\":null,\"summary\":\"Review Café menu: résumé 日本語 🎉\"}",
+      "id": "att_draft_unicode_nfd",
+      "item_digest": "sha256:44d81c164a354a797a85833e3009176e190f15956ee7f8cced7ff2314a0d6402",
+      "kind": "draft_review",
+      "name": "unicode_summary_nfd",
+      "provenance": null,
+      "summary": "Review Café menu: résumé 日本語 🎉",
+      "summary_chars": 33
+    },
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_len280\",\"kind\":\"draft_review\",\"provenance\":null,\"summary\":\"abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij\"}",
+      "id": "att_draft_len280",
+      "item_digest": "sha256:0936ec73b280de63437458c1aeda03e7f73cbb260369db1335e4639326ddfee5",
+      "kind": "draft_review",
+      "name": "summary_exactly_280_chars",
+      "provenance": null,
+      "summary": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "summary_chars": 280
+    },
+    {
+      "actions": [
+        "review",
+        "approve",
+        "deny"
+      ],
+      "canonical_json": "{\"actions\":[\"review\",\"approve\",\"deny\"],\"id\":\"att_draft_len281\",\"kind\":\"draft_review\",\"provenance\":null,\"summary\":\"abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg...\"}",
+      "id": "att_draft_len281",
+      "item_digest": "sha256:dbd916ddeb4f33412d80f08aa5e0eaf1887119dbc8cd9a34a2f45467ee631676",
+      "kind": "draft_review",
+      "name": "summary_281_chars_truncated",
+      "provenance": null,
+      "summary": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg...",
+      "summary_chars": 280,
+      "summary_input": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijk",
+      "summary_input_chars": 281
+    }
+  ],
+  "notes": [
+    "TEST ONLY. The private seed below is public on purpose so a signer on another system can reproduce these assertions. Never register this key with a real TA install and never reuse it anywhere else.",
+    "This file is generated by TA's own code (crates/ta-daemon/src/attention/vectors.rs) and a TA test fails if the committed file differs from the regenerated output. Regenerate with: TA_REGENERATE_VECTORS=1 ./dev cargo test -p ta-daemon attention::vectors",
+    "Each active vector is self-contained. To check a verifier: register registered_key (with test_key.public_key_b64) under install_id, evaluate at 'now' (a unix time, not the wall clock), build the item from item_state, present 'assertion' with request.action and request.answer, and compare with 'expect'. If presented_twice is true, the first presentation must be accepted and 'expect' describes the second.",
+    "A refusal 'reason' is the `reason` field of the 403 body from POST /api/attention/{id}/act. Messages are human text and are not part of the contract; only the reason string is.",
+    "item_digest is sha256 over the canonical JSON of {id, kind, summary, provenance, actions}. Canonical JSON means object keys sorted by byte order, no whitespace, UTF-8, strings escaped as serde_json does (only quote, backslash and control characters are escaped; every other character, including non-ASCII, is written as raw UTF-8). 'canonical_json' on each item is the exact string that was hashed.",
+    "Unicode: TA does NOT normalize. It never converts a summary to NFC or NFD, so the NFC and NFD items have different digests. A signer must hash and sign exactly the bytes of the summary TA published in the feed and must not normalize it. The only text shaping TA does to a summary is: control characters become spaces, runs of whitespace (including Unicode whitespace such as U+00A0) collapse to one space, leading and trailing whitespace is removed, and the result is capped at 280 characters.",
+    "Length: a summary of 280 characters is kept as is. A longer one is not refused: TA truncates it to the first 277 characters, removes trailing whitespace, and appends '...' (so at most 280). Lengths count Unicode scalar values (characters), not bytes. The digest covers the truncated summary, because that is what the feed publishes. 'summary_input' on an item shows the pre-shaping text when it differs.",
+    "Answers: answer_sha256 is sha256 over the exact UTF-8 bytes of the relayed answer text. TA does not trim, normalize or re-encode the answer before hashing, so trailing whitespace and newlines count. An assertion whose hash was computed over trimmed text is refused with answer_changed when the relayed text is not trimmed.",
+    "provenance null (no agent-side requester) and provenance with an empty-string excerpt are different values and have different digests.",
+    "The signature is over the exact base64url header and claims segments as sent (header.claims). A signer may serialize the JSON with any key order; the verifier parses it. Signatures are Ed25519 and deterministic, so the compact assertions in this file are stable.",
+    "role_order, maintainer_roles and escalation_min_role are the registered key's settings and are published by GET /api/attention metadata (keys[]). escalation_min_role is recorded and published now; the escalated viewer reroute that enforces it is the pending vector below.",
+    "jti must be 8 to 128 characters. TA keeps used jtis for at least 300 seconds, so a replay inside an assertion's lifetime is always refused."
+  ],
+  "now": 1800000000,
+  "test_key": {
+    "WARNING": "TEST ONLY. This key pair is published so another system can sign these vectors. Never register it with a real install.",
+    "alg": "EdDSA",
+    "fingerprint": "sha256:65b60673d6ed884bf01c2c222d82ada0740f29ac3355d6a925c81f17f47a27b8",
+    "kid": "org-1",
+    "private_seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "public_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+    "public_key_hex": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+  },
+  "vectors": [
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.wSQXauYdIvd5DxHZptqw9l31iumDIYBDGB_dqY8Man7blRmybxsoA4TPLsBMYn8v7urpb6_wGXKzgKvqqKpxDw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "Approve an any_maintainer draft as an admin, with a role claim. The item has provenance and the signer is not its requester.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_with_provenance",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6MjNkYWMzMmE2ZjdkMjg2Y2I2ZjBiMGFjODQ3YWZiZDk5YjgzNWViNGViMjEyYjY4M2NhNmYwNTBjZTFlNTE1ZSIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMGIxYzJkM2UiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.6ESfE07QDokjmhH1JdgWlGbE6iRczxjV_u7kWtozl-DspMiFDkQwbJq6CZMN67aV946fUsv94FwreDPqH2juBA",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:23dac32a6f7d286cb6f0b0ac847afbd99b835eb4eb212b683ca6f050ce1e515e",
+        "item_id": "att_draft_0b1c2d3e",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "Approve an item whose provenance is null: nothing to self-approve against, the digest is over provenance null.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_provenance_null",
+      "item_state": {
+        "agent_originated": false,
+        "id": "att_draft_0b1c2d3e",
+        "item_digest": "sha256:23dac32a6f7d286cb6f0b0ac847afbd99b835eb4eb212b683ca6f050ce1e515e",
+        "project": "wayfinder-demo",
+        "requester_id": null,
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_provenance_null",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJkZW55IiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYm9iQGV4YW1wbGUuY29tIiwiZXhwIjoxODAwMDAwMDMwLCJpYXQiOjE4MDAwMDAwMDAsIml0ZW1fZGlnZXN0Ijoic2hhMjU2Ojk1NDhjNzk1NzM2Y2VjNmFkNDFkMzZmZWEyYjVjZDA1NTg3ODg1YTlmYmE5NDg4ZGVhYzkwNzBjZGJkYjkxYTciLCJpdGVtX2lkIjoiYXR0X2RyYWZ0XzM1MjgzOGQ4IiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6Im93bmVyIiwidXNlcl9pZCI6ImJvYiJ9.vPJiQjTohpw-KE6usfINQPLKhmD2RFLmLu2M8-5SXXzqVhOh4K_j0IBS192gN9W_T-WdncAYd4o4x43CkB1YAQ",
+      "claims": {
+        "action": "deny",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "bob@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "owner",
+        "user_id": "bob"
+      },
+      "description": "Deny as an owner (owner is a maintainer role and outranks admin).",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "deny",
+          "escalated": false,
+          "role": "owner",
+          "self_approved": false,
+          "user_id": "bob"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "deny_as_owner",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "deny",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhbnN3ZXIiLCJhbnN3ZXJfc2hhMjU2Ijoic2hhMjU2OmIyZDE2OWFmNDQ0OWEzZTVlMWZjZjVlYTczMzdkZTI3NmQwZDdiOWNlYmU5OTFlYjVmMzZmODA1MzBhYmI0MDciLCJhdWQiOiJ0YV9pbnN0YWxsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZW1haWwiOiJ1c2VyLTEyM0BleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo2OGJhNDY5M2NjZmQwZjM2NDdiYWMxZTg1NzIzNjFiODllYmU3ZGEyNGI2ZmM2MjViNjViM2NlODIzYmFmYjgxIiwiaXRlbV9pZCI6ImF0dF9xdWVzdGlvbl83YTFmM2MyMCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInVzZXJfaWQiOiJ1c2VyLTEyMyJ9.PTmQDqFiM0ImuVTRMu3XFHOt3HwadYcE7j2QAzQ4elcyH-sjr5qRR7brBKdCvOy2vFtCB4ip50lD_eq5fbJbDQ",
+      "claims": {
+        "action": "answer",
+        "answer_sha256": "sha256:b2d169af4449a3e5e1fcf5ea7337de276d0d7b9cebe991eb5f36f80530abb407",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "user-123@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "item_id": "att_question_7a1f3c20",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "user_id": "user-123"
+      },
+      "description": "Answer an agent question as the user it waits on. No role claim is needed for a user-addressed item; answer_sha256 covers the exact relayed text.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "answer",
+          "escalated": false,
+          "role": null,
+          "self_approved": false,
+          "user_id": "user-123"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "agent_question",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_question_7a1f3c20",
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "user-123"
+        }
+      },
+      "name": "answer_basic",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "answer",
+        "answer": "Use the main branch."
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhbnN3ZXIiLCJhbnN3ZXJfc2hhMjU2Ijoic2hhMjU2OmIyZDE2OWFmNDQ0OWEzZTVlMWZjZjVlYTczMzdkZTI3NmQwZDdiOWNlYmU5OTFlYjVmMzZmODA1MzBhYmI0MDciLCJhdWQiOiJ0YV9pbnN0YWxsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZW1haWwiOiJjYXJvbEBleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo2OGJhNDY5M2NjZmQwZjM2NDdiYWMxZTg1NzIzNjFiODllYmU3ZGEyNGI2ZmM2MjViNjViM2NlODIzYmFmYjgxIiwiaXRlbV9pZCI6ImF0dF9xdWVzdGlvbl83YTFmM2MyMCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInJvbGUiOiJvd25lciIsInVzZXJfaWQiOiJjYXJvbCJ9.aGj4twSDhR-vjuf5gNfTiEwVkUbGRJR74v4rSdijcY4Aa-lbhue_I3j8QVQVh2gsEeEaDe8HAseUIe7Dpon0Bw",
+      "claims": {
+        "action": "answer",
+        "answer_sha256": "sha256:b2d169af4449a3e5e1fcf5ea7337de276d0d7b9cebe991eb5f36f80530abb407",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "carol@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "item_id": "att_question_7a1f3c20",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "owner",
+        "user_id": "carol"
+      },
+      "description": "Answer an item waiting on role member with an owner claim: rank-at-least under the default role order (member < admin < owner).",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "answer",
+          "escalated": false,
+          "role": "owner",
+          "self_approved": false,
+          "user_id": "carol"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "agent_question",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_question_7a1f3c20",
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "role",
+          "value": "member"
+        }
+      },
+      "name": "answer_role_rank_at_least",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "answer",
+        "answer": "Use the main branch."
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZGFuYUBleGFtcGxlLmNvbSIsImVzY2FsYXRlZCI6dHJ1ZSwiZXhwIjoxODAwMDAwMDMwLCJpYXQiOjE4MDAwMDAwMDAsIml0ZW1fZGlnZXN0Ijoic2hhMjU2Ojk1NDhjNzk1NzM2Y2VjNmFkNDFkMzZmZWEyYjVjZDA1NTg3ODg1YTlmYmE5NDg4ZGVhYzkwNzBjZGJkYjkxYTciLCJpdGVtX2lkIjoiYXR0X2RyYWZ0XzM1MjgzOGQ4IiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6Im93bmVyIiwidXNlcl9pZCI6ImRhbmEifQ.8pwAYACUd4wUyW87dEOmuW9n3t7xxkxW9cvpHy0j9TFk5jPwslYwxQHeMT8fQVGM9fluYB5CDtwwdsKWM-PjDA",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "owner",
+        "user_id": "dana"
+      },
+      "description": "Approve with the escalated claim set (an item escalated to the owner because nobody held the role). TA accepts it on an any_maintainer item and records escalated true.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": true,
+          "role": "owner",
+          "self_approved": false,
+          "user_id": "dana"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_escalated_claim",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoidXNlci0xMjNAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJzZWxmX2FwcHJvdmFsX3Blcm1pdHRlZCI6dHJ1ZSwidXNlcl9pZCI6InVzZXItMTIzIn0.OWJdU07D40Y2XdXNajRRwyqL0GycEC7Yie9CnBCe-CKZKS9PaTupPwhh_2nNmEEsDztGsAkr2c2b9XUcvwkBAA",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "user-123@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "self_approval_permitted": true,
+        "user_id": "user-123"
+      },
+      "description": "Approve your own agent-originated item with self_approval_permitted true: accepted and recorded as self_approved.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": true,
+          "user_id": "user-123"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_self_approval_permitted",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy1jdXN0b20ifQ.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZXJpbkBleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo5NTQ4Yzc5NTczNmNlYzZhZDQxZDM2ZmVhMmI1Y2QwNTU4Nzg4NWE5ZmJhOTQ4OGRlYWM5MDcwY2RiZGI5MWE3IiwiaXRlbV9pZCI6ImF0dF9kcmFmdF8zNTI4MzhkOCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInJvbGUiOiJsZWFkIiwidXNlcl9pZCI6ImVyaW4ifQ.V3dEiCZQDhgoLkmk539wOcXNt6gF9bTWEfNNa7pj9pAptEuryGZW831oS2tcMvgwWtx0-GeOuA2m1NhOHLQxBg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "erin@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "lead",
+        "user_id": "erin"
+      },
+      "description": "A registered key with a non-default role order and maintainer role: claim 'lead' satisfies an item waiting on role 'editor' (viewer < editor < lead).",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "lead",
+          "self_approved": false,
+          "user_id": "erin"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-custom"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "role",
+          "value": "editor"
+        }
+      },
+      "name": "approve_custom_role_order",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "editor",
+        "kid": "org-custom",
+        "maintainer_roles": [
+          "lead"
+        ],
+        "role_order": [
+          "viewer",
+          "editor",
+          "lead"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6NGQ2ODVhMzFiMWEyODA1ZTRkOWM1OGFhNTI3ODM0Nzg5MmMyNjg3M2YzYWUwOGYwZDE0MThmNWJmOGNiNjgwZiIsIml0ZW1faWQiOiJhdHRfZHJhZnRfdW5pY29kZV9uZmMiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.5Hm-2Jxp9qcHFSBXIkapznZ4DFpGWbwxwHgKBe63gK7h6ug8MIIBbS3Mxk49OAvDPdDFLAhPEds9oGJK-D3JDg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:4d685a31b1a2805e4d9c58aa5278347892c26873f3ae08f0d1418f5bf8cb680f",
+        "item_id": "att_draft_unicode_nfc",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "Unicode summary in NFC form. The digest is over the exact bytes of the canonical JSON, so this and the NFD vector have different digests; each is accepted for its own item.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "unicode_summary_nfc",
+      "item_state": {
+        "agent_originated": false,
+        "id": "att_draft_unicode_nfc",
+        "item_digest": "sha256:4d685a31b1a2805e4d9c58aa5278347892c26873f3ae08f0d1418f5bf8cb680f",
+        "project": "wayfinder-demo",
+        "requester_id": null,
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_unicode_nfc",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6NDRkODFjMTY0YTM1NGE3OTdhODU4MzNlMzAwOTE3NmUxOTBmMTU5NTZlZTdmOGNjZWQ3ZmYyMzE0YTBkNjQwMiIsIml0ZW1faWQiOiJhdHRfZHJhZnRfdW5pY29kZV9uZmQiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDEiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ._D3Ka7_O97zq1biC0JIiCndMIfuLAXilP7rNs9WReuKn99bMD4dO1ohAyaQM39eI9YtX3I_U-HcWCUaypOiFAg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:44d81c164a354a797a85833e3009176e190f15956ee7f8cced7ff2314a0d6402",
+        "item_id": "att_draft_unicode_nfd",
+        "jti": "jti-vector-0001",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "Unicode summary in NFD form (same visible text as the NFC vector, different bytes, different digest).",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "unicode_summary_nfd",
+      "item_state": {
+        "agent_originated": false,
+        "id": "att_draft_unicode_nfd",
+        "item_digest": "sha256:44d81c164a354a797a85833e3009176e190f15956ee7f8cced7ff2314a0d6402",
+        "project": "wayfinder-demo",
+        "requester_id": null,
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_unicode_nfd",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6MDkzNmVjNzNiMjgwZGU2MzQzNzQ1OGMxYWVkYTAzZTdmNzNjYmIyNjAzNjlkYjEzMzVlNDYzOTMyNmRkZmVlNSIsIml0ZW1faWQiOiJhdHRfZHJhZnRfbGVuMjgwIiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6ImFkbWluIiwidXNlcl9pZCI6ImFsaWNlIn0.ZJd2Px1Czhtiw9O00yrRc5lAECovEOTjmnuS--1VCNKZIdomut_7EzIAJRiAq6tbhlIH7qk1sGI-OkQXAj2IDg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:0936ec73b280de63437458c1aeda03e7f73cbb260369db1335e4639326ddfee5",
+        "item_id": "att_draft_len280",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "A summary of exactly 280 characters is kept whole.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "summary_exactly_280_chars",
+      "item_state": {
+        "agent_originated": false,
+        "id": "att_draft_len280",
+        "item_digest": "sha256:0936ec73b280de63437458c1aeda03e7f73cbb260369db1335e4639326ddfee5",
+        "project": "wayfinder-demo",
+        "requester_id": null,
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_summary_280",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6ZGJkOTE2ZGRlYjRmMzM0MTJkODBmMDhhYTVlMGVhZjE4ODcxMTlkYmM4Y2Q5YTM0YTJmNDU0NjdlZTYzMTY3NiIsIml0ZW1faWQiOiJhdHRfZHJhZnRfbGVuMjgxIiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6ImFkbWluIiwidXNlcl9pZCI6ImFsaWNlIn0.L1fiDQwf7pjv7ZFiBSk1t__gPP_AWHReW_FDbL-FMtRphaWA8tWte9pKSVRTLJ9OHYpwoUp6KbjdK6EC4coSCA",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:dbd916ddeb4f33412d80f08aa5e0eaf1887119dbc8cd9a34a2f45467ee631676",
+        "item_id": "att_draft_len281",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "A 281 character summary is TRUNCATED by TA to 277 characters plus '...' (280 total); it is not refused. The digest covers the truncated summary the feed publishes.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "summary_281_chars_truncated",
+      "item_state": {
+        "agent_originated": false,
+        "id": "att_draft_len281",
+        "item_digest": "sha256:dbd916ddeb4f33412d80f08aa5e0eaf1887119dbc8cd9a34a2f45467ee631676",
+        "project": "wayfinder-demo",
+        "requester_id": null,
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_summary_281_truncated",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6MmNkODliM2Q4N2MyNjA2MjViYzBmMTViNTIyODFiNjVkMTI3NjYwZjI2NjA1Njk4ZTA0ZjhhMDY0MGFjMGQ1ZSIsIml0ZW1faWQiOiJhdHRfZHJhZnRfNWU2ZjdhOGIiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.DfzP5Eg3T0tQLgAhuKxk11hOgvo62bzL5_W-o1pJMn5ncxX8Wj1mqQ1gdUmK1hILeHoHic4cP8p4mHIVVgs2Cw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:2cd89b3d87c260625bc0f15b52281b65d127660f26605698e04f8a0640ac0d5e",
+        "item_id": "att_draft_5e6f7a8b",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "Provenance present but the excerpt text is the empty string: a different digest from provenance null and from a missing excerpt.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": false,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "alice"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_empty_excerpt",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_5e6f7a8b",
+        "item_digest": "sha256:2cd89b3d87c260625bc0f15b52281b65d127660f26605698e04f8a0640ac0d5e",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "approve_empty_excerpt",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhbnN3ZXIiLCJhbnN3ZXJfc2hhMjU2Ijoic2hhMjU2OjNiZjEzYjM2ZjVkZmFmNGQxYzY2YWY3Y2I5NjBlOGRhZjgwMmE2OTkzNjdhZTFmZmI4MWE4YmU1MWZkMDQyY2EiLCJhdWQiOiJ0YV9pbnN0YWxsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZW1haWwiOiJ1c2VyLTEyM0BleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo2OGJhNDY5M2NjZmQwZjM2NDdiYWMxZTg1NzIzNjFiODllYmU3ZGEyNGI2ZmM2MjViNjViM2NlODIzYmFmYjgxIiwiaXRlbV9pZCI6ImF0dF9xdWVzdGlvbl83YTFmM2MyMCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInVzZXJfaWQiOiJ1c2VyLTEyMyJ9.2uSNIo7mNUuOQqEzp4Wi4wzw2otkcqSWKOYpkR6I_yrpBFs-ovRVZssz9P-KaXmJW05PIKyp4tR6jDrRnl_xCw",
+      "claims": {
+        "action": "answer",
+        "answer_sha256": "sha256:3bf13b36f5dfaf4d1c66af7cb960e8daf802a699367ae1ffb81a8be51fd042ca",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "user-123@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "item_id": "att_question_7a1f3c20",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "user_id": "user-123"
+      },
+      "description": "The answer has trailing whitespace and answer_sha256 was computed over the exact text including it. TA hashes the relayed answer untrimmed, so this is accepted.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "answer",
+          "escalated": false,
+          "role": null,
+          "self_approved": false,
+          "user_id": "user-123"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "agent_question",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_question_7a1f3c20",
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "user-123"
+        }
+      },
+      "name": "answer_trailing_whitespace_exact_hash",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "answer",
+        "answer": "Yes, go ahead.  \n"
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE3OTk5OTk5MzAsImlhdCI6MTc5OTk5OTkwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.UHDBOrPSqYiFZPLR_tnDSt_jLmo2t8m90Tf_xHgtTTrrkAuO8sei_7bCY0WmOAtOFYKBxc_lV5kNuxUnqqWnDw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1799999930,
+        "iat": 1799999900,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "exp is in the past at the fixed now (lifetime itself is fine).",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "expired"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_expired",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwNjEsImlhdCI6MTgwMDAwMDAzMSwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.YvfE5aIZ2GDlLlDilOTUxWu_jazZ0puE6pYYaFffunjDxF5FLoOQWDcoNIB7gR96oC91jTrzq0Bv3ety05ZAAg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000061,
+        "iat": 1800000031,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "iat is more than 30 seconds in the future at the fixed now.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_yet_valid"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_not_yet_valid",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwNjEsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.zM3kt_IM-SHOLzGyZfpuLfG0BT6eqyd2tn4sAIwDMaGVTddsrtQRQGhAk18S-DppB3pBof-9TLWiCC9SAl6OCQ",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000061,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "exp is 61 seconds after iat: longer than the 60 second maximum.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "bad_lifetime"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_bad_lifetime",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.wSQXauYdIvd5DxHZptqw9l31iumDIYBDGB_dqY8Man7blRmybxsoA4TPLsBMYn8v7urpb6_wGXKzgKvqqKpxDw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "The same assertion presented twice: the first presentation is accepted, the second is refused as replayed (jti already used).",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "replayed"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_replayed_jti",
+      "now": 1800000000,
+      "presented_twice": true,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF9mZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.H7BF_Vk_tk0Ub8sMNVbIW26rZW_j8KLXftFyNOgycsYAfvEj6jFUKUDbIWFFzCqYKFXHG8lhJdDK-SwzqGa3Cg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_ffffffffffffffffffffffffffffffff",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "aud names a different TA install.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "wrong_audience"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_wrong_audience",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.wSQXauYdIvd5DxHZptqw9l31iumDIYBDGB_dqY8Man7blRmybxsoA4TPLsBMYn8v7urpb6_wGXKzgKvqqKpxDw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "The item changed after the person saw it: the assertion signed the published digest, the item's current digest differs. Refused as item_changed and nothing is done.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "item_changed"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:c30faa0b42b7aaa275639b6a995c6c3509cef4145f209ab75cf9c8822ce89a79",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_item_changed",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.wSQXauYdIvd5DxHZptqw9l31iumDIYBDGB_dqY8Man7blRmybxsoA4TPLsBMYn8v7urpb6_wGXKzgKvqqKpxDw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "The person signed approve but the relayed request is deny.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "claim_mismatch"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_wrong_action",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "deny",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfc29tZW9uZV9lbHNlIiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6ImFkbWluIiwidXNlcl9pZCI6ImFsaWNlIn0.sVRBu6BQzzaji4d8vYv6v56K1s49VrMRPGkzJhq6-BY6s8M7k6iS8s0n8fZ6RA2HU_ErBA0ZvClJe4S8jVD1Bg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_someone_else",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "The assertion's item_id is a different item than the one being acted on.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "claim_mismatch"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_wrong_item",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhbnN3ZXIiLCJhbnN3ZXJfc2hhMjU2Ijoic2hhMjU2OmIyZDE2OWFmNDQ0OWEzZTVlMWZjZjVlYTczMzdkZTI3NmQwZDdiOWNlYmU5OTFlYjVmMzZmODA1MzBhYmI0MDciLCJhdWQiOiJ0YV9pbnN0YWxsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZW1haWwiOiJ1c2VyLTEyM0BleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo2OGJhNDY5M2NjZmQwZjM2NDdiYWMxZTg1NzIzNjFiODllYmU3ZGEyNGI2ZmM2MjViNjViM2NlODIzYmFmYjgxIiwiaXRlbV9pZCI6ImF0dF9xdWVzdGlvbl83YTFmM2MyMCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInVzZXJfaWQiOiJ1c2VyLTEyMyJ9.PTmQDqFiM0ImuVTRMu3XFHOt3HwadYcE7j2QAzQ4elcyH-sjr5qRR7brBKdCvOy2vFtCB4ip50lD_eq5fbJbDQ",
+      "claims": {
+        "action": "answer",
+        "answer_sha256": "sha256:b2d169af4449a3e5e1fcf5ea7337de276d0d7b9cebe991eb5f36f80530abb407",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "user-123@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "item_id": "att_question_7a1f3c20",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "user_id": "user-123"
+      },
+      "description": "answer_sha256 does not match the relayed answer (a swapped answer).",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "answer_changed"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "agent_question",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_question_7a1f3c20",
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "user-123"
+        }
+      },
+      "name": "refuse_answer_hash_mismatch",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "answer",
+        "answer": "Use the release branch."
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhbnN3ZXIiLCJhbnN3ZXJfc2hhMjU2Ijoic2hhMjU2OmZiMTFjYWIxNzkyNmI0Zjc1N2I5ZmM2MDgwYjgzZDdlZGRmMDY2MzEyYmMwYzQ3OTJiNjJjMzFlMDFhYjgyOWUiLCJhdWQiOiJ0YV9pbnN0YWxsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZW1haWwiOiJ1c2VyLTEyM0BleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo2OGJhNDY5M2NjZmQwZjM2NDdiYWMxZTg1NzIzNjFiODllYmU3ZGEyNGI2ZmM2MjViNjViM2NlODIzYmFmYjgxIiwiaXRlbV9pZCI6ImF0dF9xdWVzdGlvbl83YTFmM2MyMCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInVzZXJfaWQiOiJ1c2VyLTEyMyJ9.nM25EW1uYAt0Ow_EUmdTOFpbjuawfEj84Hl7MjDl0KneLP85-6pSurZjGozqICEPRT1VIfvsaCzFyjQ6u9Z9CA",
+      "claims": {
+        "action": "answer",
+        "answer_sha256": "sha256:fb11cab17926b4f757b9fc6080b83d7eddf066312bc0c4792b62c31e01ab829e",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "user-123@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "item_id": "att_question_7a1f3c20",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "user_id": "user-123"
+      },
+      "description": "The hash was computed over the TRIMMED answer but the relayed text keeps its trailing whitespace. TA does not trim before hashing, so the signer must hash exactly what is relayed.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "answer_changed"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "agent_question",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_question_7a1f3c20",
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "user-123"
+        }
+      },
+      "name": "refuse_answer_hash_over_trimmed_text",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "answer",
+        "answer": "Yes, go ahead.  \n"
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy11bmtub3duIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiYWxpY2UifQ.MvuUzByfqBnrbY9sKoWgnydIA5YYzNVd-kaBIbbWbS0ySprrAfDjAIDGtSDAuqVc9IHcNNrE0mNBrdv-uXVzBg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "alice"
+      },
+      "description": "The header kid is not registered. An unknown kid, a wrong algorithm and a bad signature are deliberately indistinguishable (one reason) so a probe learns nothing about which keys exist.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "assertion_rejected"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-unknown"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_unknown_kid",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoidXNlci0xMjNAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoidXNlci0xMjMifQ.sW63kYCC1pO4-BsimPIbUrhoDyXgY-noOzk7lOBUS_FsnKQkp1lxjJ0YYfrNNqDrhfOfNLplUDF99ZVW5pxtCQ",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "user-123@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "user-123"
+      },
+      "description": "The signer is the requester of an agent-originated item and the claim self_approval_permitted is absent.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "self_approval"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_self_approval_without_claim",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6OTU0OGM3OTU3MzZjZWM2YWQ0MWQzNmZlYTJiNWNkMDU1ODc4ODVhOWZiYTk0ODhkZWFjOTA3MGNkYmRiOTFhNyIsIml0ZW1faWQiOiJhdHRfZHJhZnRfMzUyODM4ZDgiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoibWVtYmVyIiwidXNlcl9pZCI6ImFsaWNlIn0.iaLq428j_5uDPQFRhogIQLVXt7G0Za695rKjPT66fhBxho9j6qtPCniUXXsQM7Dwz91XG07fkE-Z7RO_KlLECg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "alice@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "member",
+        "user_id": "alice"
+      },
+      "description": "A member role cannot act on an any_maintainer item (maintainer_roles are admin and owner), even though it is signed correctly.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_permitted"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "any_maintainer",
+          "value": null
+        }
+      },
+      "name": "refuse_member_on_any_maintainer",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy1jdXN0b20ifQ.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZXJpbkBleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo5NTQ4Yzc5NTczNmNlYzZhZDQxZDM2ZmVhMmI1Y2QwNTU4Nzg4NWE5ZmJhOTQ4OGRlYWM5MDcwY2RiZGI5MWE3IiwiaXRlbV9pZCI6ImF0dF9kcmFmdF8zNTI4MzhkOCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInJvbGUiOiJ2aWV3ZXIiLCJ1c2VyX2lkIjoiZXJpbiJ9.HsGL8a5Exk8-p8i3bnjiQk5roULO5iIMtIqdlnnO1C1kN-GO5wx0MFYb77xKhqz2Wfx1Am_Rd4iYmetv8vyAAg",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "erin@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "viewer",
+        "user_id": "erin"
+      },
+      "description": "Custom role order viewer < editor < lead: a 'viewer' claim does not satisfy an item waiting on 'editor'.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_permitted"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-custom"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "role",
+          "value": "editor"
+        }
+      },
+      "name": "refuse_custom_role_order_too_low",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "editor",
+        "kid": "org-custom",
+        "maintainer_roles": [
+          "lead"
+        ],
+        "role_order": [
+          "viewer",
+          "editor",
+          "lead"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "intended": {
+        "accept_for": [
+          "approve",
+          "deny",
+          "answer"
+        ],
+        "assertion_claims": "user_id differs from waiting_on.value, escalated true, role at or above the registered key's escalation_min_role",
+        "audit": "TA records escalated true and the original waiting_on.value",
+        "item_waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        },
+        "refuse_when": [
+          "role below escalation_min_role",
+          "role claim absent",
+          "any other action"
+        ]
+      },
+      "name": "escalated_viewer_reroute",
+      "pending_reason": "Filled in by plan phase v0.17.12.11 item 17 (rule 7: rerouted user-targeted items verify under the escalated claim). Today TA refuses a user-addressed item signed by a different user, with reason not_permitted, even when escalated is true.",
+      "status": "pending"
+    }
+  ]
+}

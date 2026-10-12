@@ -21,6 +21,8 @@ age = { workspace = true }
 keyring = { workspace = true }
 toml = { workspace = true }
 rand = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 dirs = { workspace = true }
 
 [dev-dependencies]

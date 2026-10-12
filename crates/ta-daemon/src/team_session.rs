@@ -45,7 +45,20 @@ pub fn role_launch_env(
     if !(c.whiteboard_enabled || c.whiteboard_token.is_some()) {
         return Vec::new();
     }
-    let scope = format!("whiteboard:team_session:{}", state.id);
+    // One token per role launch: the session scope (so presence, handoff and
+    // tasks keep working), the role scope, the execution target, and the
+    // distinct outcome right only for the roles in `[whiteboard]
+    // outcome_roles` (default chief-of-staff). The daemon reads all of this
+    // back from the token when the role calls the whiteboard API (CR-04).
+    let wb_cfg = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
+    let mut scope_list = vec![
+        ta_agent_whiteboard::scopes::session_scope(&state.id),
+        ta_agent_whiteboard::scopes::role_scope(&state.id, role),
+        ta_agent_whiteboard::scopes::target_scope(ta_agent_whiteboard::scopes::DEFAULT_TARGET),
+    ];
+    if wb_cfg.outcome_roles.iter().any(|r| r == role) {
+        scope_list.push(ta_agent_whiteboard::scopes::OUTCOME_SEND_SCOPE.to_string());
+    }
     let granted = ta_credential_broker::CredentialBroker::open_for_project(project_root)
         .map_err(|e| e.to_string())
         .and_then(|broker| {
@@ -53,7 +66,7 @@ pub fn role_launch_env(
                 .grant(
                     Uuid::new_v4(),
                     &format!("{}:{role}", state.id),
-                    vec![scope],
+                    scope_list,
                     crate::token_refresh::WHITEBOARD_TOKEN_TTL_SECS,
                 )
                 .map_err(|e| e.to_string())

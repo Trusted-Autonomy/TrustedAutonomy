@@ -341,7 +341,16 @@ impl WhiteboardDaemonClient {
             .await
             .context("whiteboard outcome send: request failed")?;
         if !resp.status().is_success() {
-            anyhow::bail!("whiteboard outcome send failed: HTTP {}", resp.status());
+            let status = resp.status();
+            // The daemon's refusal says why (role not permitted, schema, size);
+            // surface it so the agent can act on it.
+            let reason = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "no detail returned".to_string());
+            anyhow::bail!("whiteboard outcome send failed: HTTP {status}: {reason}");
         }
         Ok(())
     }

@@ -1782,45 +1782,9 @@ impl AgentToolAccess {
     }
 }
 
-/// Token record stored in `.ta/daemon-tokens.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenRecord {
-    pub token: String,
-    pub scope: TokenScope,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub label: Option<String>,
-}
-
-/// Token permission scopes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TokenScope {
-    Read,
-    /// Service-account scope for relays (the Wayfinder poller): may read the
-    /// attention feed and call the relay endpoints (whiteboard, state
-    /// changes), but is never accepted as a human for approve, deny, apply or
-    /// answer. A relayed human action must carry that human's own assertion.
-    Relay,
-    Write,
-    Admin,
-}
-
-impl TokenScope {
-    pub fn allows_write(&self) -> bool {
-        matches!(self, Self::Relay | Self::Write | Self::Admin)
-    }
-
-    /// Whether a bare token of this scope can stand in for a human on the
-    /// gated routes (remote callers only; see `api::auth`). `Relay` cannot.
-    pub fn counts_as_human(&self) -> bool {
-        matches!(self, Self::Write | Self::Admin)
-    }
-
-    #[allow(dead_code)]
-    pub fn allows_admin(&self) -> bool {
-        matches!(self, Self::Admin)
-    }
-}
+// Token record and scope types live in `ta-credentials` so `ta token` (which
+// mints and revokes service-account tokens) and the daemon share one format.
+pub use ta_credentials::daemon_tokens::{TokenRecord, TokenScope};
 
 /// Manages bearer tokens stored in `daemon-tokens.json` in the per-user TA
 /// state directory (outside the project tree; v0.17.0.9). An old-location
@@ -1833,7 +1797,16 @@ impl TokenScope {
 pub struct TokenStore {
     tokens_path: PathBuf,
     /// In-process cache. `None` means the cache has not been loaded yet.
-    cache: std::sync::Arc<std::sync::Mutex<Option<Vec<TokenRecord>>>>,
+    cache: std::sync::Arc<std::sync::Mutex<TokenCache>>,
+}
+
+/// Cached records plus the on-disk stamp they were read at, so tokens minted
+/// or revoked by `ta token` while the daemon runs take effect without a
+/// restart.
+#[derive(Default)]
+struct TokenCache {
+    records: Option<Vec<TokenRecord>>,
+    stamp: Option<(std::time::SystemTime, u64)>,
 }
 
 impl Clone for TokenStore {
@@ -1849,7 +1822,15 @@ impl TokenStore {
     pub fn new(project_root: &Path) -> Self {
         Self {
             tokens_path: Self::resolve_path(project_root),
-            cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cache: std::sync::Arc::new(std::sync::Mutex::new(TokenCache::default())),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_path(tokens_path: PathBuf) -> Self {
+        Self {
+            tokens_path,
+            cache: std::sync::Arc::new(std::sync::Mutex::new(TokenCache::default())),
         }
     }
 
@@ -1879,106 +1860,102 @@ impl TokenStore {
         }
     }
 
-    /// Load all tokens, using the in-process cache when available.
+    fn disk_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
+        std::fs::metadata(&self.tokens_path)
+            .ok()
+            .and_then(|m| m.modified().ok().map(|t| (t, m.len())))
+    }
+
+    /// Load all tokens. Served from the cache unless the file changed on disk
+    /// (a `stat` per call), so `ta token create/revoke` apply immediately.
     pub fn load(&self) -> Vec<TokenRecord> {
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cached) = guard.as_ref() {
-            return cached.clone();
+        let stamp = self.disk_stamp();
+        if let Some(cached) = guard.records.as_ref() {
+            if guard.stamp == stamp {
+                return cached.clone();
+            }
         }
-        // Cache miss — load from disk.
         let tokens = self.load_from_disk();
-        *guard = Some(tokens.clone());
+        guard.records = Some(tokens.clone());
+        guard.stamp = stamp;
         tokens
     }
 
     fn load_from_disk(&self) -> Vec<TokenRecord> {
-        if !self.tokens_path.exists() {
-            return vec![];
+        match ta_credentials::daemon_tokens::load_file(&self.tokens_path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(
+                    path = %self.tokens_path.display(),
+                    error = %e,
+                    "daemon token file unreadable; no bearer tokens will be accepted until it is fixed"
+                );
+                vec![]
+            }
         }
-        match std::fs::read_to_string(&self.tokens_path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => vec![],
-        }
+    }
+
+    /// Persist `records` (digest-only for minted entries) and refresh the cache.
+    fn write_locked(
+        &self,
+        guard: &mut TokenCache,
+        records: Vec<TokenRecord>,
+    ) -> std::io::Result<()> {
+        ta_credentials::daemon_tokens::save_file(&self.tokens_path, &records)?;
+        guard.stamp = self.disk_stamp();
+        guard.records = Some(records);
+        Ok(())
     }
 
     /// Write tokens to disk atomically (tmp + rename) and update the cache.
     #[allow(dead_code)]
     pub fn save(&self, tokens: &[TokenRecord]) -> std::io::Result<()> {
-        if let Some(parent) = self.tokens_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(tokens)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        // Write to a tmp file then rename — atomic on POSIX, minimises TOCTOU window.
-        let tmp_path = self.tokens_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, &self.tokens_path)?;
-
-        // Update in-process cache.
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(tokens.to_vec());
-        Ok(())
+        self.write_locked(&mut guard, tokens.to_vec())
     }
 
+    /// Mint a token. Only the SHA-256 digest is persisted; the returned
+    /// record carries the plaintext in `token` (in memory only) so the caller
+    /// can show it once.
     #[allow(dead_code)]
     pub fn create(&self, scope: TokenScope, label: Option<String>) -> std::io::Result<TokenRecord> {
-        use rand::Rng;
-        // Hold the cache lock for the full create to prevent concurrent races.
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut records = guard
+            .records
+            .clone()
+            .filter(|_| guard.stamp == self.disk_stamp())
+            .unwrap_or_else(|| self.load_from_disk());
 
-        let cached = guard.get_or_insert_with(|| self.load_from_disk());
+        let (stored, secret) = ta_credentials::daemon_tokens::mint(scope, label, None);
+        records.push(stored.clone());
+        self.write_locked(&mut guard, records)?;
 
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 32] = rng.gen();
-        let token = format!("ta_{}", hex_encode(&bytes));
-
-        let record = TokenRecord {
-            token,
-            scope,
-            created_at: chrono::Utc::now(),
-            label,
-        };
-
-        cached.push(record.clone());
-
-        // Atomic write while still holding the lock.
-        if let Some(parent) = self.tokens_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(cached.as_slice())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let tmp_path = self.tokens_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, &self.tokens_path)?;
-
-        Ok(record)
+        let mut out = stored;
+        out.token = secret;
+        Ok(out)
     }
 
-    /// Validate a token string and return its record if valid.
-    ///
-    /// Uses the in-process cache — no disk I/O on cache hits.
+    /// Validate a token string and return its record if it is known, not
+    /// expired and not revoked. Digests are compared in constant time.
     pub fn validate(&self, token: &str) -> Option<TokenRecord> {
-        self.load().into_iter().find(|t| t.token == token)
+        let records = self.load();
+        ta_credentials::daemon_tokens::verify(&records, token, chrono::Utc::now()).cloned()
     }
 
+    /// Remove the record whose secret is `token`.
     #[allow(dead_code)]
     pub fn revoke(&self, token: &str) -> std::io::Result<bool> {
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        let cached = guard.get_or_insert_with(|| self.load_from_disk());
-
-        let len_before = cached.len();
-        cached.retain(|t| t.token != token);
-
-        if cached.len() < len_before {
-            // Atomic write.
-            if let Some(parent) = self.tokens_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let json = serde_json::to_string_pretty(cached.as_slice())
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let tmp_path = self.tokens_path.with_extension("tmp");
-            std::fs::write(&tmp_path, &json)?;
-            std::fs::rename(&tmp_path, &self.tokens_path)?;
+        let mut records = guard
+            .records
+            .clone()
+            .filter(|_| guard.stamp == self.disk_stamp())
+            .unwrap_or_else(|| self.load_from_disk());
+        let len_before = records.len();
+        records.retain(|t| !t.matches(token));
+        if records.len() < len_before {
+            self.write_locked(&mut guard, records)?;
             Ok(true)
         } else {
             Ok(false)
@@ -1989,7 +1966,8 @@ impl TokenStore {
     #[allow(dead_code)]
     pub fn invalidate_cache(&self) {
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = None;
+        guard.records = None;
+        guard.stamp = None;
     }
 }
 
@@ -2651,6 +2629,45 @@ mod tests {
         // Revoke it.
         assert!(store.revoke(&record.token).unwrap());
         assert!(store.validate(&record.token).is_none());
+    }
+
+    #[test]
+    fn token_store_persists_digest_only_and_rejects_expired_revoked() {
+        use chrono::Duration;
+        use ta_credentials::daemon_tokens as dt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon-tokens.json");
+        let store = TokenStore::with_path(path.clone());
+
+        let rec = store
+            .create(TokenScope::Relay, Some("poller".into()))
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains(&rec.token), "secret must not be on disk");
+        assert!(raw.contains(&dt::digest_of(&rec.token)));
+        assert_eq!(store.validate(&rec.token).unwrap().scope, TokenScope::Relay);
+
+        // An external writer (ta token create) adds expired and revoked
+        // entries, and a legacy plaintext one; the running store sees them.
+        let mut records = dt::load_file(&path).unwrap();
+        let (expired, expired_secret) =
+            dt::mint(TokenScope::Read, None, Some(Duration::minutes(-5)));
+        let (mut revoked, revoked_secret) = dt::mint(TokenScope::Write, None, None);
+        revoked.revoked_at = Some(chrono::Utc::now());
+        let legacy: TokenRecord = serde_json::from_str(
+            r#"{"token":"ta_legacy_plain","scope":"write","created_at":"2026-01-01T00:00:00Z","label":"old"}"#,
+        )
+        .unwrap();
+        records.extend([expired, revoked, legacy]);
+        dt::save_file(&path, &records).unwrap();
+
+        assert!(store.validate(&expired_secret).is_none());
+        assert!(store.validate(&revoked_secret).is_none());
+        assert_eq!(
+            store.validate("ta_legacy_plain").unwrap().scope,
+            TokenScope::Write
+        );
+        assert!(store.validate(&rec.token).is_some());
     }
 
     #[test]

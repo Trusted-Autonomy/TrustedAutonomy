@@ -46,6 +46,12 @@ pub struct PresenceRecord {
     /// need a schema migration. `None` means "the only daemon there is."
     #[serde(default)]
     pub host_id: Option<String>,
+    /// The team session this agent belongs to. Stamped by the daemon from the
+    /// verified session token, never taken from the client body (v0.17.12.2).
+    /// `None` for records written before the field existed; such a record is
+    /// visible to no session-filtered query and expires with its TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_session: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
 }
 
@@ -62,8 +68,14 @@ impl PresenceRecord {
             phase: None,
             resources: Vec::new(),
             host_id: None,
+            team_session: None,
             last_heartbeat: Utc::now(),
         }
+    }
+
+    pub fn with_team_session(mut self, team_session: impl Into<String>) -> Self {
+        self.team_session = Some(team_session.into());
+        self
     }
 
     pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
@@ -82,6 +94,43 @@ impl PresenceRecord {
     }
 }
 
+/// Encode one key component so it contains only `[A-Za-z0-9-]` plus `=XX`
+/// hex escapes. The NATS JetStream KV key character set is
+/// `[-/_=.a-zA-Z0-9]`; keeping `_` out of every encoded component makes `_`
+/// an unambiguous separator, so two different `(team_session, id)` pairs can
+/// never produce the same key.
+pub fn encode_key_component(component: &str) -> String {
+    let mut out = String::with_capacity(component.len());
+    for b in component.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("={b:02X}"));
+        }
+    }
+    out
+}
+
+/// The one function that derives a session-scoped key from
+/// `(team_session, id)`: `<encoded session>_<encoded id>`. Presence keys, task
+/// ids and handoff routing all use it, so isolation cannot drift between them.
+/// With no session the id is returned unchanged (the pre-isolation key).
+pub fn session_scoped_key(team_session: Option<&str>, id: &str) -> String {
+    match team_session {
+        Some(session) => format!(
+            "{}_{}",
+            encode_key_component(session),
+            encode_key_component(id)
+        ),
+        None => id.to_string(),
+    }
+}
+
+/// The presence bucket key for `(team_session, agent_id)`.
+pub fn presence_key(team_session: Option<&str>, agent_id: &str) -> String {
+    session_scoped_key(team_session, agent_id)
+}
+
 /// Publish (or refresh) `record` in the presence bucket with `ttl`. Call
 /// this on a heartbeat interval well inside `ttl` to stay visible.
 pub async fn publish_presence(
@@ -92,15 +141,27 @@ pub async fn publish_presence(
     let mut record = record.clone();
     record.last_heartbeat = Utc::now();
     let payload = serde_json::to_vec(&record)?;
+    let key = presence_key(record.team_session.as_deref(), &record.agent_id);
     transport
-        .kv_put(PRESENCE_BUCKET, &record.agent_id, payload, Some(ttl))
+        .kv_put(PRESENCE_BUCKET, &key, payload, Some(ttl))
         .await
 }
 
 /// Explicitly withdraw a presence record (e.g. on clean agent shutdown)
 /// rather than waiting out the TTL.
 pub async fn withdraw_presence(transport: &dyn WhiteboardTransport, agent_id: &str) -> Result<()> {
-    transport.kv_delete(PRESENCE_BUCKET, agent_id).await
+    withdraw_presence_in(transport, None, agent_id).await
+}
+
+/// Withdraw the presence record of `agent_id` inside `team_session`.
+pub async fn withdraw_presence_in(
+    transport: &dyn WhiteboardTransport,
+    team_session: Option<&str>,
+    agent_id: &str,
+) -> Result<()> {
+    transport
+        .kv_delete(PRESENCE_BUCKET, &presence_key(team_session, agent_id))
+        .await
 }
 
 #[cfg(test)]
@@ -167,5 +228,43 @@ mod tests {
         let json = r#"{"agent_id":"a","goal_run_id":"g","source_dir":"/tmp","phase":null,"resources":[],"last_heartbeat":"2026-01-01T00:00:00Z"}"#;
         let record: PresenceRecord = serde_json::from_str(json).unwrap();
         assert_eq!(record.host_id, None);
+    }
+
+    #[test]
+    fn key_components_never_collide_across_the_separator() {
+        // Without escaping, ("a_", "b") and ("a", "_b") would both be a__b-ish.
+        assert_ne!(
+            session_scoped_key(Some("a_"), "b"),
+            session_scoped_key(Some("a"), "_b")
+        );
+        assert_ne!(
+            session_scoped_key(Some("a_b"), "c"),
+            session_scoped_key(Some("a"), "b_c")
+        );
+        let k = session_scoped_key(Some("sess 1/x"), "agent.1");
+        assert!(
+            k.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=')),
+            "{k}"
+        );
+        assert_eq!(k.matches('_').count(), 1, "{k}");
+    }
+
+    #[test]
+    fn same_agent_id_in_two_sessions_gets_two_keys() {
+        assert_ne!(
+            presence_key(Some("s1"), "agent-1"),
+            presence_key(Some("s2"), "agent-1")
+        );
+        assert_eq!(presence_key(None, "agent-1"), "agent-1");
+    }
+
+    #[test]
+    fn a_record_without_team_session_deserializes_and_omits_the_field() {
+        let old = r#"{"agent_id":"a","goal_run_id":"g","source_dir":"/x","last_heartbeat":"2026-01-01T00:00:00Z"}"#;
+        let rec: PresenceRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(rec.team_session, None);
+        let out = serde_json::to_string(&rec).unwrap();
+        assert!(!out.contains("team_session"), "{out}");
     }
 }

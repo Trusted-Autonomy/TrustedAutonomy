@@ -192,6 +192,11 @@ pub const AGENT_ALLOWED: &[(&str, &str, &str)] = &[
     ),
     (
         "POST",
+        "/api/whiteboard/outcome/check",
+        "read-only verification: the poller asks whether a report-back payload is a validly stamped and signed outcome; the verdict is the only effect",
+    ),
+    (
+        "POST",
         "/api/webhooks/github",
         "webhook: keeps its own HMAC signature authentication and is served outside the auth middleware",
     ),

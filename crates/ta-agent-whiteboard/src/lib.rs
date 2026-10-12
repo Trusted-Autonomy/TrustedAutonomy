@@ -24,14 +24,17 @@ pub mod discovery;
 pub mod error;
 pub mod handoff;
 pub mod memory_transport;
+pub mod nats_auth;
 pub mod nats_transport;
+pub mod outcome_envelope;
 pub mod presence;
 mod resource_match;
+pub mod scopes;
 pub mod staged_conflicts;
 pub mod tasks;
 pub mod transport;
 
-pub use config::{select_transport, WhiteboardConfig};
+pub use config::{select_transport, select_transport_for_project, WhiteboardConfig};
 pub use error::{Result, WhiteboardError};
 pub use memory_transport::InMemoryTransport;
 pub use nats_transport::NatsTransport;
