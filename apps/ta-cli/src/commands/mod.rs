@@ -68,6 +68,7 @@ pub mod setup;
 pub mod shell;
 pub mod shell_tui;
 pub mod source_lock;
+pub mod spend;
 pub mod state_secrets;
 pub mod stats;
 pub mod status;

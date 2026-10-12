@@ -37,6 +37,7 @@ pub mod provenance;
 pub mod reviewer;
 pub mod security;
 pub mod social_audit;
+pub mod spend;
 pub mod store;
 pub mod token_cost;
 pub mod tool_surface;
@@ -51,6 +52,7 @@ pub use conversation::{ConversationStore, ConversationTurn, TurnRole};
 pub use error::GoalError;
 pub use events::{EventDispatcher, LogSink, NotificationSink, TaEvent};
 pub use experiment::{experiments_dir, ExperimentConfig};
+pub use goal_run::BudgetAbort;
 pub use goal_run::{slugify_title, GoalRun, GoalRunState};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use human_review::{
@@ -58,6 +60,7 @@ pub use human_review::{
 };
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
+pub use origin::OriginClass;
 pub use persona::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle, PersonaSummary};
 pub use phase_selector::{PhaseSelector, PhaseSelectorConfig, SelectedPhase};
 pub use reviewer::{
@@ -70,7 +73,9 @@ pub use security::{
 };
 pub use social_audit::{DraftSocialRecord, SocialAuditLog, SocialPostRecordState};
 pub use store::GoalRunStore;
-pub use token_cost::{compute_cost, rate_for_model, ModelRate};
+pub use token_cost::{
+    compute_cost, rate_for_model, resolve_cost, CostSource, ModelRate, PriceTable, TokenUsage,
+};
 pub use velocity::{
     aggregate_by_contributor, detect_phase_conflicts, filter_by_phase_prefix,
     merge_velocity_entries, migrate_local_to_history, update_parent_rework, ContributorAggregate,

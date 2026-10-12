@@ -802,6 +802,19 @@ pub struct DraftPackage {
     /// `Finalizing` goal. `None` for a normal first build. See `RebuildProvenance`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuilt_from: Option<RebuildProvenance>,
+
+    /// Why the goal behind this draft started (asked, suggested, unasked),
+    /// copied from the goal. ACCOUNTING DATA ONLY: shown to the reviewer and
+    /// used to group spend, never read by approval, policy or routing.
+    #[serde(default)]
+    pub origin_class: ta_goal::origin::OriginClass,
+
+    /// Set when the draft was built from partial work because the agent was
+    /// stopped (a `--max-tokens` / `--max-usd` ceiling). Holds the message that
+    /// was shown when the agent was stopped. The reviewer sees the draft as
+    /// incomplete. `None` for a draft of a goal that ran to its own end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -1157,6 +1170,8 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
+        origin_class: Default::default(),
+        incomplete_reason: None,
     }
 }
 
@@ -1313,6 +1328,8 @@ mod tests {
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         }
     }
 

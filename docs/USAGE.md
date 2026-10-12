@@ -5688,7 +5688,7 @@ Routes that stay open to agents or carry their own authentication, each with the
 | `POST /api/webhooks/vcs` | webhook: keeps its own HMAC signature authentication and is served outside the auth middleware |
 | `POST /api/attention/{id}/act` | accepts the local human credential or a signed human assertion in the body; a relay token alone is refused by the handler |
 
-Read-only routes keep the loopback bypass. The lists live in the daemon's `human_gate` module (`GATED_ROUTES`, `AGENT_ALLOWED`, `SELF_AUTHENTICATING`) and this table is checked against them by a test.
+Read-only routes keep the loopback bypass. That includes `GET /api/spend` (spend totals grouped by origin class, project, origin or model; see "Tracking spend by origin"), which returns aggregates only and changes nothing. The lists live in the daemon's `human_gate` module (`GATED_ROUTES`, `AGENT_ALLOWED`, `SELF_AUTHENTICATING`) and this table is checked against them by a test.
 
 A request to a gated route is accepted when it carries one of:
 
@@ -14482,9 +14482,97 @@ When [Meridian](#effort--kpi-analytics-meridian) is installed, `ta draft apply -
 
 ### Token cost tracking
 
-Each goal records the Claude API tokens used during the agent run. The cost is computed from a built-in rate table (Sonnet 4.6: $3/$15 per 1M input/output tokens; Opus 4.6: $15/$75; Haiku 4.5: $0.80/$4.0). Local models (Ollama) always show $0.00.
+Each goal records the tokens the agent used, in four kinds: uncached input, output, cache read and cache write (a long goal's input is mostly cache reads, so leaving them out understates the cost badly). The cost is the agent runtime's own reported cost when it gives one (exact), otherwise it is computed from a price table (an estimate). A model the table does not know, such as an Ollama or Codex model, keeps its tokens and shows $0.00 with no estimate flag: TA never invents a price. See "Tracking spend by origin" below for how to read, price and cap it.
 
 The COST column appears automatically in `ta stats velocity` and `ta stats velocity-detail` when at least one entry has a non-zero cost.
+
+### Tracking spend by origin
+
+Spend can be reported, and capped, by why the work started. Each goal carries an **origin class**:
+
+| Class | Meaning |
+|---|---|
+| `asked` | A person asked for this work |
+| `suggested` | Someone or something suggested it and it was accepted |
+| `unasked` | Nobody asked (the default, so unclassified spend is never hidden) |
+
+The class is accounting data only. It never changes whether a draft can be auto-approved, what policy applies, where a goal is routed or what an agent may do. Goals whose origin is `cos` or `chat` are still never auto-approved, whatever their class.
+
+**Setting it.** Whoever launches the goal sets the class, in one of three ways (the flag wins over the provenance file, which wins over the environment):
+
+```bash
+ta run "Fix the login redirect" --origin-class asked
+TA_GOAL_ORIGIN_CLASS=suggested ta run "Tidy the changelog"
+ta run "Triage the inbox" --provenance-file wake.json    # {"requester": {...}, "origin_class": "unasked"}
+```
+
+An unknown value is refused with the accepted ones listed. The class is stamped when the goal is created and never changes afterwards (a later `ta run --goal-id` cannot rewrite it). Goals started from inside a running goal inherit its class through `TA_GOAL_ORIGIN_CLASS`.
+
+**An agent cannot set it.** The `ta_goal_start` tool, the chat-mode tools and the daemon API do not accept an origin class, and a `ta run` started from inside an agent ignores a different `--origin-class` and keeps the inherited one (with a warning that says so). Honest limit: that last check reads the agent marker variables (`TA_AGENT_CONTEXT` and friends), and an agent that unsets them could start a nested goal with another class. Until the OS sandbox phases land, treat the class as accounting you trust the launcher for, not as a security boundary.
+
+**The completion record.** When a goal's agent session ends, TA publishes one record in three places:
+
+```bash
+ta goal status <id> --json        # under "completion"
+curl -s 'http://127.0.0.1:7700/api/events?types=goal.completed'   # a goal.completed event per goal
+# headless runs: the __TA_HEADLESS_RESULT__ line carries it under "completion"
+```
+
+```json
+{
+  "goal_id": "3f2a9c10-...", "state": "pr_ready", "model": "claude-sonnet-5-5",
+  "input_tokens": 86, "output_tokens": 44216,
+  "cache_read_tokens": 4423499, "cache_creation_tokens": 138618,
+  "usd": 1.4391539, "cost_estimated": false, "cost_source": "runtime",
+  "origin": "cos", "origin_class": "asked",
+  "aborted": false, "outcome": null
+}
+```
+
+`cost_source` is `runtime` (the agent runtime reported the cost: exact, `cost_estimated` is false), `table` (priced from the table: an estimate, `cost_estimated` is true) or `none` (no price: tokens only, `usd` is 0).
+
+**Spend report.** `GET /api/spend` groups spend across the goals the daemon serves. It is read-only and returns only totals, so it needs no human credential:
+
+```bash
+curl -s 'http://127.0.0.1:7700/api/spend?group_by=origin_class,project&since=2026-10-01&until=2026-11-01'
+```
+
+`group_by` takes any of `origin_class`, `project`, `origin`, `model` (empty gives one total). `since` and `until` take a date or an RFC 3339 time and filter on when the goal was created. Each group carries token totals of all four kinds, `usd`, and the count of goals with an exact cost (`exact_cost_goals`), an estimated cost (`estimated_cost_goals`) and no price (`unpriced_goals`), plus `aborted_budget_goals`. The numbers are read from the goal records, not from the velocity file, because an agent can write to the velocity file. Goals recorded before cost tracking existed count as unpriced.
+
+**Prices.** The built-in table covers the Claude 3, 4 and 5 families, with cache read at one tenth of the input price and cache write at 1.25 times it. The `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-fable-5-1` rows are provisional (they use their tier's price and have not been checked against a published price sheet), which is one reason the runtime's reported cost is preferred whenever it exists. To set your own, create `.ta/pricing.toml`; its rows are checked before the built-in table:
+
+```toml
+[[model]]
+name = "claude-sonnet-5-5"   # matches any model name containing this text
+input = 3.0                  # USD per million tokens
+output = 15.0
+cache_read = 0.30
+cache_write = 3.75
+
+[[model]]
+name = "my-local-model"
+exact = true                 # match the whole model name only
+input = 0.0
+output = 0.0
+cache_read = 0.0
+cache_write = 0.0
+```
+
+All four rates are required. A malformed file is reported in the log and the built-in table is used.
+
+**Capping a goal.** `--max-tokens` and `--max-usd` stop the agent when the goal reaches the ceiling; `[budget] max_tokens` and `max_usd` in `.ta/workflow.toml` set project defaults that the flags override:
+
+```bash
+ta run "Large refactor" --headless --max-tokens 5000000 --max-usd 20
+```
+
+```toml
+[budget]
+max_tokens = 5000000   # input + output + cache read + cache write
+max_usd = 20.0
+```
+
+When a ceiling is reached TA stops the agent, prints which ceiling and what was used, records the outcome `aborted_budget` on the goal, and builds the draft from the partial work, marked as incomplete (`ta draft view` says so first). What it can promise: TA reads the runtime's usage report after each agent turn, so the agent is stopped at the first turn boundary after the ceiling is crossed. Overshoot is possible by up to one turn (a single long turn can cost a lot); undershoot is capped, since a goal is never stopped before it reaches the ceiling. Ceilings are enforced only for headless runs, because that is where TA reads the usage report. `--max-usd` needs a price: from the runtime's reported cost or the price table. For an unpriced model it warns and only `--max-tokens` applies. A goal that finishes on its own over the ceiling is not marked incomplete.
 
 ### Viewing aggregate stats
 

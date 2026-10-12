@@ -1048,6 +1048,8 @@ mod tests {
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         }
     }
 

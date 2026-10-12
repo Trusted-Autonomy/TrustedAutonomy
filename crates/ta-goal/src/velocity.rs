@@ -95,6 +95,8 @@ pub enum GoalOutcome {
     Cancelled,
     Failed,
     Timeout,
+    /// The agent was stopped for exceeding `--max-tokens` or `--max-usd`.
+    AbortedBudget,
 }
 
 impl std::fmt::Display for GoalOutcome {
@@ -105,6 +107,7 @@ impl std::fmt::Display for GoalOutcome {
             GoalOutcome::Cancelled => write!(f, "cancelled"),
             GoalOutcome::Failed => write!(f, "failed"),
             GoalOutcome::Timeout => write!(f, "timeout"),
+            GoalOutcome::AbortedBudget => write!(f, "aborted_budget"),
         }
     }
 }
@@ -177,6 +180,22 @@ pub struct VelocityEntry {
     /// `false` for Ollama/Codex/unknown agents where cost data is unavailable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cost_estimated: bool,
+    // ── Cache tokens, cost source, origin class (v0.17.12.15) ───────
+    /// Input tokens served from the prompt cache.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_read_tokens: u64,
+    /// Input tokens written to the prompt cache.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_creation_tokens: u64,
+    /// Where `cost_usd` came from (`runtime`, `table` or `none`).
+    #[serde(default)]
+    pub cost_source: crate::token_cost::CostSource,
+    /// Why the goal started. Accounting data only; never read by a decision.
+    #[serde(default)]
+    pub origin_class: crate::origin::OriginClass,
+    /// `true` when the agent was stopped by a spend ceiling.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aborted_budget: bool,
     // ── Meridian-compatible token fields (v0.17.0.12) ───────────────
     /// Input tokens in Meridian's field-name convention (`tokens_input`).
     /// `None` when no token data was captured; `Some(n)` when captured (even if n=0).
@@ -249,6 +268,11 @@ impl VelocityEntry {
             cost_usd: 0.0,
             model: String::new(),
             cost_estimated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_source: crate::token_cost::CostSource::None,
+            origin_class: goal.effective_origin_class(),
+            aborted_budget: goal.budget_abort.is_some(),
             tokens_input: None,
             tokens_output: None,
             derived_title: None,
@@ -308,6 +332,35 @@ impl VelocityEntry {
     /// Stamp with the git committer name from the given working directory.
     pub fn with_committer(mut self, work_dir: &Path) -> Self {
         self.committer = git_committer(work_dir);
+        self
+    }
+
+    /// Copy the goal's recorded spend (all four token kinds, the cost and
+    /// where it came from) onto the entry. A goal recorded before cost
+    /// resolution existed (`cost_source = none` with tokens) is priced from
+    /// `table`, as an estimate.
+    pub fn with_goal_spend(
+        mut self,
+        goal: &GoalRun,
+        table: &crate::token_cost::PriceTable,
+    ) -> Self {
+        let usage = goal.token_usage();
+        let (usd, estimated, source) = if goal.cost_source != crate::token_cost::CostSource::None {
+            (goal.cost_usd, goal.cost_estimated, goal.cost_source)
+        } else {
+            let r = crate::token_cost::resolve_cost(table, &goal.agent_model, &usage, None);
+            (r.usd, r.estimated, r.source)
+        };
+        self.input_tokens = usage.input;
+        self.output_tokens = usage.output;
+        self.cache_read_tokens = usage.cache_read;
+        self.cache_creation_tokens = usage.cache_creation;
+        self.model = goal.agent_model.clone();
+        self.tokens_input = Some(usage.input);
+        self.tokens_output = Some(usage.output);
+        self.cost_usd = usd;
+        self.cost_estimated = estimated;
+        self.cost_source = source;
         self
     }
 
@@ -902,6 +955,63 @@ mod tests {
             PathBuf::from("/tmp/staging"),
             PathBuf::from("/tmp/store"),
         )
+    }
+
+    #[test]
+    fn with_goal_spend_copies_cache_tokens_cost_and_origin_class() {
+        use crate::token_cost::{CostSource, PriceTable};
+        let mut goal = make_goal();
+        goal.origin_class = Some(crate::origin::OriginClass::Asked);
+        goal.agent_model = "claude-sonnet-5-5".into();
+        goal.input_tokens = 86;
+        goal.output_tokens = 44_216;
+        goal.cache_read_input_tokens = 4_423_499;
+        goal.cache_creation_input_tokens = 138_618;
+        goal.cost_usd = 1.4391539;
+        goal.cost_source = CostSource::Runtime;
+        let e = VelocityEntry::from_goal(&goal, GoalOutcome::Applied)
+            .with_goal_spend(&goal, &PriceTable::builtin());
+        assert_eq!(e.origin_class, crate::origin::OriginClass::Asked);
+        assert_eq!(e.cache_read_tokens, 4_423_499);
+        assert_eq!(e.cache_creation_tokens, 138_618);
+        assert_eq!(e.cost_usd, 1.4391539);
+        assert!(!e.cost_estimated, "runtime-reported cost is exact");
+        assert_eq!(e.cost_source, CostSource::Runtime);
+        assert!(!e.aborted_budget);
+    }
+
+    #[test]
+    fn with_goal_spend_prices_an_old_goal_from_the_table_as_an_estimate() {
+        use crate::token_cost::{CostSource, PriceTable};
+        let mut goal = make_goal();
+        goal.agent_model = "claude-sonnet-4-6".into();
+        goal.output_tokens = 1_000_000;
+        let e = VelocityEntry::from_goal(&goal, GoalOutcome::Applied)
+            .with_goal_spend(&goal, &PriceTable::builtin());
+        assert!(e.cost_estimated);
+        assert_eq!(e.cost_source, CostSource::Table);
+        assert!((e.cost_usd - 15.0).abs() < 1e-9);
+        // An unknown model keeps tokens and no price.
+        goal.agent_model = "qwen3.5:9b".into();
+        let e = VelocityEntry::from_goal(&goal, GoalOutcome::Applied)
+            .with_goal_spend(&goal, &PriceTable::builtin());
+        assert_eq!(e.cost_usd, 0.0);
+        assert!(!e.cost_estimated);
+        assert_eq!(e.output_tokens, 1_000_000);
+    }
+
+    #[test]
+    fn velocity_entry_defaults_origin_class_for_old_lines_and_has_an_aborted_outcome() {
+        let goal = make_goal();
+        let mut v =
+            serde_json::to_value(VelocityEntry::from_goal(&goal, GoalOutcome::Applied)).unwrap();
+        v.as_object_mut().unwrap().remove("origin_class");
+        v.as_object_mut().unwrap().remove("cost_source");
+        let e: VelocityEntry = serde_json::from_value(v).unwrap();
+        assert_eq!(e.origin_class, crate::origin::OriginClass::Unasked);
+        assert_eq!(GoalOutcome::AbortedBudget.to_string(), "aborted_budget");
+        let json = serde_json::to_string(&GoalOutcome::AbortedBudget).unwrap();
+        assert_eq!(json, "\"aborted_budget\"");
     }
 
     #[test]

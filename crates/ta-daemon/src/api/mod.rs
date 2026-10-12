@@ -33,6 +33,7 @@ pub mod plan;
 pub mod project_browser;
 pub mod project_new;
 pub mod settings;
+pub mod spend;
 pub mod stats;
 pub mod status;
 pub mod team;
@@ -543,6 +544,7 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/settings/vcs/check", post(settings::check_vcs))
         // Velocity stats API (v0.15.14.2).
+        .route("/api/spend", get(spend::spend_report))
         .route("/api/stats/velocity", get(stats::velocity_aggregate))
         .route("/api/stats/velocity-detail", get(stats::velocity_detail))
         // Studio "Stats" tab: goal stats + velocity + Meridian KPIs (v0.17.0.12.6 item 6).

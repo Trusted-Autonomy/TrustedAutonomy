@@ -687,6 +687,9 @@ impl GatewayState {
 
         let mut goal_run = GoalRun::new(title, objective, agent_id, staging_path, store_path);
         goal_run.goal_run_id = goal_run_id;
+        // Accounting only: a goal an agent starts inherits the class its launcher
+        // exported. No tool argument can set or change it.
+        goal_run.origin_class = Some(ta_goal::origin::inherited_origin_class());
 
         let profile = AlignmentProfile::default_developer();
         let options = CompilerOptions::default();
@@ -737,6 +740,9 @@ impl GatewayState {
 
         let mut goal_run = GoalRun::new(title, objective, agent_id, staging_path, store_path);
         goal_run.goal_run_id = goal_run_id;
+        // Accounting only: a goal an agent starts inherits the class its launcher
+        // exported. No tool argument can set or change it.
+        goal_run.origin_class = Some(ta_goal::origin::inherited_origin_class());
 
         let options = CompilerOptions {
             resource_scope: resource_scope.unwrap_or_else(|| vec!["fs://workspace/**".to_string()]),
@@ -862,6 +868,7 @@ impl GatewayState {
         // H9: anything a chat session produces is chat-originated and is
         // never auto-approved.
         goal_run.origin = Some(ta_goal::origin::CHAT_ORIGIN.to_string());
+        goal_run.origin_class = Some(ta_goal::origin::inherited_origin_class());
 
         // Unlike compile_with_id, compile_chat_manifest generates its own
         // manifest_id internally: keep GoalRun's own manifest_id field
@@ -2228,6 +2235,39 @@ mod tests {
         goal.goal_run_id
     }
 
+    /// Accounting-only `origin_class` is set by the launcher. No MCP tool (the
+    /// goal tools, chat-mode tools, anything on the router) accepts it, and a
+    /// caller that passes one anyway changes nothing.
+    #[test]
+    fn agent_cannot_set_origin_class_through_any_tool() {
+        let (server, _dir) = test_server();
+        for tool in server.tool_router.list_all() {
+            let schema = serde_json::to_string(&tool.input_schema).unwrap();
+            assert!(
+                !schema.contains("origin_class"),
+                "tool {} accepts origin_class; it must be settable only by the launcher",
+                tool.name
+            );
+        }
+
+        let params: GoalStartParams = serde_json::from_value(serde_json::json!({
+            "title": "t",
+            "objective": "o",
+            "origin_class": "asked"
+        }))
+        .expect("an unknown key is ignored, not an error");
+        crate::tools::goal::handle_goal_start(&server.state, params)
+            .unwrap_or_else(|e| panic!("ta_goal_start failed: {}", e.message));
+        let state = server.state.lock().unwrap();
+        let goals = state.goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(
+            goals[0].effective_origin_class(),
+            ta_goal::OriginClass::Unasked,
+            "the class came from the (unset) launcher environment, not the tool argument"
+        );
+    }
+
     #[test]
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
@@ -2939,6 +2979,40 @@ mod tests {
             "refusal must be visible in the response: {}",
             response
         );
+    }
+
+    /// The origin class is accounting data: whatever it is, a `cos` or `chat`
+    /// goal is still refused auto-approve and any other goal behaves as before.
+    #[test]
+    fn origin_class_never_changes_an_auto_approve_decision() {
+        for class in ta_goal::OriginClass::ALL {
+            for (origin, expect_auto) in [
+                (Some("cos"), false),
+                (Some("chat"), false),
+                (Some("cli"), true),
+                (None, true),
+            ] {
+                let (server, dir) = test_server();
+                let goal_id = start_goal(&server);
+                {
+                    let state = server.state.lock().unwrap();
+                    let mut goal = state.goal_store.get(goal_id).unwrap().unwrap();
+                    goal.origin = origin.map(str::to_string);
+                    goal.origin_class = Some(class);
+                    state.goal_store.save(&goal).unwrap();
+                }
+                let response =
+                    submit_draft_with_auto_approve_policy(&server, dir.path(), goal_id, "a.txt");
+                assert_eq!(
+                    response["status"] == "auto_approved",
+                    expect_auto,
+                    "origin {:?}, class {}: {}",
+                    origin,
+                    class,
+                    response
+                );
+            }
+        }
     }
 
     #[test]

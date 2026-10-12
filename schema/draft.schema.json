@@ -1018,6 +1018,26 @@
       ],
       "type": "object"
     },
+    "OriginClass": {
+      "description": "Why a goal started. Accounting data only: see the section comment above.",
+      "oneOf": [
+        {
+          "const": "asked",
+          "description": "A person asked for this work.",
+          "type": "string"
+        },
+        {
+          "const": "suggested",
+          "description": "Someone or something suggested it and it was accepted.",
+          "type": "string"
+        },
+        {
+          "const": "unasked",
+          "description": "Nobody asked. The default, so unclassified spend is never hidden.",
+          "type": "string"
+        }
+      ]
+    },
     "PatchAction": {
       "description": "Action types for external patch sets.",
       "enum": [
@@ -1289,6 +1309,17 @@
             "string",
             "null"
           ]
+        },
+        "origin_class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OriginClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the work started, as the launcher declared it in the provenance\nfile. Accounting data only; stamped on the goal as its `origin_class`."
         },
         "requester": {
           "$ref": "#/$defs/Requester"
@@ -1839,8 +1870,20 @@
       },
       "type": "array"
     },
+    "incomplete_reason": {
+      "description": "Set when the draft was built from partial work because the agent was\nstopped (a `--max-tokens` / `--max-usd` ceiling). Holds the message that\nwas shown when the agent was stopped. The reviewer sees the draft as\nincomplete. `None` for a draft of a goal that ran to its own end.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "iteration": {
       "$ref": "#/$defs/Iteration"
+    },
+    "origin_class": {
+      "$ref": "#/$defs/OriginClass",
+      "default": "unasked",
+      "description": "Why the goal behind this draft started (asked, suggested, unasked),\ncopied from the goal. ACCOUNTING DATA ONLY: shown to the reviewer and\nused to group spend, never read by approval, policy or routing."
     },
     "package_id": {
       "format": "uuid",

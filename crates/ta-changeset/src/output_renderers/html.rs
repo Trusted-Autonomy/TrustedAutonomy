@@ -408,6 +408,8 @@ mod tests {
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         };
         pkg.status = DraftStatus::PendingReview;
 
@@ -528,6 +530,8 @@ mod tests {
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         };
 
         let adapter = HtmlRenderer::new();
@@ -644,6 +648,8 @@ mod tests {
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         };
         pkg.agent_decision_log = vec![DecisionLogEntry {
             decision: "Used Ed25519 over RSA".to_string(),

@@ -173,6 +173,161 @@ pub fn auto_approve_refusal(origin: &str) -> String {
     )
 }
 
+// ── Origin class (accounting only) ───────────────────────────────────────────
+//
+// `origin_class` records WHY a goal started: a person asked for it, someone
+// suggested it, or nobody asked. It exists so spend can be reported and capped
+// by that class (`GET /api/spend`, `ta run --max-usd`).
+//
+// IT IS ACCOUNTING DATA ONLY. It is never read by auto-approve, policy,
+// routing, credential scoping, sandbox selection or any other authorization
+// decision. Those read `origin` (via `origin_blocks_auto_approve`) and the
+// human credential, never this. A test (`origin_class_is_never_read_by_a_decision_path`)
+// scans the source tree and fails if a decision module mentions it.
+//
+// It is set by the LAUNCHER only: `ta run --origin-class`, `$TA_GOAL_ORIGIN_CLASS`
+// or the `origin_class` field of `--provenance-file`. No agent-facing surface
+// (the `ta_goal_start` MCP tool, chat-mode tools, the daemon API) accepts it,
+// it is stamped once at goal creation and never changed, and nested goals
+// inherit it through `$TA_GOAL_ORIGIN_CLASS`.
+
+/// Environment variable `ta run` reads as the goal origin class when
+/// `--origin-class` is not given. `ta run` exports it so goals started from
+/// inside a running goal inherit it.
+pub const ORIGIN_CLASS_ENV_VAR: &str = "TA_GOAL_ORIGIN_CLASS";
+
+/// Why a goal started. Accounting data only: see the section comment above.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginClass {
+    /// A person asked for this work.
+    Asked,
+    /// Someone or something suggested it and it was accepted.
+    Suggested,
+    /// Nobody asked. The default, so unclassified spend is never hidden.
+    #[default]
+    Unasked,
+}
+
+impl OriginClass {
+    /// Every class, in report order.
+    pub const ALL: [OriginClass; 3] = [
+        OriginClass::Asked,
+        OriginClass::Suggested,
+        OriginClass::Unasked,
+    ];
+
+    /// The lowercase name used on the command line, in JSON and in reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OriginClass::Asked => "asked",
+            OriginClass::Suggested => "suggested",
+            OriginClass::Unasked => "unasked",
+        }
+    }
+}
+
+impl std::fmt::Display for OriginClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OriginClass {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        parse_origin_class(s)
+    }
+}
+
+/// Parse an origin class (case-insensitive, trimmed). An unknown value is an
+/// error that lists the accepted ones, so a typo never silently becomes
+/// `unasked`.
+pub fn parse_origin_class(s: &str) -> Result<OriginClass, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "asked" => Ok(OriginClass::Asked),
+        "suggested" => Ok(OriginClass::Suggested),
+        "unasked" => Ok(OriginClass::Unasked),
+        other => Err(format!(
+            "invalid origin class {:?}: expected one of asked, suggested, unasked \
+             (e.g. --origin-class asked)",
+            other
+        )),
+    }
+}
+
+/// Read and validate the origin class from [`ORIGIN_CLASS_ENV_VAR`]. Unset or
+/// blank means "not given". An invalid value is an error (fail loudly).
+pub fn origin_class_from_env() -> Result<Option<OriginClass>, String> {
+    match std::env::var(ORIGIN_CLASS_ENV_VAR) {
+        Ok(v) if v.trim().is_empty() => Ok(None),
+        Ok(v) => parse_origin_class(&v)
+            .map(Some)
+            .map_err(|e| format!("{} (from ${})", e, ORIGIN_CLASS_ENV_VAR)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The origin class a goal started by an agent-facing surface (the MCP
+/// `ta_goal_start` tool, a nested `ta` call) receives: only what the launcher
+/// exported, else `unasked`. Never taken from a tool argument.
+pub fn inherited_origin_class() -> OriginClass {
+    match origin_class_from_env() {
+        Ok(c) => c.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "ignoring an invalid inherited origin class; the goal is recorded as unasked. \
+                 Set TA_GOAL_ORIGIN_CLASS to asked, suggested or unasked"
+            );
+            OriginClass::default()
+        }
+    }
+}
+
+/// Pick the class to stamp on a goal at creation.
+///
+/// `existing` is what the record already carries (`Some` means it was stamped
+/// at creation and is fixed). `requested` is what the launcher asked for (flag,
+/// provenance file or environment, already merged by the caller);
+/// `inherited` is `$TA_GOAL_ORIGIN_CLASS`; `launched_by_agent` says the
+/// process is running inside an agent.
+///
+/// Returns `None` to leave the record alone, else the class to write.
+/// Rules: an existing class is never changed; when launched by an agent the
+/// inherited class wins over any request (an agent cannot raise or lower the
+/// class of work it starts); otherwise the request, then the inherited class,
+/// then `unasked`.
+pub fn origin_class_to_stamp(
+    existing: Option<OriginClass>,
+    requested: Option<OriginClass>,
+    inherited: Option<OriginClass>,
+    launched_by_agent: bool,
+) -> Option<OriginClass> {
+    if existing.is_some() {
+        return None;
+    }
+    let chosen = if launched_by_agent {
+        inherited
+    } else {
+        requested.or(inherited)
+    };
+    Some(chosen.unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +457,152 @@ mod tests {
     #[test]
     fn refusal_text_names_the_origin() {
         assert!(auto_approve_refusal("cos").starts_with("auto-approve refused: origin=cos"));
+    }
+
+    #[test]
+    fn origin_class_default_is_unasked_and_parse_validates() {
+        assert_eq!(OriginClass::default(), OriginClass::Unasked);
+        assert_eq!(parse_origin_class("asked"), Ok(OriginClass::Asked));
+        assert_eq!(
+            parse_origin_class(" Suggested "),
+            Ok(OriginClass::Suggested)
+        );
+        assert_eq!(parse_origin_class("UNASKED"), Ok(OriginClass::Unasked));
+        for bad in ["", "ask", "requested", "cos", "asked,unasked"] {
+            let e = parse_origin_class(bad).unwrap_err();
+            assert!(e.contains("asked, suggested, unasked"), "{e}");
+        }
+        assert_eq!("asked".parse::<OriginClass>(), Ok(OriginClass::Asked));
+    }
+
+    #[test]
+    fn origin_class_serde_uses_snake_case_and_rejects_unknown() {
+        assert_eq!(
+            serde_json::to_string(&OriginClass::Suggested).unwrap(),
+            "\"suggested\""
+        );
+        let c: OriginClass = serde_json::from_str("\"asked\"").unwrap();
+        assert_eq!(c, OriginClass::Asked);
+        assert!(serde_json::from_str::<OriginClass>("\"Asked\"").is_err());
+        assert!(serde_json::from_str::<OriginClass>("\"bogus\"").is_err());
+    }
+
+    #[test]
+    fn stamping_follows_request_then_inherited_then_default() {
+        use OriginClass::*;
+        assert_eq!(
+            origin_class_to_stamp(None, None, None, false),
+            Some(Unasked)
+        );
+        assert_eq!(
+            origin_class_to_stamp(None, Some(Asked), None, false),
+            Some(Asked)
+        );
+        assert_eq!(
+            origin_class_to_stamp(None, None, Some(Suggested), false),
+            Some(Suggested)
+        );
+        assert_eq!(
+            origin_class_to_stamp(None, Some(Asked), Some(Suggested), false),
+            Some(Asked)
+        );
+    }
+
+    #[test]
+    fn a_recorded_class_is_never_changed() {
+        for existing in OriginClass::ALL {
+            for requested in OriginClass::ALL {
+                assert_eq!(
+                    origin_class_to_stamp(Some(existing), Some(requested), None, false),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inside_an_agent_the_inherited_class_wins_over_any_request() {
+        use OriginClass::*;
+        // An agent that runs `ta run --origin-class asked` inside an
+        // `unasked` goal gets `unasked`; inside no class at all, also `unasked`.
+        assert_eq!(
+            origin_class_to_stamp(None, Some(Asked), Some(Unasked), true),
+            Some(Unasked)
+        );
+        assert_eq!(
+            origin_class_to_stamp(None, Some(Asked), None, true),
+            Some(Unasked)
+        );
+        assert_eq!(
+            origin_class_to_stamp(None, Some(Unasked), Some(Suggested), true),
+            Some(Suggested)
+        );
+    }
+
+    /// `origin_class` is accounting data. No module that makes an
+    /// authorization, policy, routing or approval decision may read it. This
+    /// scans their sources (CRLF-normalized for Windows checkouts).
+    #[test]
+    fn origin_class_is_never_read_by_a_decision_path() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        // (crate directory, file or directory relative to crates/)
+        let decision_paths = [
+            "ta-policy/src",
+            "ta-sandbox/src",
+            "ta-brain/src",
+            "ta-credential-broker/src",
+            "ta-credentials/src",
+            "ta-mediation/src",
+            "ta-daemon/src/human_gate.rs",
+            "ta-daemon/src/router.rs",
+            "ta-daemon/src/assertion.rs",
+            "ta-goal/src/security.rs",
+            "ta-goal/src/chat_mode.rs",
+            "ta-goal/src/tool_surface.rs",
+            "ta-mcp-gateway/src/interceptor.rs",
+            "ta-mcp-gateway/src/tools/draft.rs",
+        ];
+        let mut hits = Vec::new();
+        for rel in decision_paths {
+            let path = root.join(rel);
+            assert!(
+                path.exists(),
+                "decision path {rel} no longer exists; update this list so the scan keeps \
+                 covering the module that replaced it"
+            );
+            scan_for_origin_class(&path, &mut hits);
+        }
+        assert!(
+            hits.is_empty(),
+            "origin_class is accounting data only and must not be read by a decision path, \
+             but these files mention it: {hits:?}"
+        );
+    }
+
+    fn scan_for_origin_class(path: &std::path::Path, hits: &mut Vec<String>) {
+        if path.is_dir() {
+            for e in std::fs::read_dir(path).unwrap().flatten() {
+                scan_for_origin_class(&e.path(), hits);
+            }
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("origin_class") || lower.contains("originclass") {
+                hits.push(path.display().to_string());
+            }
+        }
+    }
+
+    /// Auto-approve refusal is decided by `origin` alone: every origin class
+    /// leaves `cos` and `chat` refused and other origins unaffected.
+    #[test]
+    fn auto_approve_refusal_does_not_depend_on_origin_class() {
+        for _class in OriginClass::ALL {
+            for blocked in NO_AUTO_APPROVE_ORIGINS {
+                assert!(origin_blocks_auto_approve(Some(blocked)));
+            }
+            assert!(!origin_blocks_auto_approve(Some("cli")));
+            assert!(!origin_blocks_auto_approve(None));
+        }
     }
 }
