@@ -88,6 +88,17 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub workflow: WorkflowSection,
 
+    /// Per-goal spend ceilings (v0.17.12.15). `ta run --max-tokens` and
+    /// `--max-usd` override these for one goal.
+    ///
+    /// ```toml
+    /// [budget]
+    /// max_tokens = 5000000
+    /// max_usd = 20.0
+    /// ```
+    #[serde(default)]
+    pub budget: BudgetConfig,
+
     /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
     ///
     /// Each command is run in the staging workspace. Results are embedded in the
@@ -1617,6 +1628,19 @@ pub struct DisplayConfig {
     pub color: bool,
 }
 
+/// Default per-goal spend ceilings from `[budget]` in `.ta/workflow.toml`.
+/// Absent means no ceiling. A goal that reaches one is stopped, recorded as
+/// `aborted_budget`, and its draft is marked incomplete.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BudgetConfig {
+    /// Stop the agent once input + output + cache tokens reach this many.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// Stop the agent once its cost reaches this many USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_usd: Option<f64>,
+}
+
 /// Garbage collection / draft lifecycle configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcConfig {
@@ -2170,6 +2194,16 @@ fn merge_toml_values(base: &mut toml::Value, overrides: toml::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_section_defaults_to_no_ceiling_and_parses() {
+        let none: WorkflowConfig = toml::from_str("").unwrap();
+        assert_eq!(none.budget, BudgetConfig::default());
+        let cfg: WorkflowConfig =
+            toml::from_str("[budget]\nmax_tokens = 5000000\nmax_usd = 20.0\n").unwrap();
+        assert_eq!(cfg.budget.max_tokens, Some(5_000_000));
+        assert_eq!(cfg.budget.max_usd, Some(20.0));
+    }
 
     #[test]
     fn build_config_defaults_to_warning() {

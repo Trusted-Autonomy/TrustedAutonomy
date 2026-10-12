@@ -1461,6 +1461,20 @@ fn diagnose_goal(
     }
 }
 
+/// The goal record plus its machine-readable completion record under
+/// `completion` (tokens of all four kinds, usd, cost_estimated, origin,
+/// origin_class, aborted). Every key of the goal record is unchanged.
+fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(g)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "completion".to_string(),
+            serde_json::to_value(ta_goal::spend::CompletionRecord::from_goal(g))?,
+        );
+    }
+    Ok(value)
+}
+
 fn show_status(
     store: &GoalRunStore,
     config: &GatewayConfig,
@@ -1471,8 +1485,10 @@ fn show_status(
     match store.get(goal_run_id)? {
         Some(g) => {
             if json_output {
-                let json = serde_json::to_string_pretty(&g)?;
-                println!("{}", json);
+                // The goal record plus its machine-readable completion record
+                // (tokens of all four kinds, usd, cost_estimated, origin,
+                // origin_class, aborted), added under `completion`.
+                println!("{}", serde_json::to_string_pretty(&status_json(&g)?)?);
                 return Ok(());
             }
 
@@ -1530,6 +1546,17 @@ fn show_status(
             }
             println!("Created:  {}", g.created_at.to_rfc3339());
             println!("Updated:  {}", g.updated_at.to_rfc3339());
+            println!("Class:    {}", g.effective_origin_class());
+            if g.token_usage().total() > 0 || g.cost_source != ta_goal::CostSource::None {
+                println!(
+                    "{}",
+                    super::spend::summary_line(&ta_goal::spend::CompletionRecord::from_goal(&g))
+                );
+            }
+            if let Some(ref abort) = g.budget_abort {
+                println!("Budget:   aborted_budget ({})", abort.limit);
+                println!("          {}", abort.message);
+            }
             if let Some(ref src) = g.source_dir {
                 println!("Source:   {}", src.display());
             }
@@ -3959,6 +3986,76 @@ pub(crate) fn reconcile_stale_terminal_goals(
     }
 
     Ok(fixed)
+}
+
+#[cfg(test)]
+mod spend_status_tests {
+    use super::*;
+
+    #[test]
+    fn status_json_keeps_the_goal_record_and_adds_the_completion_record() {
+        let mut g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/tmp/w"),
+            std::path::PathBuf::from("/tmp/s"),
+        );
+        g.origin_class = Some(ta_goal::OriginClass::Asked);
+        g.input_tokens = 3;
+        g.output_tokens = 4;
+        g.cache_read_input_tokens = 5;
+        g.cache_creation_input_tokens = 6;
+        g.cost_usd = 0.25;
+        g.cost_source = ta_goal::CostSource::Runtime;
+        let v = status_json(&g).unwrap();
+        // The goal record's own keys are still there.
+        assert_eq!(v["goal_run_id"], g.goal_run_id.to_string());
+        assert_eq!(v["origin_class"], "asked");
+        assert_eq!(v["cache_read_input_tokens"], 5);
+        let c = &v["completion"];
+        assert_eq!(c["goal_id"], g.goal_run_id.to_string());
+        assert_eq!(c["input_tokens"], 3);
+        assert_eq!(c["output_tokens"], 4);
+        assert_eq!(c["cache_read_tokens"], 5);
+        assert_eq!(c["cache_creation_tokens"], 6);
+        assert_eq!(c["usd"], 0.25);
+        assert_eq!(c["cost_estimated"], false);
+        assert_eq!(c["origin_class"], "asked");
+        assert_eq!(c["aborted"], false);
+    }
+
+    #[test]
+    fn an_old_goal_record_without_the_new_fields_still_loads_as_unasked() {
+        let g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/tmp/w"),
+            std::path::PathBuf::from("/tmp/s"),
+        );
+        let mut v = serde_json::to_value(&g).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        for k in [
+            "origin_class",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "cost_usd",
+            "cost_estimated",
+            "cost_source",
+            "budget_abort",
+        ] {
+            obj.remove(k);
+        }
+        let loaded: ta_goal::GoalRun = serde_json::from_value(v).unwrap();
+        assert_eq!(loaded.origin_class, None);
+        assert_eq!(
+            loaded.effective_origin_class(),
+            ta_goal::OriginClass::Unasked
+        );
+        assert_eq!(loaded.cost_source, ta_goal::CostSource::None);
+        assert!(loaded.budget_abort.is_none());
+    }
 }
 
 #[cfg(test)]

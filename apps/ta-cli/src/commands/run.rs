@@ -3291,6 +3291,11 @@ pub fn execute(
         // only; nothing here reaches the agent's prompt.
         super::review_packet::stamp_goal(&mut updated_goal, quiet)?;
 
+        // v0.17.12.15: stamp why the goal started (`--origin-class`, the
+        // provenance file or the inherited environment). Accounting data only:
+        // nothing below reads it to decide anything. Set once at creation.
+        super::spend::stamp_origin_class(&mut updated_goal, quiet)?;
+
         // Generic cost-classification tag (v0.17.x cost-experiment
         // framework): `--workflow-tag`, opaque to TA core. Set only when the
         // flag is actually present -- this block also runs on the
@@ -4314,6 +4319,58 @@ pub fn execute(
         println!();
     }
 
+    // v0.17.12.15: spend settings for this launch. The ceilings come from
+    // `--max-tokens` / `--max-usd`, else `[budget]` in `.ta/workflow.toml`; the
+    // price table is `.ta/pricing.toml` over the built-in table.
+    let budget_limits = super::spend::resolve_limits(&config.workspace_root)?;
+    let price_table = super::spend::price_table(&config.workspace_root);
+    if !budget_limits.is_unlimited() {
+        tracing::info!(
+            goal_id = %goal.goal_run_id,
+            max_tokens = ?budget_limits.max_tokens,
+            max_usd = ?budget_limits.max_usd,
+            headless = headless || quiet,
+            "per-goal spend ceiling in force"
+        );
+        if !quiet {
+            println!(
+                "Budget: max tokens {}, max usd {} (checked after each agent turn, so a goal can \
+                 overshoot by up to one turn)",
+                budget_limits
+                    .max_tokens
+                    .map_or("none".to_string(), |t| t.to_string()),
+                budget_limits
+                    .max_usd
+                    .map_or("none".to_string(), |u| format!("${u:.2}"))
+            );
+        }
+        if !(headless || quiet) {
+            eprintln!(
+                "[warn] --max-tokens / --max-usd are enforced only for headless runs, where TA \
+                 reads the agent's usage report. This launch is {}, so the ceiling will not stop \
+                 the agent. Re-run with --headless to enforce it.",
+                if interactive {
+                    "interactive"
+                } else {
+                    "not headless"
+                }
+            );
+        }
+    }
+    {
+        // Export the goal's origin class so a goal started from inside this
+        // agent inherits it (it cannot choose its own).
+        let class = GoalRunStore::new(&config.goals_dir)
+            .ok()
+            .and_then(|s| s.get(goal.goal_run_id).ok().flatten())
+            .map(|g| g.effective_origin_class())
+            .unwrap_or_default();
+        agent_config.env.insert(
+            ta_goal::origin::ORIGIN_CLASS_ENV_VAR.to_string(),
+            class.to_string(),
+        );
+    }
+
     // Track the start time BEFORE agent launch to compute accurate duration (v0.9.5.1).
     let agent_start = std::time::Instant::now();
 
@@ -4400,6 +4457,8 @@ pub fn execute(
             &events_dir_for_launch,
             credential_scopes,
             transcript_dir.as_deref(),
+            budget_limits,
+            &price_table,
         )
         .map(|(exit, tokens)| {
             agent_tokens_out = tokens;
@@ -4432,6 +4491,8 @@ pub fn execute(
                 &events_dir_for_launch,
                 credential_scopes,
                 transcript_dir.as_deref(),
+                budget_limits,
+                &price_table,
             )
             .map(|(exit, tokens)| {
                 agent_tokens_out = tokens;
@@ -4449,6 +4510,8 @@ pub fn execute(
             &events_dir_for_launch,
             credential_scopes,
             transcript_dir.as_deref(),
+            budget_limits,
+            &price_table,
         )
         .map(|(exit, tokens)| {
             agent_tokens_out = tokens;
@@ -4470,12 +4533,15 @@ pub fn execute(
                 if let Ok(Some(mut g)) = store.get(goal.goal_run_id) {
                     g.agent_pid = None;
                     // v0.15.14.2: Persist accumulated token counts from stream-json.
-                    if agent_tokens_out.input_tokens > 0 || agent_tokens_out.output_tokens > 0 {
-                        g.input_tokens = agent_tokens_out.input_tokens;
-                        g.output_tokens = agent_tokens_out.output_tokens;
-                    }
-                    if !agent_tokens_out.model.is_empty() {
-                        g.agent_model = agent_tokens_out.model.clone();
+                    // v0.17.12.15: all four token kinds, the cost (runtime-reported
+                    // when available, else priced from the table) and a budget abort.
+                    ta_goal::spend::record_usage_on_goal(
+                        &mut g,
+                        &agent_tokens_out.tracker,
+                        &price_table,
+                    );
+                    if let Some(abort) = &agent_tokens_out.budget_abort {
+                        g.budget_abort = Some(abort.clone());
                     }
                     if matches!(g.state, ta_goal::GoalRunState::Running) {
                         // Store our own PID so the watchdog can confirm we're
@@ -5337,6 +5403,20 @@ pub fn execute(
                         complete_chat_session_without_draft(config, goal.goal_run_id)?;
                         chat_session_finished = true;
                     } else {
+                        // The draft could not be built, so the goal ends here:
+                        // still publish its spend (and, for a budget abort, say so
+                        // in the velocity record) before returning the error.
+                        super::spend::record_budget_abort_velocity(
+                            config,
+                            goal.goal_run_id,
+                            &price_table,
+                        );
+                        super::spend::publish_completion(
+                            &config.goals_dir,
+                            &config.workspace_root.join(".ta").join("events"),
+                            goal.goal_run_id,
+                            quiet,
+                        );
                         return Err(e);
                     }
                 }
@@ -5442,6 +5522,14 @@ pub fn execute(
         store.save(&session)?;
     }
 
+    // v0.17.12.15: publish the goal's completion record (event + log line).
+    let completion = super::spend::publish_completion(
+        &config.goals_dir,
+        &config.workspace_root.join(".ta").join("events"),
+        goal.goal_run_id,
+        quiet,
+    );
+
     // In headless mode, output structured JSON for orchestrator consumption.
     // In quiet mode, print a minimal human-readable summary (no JSON).
     if headless && !quiet {
@@ -5458,13 +5546,14 @@ pub fn execute(
             .flatten()
             .map(|g| g.state.to_string())
             .unwrap_or_else(|| goal_current.state.to_string());
-        let output = serde_json::json!({
-            "goal_id": goal_id,
-            "draft_built": draft_built,
-            "draft_id": draft_id,
-            "state": final_state,
-            "chat_session_finished": chat_session_finished,
-        });
+        let output = headless_result_json(
+            &goal_id,
+            draft_built,
+            draft_id.as_deref(),
+            &final_state,
+            chat_session_finished,
+            completion.as_ref(),
+        );
         println!("\n__TA_HEADLESS_RESULT__:{}", output);
     } else if quiet {
         // Quiet mode: always print completion/failure summary regardless of verbosity.
@@ -5926,53 +6015,13 @@ fn launch_agent_interactive(
     Ok((result.exit_status, guidance_log))
 }
 
-/// Token counts accumulated from a headless agent's stream-json output.
+/// What a headless agent session reported while it ran: its running usage
+/// (all four token kinds, the model and any runtime-reported cost) and, when a
+/// spend ceiling stopped it, the abort record.
 #[derive(Debug, Default, Clone)]
 struct AgentTokens {
-    input_tokens: u64,
-    output_tokens: u64,
-    model: String,
-}
-
-/// Parse a single stream-json line and accumulate token usage.
-///
-/// Claude Code emits a `result` event with a `usage` object:
-/// `{"type":"result","usage":{"input_tokens":N,"output_tokens":M}}`
-/// A `system` init event carries the model:
-/// `{"type":"system","subtype":"init","model":"claude-sonnet-4-6-..."}`
-fn accumulate_tokens(line: &str, tokens: &mut AgentTokens) {
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-        return;
-    };
-    let event_type = val.get("type").and_then(|t| t.as_str());
-    match event_type {
-        Some("result") => {
-            if let Some(usage) = val.get("usage") {
-                tokens.input_tokens += usage
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                tokens.output_tokens += usage
-                    .get("output_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-            }
-        }
-        Some("system") if tokens.model.is_empty() => {
-            if let Some(model) = val.get("model").and_then(|v| v.as_str()) {
-                tokens.model = model.to_string();
-            }
-        }
-        Some("assistant") if tokens.model.is_empty() => {
-            // Also extract model from assistant message metadata if present.
-            if let Some(msg) = val.get("message") {
-                if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
-                    tokens.model = model.to_string();
-                }
-            }
-        }
-        _ => {}
-    }
+    tracker: ta_goal::spend::UsageTracker,
+    budget_abort: Option<ta_goal::BudgetAbort>,
 }
 
 // ── Credential scope enforcement (v0.17.6.1) ──────────────────────────────────
@@ -6511,6 +6560,8 @@ fn launch_agent_via_runtime(
     events_dir: &std::path::Path,
     credential_scopes: Option<&[String]>,
     transcript_dir: Option<&std::path::Path>,
+    budget_limits: ta_goal::spend::BudgetLimits,
+    price_table: &ta_goal::PriceTable,
 ) -> std::io::Result<(std::process::ExitStatus, AgentTokens)> {
     use std::io::{BufRead, BufReader};
     use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
@@ -6780,13 +6831,29 @@ fn launch_agent_via_runtime(
         });
         if let Some(stdout) = handle.take_stdout() {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                accumulate_tokens(&line, &mut tokens);
-                if let Some(r) = recorder.as_mut() {
-                    r.record(&line);
-                }
-                println!("{}", line);
-            }
+            pump_agent_output(
+                reader.lines().map_while(Result::ok),
+                &mut tokens,
+                budget_limits,
+                price_table,
+                goal_id,
+                |line| {
+                    if let Some(r) = recorder.as_mut() {
+                        r.record(line);
+                    }
+                    println!("{}", line);
+                },
+                || {
+                    if let Err(e) = handle.stop() {
+                        tracing::warn!(
+                            goal_id = %goal_id,
+                            error = %e,
+                            "could not stop the agent cleanly after the spend ceiling; \
+                             waiting for it to exit"
+                        );
+                    }
+                },
+            );
         }
         if let Some(r) = recorder {
             r.finish(goal_id);
@@ -6820,6 +6887,106 @@ fn launch_agent_via_runtime(
     }
 
     Ok((exit_status, tokens))
+}
+
+/// The JSON after `__TA_HEADLESS_RESULT__:` for a finished headless run.
+/// `completion` is the spend and origin-class record (tokens of all four kinds,
+/// usd, cost_estimated, origin, origin_class, aborted).
+fn headless_result_json(
+    goal_id: &str,
+    draft_built: bool,
+    draft_id: Option<&str>,
+    state: &str,
+    chat_session_finished: bool,
+    completion: Option<&ta_goal::spend::CompletionRecord>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "goal_id": goal_id,
+        "draft_built": draft_built,
+        "draft_id": draft_id,
+        "state": state,
+        "chat_session_finished": chat_session_finished,
+        "completion": completion,
+    })
+}
+
+/// Feed an agent's stdout lines through the usage tracker and enforce the
+/// per-goal spend ceiling (v0.17.12.15).
+///
+/// `emit` receives every line (to print and record it). The check runs on every
+/// line, which in practice means after each agent turn because the runtime
+/// reports usage per message. When a ceiling is reached while the agent is still
+/// running, `stop_agent` is called once, the abort is stored in
+/// `tokens.budget_abort` and reading stops: the agent is stopped between turns,
+/// so a goal can overshoot by up to one turn but is never stopped early. A
+/// ceiling crossed only by the closing result line (the agent already ended) is
+/// reported but does not abort.
+fn pump_agent_output(
+    lines: impl Iterator<Item = String>,
+    tokens: &mut AgentTokens,
+    budget_limits: ta_goal::spend::BudgetLimits,
+    price_table: &ta_goal::PriceTable,
+    goal_id: uuid::Uuid,
+    mut emit: impl FnMut(&str),
+    mut stop_agent: impl FnMut(),
+) {
+    let mut usd_ceiling_unpriced_warned = false;
+    for line in lines {
+        tokens.tracker.observe_line(&line);
+        emit(&line);
+        if budget_limits.is_unlimited() {
+            continue;
+        }
+        let usage = tokens.tracker.usage();
+        let usd = tokens.tracker.live_cost_usd(price_table);
+        if budget_limits.max_usd.is_some()
+            && usd.is_none()
+            && usage.total() > 0
+            && !usd_ceiling_unpriced_warned
+        {
+            usd_ceiling_unpriced_warned = true;
+            let model = tokens.tracker.model().to_string();
+            tracing::warn!(
+                goal_id = %goal_id,
+                model = %model,
+                "--max-usd cannot be enforced: the model has no price"
+            );
+            eprintln!(
+                "[warn] --max-usd cannot be enforced for model {:?}: it has no price and the \
+                 agent runtime has not reported a cost. Use --max-tokens, or add the model to \
+                 .ta/pricing.toml.",
+                if model.is_empty() { "unknown" } else { &model }
+            );
+        }
+        if let Some(abort) = budget_limits.check(&usage, usd) {
+            if tokens.tracker.is_final() {
+                tracing::warn!(
+                    goal_id = %goal_id,
+                    limit = %abort.limit,
+                    observed = abort.observed,
+                    limit_value = abort.limit_value,
+                    "goal finished over its spend ceiling (not stopped: the agent had already ended)"
+                );
+                eprintln!(
+                    "[budget] Goal finished at {} {} against a ceiling of {}. The agent had \
+                     already ended, so the draft is not marked incomplete.",
+                    abort.observed, abort.limit, abort.limit_value
+                );
+            } else {
+                tracing::warn!(
+                    goal_id = %goal_id,
+                    limit = %abort.limit,
+                    observed = abort.observed,
+                    limit_value = abort.limit_value,
+                    "stopping the agent: spend ceiling reached"
+                );
+                eprintln!("[budget] {}", abort.message);
+                stop_agent();
+                tokens.budget_abort = Some(abort);
+                break;
+            }
+        }
+    }
 }
 
 /// Whether a failed draft build after the agent exited is in fact the normal,
@@ -13594,6 +13761,8 @@ pre_launch:
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         };
 
         // Save the draft package.
@@ -13765,6 +13934,8 @@ pre_launch:
             request_provenance: None,
             plan_md_base: None,
             rebuilt_from: None,
+            origin_class: Default::default(),
+            incomplete_reason: None,
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();
@@ -16452,6 +16623,276 @@ plan_pending_window = 7
         assert!(
             !args.contains(&"--workflow".to_string()),
             "--workflow must be omitted when the canonical goal has no engine workflow"
+        );
+    }
+}
+
+/// Budget enforcement against a fake agent runtime (v0.17.12.15): the fake emits
+/// the same stream-json usage events a real agent does.
+#[cfg(test)]
+mod spend_tests {
+    use super::*;
+    use ta_goal::spend::BudgetLimits;
+    use ta_goal::PriceTable;
+
+    fn init() -> String {
+        r#"{"type":"system","subtype":"init","model":"claude-sonnet-5-5"}"#.to_string()
+    }
+
+    /// One assistant turn costing `out` output tokens and `read` cache reads.
+    fn turn(id: &str, out: u64, read: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"input_tokens":1,"output_tokens":{out},"cache_read_input_tokens":{read},"cache_creation_input_tokens":0}}}}}}"#
+        )
+    }
+
+    fn result(out: u64, read: u64, cost: Option<f64>) -> String {
+        let cost = cost.map_or(String::new(), |c| format!(r#""total_cost_usd":{c},"#));
+        format!(
+            r#"{{"type":"result",{cost}"usage":{{"input_tokens":3,"output_tokens":{out},"cache_read_input_tokens":{read},"cache_creation_input_tokens":0}}}}"#
+        )
+    }
+
+    fn run(lines: Vec<String>, limits: BudgetLimits) -> (AgentTokens, Vec<String>, usize) {
+        let mut tokens = AgentTokens::default();
+        let mut seen = Vec::new();
+        let mut stops = 0usize;
+        pump_agent_output(
+            lines.into_iter(),
+            &mut tokens,
+            limits,
+            &PriceTable::builtin(),
+            uuid::Uuid::new_v4(),
+            |l| seen.push(l.to_string()),
+            || stops += 1,
+        );
+        (tokens, seen, stops)
+    }
+
+    #[test]
+    fn token_ceiling_stops_the_agent_between_turns_and_records_the_abort() {
+        let limits = BudgetLimits {
+            max_tokens: Some(1_000),
+            max_usd: None,
+        };
+        // Turn 1 totals 1+300+200 = 501 (under). Turn 2 adds 1+400+200 = 601 more
+        // (1,102 total, over): the agent is stopped there, before turn 3.
+        let lines = vec![
+            init(),
+            turn("m1", 300, 200),
+            turn("m2", 400, 200),
+            turn("m3", 400, 200),
+            result(1_100, 600, Some(0.5)),
+        ];
+        let (tokens, seen, stops) = run(lines, limits);
+        let abort = tokens.budget_abort.expect("aborted");
+        assert_eq!(abort.limit, "max_tokens");
+        assert_eq!(stops, 1, "stopped exactly once");
+        assert_eq!(
+            seen.len(),
+            3,
+            "reading stops at the turn that crossed the ceiling"
+        );
+        assert!(abort.observed >= 1_000.0 && abort.observed < 1_300.0);
+        assert!(abort.message.contains("incomplete"));
+        assert!(
+            !tokens.tracker.is_final(),
+            "the result line was never reached"
+        );
+    }
+
+    #[test]
+    fn undershoot_is_capped_nothing_stops_below_the_ceiling() {
+        let limits = BudgetLimits {
+            max_tokens: Some(1_000_000),
+            max_usd: Some(100.0),
+        };
+        let lines = vec![
+            init(),
+            turn("m1", 300, 200),
+            turn("m2", 400, 200),
+            result(700, 400, None),
+        ];
+        let (tokens, seen, stops) = run(lines, limits);
+        assert!(tokens.budget_abort.is_none());
+        assert_eq!(stops, 0);
+        assert_eq!(seen.len(), 4, "every line is passed through");
+        assert!(tokens.tracker.is_final());
+    }
+
+    #[test]
+    fn usd_ceiling_uses_the_table_price_of_the_live_count() {
+        // Sonnet output is $15 per million: 100k output tokens is $1.50.
+        let limits = BudgetLimits {
+            max_tokens: None,
+            max_usd: Some(1.0),
+        };
+        let lines = vec![
+            init(),
+            turn("m1", 10_000, 0),
+            turn("m2", 100_000, 0),
+            turn("m3", 1, 0),
+        ];
+        let (tokens, seen, stops) = run(lines, limits);
+        let abort = tokens.budget_abort.expect("aborted");
+        assert_eq!(abort.limit, "max_usd");
+        assert_eq!(stops, 1);
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn no_ceiling_never_stops_or_drops_a_line() {
+        let (tokens, seen, stops) = run(
+            vec![init(), turn("m1", 9_999_999, 9_999_999), result(1, 1, None)],
+            BudgetLimits::default(),
+        );
+        assert!(tokens.budget_abort.is_none());
+        assert_eq!((seen.len(), stops), (3, 0));
+    }
+
+    #[test]
+    fn a_goal_that_ends_over_the_ceiling_by_itself_is_not_marked_aborted() {
+        let limits = BudgetLimits {
+            max_tokens: Some(100),
+            max_usd: None,
+        };
+        // No streamed turns: only the closing result line crosses the ceiling.
+        let (tokens, _seen, stops) = run(vec![init(), result(500, 500, Some(1.0))], limits);
+        assert!(tokens.budget_abort.is_none(), "the agent had already ended");
+        assert_eq!(stops, 0);
+        assert!(tokens.tracker.is_final());
+    }
+
+    #[test]
+    fn an_unpriced_model_cannot_hit_a_usd_ceiling() {
+        let limits = BudgetLimits {
+            max_tokens: None,
+            max_usd: Some(0.01),
+        };
+        let lines = vec![
+            r#"{"type":"system","model":"qwen3.5:9b"}"#.to_string(),
+            turn("m1", 5_000_000, 0),
+        ];
+        let (tokens, _seen, stops) = run(lines, limits);
+        assert!(tokens.budget_abort.is_none());
+        assert_eq!(stops, 0);
+    }
+
+    #[test]
+    fn the_abort_reaches_the_goal_record_the_completion_record_and_the_draft_flag() {
+        let limits = BudgetLimits {
+            max_tokens: Some(100),
+            max_usd: None,
+        };
+        let (tokens, _seen, _stops) = run(vec![init(), turn("m1", 500, 0)], limits);
+        let mut goal = ta_goal::GoalRun::new(
+            "budget",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/tmp/w"),
+            std::path::PathBuf::from("/tmp/s"),
+        );
+        ta_goal::spend::record_usage_on_goal(&mut goal, &tokens.tracker, &PriceTable::builtin());
+        goal.budget_abort = tokens.budget_abort.clone();
+        // Cache and output tokens were recorded from the stream.
+        assert_eq!(goal.output_tokens, 500);
+        assert_eq!(goal.cost_source, ta_goal::CostSource::Table);
+        let rec = ta_goal::spend::CompletionRecord::from_goal(&goal);
+        assert!(rec.aborted);
+        assert_eq!(rec.outcome.as_deref(), Some("aborted_budget"));
+        // The velocity entry says so too.
+        let entry = ta_goal::VelocityEntry::from_goal(&goal, ta_goal::GoalOutcome::Applied)
+            .with_goal_spend(&goal, &PriceTable::builtin());
+        assert!(entry.aborted_budget);
+        assert_eq!(entry.output_tokens, 500);
+    }
+
+    #[test]
+    fn headless_result_line_carries_the_completion_record() {
+        let mut goal = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/tmp/w"),
+            std::path::PathBuf::from("/tmp/s"),
+        );
+        goal.origin = Some("cos".into());
+        goal.origin_class = Some(ta_goal::OriginClass::Suggested);
+        goal.cache_read_input_tokens = 7;
+        let rec = ta_goal::spend::CompletionRecord::from_goal(&goal);
+        let v = headless_result_json("g1", true, Some("d1"), "pr_ready", false, Some(&rec));
+        // The existing keys are unchanged.
+        assert_eq!(v["goal_id"], "g1");
+        assert_eq!(v["draft_id"], "d1");
+        assert_eq!(v["state"], "pr_ready");
+        let c = &v["completion"];
+        for key in [
+            "goal_id",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "usd",
+            "cost_estimated",
+            "origin",
+            "origin_class",
+            "aborted",
+        ] {
+            assert!(c.get(key).is_some(), "missing {key}: {c}");
+        }
+        assert_eq!(c["origin_class"], "suggested");
+        assert_eq!(c["origin"], "cos");
+        assert_eq!(c["cache_read_tokens"], 7);
+        // And a run with no record still emits valid JSON.
+        let none = headless_result_json("g", false, None, "failed", false, None);
+        assert!(none["completion"].is_null());
+    }
+
+    /// End to end with a real child process standing in for the agent runtime
+    /// (a shell script printing stream-json usage, then sleeping like an agent
+    /// still working). The agent must be stopped well before its sleep ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_child_is_stopped_when_the_ceiling_is_reached() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let script = format!(
+            "printf '%s\\n' '{}' '{}' '{}'; sleep 30",
+            init(),
+            turn("m1", 600, 0),
+            turn("m2", 600, 0)
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sh is available");
+        let stdout = child.stdout.take().unwrap();
+        let started = std::time::Instant::now();
+        let mut tokens = AgentTokens::default();
+        let mut killed = false;
+        pump_agent_output(
+            BufReader::new(stdout).lines().map_while(Result::ok),
+            &mut tokens,
+            BudgetLimits {
+                max_tokens: Some(1_000),
+                max_usd: None,
+            },
+            &PriceTable::builtin(),
+            uuid::Uuid::new_v4(),
+            |_| {},
+            || {
+                killed = true;
+                let _ = child.kill();
+            },
+        );
+        let _ = child.wait();
+        assert!(killed, "the ceiling stopped the agent");
+        assert!(tokens.budget_abort.is_some());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the agent was stopped, not waited out"
         );
     }
 }

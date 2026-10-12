@@ -89,6 +89,10 @@ pub struct RequestProvenance {
     pub objective: Option<String>,
     #[serde(default)]
     pub ids: IdChain,
+    /// Why the work started, as the launcher declared it in the provenance
+    /// file. Accounting data only; stamped on the goal as its `origin_class`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_class: Option<crate::origin::OriginClass>,
 }
 
 /// The on-disk format of `--provenance-file`. Unknown fields are rejected so a
@@ -113,6 +117,9 @@ pub struct ProvenanceInput {
     pub candidate_id: Option<String>,
     #[serde(default)]
     pub cos_goal_id: Option<String>,
+    /// `asked`, `suggested` or `unasked`. Set by the launcher, never by an agent.
+    #[serde(default)]
+    pub origin_class: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +224,15 @@ impl RequestProvenance {
                 cos_goal_id: opt_short("cos_goal_id", &input.cos_goal_id)?,
                 worker_goal_id: None,
             },
+            origin_class: input
+                .origin_class
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| {
+                    crate::origin::parse_origin_class(s)
+                        .map_err(|e| format!("provenance field 'origin_class': {e}"))
+                })
+                .transpose()?,
         })
     }
 
@@ -226,7 +242,8 @@ impl RequestProvenance {
             format!(
                 "the provenance JSON is invalid: {e}. Expected an object with `requester` \
                  ({{id, display_name?, channel}}) and optional message_excerpt (or excerpt), delegating_role, \
-                 delegation_reason (or reason), objective, message_id, candidate_id, cos_goal_id; unknown \
+                 delegation_reason (or reason), objective, message_id, candidate_id, cos_goal_id, origin_class \
+                 (asked|suggested|unasked); unknown \
                  fields are rejected."
             )
         })?;
@@ -488,6 +505,33 @@ mod tests {
         assert!(err.contains("requester.id"), "{err}");
         let err = RequestProvenance::from_json("{}").unwrap_err();
         assert!(err.contains("requester"), "{err}");
+    }
+
+    #[test]
+    fn origin_class_is_accepted_validated_and_unknown_fields_still_rejected() {
+        let ok = serde_json::json!({
+            "requester": {"id": "u", "channel": "c"},
+            "origin_class": "Suggested"
+        })
+        .to_string();
+        let p = RequestProvenance::from_json(&ok).unwrap();
+        assert_eq!(p.origin_class, Some(crate::origin::OriginClass::Suggested));
+        let none =
+            RequestProvenance::from_json(r#"{"requester":{"id":"u","channel":"c"}}"#).unwrap();
+        assert_eq!(none.origin_class, None);
+        let bad = RequestProvenance::from_json(
+            r#"{"requester":{"id":"u","channel":"c"},"origin_class":"requested"}"#,
+        )
+        .unwrap_err();
+        assert!(bad.contains("asked, suggested, unasked"), "{bad}");
+        let unknown = RequestProvenance::from_json(
+            r#"{"requester":{"id":"u","channel":"c"},"origin_klass":"asked"}"#,
+        )
+        .unwrap_err();
+        assert!(
+            unknown.contains("origin_klass") || unknown.contains("unknown"),
+            "{unknown}"
+        );
     }
 
     #[test]

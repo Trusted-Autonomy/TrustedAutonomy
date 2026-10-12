@@ -491,6 +491,26 @@ enum Commands {
         /// 1-32 chars of `[a-z0-9_-]`. Falls back to `$TA_GOAL_ORIGIN`.
         #[arg(long)]
         origin: Option<String>,
+        /// Why this goal started: `asked` (a person requested it), `suggested`
+        /// or `unasked` (the default). Accounting data only, used to report and
+        /// cap spend by class: it never affects approval, policy or routing.
+        /// Set by whoever launches the goal, never by an agent; goals started
+        /// from inside this goal inherit it. Falls back to
+        /// `$TA_GOAL_ORIGIN_CLASS` and the `origin_class` field of
+        /// `--provenance-file`.
+        #[arg(long, value_name = "CLASS")]
+        origin_class: Option<String>,
+        /// Stop the agent once this goal has used this many tokens (input,
+        /// output and cache combined). The draft is built from the partial work
+        /// and marked incomplete. Default: `[budget] max_tokens` in
+        /// `.ta/workflow.toml`, else no ceiling.
+        #[arg(long, value_name = "N")]
+        max_tokens: Option<u64>,
+        /// Stop the agent once this goal has cost this many US dollars. Needs
+        /// a priced model or a runtime that reports cost. Default:
+        /// `[budget] max_usd` in `.ta/workflow.toml`, else no ceiling.
+        #[arg(long, value_name = "USD")]
+        max_usd: Option<f64>,
         /// Intake record (JSON) to hand the agent as untrusted data. Set by
         /// the daemon's wake listener for wake-on-demand launches (the
         /// Chief-of-Staff). The record goes into the agent's first message
@@ -1794,6 +1814,9 @@ fn dispatch_raw(
             experiment_shadow_overrides,
             auto_cancel_after_draft,
             origin,
+            origin_class,
+            max_tokens,
+            max_usd,
             intake_file,
             provenance_file,
             title_flag,
@@ -1809,6 +1832,14 @@ fn dispatch_raw(
                 let o = ta_goal::origin::validate_origin(o).map_err(anyhow::Error::msg)?;
                 std::env::set_var(ta_goal::origin::ORIGIN_ENV_VAR, &o);
             }
+            // `--origin-class`, `--max-tokens`, `--max-usd`: validated now so a
+            // typo fails the launch before any staging exists, then carried by
+            // a guard so every goal this run launches sees them.
+            let _spend_guard = commands::spend::CliSpendGuard::set(
+                origin_class.as_deref(),
+                *max_tokens,
+                *max_usd,
+            )?;
             // `--chat-mode`: carried into `commands::run::execute` by a scoped
             // guard (see commands/chat_launch.rs). Multi-goal workflows spawn
             // their own sub-goal launches, which would not inherit it, so

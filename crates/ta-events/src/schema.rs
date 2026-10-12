@@ -469,6 +469,19 @@ pub enum SessionEvent {
         kind: String,
         project: String,
     },
+
+    /// A goal's agent session ended and its spend is final (v0.17.12.15).
+    /// `record` is the goal's completion record exactly as
+    /// `ta goal status --json` returns it: token counts of all four kinds,
+    /// `usd`, `cost_estimated`, `origin`, `origin_class` and the `aborted`
+    /// flag. Carries no secrets. Not the same as `goal_completed`, which says
+    /// the agent exited successfully; this one is emitted for every ending,
+    /// including a failed or budget-aborted goal.
+    #[serde(rename = "goal.completed")]
+    GoalSpendRecorded {
+        goal_id: Uuid,
+        record: serde_json::Value,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -529,6 +542,7 @@ impl SessionEvent {
             Self::AttentionCreated { .. } => "attention.created",
             Self::AttentionUpdated { .. } => "attention.updated",
             Self::AttentionResolved { .. } => "attention.resolved",
+            Self::GoalSpendRecorded { .. } => "goal.completed",
         }
     }
 
@@ -549,7 +563,8 @@ impl SessionEvent {
             | Self::InteractiveSessionStarted { goal_id, .. }
             | Self::InteractiveSessionCompleted { goal_id, .. }
             | Self::GoalProcessExited { goal_id, .. }
-            | Self::QuestionStale { goal_id, .. } => Some(*goal_id),
+            | Self::QuestionStale { goal_id, .. }
+            | Self::GoalSpendRecorded { goal_id, .. } => Some(*goal_id),
             Self::PolicyViolation { goal_id, .. } => *goal_id,
             Self::AgentSpawned { goal_id, .. } | Self::AgentExited { goal_id, .. } => {
                 Some(*goal_id)
@@ -736,6 +751,31 @@ impl SessionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_completed_spend_event_has_the_dotted_type_and_a_goal_id() {
+        let id = Uuid::new_v4();
+        let record =
+            serde_json::json!({"goal_id": id.to_string(), "origin_class": "asked", "usd": 1.5});
+        let env = EventEnvelope::new(SessionEvent::GoalSpendRecorded {
+            goal_id: id,
+            record: record.clone(),
+        });
+        assert_eq!(env.event_type, "goal.completed");
+        assert_eq!(env.payload.goal_id(), Some(id));
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(json["payload"]["type"], "goal.completed");
+        assert_eq!(json["payload"]["record"], record);
+        let back: EventEnvelope = serde_json::from_value(json).unwrap();
+        assert_eq!(back.event_type, "goal.completed");
+        // The existing goal_completed event is a different type.
+        let old = SessionEvent::GoalCompleted {
+            goal_id: id,
+            title: "t".into(),
+            duration_secs: None,
+        };
+        assert_eq!(old.event_type(), "goal_completed");
+    }
 
     #[test]
     fn envelope_creation() {

@@ -1,5 +1,55 @@
 {
   "$defs": {
+    "BudgetAbort": {
+      "description": "Record of a per-goal ceiling that stopped the agent.",
+      "properties": {
+        "limit": {
+          "description": "Which ceiling was hit: `max_tokens` or `max_usd`.",
+          "type": "string"
+        },
+        "limit_value": {
+          "description": "The configured ceiling (tokens or USD).",
+          "format": "double",
+          "type": "number"
+        },
+        "message": {
+          "description": "The message printed when the agent was stopped.",
+          "type": "string"
+        },
+        "observed": {
+          "description": "What had been observed when the agent was stopped.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "limit",
+        "limit_value",
+        "observed",
+        "message"
+      ],
+      "type": "object"
+    },
+    "CostSource": {
+      "description": "Where a recorded cost came from.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No price: unknown or non-Claude model and no runtime-reported cost.",
+          "type": "string"
+        },
+        {
+          "const": "runtime",
+          "description": "The agent runtime reported the cost (`total_cost_usd`): exact.",
+          "type": "string"
+        },
+        {
+          "const": "table",
+          "description": "Computed from a price-table row: an estimate.",
+          "type": "string"
+        }
+      ]
+    },
     "GoalRunState": {
       "description": "The lifecycle state of a GoalRun.\n\nIn Rust, enums can carry data per variant (like `Failed { reason }`).\nThe `#[serde(tag = \"state\")]` attribute makes this serialize as\n`{\"state\": \"running\"}` in JSON — clean and readable.\nThe lifecycle state of a GoalRun (v0.17.0.9: `#[non_exhaustive]` added).\n\nDownstream crates that match on this enum must add a `_` arm. Use\n`GoalRunState::Custom { tag }` when extending the state machine without\nforking this crate.",
       "oneOf": [
@@ -296,6 +346,26 @@
       },
       "type": "object"
     },
+    "OriginClass": {
+      "description": "Why a goal started. Accounting data only: see the section comment above.",
+      "oneOf": [
+        {
+          "const": "asked",
+          "description": "A person asked for this work.",
+          "type": "string"
+        },
+        {
+          "const": "suggested",
+          "description": "Someone or something suggested it and it was accepted.",
+          "type": "string"
+        },
+        {
+          "const": "unasked",
+          "description": "Nobody asked. The default, so unclassified spend is never hidden.",
+          "type": "string"
+        }
+      ]
+    },
     "RequestProvenance": {
       "description": "The provenance block stored on a goal and its draft.",
       "properties": {
@@ -332,6 +402,17 @@
             "string",
             "null"
           ]
+        },
+        "origin_class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OriginClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the work started, as the launcher declared it in the provenance\nfile. Accounting data only; stamped on the goal as its `origin_class`."
         },
         "requester": {
           "$ref": "#/$defs/Requester"
@@ -420,6 +501,29 @@
       "description": "When `true`, `ta draft build` immediately closes this goal's draft\ninstead of leaving it at `PrReady` awaiting human review/apply.\n\nSet by a cost-experiment paired-shadow spawn (`ta run\n--auto-cancel-after-draft`, internal flag): the shadow arm's only\npurpose is to record its token cost for `ta experiment report`, it\nis never meant to reach a human reviewer. `false` (default) for\nevery normal goal.",
       "type": "boolean"
     },
+    "budget_abort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BudgetAbort"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Set when the agent was stopped for exceeding `--max-tokens` or\n`--max-usd`. The draft built from the partial work is marked incomplete."
+    },
+    "cache_creation_input_tokens": {
+      "description": "Input tokens written to the prompt cache (priced at a premium).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cache_read_input_tokens": {
+      "description": "Input tokens served from the prompt cache, from the agent runtime's\nusage report. Most of a long goal's input; dropping it understates cost.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "context_from": {
       "description": "Goals whose output feeds into this one's context (v0.9.8.2).",
       "items": {
@@ -427,6 +531,20 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "cost_estimated": {
+      "description": "`true` only when `cost_usd` came from a price-table row rather than a\ncost the agent runtime reported.",
+      "type": "boolean"
+    },
+    "cost_source": {
+      "$ref": "#/$defs/CostSource",
+      "default": "none",
+      "description": "Where `cost_usd` came from."
+    },
+    "cost_usd": {
+      "description": "USD cost of this goal's agent session. Exact when `cost_source` is\n`runtime`, an estimate when it is `table`, and `0` with `cost_source`\n`none` when the model has no price.",
+      "format": "double",
+      "type": "number"
     },
     "created_at": {
       "description": "When this goal run was created.",
@@ -507,6 +625,17 @@
         "string",
         "null"
       ]
+    },
+    "origin_class": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OriginClass"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Why this goal started (asked, suggested, unasked). `None` on records\nwritten before the field existed; read it with\n[`GoalRun::effective_origin_class`], which defaults to `unasked`.\nStamped once at creation by the launcher and never changed. ACCOUNTING\nDATA ONLY: no approval, policy, routing or authorization decision reads\nit (see `crate::origin`)."
     },
     "output_tokens": {
       "description": "Total LLM output tokens generated during this goal's agent session.",

@@ -1529,6 +1529,13 @@ fn create_constitution_amend_draft(
         input_tokens: 0,
         output_tokens: 0,
         agent_model: String::new(),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cost_usd: 0.0,
+        cost_estimated: false,
+        cost_source: ta_goal::CostSource::None,
+        origin_class: None,
+        budget_abort: None,
         experiment_id: None,
         experiment_arm: None,
         experiment_pair_id: None,
@@ -1651,6 +1658,8 @@ fn create_constitution_amend_draft(
         request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
+        origin_class: Default::default(),
+        incomplete_reason: None,
     };
 
     super::draft::save_package(config, &pkg)
@@ -2315,6 +2324,13 @@ fn create_review_draft(
         input_tokens: 0,
         output_tokens: 0,
         agent_model: String::new(),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cost_usd: 0.0,
+        cost_estimated: false,
+        cost_source: ta_goal::CostSource::None,
+        origin_class: None,
+        budget_abort: None,
         experiment_id: None,
         experiment_arm: None,
         experiment_pair_id: None,
@@ -2470,6 +2486,8 @@ fn create_review_draft(
         request_provenance: None,
         plan_md_base: None,
         rebuilt_from: None,
+        origin_class: Default::default(),
+        incomplete_reason: None,
     };
 
     super::draft::save_package(config, &pkg)

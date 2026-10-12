@@ -2570,6 +2570,8 @@ pub(crate) fn build_package(
         request_provenance: goal.request_provenance.clone(), // Review packet (CR-02 item 6).
         plan_md_base: None,         // Set below if plan_base.md exists in staging (v0.15.24.5).
         rebuilt_from: rebuild_provenance.clone(), // v0.17.6.3.1.
+        origin_class: goal.effective_origin_class(), // Accounting only (v0.17.12.15).
+        incomplete_reason: goal.budget_abort.as_ref().map(|a| a.message.clone()),
     };
 
     // v0.15.24.5: Capture PLAN.md base snapshot for 3-way merge on apply.
@@ -3049,7 +3051,7 @@ fn auto_cancel_shadow_experiment_goal(
         let vs = VelocityStore::for_project(&config.workspace_root);
         let entry = VelocityEntry::from_goal(goal, GoalOutcome::Cancelled)
             .with_cancel_reason(REASON)
-            .with_token_cost(goal.input_tokens, goal.output_tokens, &goal.agent_model);
+            .with_goal_spend(goal, &ta_goal::PriceTable::load(&config.workspace_root));
         if let Err(e) = vs.append(&entry) {
             tracing::warn!(
                 "Failed to record velocity entry for auto-cancelled shadow goal: {}",
@@ -3327,6 +3329,8 @@ fn build_memory_only_draft(
         request_provenance: goal.request_provenance.clone(),
         plan_md_base: None,
         rebuilt_from: rebuild_provenance.clone(), // v0.17.6.3.1.
+        origin_class: goal.effective_origin_class(), // Accounting only (v0.17.12.15).
+        incomplete_reason: goal.budget_abort.as_ref().map(|a| a.message.clone()),
     };
 
     // Set display_id and shortref/seq (mirrors build_package logic).
@@ -4008,6 +4012,16 @@ fn view_package(
     if !matches!(format_str, "json" | "html") {
         if let Some(packet) = render_review_packet_for(&pkg) {
             println!("{}", packet);
+        }
+    }
+
+    // v0.17.12.15: a draft built from partial work (the agent was stopped by a
+    // spend ceiling) says so before anything else a reviewer reads.
+    if !matches!(format_str, "json" | "html") {
+        if let Some(reason) = pkg.incomplete_reason.as_deref() {
+            println!("INCOMPLETE DRAFT: the agent was stopped before it finished.");
+            println!("{}", reason);
+            println!();
         }
     }
 
@@ -8854,7 +8868,7 @@ fn apply_package(
                         .with_derived_title(derived_title)
                         .with_machine_id()
                         .with_committer(&target_dir)
-                        .with_token_cost(goal.input_tokens, goal.output_tokens, &goal.agent_model);
+                        .with_goal_spend(goal, &ta_goal::PriceTable::load(&target_dir));
                     let hs = VelocityHistoryStore::for_project(&target_dir);
                     if let Err(e) = hs.append(&history_entry) {
                         tracing::warn!("Failed to record velocity history entry: {}", e);
@@ -9331,11 +9345,8 @@ fn apply_package(
             VelocityHistoryStore, VelocityStore,
         };
         let vs = VelocityStore::for_project(&config.workspace_root);
-        let entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied).with_token_cost(
-            goal.input_tokens,
-            goal.output_tokens,
-            &goal.agent_model,
-        );
+        let entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
+            .with_goal_spend(goal, &ta_goal::PriceTable::load(&config.workspace_root));
         if let Err(e) = vs.append(&entry) {
             tracing::warn!("Failed to record velocity entry: {}", e);
         }
@@ -13469,6 +13480,64 @@ fn run() {
         assert_eq!(entries[0].tokens_output, Some(goal.output_tokens));
         assert_eq!(entries[0].model, goal.agent_model);
         assert_eq!(entries[0].cost_usd, expected_cost);
+    }
+
+    /// v0.17.12.15: the draft carries the goal's origin class (accounting only)
+    /// and, when the agent was stopped by a spend ceiling, an incomplete marker.
+    #[test]
+    fn draft_carries_origin_class_and_marks_budget_aborted_work_incomplete() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        for (title, abort) in [("Aborted", true), ("Finished", false)] {
+            super::super::goal::execute(
+                &super::super::goal::GoalCommands::Start {
+                    title: title.to_string(),
+                    source: Some(project.path().to_path_buf()),
+                    objective: "spend marker".to_string(),
+                    agent: "test-agent".to_string(),
+                    phase: None,
+                    follow_up: None,
+                    objective_file: None,
+                },
+                &config,
+            )
+            .unwrap();
+            let mut goal = goal_store
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|g| g.title == title)
+                .unwrap();
+            goal.origin_class = Some(ta_goal::OriginClass::Suggested);
+            if abort {
+                goal.budget_abort = Some(ta_goal::BudgetAbort {
+                    limit: "max_tokens".into(),
+                    limit_value: 10.0,
+                    observed: 12.0,
+                    message: "Goal stopped: ceiling reached".into(),
+                });
+            }
+            goal_store.save(&goal).unwrap();
+            std::fs::write(
+                goal.workspace_path.join("README.md"),
+                format!("# {title}\n"),
+            )
+            .unwrap();
+            build_package(&config, &goal.goal_run_id.to_string(), "change", false).unwrap();
+            let built = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+            let pkg = load_package(&config, built.pr_package_id.unwrap()).unwrap();
+            assert_eq!(pkg.origin_class, ta_goal::OriginClass::Suggested);
+            if abort {
+                assert_eq!(
+                    pkg.incomplete_reason.as_deref(),
+                    Some("Goal stopped: ceiling reached")
+                );
+            } else {
+                assert!(pkg.incomplete_reason.is_none());
+            }
+        }
     }
 
     /// v0.17.6.3.1: A goal that reaches `pr_ready`, gets a staging edit (simulating a

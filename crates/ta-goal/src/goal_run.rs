@@ -503,6 +503,79 @@ pub struct GoalRun {
     /// Populated from stream-json `system` init event.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent_model: String,
+
+    // ── Spend and origin class (v0.17.12.15) ─────────────────────────
+    /// Input tokens served from the prompt cache, from the agent runtime's
+    /// usage report. Most of a long goal's input; dropping it understates cost.
+    #[serde(default, skip_serializing_if = "super::velocity::is_zero_u64_pub")]
+    pub cache_read_input_tokens: u64,
+
+    /// Input tokens written to the prompt cache (priced at a premium).
+    #[serde(default, skip_serializing_if = "super::velocity::is_zero_u64_pub")]
+    pub cache_creation_input_tokens: u64,
+
+    /// USD cost of this goal's agent session. Exact when `cost_source` is
+    /// `runtime`, an estimate when it is `table`, and `0` with `cost_source`
+    /// `none` when the model has no price.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub cost_usd: f64,
+
+    /// `true` only when `cost_usd` came from a price-table row rather than a
+    /// cost the agent runtime reported.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cost_estimated: bool,
+
+    /// Where `cost_usd` came from.
+    #[serde(default)]
+    pub cost_source: crate::token_cost::CostSource,
+
+    /// Why this goal started (asked, suggested, unasked). `None` on records
+    /// written before the field existed; read it with
+    /// [`GoalRun::effective_origin_class`], which defaults to `unasked`.
+    /// Stamped once at creation by the launcher and never changed. ACCOUNTING
+    /// DATA ONLY: no approval, policy, routing or authorization decision reads
+    /// it (see `crate::origin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_class: Option<crate::origin::OriginClass>,
+
+    /// Set when the agent was stopped for exceeding `--max-tokens` or
+    /// `--max-usd`. The draft built from the partial work is marked incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_abort: Option<BudgetAbort>,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
+/// Record of a per-goal ceiling that stopped the agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct BudgetAbort {
+    /// Which ceiling was hit: `max_tokens` or `max_usd`.
+    pub limit: String,
+    /// The configured ceiling (tokens or USD).
+    pub limit_value: f64,
+    /// What had been observed when the agent was stopped.
+    pub observed: f64,
+    /// The message printed when the agent was stopped.
+    pub message: String,
+}
+
+impl GoalRun {
+    /// The goal's origin class, `unasked` for records that predate the field.
+    pub fn effective_origin_class(&self) -> crate::origin::OriginClass {
+        self.origin_class.unwrap_or_default()
+    }
+
+    /// This goal's recorded token counts as a [`crate::token_cost::TokenUsage`].
+    pub fn token_usage(&self) -> crate::token_cost::TokenUsage {
+        crate::token_cost::TokenUsage {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_input_tokens,
+            cache_creation: self.cache_creation_input_tokens,
+        }
+    }
 }
 
 /// Generate a slug from a title: lowercase, hyphens, max 30 chars.
@@ -668,6 +741,13 @@ impl GoalRun {
             updated_at: now,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cost_usd: 0.0,
+            cost_estimated: false,
+            cost_source: crate::token_cost::CostSource::None,
+            origin_class: None,
+            budget_abort: None,
             agent_model: String::new(),
         }
     }
