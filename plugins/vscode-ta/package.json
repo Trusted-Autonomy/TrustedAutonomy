@@ -167,7 +167,7 @@
         "ta.daemonUrl": {
           "type": "string",
           "default": "http://127.0.0.1:7700",
-          "description": "URL of the TA daemon HTTP API.",
+          "description": "URL of the TA daemon HTTP API. Leave unchanged to use the daemon of the open project (read from .ta/daemon.pid or .ta/daemon.toml); each project has its own port.",
           "order": 1
         },
         "ta.apiToken": {

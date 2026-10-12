@@ -544,11 +544,15 @@ mod tests {
         let resolved_against_source_dir =
             crate::daemon_client::resolve_daemon_url(std::path::Path::new(source_dir.path()))
                 .unwrap();
+        let staging_default = crate::daemon_port::default_port_for(workspace_root.path()).unwrap();
         assert_eq!(
-            resolved_against_workspace_root, "http://127.0.0.1:7700",
-            "staging has no daemon.pid, so resolving against it silently falls back to 7700 \
-             -- this is exactly the bug, kept here to document what NOT to resolve against"
+            resolved_against_workspace_root,
+            format!("http://127.0.0.1:{staging_default}"),
+            "staging has no daemon.pid, so resolving against it silently falls back to a \
+             default port -- this is exactly the bug, kept here to document what NOT to \
+             resolve against"
         );
+        assert_ne!(resolved_against_workspace_root, resolved_against_source_dir);
         assert_eq!(
             resolved_against_source_dir, "http://127.0.0.1:8899",
             "resolving against the real project root (source_dir) must find its daemon.pid \

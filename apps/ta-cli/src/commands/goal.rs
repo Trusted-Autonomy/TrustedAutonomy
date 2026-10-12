@@ -4486,7 +4486,7 @@ mod tests {
             false,
             false,
             false,
-            false,
+            &crate::commands::doctor_fix::FixOptions::default(),
             &|| {
                 crate::commands::doctor::CheckResult::warn(
                     "gh CLI",

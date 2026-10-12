@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { TaClient, DraftPackage } from './client';
+import { TaClient, DraftPackage, resolveDaemonUrl } from './client';
 import { GoalsProvider } from './goalsProvider';
 import { DraftsProvider, DraftItem } from './draftsProvider';
 import { DraftDiffProvider, openDraftDiff, pathFromUri } from './diffProvider';
@@ -206,7 +206,7 @@ async function viewDiff(
 }
 
 async function openShell(): Promise<void> {
-  const url = vscode.workspace.getConfiguration('ta').get<string>('daemonUrl') ?? 'http://127.0.0.1:7700';
+  const url = resolveDaemonUrl();
   const shellUrl = `${url}/shell`;
   await vscode.env.openExternal(vscode.Uri.parse(shellUrl));
 }

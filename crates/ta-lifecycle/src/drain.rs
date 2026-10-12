@@ -23,6 +23,26 @@ pub struct DrainSnapshot {
     pub inflight_launches: u64,
     /// A `ta draft apply` holds a live `.ta/apply.lock`.
     pub applying: bool,
+    /// The running goals behind `active_goals` (id and title), so a waiting
+    /// message can name what it waits on. Empty for an older daemon.
+    pub goals: Vec<DrainGoal>,
+    /// Canonical root of the project the reporting daemon serves.
+    pub project_root: Option<String>,
+}
+
+/// One running goal named in a drain snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DrainGoal {
+    pub id: String,
+    pub title: String,
+}
+
+impl DrainGoal {
+    /// First 8 characters of the id, the form `ta goal status` accepts.
+    pub fn short_id(&self) -> &str {
+        &self.id[..self.id.len().min(8)]
+    }
 }
 
 impl DrainSnapshot {
@@ -75,6 +95,35 @@ impl DrainSnapshot {
         if out.is_empty() && self.status == "draining" {
             out.push("the daemon reports it is draining".into());
         }
+        out
+    }
+
+    /// Like [`blockers`](Self::blockers), but a running-goal blocker names
+    /// each goal (id and title) and says how to look at it. Identical to
+    /// `blockers()` when the snapshot carries no goal details.
+    pub fn describe_blockers(&self) -> Vec<String> {
+        if self.goals.is_empty() {
+            return self.blockers();
+        }
+        let mut out = Vec::new();
+        let n = self.goals.len();
+        let goals: Vec<String> = self
+            .goals
+            .iter()
+            .map(|g| format!("goal {} \"{}\"", g.short_id(), g.title))
+            .collect();
+        out.push(format!(
+            "{n} running goal{}: {} (see `ta goal status {}`)",
+            if n == 1 { "" } else { "s" },
+            goals.join(", "),
+            self.goals[0].short_id()
+        ));
+        // Everything except the goal count line is unchanged.
+        out.extend(
+            self.blockers()
+                .into_iter()
+                .filter(|b| !b.contains("running goal")),
+        );
         out
     }
 
@@ -259,7 +308,7 @@ pub fn wait_for_idle(
         if now >= deadline {
             return Err(DrainTimeout {
                 waited_secs: opts.timeout.as_secs(),
-                blockers: snap.blockers(),
+                blockers: snap.describe_blockers(),
             });
         }
         progress(&snap, deadline - now);
@@ -323,6 +372,34 @@ mod tests {
     }
 
     #[test]
+    fn describe_blockers_names_goal_id_and_title() {
+        let s = DrainSnapshot {
+            status: "draining".into(),
+            active_goals: 1,
+            goals: vec![DrainGoal {
+                id: "c5ee0b0a-1111-2222-3333-444455556666".into(),
+                title: "Fix the thing".into(),
+            }],
+            applying: true,
+            ..Default::default()
+        };
+        let b = s.describe_blockers();
+        assert_eq!(b.len(), 2, "{b:?}");
+        assert!(b[0].contains("c5ee0b0a"), "{b:?}");
+        assert!(b[0].contains("\"Fix the thing\""), "{b:?}");
+        assert!(b[0].contains("ta goal status c5ee0b0a"), "{b:?}");
+        assert!(b[1].contains("apply.lock"), "{b:?}");
+        // The plain count form is unchanged for callers that want it.
+        assert_eq!(s.blockers()[0], "1 running goal");
+    }
+
+    #[test]
+    fn describe_blockers_falls_back_to_counts_for_an_older_daemon() {
+        let s = busy(2);
+        assert_eq!(s.describe_blockers(), s.blockers());
+    }
+
+    #[test]
     fn every_blocker_kind_is_reported() {
         let s = DrainSnapshot {
             status: "draining".into(),
@@ -330,6 +407,7 @@ mod tests {
             active_sessions: 1,
             inflight_launches: 2,
             applying: true,
+            ..Default::default()
         };
         let b = s.blockers().join("; ");
         assert!(b.contains("1 running goal"), "{b}");

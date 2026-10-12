@@ -1746,6 +1746,8 @@ fn git_in(cwd: &Path, args: &[&str]) -> std::process::Command {
         .current_dir(cwd)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CEILING_DIRECTORIES");
     cmd
 }
@@ -10960,6 +10962,8 @@ fn check_post_commit_dirty_files(
         .current_dir(project_root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_CEILING_DIRECTORIES")
         .output();
     let output = match output {
@@ -13066,6 +13070,8 @@ mod tests {
     fn clear_git_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
         cmd.env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
     }
 

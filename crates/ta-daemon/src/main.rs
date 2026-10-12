@@ -172,6 +172,34 @@ async fn main() -> Result<()> {
     // Load daemon configuration.
     let mut daemon_config = config::DaemonConfig::load(&project_root);
 
+    // A project without an explicit port (neither `--port` nor `[server] port`)
+    // gets a stable per-project port instead of the shared 7700, and records
+    // it in `.ta/daemon.toml` so every client resolves the same value.
+    if cli.port.is_none() {
+        match ta_mcp_gateway::daemon_port::choose_start_port(&project_root, &|p| {
+            ta_mcp_gateway::daemon_port::port_is_free(&daemon_config.server.bind, p)
+        }) {
+            Ok(choice) if !choice.explicit => {
+                daemon_config.server.port = choice.port;
+                match ta_mcp_gateway::daemon_port::record_port(&project_root, choice.port) {
+                    Ok(path) => tracing::info!(
+                        port = choice.port,
+                        derived = choice.derived,
+                        path = %path.display(),
+                        "no [server] port configured: chose a project port and recorded it"
+                    ),
+                    Err(e) => tracing::warn!(
+                        port = choice.port,
+                        error = %e,
+                        "chose a project port but could not record it in .ta/daemon.toml"
+                    ),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => anyhow::bail!("Refusing to start: {e}"),
+        }
+    }
+
     // Apply --port / --web-port, refusing two listeners on one port with an
     // error that names both settings (see config::apply_port_flags).
     let api_web_port =
@@ -365,6 +393,11 @@ async fn main() -> Result<()> {
             project_root.clone(),
             daemon_config.channels.discord_listener.clone(),
             shutdown.clone(),
+            format!(
+                "http://{}:{}",
+                connect_host(&daemon_config.server.bind),
+                daemon_config.server.port
+            ),
         );
     }
 
@@ -671,4 +704,12 @@ fn parse_semver(v: &str) -> (u32, u32, u32) {
         parts.get(1).copied().unwrap_or(0),
         parts.get(2).copied().unwrap_or(0),
     )
+}
+
+/// Host a local client should connect to for a given bind address.
+fn connect_host(bind: &str) -> &str {
+    match bind.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" | "*" => "127.0.0.1",
+        other => other,
+    }
 }

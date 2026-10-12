@@ -3,9 +3,13 @@
 // `.ta/credentials.json` is encrypted with `age` (X25519 recipient/identity).
 // Key custody prefers the OS keychain (macOS Keychain, Windows Credential
 // Manager, Secret Service on Linux); when no backend is reachable, the key
-// falls back to a chmod-0600 file next to the vault. Callers are expected to
-// surface `KeyCustody::FallbackFile` loudly (see `ta doctor`) since it's a
-// materially weaker guarantee than OS-native custody.
+// falls back to an owner-only file. For a vault at `<project>/.ta/credentials.json`
+// that file lives in the per-user TA state directory (outside every project
+// tree, see `state.rs`), NOT next to the vault: a key beside the vault lets
+// any agent that can read the project decrypt it. A vault at any other path
+// has no project, so its key file stays beside it. Callers are expected to
+// surface `KeyCustody::FallbackFile` (weaker than the keychain) and
+// `KeyCustody::InProjectFile` (unsafe: readable by agents) in `ta doctor`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -17,6 +21,9 @@ use age::x25519::Identity;
 use tracing::warn;
 
 use crate::error::VaultError;
+use crate::state::{
+    self, ControlSecret, CustodyOpts, Posture, ProjectState, SecretOrigin, StateLocator,
+};
 
 const KEYRING_SERVICE: &str = "trusted-autonomy-vault";
 const KEYRING_USER: &str = "credential-vault-age-identity";
@@ -29,9 +36,14 @@ pub const FALLBACK_KEY_FILENAME: &str = "credentials.key";
 pub enum KeyCustody {
     /// Stored in the OS-native keychain/credential manager.
     Keychain,
-    /// Stored in a chmod-0600 file — used when no keychain backend is
-    /// reachable (e.g. headless Linux with no Secret Service daemon).
+    /// Stored in an owner-only file, used when no keychain backend is
+    /// reachable (e.g. headless Linux with no Secret Service daemon). For a
+    /// project vault this is a file in the per-user state directory.
     FallbackFile(PathBuf),
+    /// Stored in `<project>/.ta/credentials.key`, next to the vault. Any
+    /// agent that can read the project can decrypt the vault with it.
+    /// `ta doctor --fix` moves it to the state directory.
+    InProjectFile(PathBuf),
 }
 
 /// Environment variable that opts a process out of OS keychain use entirely.
@@ -135,9 +147,79 @@ pub fn load_or_create_identity(
             }
         }
     }
+    if let Some(project_root) = project_root_of(vault_dir) {
+        return state_dir_identity(&project_root);
+    }
     let key_path = vault_dir.join(FALLBACK_KEY_FILENAME);
     let identity = file_load_or_create(&key_path)?;
     Ok((identity, KeyCustody::FallbackFile(key_path)))
+}
+
+/// The project a vault directory belongs to: `<project>/.ta` yields
+/// `<project>`. Any other directory (a test tempdir, a custom vault path) is
+/// not a project vault.
+fn project_root_of(vault_dir: &Path) -> Option<PathBuf> {
+    if vault_dir.file_name().is_some_and(|n| n == ".ta") {
+        vault_dir.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+/// Fallback-file custody for a project vault: the owner-only
+/// `secrets/vault-key` in the per-user state directory. Reuses the control
+/// secret custody from `state.rs`: a leftover in-tree `credentials.key` is
+/// read with a loud warning in the default posture and refused under
+/// `strict`; `ta doctor --fix` migrates it with a verified copy.
+fn state_dir_identity(project_root: &Path) -> Result<(Identity, KeyCustody), VaultError> {
+    let locator = StateLocator::from_env();
+    let posture = Posture::resolve(&locator);
+    state_dir_identity_with(project_root, &locator, posture)
+}
+
+/// [`state_dir_identity`] with the state locator and posture injected.
+fn state_dir_identity_with(
+    project_root: &Path,
+    locator: &StateLocator,
+    posture: Posture,
+) -> Result<(Identity, KeyCustody), VaultError> {
+    let opts = CustodyOpts {
+        use_keychain: false,
+        posture,
+    };
+    let ps =
+        ProjectState::open(project_root, locator).map_err(|e| VaultError::Other(e.to_string()))?;
+    let found = state::load_secret(&ps, ControlSecret::VaultKey, opts)
+        .map_err(|e| VaultError::Other(e.to_string()))?;
+    if let Some(found) = found {
+        let path = match &found.origin {
+            SecretOrigin::StateFile(p) | SecretOrigin::Legacy(p) => p.clone(),
+            SecretOrigin::Keychain => ps.secrets_dir().join(ControlSecret::VaultKey.name()),
+        };
+        let identity =
+            Identity::from_str(found.value.trim()).map_err(|e| VaultError::KeyUnreadable {
+                path: path.clone(),
+                reason: e.to_string(),
+            })?;
+        let custody = match found.origin {
+            SecretOrigin::Legacy(p) => KeyCustody::InProjectFile(p),
+            _ => KeyCustody::FallbackFile(path),
+        };
+        return Ok((identity, custody));
+    }
+    let identity = Identity::generate();
+    let outcome = state::store_secret(
+        &ps,
+        ControlSecret::VaultKey,
+        identity.to_string().expose_secret(),
+        opts,
+    )
+    .map_err(|e| VaultError::Other(e.to_string()))?;
+    let path = match outcome.custody {
+        crate::human::Custody::File(p) => p,
+        crate::human::Custody::Keychain => ps.secrets_dir().join(ControlSecret::VaultKey.name()),
+    };
+    Ok((identity, KeyCustody::FallbackFile(path)))
 }
 
 /// Non-mutating probe of current key custody, for `ta doctor`. Returns `None`
@@ -153,8 +235,25 @@ pub fn probe_key_custody(vault_dir: &Path) -> Option<KeyCustody> {
         }
     }
     let key_path = vault_dir.join(FALLBACK_KEY_FILENAME);
+    if let Some(project_root) = project_root_of(vault_dir) {
+        return probe_project_file_custody(&project_root, &StateLocator::from_env());
+    }
     if key_path.exists() {
         return Some(KeyCustody::FallbackFile(key_path));
+    }
+    None
+}
+
+fn probe_project_file_custody(project_root: &Path, locator: &StateLocator) -> Option<KeyCustody> {
+    let in_tree = project_root.join(".ta").join(FALLBACK_KEY_FILENAME);
+    if in_tree.is_file() {
+        return Some(KeyCustody::InProjectFile(in_tree));
+    }
+    if let Ok(Some(ps)) = ProjectState::locate(project_root, locator) {
+        let file = ps.secrets_dir().join(ControlSecret::VaultKey.name());
+        if file.is_file() {
+            return Some(KeyCustody::FallbackFile(file));
+        }
     }
     None
 }
@@ -373,6 +472,162 @@ mod tests {
     #[test]
     fn file_custody_never_trips_the_guard() {
         let dir = tempfile::tempdir().unwrap();
+        let (_, custody) = load_or_create_identity(dir.path(), false).unwrap();
+        assert_eq!(
+            custody,
+            KeyCustody::FallbackFile(dir.path().join(FALLBACK_KEY_FILENAME))
+        );
+    }
+
+    // ── Key custody for a project vault (`<project>/.ta/credentials.json`) ──
+
+    fn project_with_ta() -> (TempDir, TempDir, StateLocator) {
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        let state = TempDir::new().unwrap();
+        let locator = StateLocator::at(state.path());
+        (project, state, locator)
+    }
+
+    #[test]
+    fn project_vault_key_lives_in_the_state_dir_not_next_to_the_vault() {
+        let (project, state, locator) = project_with_ta();
+        let (identity, custody) =
+            state_dir_identity_with(project.path(), &locator, Posture::Default).unwrap();
+        let KeyCustody::FallbackFile(path) = custody else {
+            panic!("expected a fallback file, got {custody:?}");
+        };
+        assert!(path.starts_with(state.path()), "{}", path.display());
+        assert!(!path.starts_with(project.path()));
+        assert!(
+            !project.path().join(".ta/credentials.key").exists(),
+            "nothing may be written next to the vault"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the key file must be owner-only");
+        }
+        // Same identity on the next open.
+        let (again, _) =
+            state_dir_identity_with(project.path(), &locator, Posture::Default).unwrap();
+        assert_eq!(
+            identity.to_public().to_string(),
+            again.to_public().to_string()
+        );
+    }
+
+    fn plant_legacy_key(project: &Path) -> Identity {
+        let identity = Identity::generate();
+        fs::write(
+            project.join(".ta").join(FALLBACK_KEY_FILENAME),
+            identity.to_string().expose_secret(),
+        )
+        .unwrap();
+        identity
+    }
+
+    #[test]
+    fn default_posture_reads_a_leftover_in_tree_key_and_reports_it_unsafe() {
+        let (project, _state, locator) = project_with_ta();
+        let legacy = plant_legacy_key(project.path());
+        let (identity, custody) =
+            state_dir_identity_with(project.path(), &locator, Posture::Default).unwrap();
+        assert_eq!(
+            identity.to_public().to_string(),
+            legacy.to_public().to_string(),
+            "an existing vault must keep opening until it is migrated"
+        );
+        assert_eq!(
+            custody,
+            KeyCustody::InProjectFile(project.path().join(".ta").join(FALLBACK_KEY_FILENAME))
+        );
+        assert_eq!(
+            probe_project_file_custody(project.path(), &locator),
+            Some(custody)
+        );
+    }
+
+    #[test]
+    fn strict_posture_refuses_the_key_in_the_project_tree_with_the_fix() {
+        let (project, _state, locator) = project_with_ta();
+        plant_legacy_key(project.path());
+        let err = state_dir_identity_with(project.path(), &locator, Posture::Strict)
+            .err()
+            .expect("strict must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("credentials.key"), "{msg}");
+        assert!(msg.contains("strict"), "{msg}");
+        assert!(msg.contains("ta doctor --fix"), "{msg}");
+        assert!(
+            project.path().join(".ta/credentials.key").exists(),
+            "refusing must not delete anything"
+        );
+    }
+
+    #[test]
+    fn migration_verifies_the_copy_then_removes_the_in_tree_key_and_is_idempotent() {
+        use crate::state::{migrate_project, MigrationStatus};
+        let (project, _state, locator) = project_with_ta();
+        let legacy = plant_legacy_key(project.path());
+        let ciphertext = encrypt(&legacy, b"{\"credentials\":[]}").unwrap();
+
+        let ps = ProjectState::open(project.path(), &locator).unwrap();
+        let report = migrate_project(&ps, CustodyOpts::file_only());
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.name == "vault-key")
+            .expect("the vault key is part of the migration");
+        assert_eq!(item.status, MigrationStatus::Migrated, "{item:?}");
+        assert!(
+            !project.path().join(".ta/credentials.key").exists(),
+            "the old key is removed once the copy is verified"
+        );
+
+        // The vault still opens, now with the key from the state directory.
+        let (identity, custody) =
+            state_dir_identity_with(project.path(), &locator, Posture::Strict).unwrap();
+        assert!(
+            matches!(custody, KeyCustody::FallbackFile(_)),
+            "{custody:?}"
+        );
+        let plain = decrypt(&identity, Path::new("vault"), &ciphertext).unwrap();
+        assert_eq!(plain, b"{\"credentials\":[]}");
+
+        // Second run: nothing left to do.
+        let again = migrate_project(&ps, CustodyOpts::file_only());
+        let item = again.items.iter().find(|i| i.name == "vault-key").unwrap();
+        assert_eq!(item.status, MigrationStatus::NothingToMigrate);
+    }
+
+    #[test]
+    fn migration_keeps_the_in_tree_key_when_the_state_dir_holds_a_different_one() {
+        use crate::state::{migrate_project, MigrationStatus};
+        let (project, _state, locator) = project_with_ta();
+        plant_legacy_key(project.path());
+        let ps = ProjectState::open(project.path(), &locator).unwrap();
+        state::store_secret(
+            &ps,
+            ControlSecret::VaultKey,
+            Identity::generate().to_string().expose_secret(),
+            CustodyOpts::file_only(),
+        )
+        .unwrap();
+        let report = migrate_project(&ps, CustodyOpts::file_only());
+        let item = report.items.iter().find(|i| i.name == "vault-key").unwrap();
+        assert!(
+            matches!(item.status, MigrationStatus::Conflict(_)),
+            "{item:?}"
+        );
+        assert!(project.path().join(".ta/credentials.key").exists());
+    }
+
+    #[test]
+    fn a_vault_outside_a_dot_ta_directory_keeps_its_key_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(project_root_of(dir.path()).is_none());
         let (_, custody) = load_or_create_identity(dir.path(), false).unwrap();
         assert_eq!(
             custody,

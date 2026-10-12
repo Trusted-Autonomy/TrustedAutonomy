@@ -5378,6 +5378,8 @@ fn check_drift(workspace_root: &std::path::Path, threshold: u32) -> Result<(), V
         .current_dir(workspace_root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .output();
 
     let changed: Vec<String> = match output {

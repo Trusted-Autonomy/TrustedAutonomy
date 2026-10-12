@@ -195,6 +195,7 @@ memory/work_queue.md
 # (PLAN v0.17.12.1) moves these out of the project tree entirely.
 .ta/*.key
 .ta/*.pem
+.ta/*.cred
 .ta/broker_root.key
 .ta/audit.key
 .ta/credentials.key

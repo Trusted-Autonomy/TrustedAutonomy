@@ -664,8 +664,10 @@ enum Commands {
     /// Examples:
     ///   ta doctor              # human-readable output
     ///   ta doctor --json       # machine-readable JSON for CI
-    ///   ta doctor --fix        # diagnose + interactively offer to clean each finding
-    ///   ta doctor --fix --yes  # diagnose + auto-fix all (non-interactive, same as ta gc)
+    ///   ta doctor --fix        # list findings with ids, then ask about each (needs a terminal)
+    ///   ta doctor --fix --yes  # apply every non-destructive fix (destructive ones need --only)
+    ///   ta doctor --fix --only secrets,vcs-gitignore   # apply exactly these ids, no prompts
+    ///   ta doctor --fix --dry-run                      # show what would change, change nothing
     ///   ta doctor --fix-denied # interactively clean up pr_ready goals with denied drafts
     Doctor {
         /// Output results as a JSON array (for CI / scripted use).
@@ -682,11 +684,20 @@ enum Commands {
         /// Combine with --yes for non-interactive mode (equivalent to `ta gc`).
         #[arg(long)]
         fix: bool,
-        /// Apply all fixes automatically without prompting (use with --fix, v0.15.30.6).
+        /// Apply every non-destructive fix without prompting (use with --fix).
         ///
-        /// `ta doctor --fix --yes` is equivalent to `ta gc` but with richer output.
+        /// Destructive fixes (those that delete staging directories) are never covered:
+        /// each needs its own id in `--only`.
         #[arg(long)]
         yes: bool,
+        /// Apply exactly these finding ids (comma separated) without prompting; implies --fix.
+        ///
+        /// The ids are printed next to each finding. Destructive fixes must be named here.
+        #[arg(long, value_delimiter = ',', value_name = "ID,...")]
+        only: Vec<String>,
+        /// Show what `--fix` would change and change nothing; implies --fix.
+        #[arg(long)]
+        dry_run: bool,
         /// Optional subcommand: "fix <component>".
         ///
         /// Currently supports:
@@ -2242,12 +2253,24 @@ fn dispatch_raw(
             fix_denied,
             fix,
             yes,
+            only,
+            dry_run,
             extra_args,
         } => match extra_args.as_slice() {
             [sub, comp, ..] if sub == "fix" && comp == "projfs" => {
                 commands::doctor::execute_fix_projfs()
             }
-            _ => commands::doctor::execute(config, *json, *fix_denied, *fix, *yes),
+            _ => commands::doctor::execute(
+                config,
+                *json,
+                *fix_denied,
+                *fix || !only.is_empty() || *dry_run,
+                &commands::doctor_fix::FixOptions {
+                    yes: *yes,
+                    only: only.clone(),
+                    dry_run: *dry_run,
+                },
+            ),
         },
         Commands::Upgrade(args) => commands::upgrade::execute(config, args),
         Commands::Conversation { goal_id, json } => {

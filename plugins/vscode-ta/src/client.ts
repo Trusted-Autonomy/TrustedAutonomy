@@ -140,9 +140,64 @@ function cfg<T>(key: string): T {
   return vscode.workspace.getConfiguration('ta').get<T>(key) as T;
 }
 
+const FALLBACK_DAEMON_URL = 'http://127.0.0.1:7700';
+
+/**
+ * The port a project's daemon records: the `bind=host:port` (or legacy
+ * `port=`) line of `.ta/daemon.pid`, else `[server] port` in `.ta/daemon.toml`.
+ * Returns undefined when neither names one.
+ */
+export function daemonUrlFromProjectFiles(pidText?: string, tomlText?: string): string | undefined {
+  if (pidText) {
+    const bind = /^bind=([^:\r\n]+):(\d+)\s*$/m.exec(pidText);
+    const legacy = /^port=(\d+)\s*$/m.exec(pidText);
+    const host = bind ? bind[1] : '127.0.0.1';
+    const port = bind ? bind[2] : legacy ? legacy[1] : undefined;
+    if (port) {
+      return `http://${host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host}:${port}`;
+    }
+  }
+  if (tomlText) {
+    const section = /^\[server\][^\n]*\n([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(tomlText);
+    const port = section ? /^\s*port\s*=\s*(\d+)/m.exec(section[1]) : null;
+    if (port) {
+      return `http://127.0.0.1:${port[1]}`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The daemon URL to use. An explicit `ta.daemonUrl` setting wins. Otherwise
+ * the workspace project's own daemon (from `.ta/`), because every project has
+ * its own port and 7700 may belong to a different project's daemon.
+ */
+export function resolveDaemonUrl(): string {
+  const inspected = vscode.workspace.getConfiguration('ta').inspect<string>('daemonUrl');
+  const explicit =
+    inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? inspected?.globalValue;
+  if (explicit) {
+    return explicit;
+  }
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const read = (name: string): string | undefined => {
+      try {
+        return fs.readFileSync(path.join(folder.uri.fsPath, '.ta', name), 'utf8');
+      } catch {
+        return undefined;
+      }
+    };
+    const url = daemonUrlFromProjectFiles(read('daemon.pid'), read('daemon.toml'));
+    if (url) {
+      return url;
+    }
+  }
+  return inspected?.defaultValue || FALLBACK_DAEMON_URL;
+}
+
 export class TaClient {
   private get baseUrl(): string {
-    return cfg<string>('daemonUrl') || 'http://127.0.0.1:7700';
+    return resolveDaemonUrl();
   }
 
   private get token(): string {

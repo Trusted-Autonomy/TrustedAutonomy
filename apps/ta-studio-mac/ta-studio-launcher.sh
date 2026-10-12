@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Embedded in TA Studio.app/Contents/MacOS/ta-studio-launcher
-PORT="${TA_PORT:-7700}"
+# Each project has its own daemon port; ask `ta` for this project's rather than
+# assuming 7700. TA_PORT overrides; 7700 is only the last resort.
+PORT="${TA_PORT:-$(ta daemon config 2>/dev/null | sed -n 's/^ *Daemon URL: *http:\/\/[^:]*:\([0-9][0-9]*\).*/\1/p' | head -n 1)}"
+PORT="${PORT:-7700}"
 MAX_WAIT=5
 
 check_daemon() {

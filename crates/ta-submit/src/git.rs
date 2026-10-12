@@ -265,6 +265,8 @@ impl GitAdapter {
             .current_dir(&self.work_dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()?;
 
@@ -469,6 +471,8 @@ impl GitAdapter {
                 .current_dir(&self.work_dir)
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES")
                 .output()
                 .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -548,6 +552,8 @@ impl GitAdapter {
             .current_dir(&self.work_dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1432,6 +1438,8 @@ impl SourceAdapter for GitAdapter {
                         .current_dir(staging_dir)
                         .env_remove("GIT_DIR")
                         .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_INDEX_FILE")
+                        .env_remove("GIT_COMMON_DIR")
                         .env_remove("GIT_CEILING_DIRECTORIES")
                         .output()
                         .map_err(|e| SubmitError::VcsError(format!("git init failed: {}", e)))?;
@@ -1441,6 +1449,8 @@ impl SourceAdapter for GitAdapter {
                             .current_dir(staging_dir)
                             .env_remove("GIT_DIR")
                             .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_INDEX_FILE")
+                            .env_remove("GIT_COMMON_DIR")
                             .env_remove("GIT_CEILING_DIRECTORIES")
                             .output()
                             .map_err(|e| {
@@ -1460,6 +1470,8 @@ impl SourceAdapter for GitAdapter {
                         .current_dir(staging_dir)
                         .env_remove("GIT_DIR")
                         .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_INDEX_FILE")
+                        .env_remove("GIT_COMMON_DIR")
                         .env_remove("GIT_CEILING_DIRECTORIES")
                         .output();
                     let _ = std::process::Command::new("git")
@@ -1467,6 +1479,8 @@ impl SourceAdapter for GitAdapter {
                         .current_dir(staging_dir)
                         .env_remove("GIT_DIR")
                         .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_INDEX_FILE")
+                        .env_remove("GIT_COMMON_DIR")
                         .env_remove("GIT_CEILING_DIRECTORIES")
                         .output();
 
@@ -1478,6 +1492,8 @@ impl SourceAdapter for GitAdapter {
                             .current_dir(staging_dir)
                             .env_remove("GIT_DIR")
                             .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_INDEX_FILE")
+                            .env_remove("GIT_COMMON_DIR")
                             .env_remove("GIT_CEILING_DIRECTORIES")
                             .output();
                         let _ = std::process::Command::new("git")
@@ -1485,6 +1501,8 @@ impl SourceAdapter for GitAdapter {
                             .current_dir(staging_dir)
                             .env_remove("GIT_DIR")
                             .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_INDEX_FILE")
+                            .env_remove("GIT_COMMON_DIR")
                             .env_remove("GIT_CEILING_DIRECTORIES")
                             .env("GIT_AUTHOR_NAME", "TA Agent")
                             .env("GIT_AUTHOR_EMAIL", "ta-agent@local")
@@ -1698,6 +1716,8 @@ impl SourceAdapter for GitAdapter {
             .current_dir(repo_root)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .ok()?;
         if out.status.success() {
@@ -1713,6 +1733,8 @@ impl SourceAdapter for GitAdapter {
             .current_dir(repo_root)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .output()
             .ok()?;
         if out.status.success() {
@@ -1871,6 +1893,8 @@ mod tests {
         let clear_git_env = |cmd: &mut Command| {
             cmd.env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES");
         };
 
@@ -2250,6 +2274,8 @@ mod tests {
             .current_dir(local_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2260,6 +2286,8 @@ mod tests {
             .current_dir(local_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2288,6 +2316,8 @@ mod tests {
             .current_dir(remote_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2296,6 +2326,8 @@ mod tests {
             .current_dir(remote_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2315,6 +2347,8 @@ mod tests {
         let clear_git_env = |cmd: &mut Command| {
             cmd.env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
                 .env_remove("GIT_CEILING_DIRECTORIES");
         };
         let mut cmd = Command::new("git");
@@ -2352,6 +2386,8 @@ mod tests {
             .current_dir(remote_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES");
         assert!(cmd.output().unwrap().status.success());
         Command::new("git")
@@ -2359,6 +2395,8 @@ mod tests {
             .current_dir(remote_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2367,6 +2405,8 @@ mod tests {
             .current_dir(remote_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2383,6 +2423,8 @@ mod tests {
             .current_dir(local_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2391,6 +2433,8 @@ mod tests {
             .current_dir(local_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2399,6 +2443,8 @@ mod tests {
             .current_dir(local_dir.path())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
@@ -2739,6 +2785,8 @@ mod tests {
         cmd.args(args).current_dir(dir);
         cmd.env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CEILING_DIRECTORIES");
         cmd.output().unwrap()
     }

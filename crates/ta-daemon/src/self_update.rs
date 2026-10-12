@@ -55,7 +55,7 @@ fn publish(report: UpdateReport) {
 /// and the self-check so both agree on what "busy" means. `inflight` is the
 /// current `WAKE_LAUNCHES` count (a parameter so tests do not share the static).
 pub fn core_snapshot(goals_dir: &Path, project_root: &Path, inflight: usize) -> DrainSnapshot {
-    let active_goals = match ta_goal::GoalRunStore::new(goals_dir) {
+    let goals: Vec<ta_lifecycle::DrainGoal> = match ta_goal::GoalRunStore::new(goals_dir) {
         Ok(store) => store
             .list()
             .unwrap_or_default()
@@ -66,17 +66,23 @@ pub fn core_snapshot(goals_dir: &Path, project_root: &Path, inflight: usize) -> 
                     ta_goal::GoalRunState::Running | ta_goal::GoalRunState::Configured
                 )
             })
-            .count(),
-        Err(_) => 0,
+            .map(|g| ta_lifecycle::DrainGoal {
+                id: g.goal_run_id.to_string(),
+                title: g.title.clone(),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
     };
     let applying =
         ta_lifecycle::apply_lock_state(project_root, &ta_lifecycle::process_is_alive).is_blocking();
     let mut snap = DrainSnapshot {
         status: String::new(),
-        active_goals: active_goals as u64,
+        active_goals: goals.len() as u64,
         active_sessions: 0,
         inflight_launches: inflight as u64,
         applying,
+        goals,
+        project_root: Some(crate::api::status::canonical_root_string(project_root)),
     };
     snap.status = if snap.is_idle() { "clean" } else { "draining" }.into();
     snap
