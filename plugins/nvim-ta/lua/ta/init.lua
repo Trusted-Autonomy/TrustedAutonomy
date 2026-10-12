@@ -35,7 +35,9 @@ function M.resolve_daemon_url(start_dir)
     end
     local toml = read_file(dir .. "/.ta/daemon.toml")
     if toml then
-      local server = ("\n" .. toml):match("\n%[server%][^\n]*\n(.-)\n%[") or ("\n" .. toml):match("\n%[server%][^\n]*\n(.*)")
+      local padded = "\n" .. toml
+      local server = padded:match("\n%[server%][^\n]*\n(.-)\n%[")
+        or padded:match("\n%[server%][^\n]*\n(.*)")
       local port = server and ("\n" .. server):match("\n%s*port%s*=%s*(%d+)")
       if port then
         return string.format("http://127.0.0.1:%s", port)

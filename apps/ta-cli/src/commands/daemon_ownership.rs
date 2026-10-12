@@ -41,8 +41,12 @@ pub struct HttpProbe;
 
 impl DaemonProbe for HttpProbe {
     fn identify(&self, base_url: &str) -> ProbeAnswer {
+        // The connect phase gets its own, longer limit: refusing a connection to a
+        // closed local port can take a second or two on Windows, and that must read as
+        // "nothing is listening", not as "something accepted and then stayed silent".
         let client = match reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(8))
             .no_proxy()
             .build()
         {
@@ -52,9 +56,11 @@ impl DaemonProbe for HttpProbe {
         let url = format!("{base_url}/health");
         let resp = match client.get(&url).send() {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
+            // Only a timeout AFTER the connection was made means "accepted but silent";
+            // a connect failure or connect timeout means nothing is listening.
+            Err(e) if e.is_timeout() && !e.is_connect() => {
                 return ProbeAnswer::Other(format!(
-                    "it accepted the connection but did not answer GET {url} within 2 seconds"
+                    "it accepted the connection but did not answer GET {url} within 8 seconds"
                 ))
             }
             Err(_) => return ProbeAnswer::NoAnswer,

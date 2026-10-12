@@ -1797,7 +1797,11 @@ mod tests {
 
     fn assert_refusal_names_everything(err: &str, a: &Path, b: &Path, port: u16) {
         assert!(err.contains(&format!("port {port}")), "{err}");
-        assert!(err.contains(&a.display().to_string()), "{err}");
+        // The other project's root is reported by its daemon in canonical form (on
+        // Windows `\\?\C:\Users\runneradmin\...`, not the 8.3 `RUNNER~1` spelling the
+        // temp dir hands out), so compare against the canonical spelling.
+        let canon_a = std::fs::canonicalize(a).unwrap();
+        assert!(err.contains(&canon_a.display().to_string()), "{err}");
         assert!(err.contains(&b.display().to_string()), "{err}");
         assert!(err.contains("pid 31337"), "{err}");
         assert!(err.contains("ta daemon status"), "{err}");
