@@ -11170,7 +11170,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.13`
 
 ### v0.17.12.14 - Multi-Project Daemon Safety and Credential Vault Key Custody
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.1
 
 **Goal**: One project's `ta daemon restart` must never shut down another project's daemon, and the credential vault's own key must not sit next to the vault in the project tree. Found 2026-10-12 in the live end-to-end test: an agent ran `ta daemon restart` in a scratch project whose `daemon.toml` was empty, so it used the default port 7700, where the owner's daemon for a different project was running; TA waited for "1 running goal", then POSTed `/api/shutdown` to that daemon and started the scratch daemon on the same port while a goal was still running. Evidence: `/tmp/vt-live-test/evidence/run8/daemon-restart.out`. Urgent safety fix, ordered last by number only.
