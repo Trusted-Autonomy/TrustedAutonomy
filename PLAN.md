@@ -10988,7 +10988,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.3`
 
 ### v0.17.12.4 - Rules Engine: Owner Rules File, Postures and Effective-Policy Output
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12, v0.17.12.1, v0.17.12.3
 
 **Goal**: What agents may do unattended is decided by one deterministic table compiled from the owner's rules, with VT presets that can only tighten. Design: `docs/superpowers/specs/2026-10-07-compiled-constitution-automation-rules-design.md` (Revision 2, PR #644).
