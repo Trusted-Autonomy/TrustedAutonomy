@@ -222,6 +222,25 @@ impl PolicyConstitution {
         }
     }
 
+    /// Strict variant of [`PolicyConstitution::load`] for send-time checks
+    /// (v0.17.12.3): a constitution file that exists but cannot be read or
+    /// parsed is an error, not a silent fall back to the defaults, so a
+    /// broken file can never loosen what a queued action is allowed to do.
+    pub fn try_load(workspace_root: &Path) -> Result<Self, String> {
+        let path = workspace_root.join(".ta").join("constitution.toml");
+        if !path.exists() {
+            return Ok(Self::default_rules());
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        let parsed = toml::from_str::<ConstitutionToml>(&content)
+            .map_err(|e| format!("could not parse {}: {e}", path.display()))?;
+        let mut base = Self::default_rules();
+        base.block_rules.extend(parsed.rules.block);
+        base.warn_rules.extend(parsed.rules.warn);
+        Ok(base)
+    }
+
     fn parse_and_merge(content: &str, mut base: Self) -> Self {
         match toml::from_str::<ConstitutionToml>(content) {
             Ok(parsed) => {

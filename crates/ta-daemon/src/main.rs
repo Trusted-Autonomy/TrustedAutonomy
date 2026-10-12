@@ -32,6 +32,7 @@
 //! ta-daemon --api --web-port 8080    # Also serves the legacy web UI on port 8080
 //! ```
 
+pub mod action_worker;
 pub mod actor_context;
 mod api;
 pub mod assertion;
@@ -440,6 +441,11 @@ async fn main() -> Result<()> {
     // Start the ConnectorSupervisor for [[connectors.managed]] entries (v0.17.0.6).
     // Runs in both API and MCP modes. No-op if workflow.toml has no managed connectors.
     connector_supervisor::start(project_root.clone(), shutdown.clone());
+
+    // Durable action queue worker (v0.17.12.3): finishes or rolls back any
+    // interrupted apply, marks unknown-outcome sends as needing attention, then
+    // drains queued outside actions. Runs in both API and MCP modes.
+    action_worker::start(project_root.clone(), shutdown.clone());
 
     // Start the PromptOptimizerSupervisor for context compression (v0.17.0.10).
     // No-op when compression.enabled = false or the plugin binary is not on PATH.

@@ -4521,6 +4521,7 @@ fn view_package(
             .pending_actions
             .iter()
             .any(|a| a.tool_name.starts_with("ta_external_action:email"));
+        let reversibility_registry = super::apply_queue::build_registry(&config.workspace_root);
         for (i, action) in pkg.changes.pending_actions.iter().enumerate() {
             if action.tool_name.starts_with("ta_external_action:email") {
                 // Render email drafts as structured cards.
@@ -4576,6 +4577,21 @@ fn view_package(
                     let params_str = serde_json::to_string_pretty(&action.parameters)
                         .unwrap_or_else(|_| action.parameters.to_string());
                     println!("     Parameters: {}", params_str);
+                }
+            }
+            // Reversibility (v0.17.12.3): the reviewer sees what can be taken back.
+            if let Some(verb) = action.tool_name.strip_prefix("ta_external_action:") {
+                let decl = reversibility_registry.declaration_for(verb);
+                let note = match decl.reversibility {
+                    ta_actions::Reversibility::Irrecoverable => {
+                        " (cannot be undone once sent; runs last)"
+                    }
+                    ta_actions::Reversibility::Compensable => " (can be countered after it runs)",
+                    ta_actions::Reversibility::Reversible => "",
+                };
+                println!("     Reversibility: {}{}", decl.reversibility, note);
+                if !decl.note.is_empty() {
+                    println!("     Note: {}", decl.note);
                 }
             }
         }
@@ -5997,7 +6013,7 @@ impl Drop for ApplyLock {
 ///
 /// Deliberately avoids importing `std::os::windows::io` traits or the
 /// `windows`/`winapi` crates to keep the Windows compilation footprint small.
-fn is_apply_process_alive(pid: u32) -> bool {
+pub(crate) fn is_apply_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // Safety: kill(pid, 0) with signal 0 never sends a signal — it only
@@ -6058,6 +6074,16 @@ struct ApplyRollbackGuard {
     /// (or were added later, e.g. version-bump files) to call
     /// `snapshot_file` before writing (v0.17.10.1 item 2).
     git_root: Option<std::path::PathBuf>,
+    /// The durable two-phase apply journal (v0.17.12.3): every snapshot is
+    /// also saved into the daemon-only state directory so a crash (not just
+    /// an error) can be rolled back by startup recovery.
+    journal: Option<ta_actions::ApplyJournal>,
+    /// Root the journal's relative paths are taken from.
+    journal_root: Option<std::path::PathBuf>,
+    /// VCS head before the apply, to tell "a commit was made" from "none was".
+    prior_head: Option<String>,
+    /// First error writing the journal. Checked before any file is overwritten.
+    journal_error: Option<String>,
 }
 
 impl ApplyRollbackGuard {
@@ -6079,7 +6105,64 @@ impl ApplyRollbackGuard {
             } else {
                 None
             },
+            journal: None,
+            journal_root: None,
+            prior_head: None,
+            journal_error: None,
         }
+    }
+
+    /// Attaches the apply journal. Snapshots taken from now on are journaled.
+    fn attach_journal(
+        &mut self,
+        journal: ta_actions::ApplyJournal,
+        root: &std::path::Path,
+        prior_head: Option<String>,
+    ) {
+        self.journal = Some(journal);
+        self.journal_root = Some(root.to_path_buf());
+        self.prior_head = prior_head;
+    }
+
+    /// Journals the local commit, if the VCS step made one. `rev` names where
+    /// it landed (the feature branch, or HEAD). Not called after a push: a
+    /// pushed commit is a remote effect and is never reset (see recovery docs).
+    fn journal_local_commit(&mut self, rev: &str) {
+        let (Some(journal), Some(root)) = (self.journal.as_mut(), self.journal_root.as_ref())
+        else {
+            return;
+        };
+        let Ok(out) = git_in(root, &["rev-parse", rev]).output() else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sha.is_empty() || self.prior_head.as_deref() == Some(sha.as_str()) {
+            return;
+        }
+        if let Err(e) = journal.local_committed(&sha) {
+            tracing::error!(commit = %sha, error = %e,
+                "apply journal: could not record the local commit");
+        }
+    }
+
+    /// Fails closed: if the journal could not record a prior state, the apply
+    /// must not overwrite that file, because a crash could no longer be undone.
+    fn ensure_journal_ok(&self) -> anyhow::Result<()> {
+        match &self.journal_error {
+            None => Ok(()),
+            Some(e) => anyhow::bail!(
+                "the apply journal could not record a file's prior state, so nothing was \
+                 applied: {e}"
+            ),
+        }
+    }
+
+    /// Hands the journal to the caller for the final mark-Applied and enqueue.
+    fn take_journal(&mut self) -> Option<ta_actions::ApplyJournal> {
+        self.journal.take()
     }
 
     /// Record the current on-disk content of `path` before it is written.
@@ -6092,6 +6175,20 @@ impl ApplyRollbackGuard {
         }
         let content = std::fs::read(path).ok(); // None → file not yet on disk
         self.snapshots.push((path.to_path_buf(), content));
+        if let (Some(journal), Some(root)) = (self.journal.as_mut(), self.journal_root.as_ref()) {
+            match path.strip_prefix(root) {
+                Ok(rel) => {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if let Err(e) = journal.record_prior(&rel) {
+                        tracing::error!(path = %path.display(), error = %e,
+                            "apply journal: could not record a file's prior state");
+                        self.journal_error.get_or_insert(e.to_string());
+                    }
+                }
+                Err(_) => tracing::warn!(path = %path.display(), root = %root.display(),
+                    "apply journal: path is outside the project root and is not journaled"),
+            }
+        }
     }
 
     /// Mark the apply as committed — `Drop` will not roll back.
@@ -6174,6 +6271,10 @@ impl Drop for ApplyRollbackGuard {
             let n = self.rollback();
             if n > 0 {
                 eprintln!("[rollback] Restored {} file(s) to pre-apply state.", n);
+            }
+            // Rolled back in-process: the journal has nothing left to recover.
+            if let Some(j) = self.journal.take() {
+                j.abandon_after_rollback();
             }
         }
     }
@@ -6729,6 +6830,9 @@ fn apply_package(
     // and signals to co-developer processes (including AI assistants) that git
     // mutations should be deferred until this apply completes.
     // The lock is released automatically when `_apply_lock` is dropped.
+    // Finish or undo any earlier apply that was interrupted (crash, power loss)
+    // before taking the lock. A live apply is left alone (v0.17.12.3).
+    super::apply_queue::recover_interrupted_applies(config);
     let _apply_lock = ApplyLock::acquire(&config.workspace_root, &package_id.to_string())?;
 
     eprintln!("[apply] Loading draft package {}...", package_id);
@@ -7365,6 +7469,32 @@ fn apply_package(
     // Snapshot working-tree files before any writes so we can restore them
     // atomically if pre-submit verification fails (or any other error occurs).
     let mut rollback_guard = ApplyRollbackGuard::with_git_root(&target_dir);
+
+    // ── Two-phase apply journal (v0.17.12.3) ─────────────────────────────────
+    // PREPARE: write the durable journal (queued actions, prior head) in the
+    // daemon-only state directory before any file changes. Every snapshot the
+    // guard takes below is also journaled, so a crash at any later step is
+    // rolled back (or finished) by startup recovery. If the journal cannot be
+    // written the apply stops here, with nothing changed.
+    {
+        let registry = super::apply_queue::build_registry(&config.workspace_root);
+        let actions = super::apply_queue::queueable_actions(&pkg, &registry);
+        let ps = super::apply_queue::open_state(&config.workspace_root)?;
+        let prior_head = git_in(&target_dir, &["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let journal = ta_actions::ApplyJournal::begin(
+            &ps.apply_journal_dir(),
+            &package_id.to_string(),
+            &target_dir,
+            actions,
+            prior_head.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        rollback_guard.attach_journal(journal, &target_dir, prior_head);
+    }
     // PLAN.md is touched twice: once by the artifact apply (if the agent
     // modified it) and once by the plan-phase status update below. Snapshot
     // it now — before either write — so rollback restores the true original.
@@ -7512,6 +7642,9 @@ fn apply_package(
                 rollback_guard.snapshot_file(&target_dir.join(rel));
             }
         }
+        // COMMIT begins: every prior is durable. Refuse to overwrite anything
+        // the journal could not back up.
+        rollback_guard.ensure_journal_ok()?;
 
         // v0.13.17.2: Pre-apply artifact safety checks — catch destructive changes
         // before they reach the filesystem. Blocked by --force-apply.
@@ -9302,6 +9435,11 @@ fn apply_package(
                 }
                 return Err(e);
             }
+            // Journal the local commit (unless it was pushed: a pushed commit is
+            // a remote effect that recovery never resets).
+            if !git_push {
+                rollback_guard.journal_local_commit(preflight_branch.as_deref().unwrap_or("HEAD"));
+            }
             rollback_guard.commit();
         } // end of non-dry-run block
     }
@@ -9322,6 +9460,34 @@ fn apply_package(
         applied_via: ApplyProvenance::Manual,
     };
     save_package(config, &pkg)?;
+
+    // COMMIT POINT passed (the status flip is one atomic file replace). Journal
+    // it, then write every outside action into the durable queue in one step.
+    // A crash from here on is finished by recovery, never undone.
+    if let Some(mut journal) = rollback_guard.take_journal() {
+        if let Err(e) = journal.marked_applied() {
+            tracing::warn!(error = %e, "apply journal: could not record the Applied mark; recovery will still roll forward from the draft status");
+        }
+        match super::apply_queue::open_queue(&config.workspace_root).and_then(|q| {
+            journal
+                .enqueue_and_complete(&q, &ta_actions::SystemClock)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }) {
+            Ok(0) => {}
+            Ok(n) => {
+                eprintln!(
+                    "[apply] Queued {n} outside action(s). Track them with `ta show actions`."
+                );
+                super::apply_queue::print_irrecoverable_notice(config, &pkg);
+            }
+            Err(e) => eprintln!(
+                "[apply] WARNING: the draft is Applied but its outside actions could not be \
+                 queued: {e}\n  Nothing was lost: the journal is kept, and the next `ta draft \
+                 apply` or daemon start queues them. Check disk space and the daemon state \
+                 directory (`ta show state`)."
+            ),
+        }
+    }
 
     // §8: emit DraftApplied event so all state changes are logged with structured fields.
     {
@@ -11049,7 +11215,17 @@ pub fn save_package(config: &GatewayConfig, pkg: &DraftPackage) -> anyhow::Resul
         .pr_packages_dir
         .join(format!("{}.json", pkg.package_id));
     let json = serde_json::to_string_pretty(pkg)?;
-    fs::write(&path, json)?;
+    // One atomic replace: the status flip to Applied is the apply's commit
+    // point (v0.17.12.3), so a crash must leave the old file or the new one,
+    // never a torn one that recovery cannot read.
+    let tmp = path.with_extension("json.tmp");
+    {
+        use std::io::Write as _;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, &path)?;
     Ok(())
 }
 

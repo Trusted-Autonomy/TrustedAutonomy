@@ -7580,6 +7580,75 @@ Every action attempt — regardless of outcome — is appended to `.ta/action-lo
 
 Actions with `policy = "review"` appear in `ta draft view` alongside file changes. Approve or deny them as part of the normal draft review flow.
 
+### Applying a Draft Safely: Atomic Apply and the Action Queue
+
+A draft does two kinds of work. Copying files into your project can be undone. Sending an email cannot. TA is explicit about the difference.
+
+| Class | Meaning | Example |
+|-------|---------|---------|
+| Reversible | Can be undone completely | Writing project files, the local commit |
+| Compensable | Can be countered, but it still happened | Posting to Slack, then deleting the post |
+| Irrecoverable | Cannot be undone | Sending an email, publishing a package |
+
+A connector declares its own class in its `plugin.toml`. A connector that declares nothing is treated as irrecoverable.
+
+```toml
+reversibility = "compensable"   # reversible | compensable | irrecoverable
+undo          = "slack.delete"  # the verb that counters the action (required for compensable)
+idempotency   = "key"           # key | natural | none
+```
+
+`ta draft view` shows the class of every outside action before you approve.
+
+#### What `ta draft apply` guarantees
+
+- **Local changes are all or nothing.** The file changes, the local commit and the Applied status land together. Before touching any file, TA saves its prior contents in a journal in your per-user TA state directory (see `ta show state`), outside the project. If TA, your machine or the terminal dies partway, the next `ta draft apply` or daemon start finishes or undoes the apply for you. The draft's Applied status is the deciding point: if it was set, recovery finishes queueing the actions; if not, recovery restores every file.
+- **Outside actions are queued, not sent inline.** They are written to a durable queue in the same step as the Applied status, then sent by the daemon. They survive restarts and never run twice.
+- **Irrecoverable actions run last**, and only after every other action of the same draft has succeeded.
+
+```bash
+ta draft apply <id>
+# [apply] Queued 2 outside action(s). Track them with `ta show actions`.
+# [apply]   1 cannot be undone once sent (irrecoverable). They run last, only after the other actions succeed.
+```
+
+If an apply was interrupted you will see a line starting `[recover]` the next time you apply, or in the daemon log. It says whether the apply was finished or rolled back and what to do next. Nothing needs to be done by hand unless the message says recovery could not finish.
+
+#### Watching and managing outside actions
+
+```bash
+ta show actions                 # everything in the queue
+ta show actions <draft-id>      # one draft
+ta show actions --json          # machine-readable
+```
+
+Each action is in one of five states: `queued`, `sending`, `done`, `retrying`, or `needs attention`. Failed sends are retried with growing delays (30 seconds, 1 minute, 2 minutes, up to one hour, six attempts). Before every attempt TA re-reads your policy and constitution. A policy that now blocks the action, or a policy file TA cannot read, stops the send and puts the action in `needs attention`.
+
+An action needs attention when the outcome is unknown (TA stopped mid-send, or the connector gave no clear answer), when policy now blocks it, when the destination rejected it, or when retries ran out. TA never resends an unknown outcome on its own, because it might send a second email. Check the destination, then tell TA what happened:
+
+```bash
+ta show actions --resolve <draft-id>:<action-id> --sent     # it went out; never send it again
+ta show actions --resolve <draft-id>:<action-id> --resend   # it did not go out; queue it again
+ta show actions --resolve <draft-id>:<action-id> --drop     # do not send it
+```
+
+Resolving and undoing need a human credential (see "Human Credential"), so an agent cannot do either.
+
+For compensable actions that are done, `ta show actions` prints the recorded undo. Running it queues the counter-action as a new, logged entry; it is checked against policy and sent like any other action. History is not rewritten.
+
+```bash
+ta show actions --undo <draft-id>:<action-id>
+```
+
+Connector authors: to let TA retry a failed send safely, start the error message with `retryable:` when you know nothing was sent, or `rejected:` when the destination refused it. Any other failure is treated as an unknown outcome. When a connector declares `idempotency = "key"`, TA passes `idempotency_key` (the draft id and action id) in the payload.
+
+#### What is and is not covered
+
+- Task proposals (`ta_propose_task_*`) are not in this queue. They are replayed against Wayfinder after apply, with their own ledger.
+- Only `ta_external_action:<verb>` actions are queued. Actions the reviewer rejected or marked for discussion are skipped.
+- A commit that was pushed is a remote effect. Recovery undoes an unpushed local commit but never rewrites pushed history.
+- The queue and the apply journal live in the per-user state directory. A process running in a goal's staging workspace cannot reach them.
+
 ### Selective Approval
 
 Approve, reject, or discuss individual files using glob patterns:

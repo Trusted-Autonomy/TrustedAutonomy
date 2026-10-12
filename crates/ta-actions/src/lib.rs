@@ -34,20 +34,36 @@
 // ```
 
 pub mod action;
+pub mod apply_journal;
 pub mod capture;
 pub mod constitution_rules;
 pub mod dispatch;
+pub mod package_effects;
 pub mod plugin_action;
 pub mod policy;
+pub mod queue;
 pub mod rate_limit;
 pub mod ratelimit;
+pub mod reversibility;
+pub mod send;
 
 // Re-export the most commonly used types.
 pub use action::{ActionError, ActionRegistry, ActionTypeInfo, ExternalAction, RiskAssessment};
+pub use apply_journal::{
+    recover_all, ApplyEffects, ApplyJournal, JournalError, RecoveryOutcome, RecoveryReport,
+};
 pub use capture::{ActionCapture, ActionOutcome, CaptureError, CapturedAction};
 pub use constitution_rules::{ConstitutionViolation, PolicyConstitution};
 pub use dispatch::{DispatchResult, EmailDispatchGuard};
+pub use package_effects::PackageStatusEffects;
 pub use plugin_action::{discover_adapter_actions, AdapterPluginAction};
 pub use policy::{ActionPolicies, ActionPolicy, ActionPolicyConfig};
+pub use queue::{
+    is_queueable_tool, make_key, ActionExecutor, ActionQueue, Attention, AttentionReason, Clock,
+    ExecOutcome, ManualClock, NewAction, PolicyVerdict, QueueEntry, QueueError, QueueState,
+    QueueWorker, Resolution, RetryPolicy, RunReport, SendPolicy, Snapshot, SystemClock,
+};
 pub use rate_limit::{RateLimitResult, RateLimiter};
 pub use ratelimit::{SessionRateLimitResult, SessionRateLimiter};
+pub use reversibility::{Declaration, Idempotency, Reversibility};
+pub use send::{ProjectSendPolicy, RegistryExecutor, EXTERNAL_ACTION_PREFIX};

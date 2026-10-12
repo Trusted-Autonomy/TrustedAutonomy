@@ -403,6 +403,8 @@ pub(crate) fn show_state_with(project_root: &Path, locator: &StateLocator) -> an
             println!("  NATS JetStream:   {}", ps.nats_data_dir().display());
             println!("  Audit checkpoints:{}", ps.checkpoints_path().display());
             println!("  Config hashes:    {}", ps.hashes_path().display());
+            println!("  Action queue:     {}", ps.action_queue_dir().display());
+            println!("  Apply journals:   {}", ps.apply_journal_dir().display());
         }
         None => {
             println!(

@@ -44,6 +44,7 @@ use ta_plugin::envelope::{PluginRequest, PluginResponse};
 use ta_plugin::manifest::PluginManifest;
 
 use crate::action::{ActionError, ExternalAction, RiskAssessment};
+use crate::reversibility::Declaration;
 
 const ADAPTER_PLUGIN_KIND: &str = "adapter";
 const VERB_PREFIX: &str = "verb:";
@@ -77,6 +78,7 @@ pub struct AdapterPluginAction {
     args: Vec<String>,
     work_dir: PathBuf,
     timeout: Duration,
+    declaration: Declaration,
 }
 
 impl AdapterPluginAction {
@@ -88,6 +90,7 @@ impl AdapterPluginAction {
             args: manifest.args.clone(),
             work_dir: plugin_dir.to_path_buf(),
             timeout: manifest.timeout(30),
+            declaration: read_declaration(plugin_dir, &manifest.name),
         }
     }
 
@@ -171,6 +174,10 @@ impl ExternalAction for AdapterPluginAction {
         self.call("execute", payload)
     }
 
+    fn declaration(&self) -> Declaration {
+        self.declaration.clone()
+    }
+
     /// Attach a broker-resolved connector secret (v0.17.6.3) to this one
     /// subprocess call as `TA_CONNECTOR_SECRET`, never touching `payload`
     /// or the plugin's `PluginResponse` — the plugin script reads it from
@@ -188,6 +195,20 @@ impl ExternalAction for AdapterPluginAction {
                 &[("TA_CONNECTOR_SECRET".to_string(), s.to_string())],
             ),
             None => self.call("execute", payload),
+        }
+    }
+}
+
+/// Reads `reversibility`, `undo` and `idempotency` from the plugin's own
+/// `plugin.toml`. Missing or unreadable means irrecoverable (v0.17.12.3).
+fn read_declaration(plugin_dir: &Path, plugin_name: &str) -> Declaration {
+    let path = plugin_dir.join("plugin.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Declaration::from_manifest_text(&text, &path.display().to_string()),
+        Err(e) => {
+            tracing::warn!(plugin = %plugin_name, path = %path.display(), error = %e,
+                "could not read the connector manifest for its reversibility; treating its actions as irrecoverable");
+            Declaration::undeclared()
         }
     }
 }

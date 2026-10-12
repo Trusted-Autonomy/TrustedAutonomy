@@ -10976,11 +10976,11 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: A draft is never half applied, outside actions survive restarts and never run twice, and the system is honest that not everything can be undone. Design: `docs/superpowers/specs/2026-10-07-atomic-apply-and-action-queue-design.md`. Supersedes PR #642.
 
-1. [ ] Apply in two phases: prepare (check policy, paths, conflicts; write a journal with prior values) then commit (staged file move, local commit, mark Applied, enqueue every action in one step) with startup recovery from the journal.
-2. [ ] Connector manifests declare `reversibility` (reversible, compensable, irrecoverable), `undo` and `idempotency`; undeclared means irrecoverable. Reversibility table for the built-in media in the design doc.
-3. [ ] Durable action queue in the daemon-only state directory: states queued, sending, done, retrying, needs attention; key is draft id plus action id; retries with growing delays; policy re-checked on every attempt; an unknown outcome is never guessed or resent automatically.
-4. [ ] Irrecoverable actions run last; `ta show actions` lists queue state and offers recorded undo for compensable actions.
-5. [ ] Keep from PR #642: fsynced intent before send, policy re-check at send time, fail-closed config, per-action isolation, exclusion of `ta_propose_*`.
+1. [x] Apply in two phases: prepare (check policy, paths, conflicts; write a journal with prior values) then commit (staged file move, local commit, mark Applied, enqueue every action in one step) with startup recovery from the journal.
+2. [x] Connector manifests declare `reversibility` (reversible, compensable, irrecoverable), `undo` and `idempotency`; undeclared means irrecoverable. Reversibility table for the built-in media in the design doc.
+3. [x] Durable action queue in the daemon-only state directory: states queued, sending, done, retrying, needs attention; key is draft id plus action id; retries with growing delays; policy re-checked on every attempt; an unknown outcome is never guessed or resent automatically.
+4. [x] Irrecoverable actions run last; `ta show actions` lists queue state and offers recorded undo for compensable actions.
+5. [x] Keep from PR #642: fsynced intent before send, policy re-check at send time, fail-closed config, per-action isolation, exclusion of `ta_propose_*`.
 6. [ ] Optional saga order under the `strict` posture.
 
 **Effort**: L.

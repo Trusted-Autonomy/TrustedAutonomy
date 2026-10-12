@@ -390,6 +390,15 @@ impl ProjectState {
     pub fn hashes_path(&self) -> PathBuf {
         self.dir.join("config-hashes.json")
     }
+    /// Durable action queue (v0.17.12.3). Daemon-only: outside the project
+    /// tree and every staging workspace, so an agent cannot write or forge it.
+    pub fn action_queue_dir(&self) -> PathBuf {
+        self.dir.join("action-queue")
+    }
+    /// Two-phase apply journals (v0.17.12.3), same custody as the queue.
+    pub fn apply_journal_dir(&self) -> PathBuf {
+        self.dir.join("apply-journal")
+    }
 }
 
 fn human_write(path: &Path, contents: &str) -> Result<(), StateError> {
@@ -1661,6 +1670,30 @@ mod tests {
             HashCheck::Drift { .. }
         ));
         assert!(ps.hashes_path().starts_with(loc.root()));
+    }
+
+    #[test]
+    fn action_queue_and_apply_journal_live_outside_the_project_tree() {
+        let (p, _s, loc) = fixture();
+        let ps = ProjectState::open(p.path(), &loc).unwrap();
+        for dir in [ps.action_queue_dir(), ps.apply_journal_dir()] {
+            assert!(
+                dir.starts_with(loc.root()),
+                "{dir:?} must be in the state root"
+            );
+            assert!(
+                !dir.starts_with(p.path()),
+                "{dir:?} must not be in the project tree"
+            );
+        }
+        assert_ne!(ps.action_queue_dir(), ps.apply_journal_dir());
+        // An agent in a staging workspace cannot even resolve the state directory.
+        let staging = p.path().join(".ta").join("staging").join("goal-1");
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(matches!(
+            ProjectState::open(&staging, &loc),
+            Err(StateError::StagingWorkspace { .. })
+        ));
     }
 
     #[test]
