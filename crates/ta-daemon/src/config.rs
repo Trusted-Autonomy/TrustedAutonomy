@@ -157,6 +157,7 @@ pub struct DaemonConfig {
     /// [daemon]
     /// auto_update = "ask"            # "when_idle" | "ask" | "never"
     /// update_check_interval_secs = 300
+    /// keychain_approval_timeout_secs = 60
     /// ```
     #[serde(default)]
     pub daemon: DaemonSettings,
@@ -188,6 +189,12 @@ pub struct DaemonSettings {
     pub auto_update: ta_lifecycle::AutoUpdateMode,
     /// Seconds between checks (default 300). `0` is treated as the default.
     pub update_check_interval_secs: u64,
+    /// Seconds startup waits for ONE macOS Keychain approval dialog (default
+    /// 60; `0` is treated as the default). The daemon reads every keychain
+    /// item it needs at start so the prompt appears then, while `/health`
+    /// keeps answering `starting`. On timeout the default posture starts
+    /// degraded and the strict posture (`TA_POSTURE=strict`) refuses to start.
+    pub keychain_approval_timeout_secs: u64,
 }
 
 impl Default for DaemonSettings {
@@ -195,11 +202,21 @@ impl Default for DaemonSettings {
         Self {
             auto_update: ta_lifecycle::AutoUpdateMode::default(),
             update_check_interval_secs: DEFAULT_UPDATE_CHECK_INTERVAL_SECS,
+            keychain_approval_timeout_secs: crate::startup::DEFAULT_KEYCHAIN_TIMEOUT_SECS,
         }
     }
 }
 
 impl DaemonSettings {
+    /// Per-item wait for a keychain approval dialog at startup.
+    pub fn keychain_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(if self.keychain_approval_timeout_secs == 0 {
+            crate::startup::DEFAULT_KEYCHAIN_TIMEOUT_SECS
+        } else {
+            self.keychain_approval_timeout_secs
+        })
+    }
+
     pub fn check_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(if self.update_check_interval_secs == 0 {
             DEFAULT_UPDATE_CHECK_INTERVAL_SECS
@@ -2411,6 +2428,22 @@ mod tests {
         assert_eq!(cfg.daemon.auto_update, ta_lifecycle::AutoUpdateMode::Ask);
         assert_eq!(cfg.server.port, 7733);
         assert_eq!(cfg.daemon.check_interval().as_secs(), 60);
+    }
+
+    #[test]
+    fn keychain_timeout_defaults_to_60s_and_is_configurable() {
+        let cfg: DaemonConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.daemon.keychain_timeout().as_secs(), 60);
+        let cfg: DaemonConfig =
+            toml::from_str("[daemon]\nkeychain_approval_timeout_secs = 15\n").unwrap();
+        assert_eq!(cfg.daemon.keychain_timeout().as_secs(), 15);
+        let cfg: DaemonConfig =
+            toml::from_str("[daemon]\nkeychain_approval_timeout_secs = 0\n").unwrap();
+        assert_eq!(
+            cfg.daemon.keychain_timeout().as_secs(),
+            60,
+            "0 means default"
+        );
     }
 
     #[test]

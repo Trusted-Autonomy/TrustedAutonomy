@@ -26,6 +26,7 @@ pub mod encryption;
 pub mod error;
 pub mod file_vault;
 pub mod human;
+pub mod keychain;
 pub mod outcome_keys;
 pub mod state;
 pub mod vault;

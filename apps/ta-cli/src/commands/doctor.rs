@@ -309,6 +309,70 @@ fn check_cli_version() -> CheckResult {
     CheckResult::ok("CLI version", format!("{} ({})", version, hash))
 }
 
+/// The doctor result for a daemon that answered `/api/status` with `body`.
+fn check_daemon_body(daemon_url: &str, body: &serde_json::Value) -> CheckResult {
+    let daemon_ver = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let cli_ver = env!("CARGO_PKG_VERSION");
+    // `starting` or `degraded` (keychain not approved, whiteboard
+    // disconnected): show every reason with its next step.
+    let state = super::daemon::daemon_state(body);
+    if state != "ok" {
+        let reasons: Vec<String> = body["reasons"]
+            .as_array()
+            .map(|rs| {
+                rs.iter()
+                    .map(|r| {
+                        format!(
+                            "{}: {}",
+                            r["component"].as_str().unwrap_or("daemon"),
+                            r["reason"].as_str().unwrap_or("no reason given")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let fix: Vec<String> = body["reasons"]
+            .as_array()
+            .map(|rs| {
+                rs.iter()
+                    .filter_map(|r| r["next_step"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return CheckResult::warn(
+            "Daemon",
+            format!(
+                "{state} at {daemon_url}: {}",
+                if reasons.is_empty() {
+                    "no reason reported (see `ta daemon log`)".to_string()
+                } else {
+                    reasons.join("; ")
+                }
+            ),
+            if fix.is_empty() {
+                "Check `ta daemon status` and `ta daemon log`".to_string()
+            } else {
+                fix.join("\n")
+            },
+        );
+    }
+    if daemon_ver != "unknown" && daemon_ver != cli_ver {
+        CheckResult::warn(
+            "Daemon",
+            format!(
+                "connected at {} (daemon: {}, CLI: {})",
+                daemon_url, daemon_ver, cli_ver
+            ),
+            "Version mismatch: restart the daemon with `ta daemon restart`",
+        )
+    } else {
+        CheckResult::ok("Daemon", format!("connected at {}", daemon_url))
+    }
+}
+
 fn check_daemon(daemon_url: &str) -> CheckResult {
     let result = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -324,25 +388,7 @@ fn check_daemon(daemon_url: &str) -> CheckResult {
         });
 
     match result {
-        Some(body) => {
-            let daemon_ver = body
-                .get("version")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let cli_ver = env!("CARGO_PKG_VERSION");
-            if daemon_ver != "unknown" && daemon_ver != cli_ver {
-                CheckResult::warn(
-                    "Daemon",
-                    format!(
-                        "connected at {} (daemon: {}, CLI: {})",
-                        daemon_url, daemon_ver, cli_ver
-                    ),
-                    "Version mismatch — restart daemon: ta daemon restart",
-                )
-            } else {
-                CheckResult::ok("Daemon", format!("connected at {}", daemon_url))
-            }
-        }
+        Some(body) => check_daemon_body(daemon_url, &body),
         None => CheckResult::warn(
             "Daemon",
             "not running".to_string(),
@@ -3149,5 +3195,41 @@ mod tests {
                 "execute_fix_projfs must succeed on non-Windows"
             );
         }
+    }
+
+    #[test]
+    fn doctor_warns_with_the_reason_and_next_step_when_the_daemon_is_not_ready() {
+        let body = serde_json::json!({
+            "status": "degraded",
+            "version": env!("CARGO_PKG_VERSION"),
+            "reasons": [{
+                "component": "keychain",
+                "reason": "timed out after 60s waiting for keychain approval",
+                "next_step": "Approve the keychain prompt, then run `ta daemon restart`"
+            }]
+        });
+        let check = check_daemon_body("http://127.0.0.1:7700", &body);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("degraded"), "{}", check.detail);
+        assert!(
+            check.detail.contains("keychain: timed out"),
+            "{}",
+            check.detail
+        );
+        assert!(check.fix.contains("ta daemon restart"), "{}", check.fix);
+    }
+
+    #[test]
+    fn doctor_is_ok_for_a_ready_daemon_even_without_a_status_field() {
+        let body = serde_json::json!({ "version": env!("CARGO_PKG_VERSION") });
+        assert_eq!(
+            check_daemon_body("http://127.0.0.1:7700", &body).status,
+            CheckStatus::Ok
+        );
+        let body = serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") });
+        assert_eq!(
+            check_daemon_body("http://127.0.0.1:7700", &body).status,
+            CheckStatus::Ok
+        );
     }
 }

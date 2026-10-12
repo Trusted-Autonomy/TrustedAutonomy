@@ -816,6 +816,7 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
             None,
             &HttpProbe,
         )?;
+        wait_out_startup(&client, &base_url, project_root)?;
         return Ok(());
     }
 
@@ -835,6 +836,7 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(500));
         if client.get(&status_url).send().is_ok() {
+            wait_out_startup(&client, &base_url, project_root)?;
             eprintln!("  Daemon is ready.");
             return Ok(());
         }
@@ -844,6 +846,147 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
         "Daemon started (pid {}) but did not become healthy within 10 seconds. \
          Check logs: {}",
         pid,
+        log_path(project_root).display()
+    ))
+}
+
+// ─── Startup state (keychain approval, whiteboard link) ──────────────────────
+
+/// The daemon's `status` field: `ok`, `starting` or `degraded`. A daemon from
+/// before the field existed has none and counts as `ok`.
+pub(crate) fn daemon_state(json: &serde_json::Value) -> &str {
+    json["status"].as_str().unwrap_or("ok")
+}
+
+/// Printable lines for the reasons a daemon is `starting` or `degraded`, each
+/// with its next step. Empty when the daemon reports `ok`.
+pub(crate) fn startup_report_lines(json: &serde_json::Value) -> Vec<String> {
+    let state = daemon_state(json);
+    if state == "ok" {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("  State:          {state}")];
+    let reasons = json["reasons"].as_array().cloned().unwrap_or_default();
+    if reasons.is_empty() {
+        lines.push("    (the daemon gave no reason; see `ta daemon log`)".to_string());
+    }
+    for r in &reasons {
+        lines.push(format!(
+            "    - {}: {}",
+            r["component"].as_str().unwrap_or("daemon"),
+            r["reason"].as_str().unwrap_or("no reason given")
+        ));
+        if let Some(next) = r["next_step"].as_str() {
+            lines.push(format!("      Next step: {next}"));
+        }
+    }
+    lines
+}
+
+/// Poll `/health` until the daemon answers (or `attempts` run out) and return
+/// the last body. A `starting` daemon is returned as is, with its reasons.
+fn poll_health(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    attempts: u32,
+    keep_waiting_while_starting: bool,
+) -> Option<serde_json::Value> {
+    let url = format!("{}/health", base_url);
+    let mut last = None;
+    for _ in 0..attempts {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Some(body) = client
+            .get(&url)
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+        {
+            let starting = daemon_state(&body) == "starting";
+            last = Some(body);
+            if !(starting && keep_waiting_while_starting) {
+                break;
+            }
+        }
+    }
+    last
+}
+
+/// Print the health line after a start or restart: `ok`, or the state with its
+/// reasons and next steps.
+fn print_health_after_start(last: Option<&serde_json::Value>, base_url: &str) {
+    match last {
+        Some(body) if daemon_state(body) == "ok" => {
+            println!("  Health: ok (listening on {})", base_url)
+        }
+        Some(body) => {
+            println!(
+                "  Health: {} (listening on {})",
+                daemon_state(body),
+                base_url
+            );
+            for line in startup_report_lines(body).into_iter().skip(1) {
+                println!("{line}");
+            }
+            println!("  Check progress with: ta daemon status");
+        }
+        None => println!(
+            "  Health: starting (not yet responding on {}; check the log: ta daemon log)",
+            base_url
+        ),
+    }
+}
+
+/// A daemon that answers but reports `starting` is waiting for something (most
+/// often a Keychain approval). Say what, with the next step, and wait for it
+/// up to the daemon's own keychain timeout plus a margin, instead of letting
+/// the caller's next request fail with a 503.
+fn wait_out_startup(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    project_root: &Path,
+) -> anyhow::Result<()> {
+    const MAX_WAIT_SECS: u64 = 75;
+    let url = format!("{}/health", base_url);
+    let fetch = || {
+        client
+            .get(&url)
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+    };
+    let Some(first) = fetch().filter(|b| daemon_state(b) == "starting") else {
+        return Ok(());
+    };
+    eprintln!("  The daemon is still starting:");
+    for line in startup_report_lines(&first).into_iter().skip(1) {
+        eprintln!("{line}");
+    }
+    eprintln!("  Waiting up to {MAX_WAIT_SECS}s for it to finish...");
+    let started = std::time::Instant::now();
+    while started.elapsed().as_secs() < MAX_WAIT_SECS {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        match fetch() {
+            Some(b) if daemon_state(&b) != "starting" => {
+                if daemon_state(&b) == "degraded" {
+                    eprintln!("  The daemon started DEGRADED:");
+                    for line in startup_report_lines(&b).into_iter().skip(1) {
+                        eprintln!("{line}");
+                    }
+                }
+                return Ok(());
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    Err(anyhow::anyhow!(
+        "The daemon at {base_url} is still starting after {}s (project {}). Check what it is \
+         waiting for with `ta daemon status`; if a macOS Keychain dialog is open, click \
+         Always Allow. Log: {}",
+        started.elapsed().as_secs(),
+        project_root.display(),
         log_path(project_root).display()
     ))
 }
@@ -889,22 +1032,14 @@ fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow
     println!();
     println!("Use `ta daemon status` to check health, `ta daemon stop` to shut down.");
 
-    // Wait briefly for startup and report health.
+    // Wait briefly for startup and report health. A daemon waiting for a
+    // Keychain approval answers `starting` with the reason; show it.
     let base_url = resolve_daemon_url(project_root, port);
-    let status_url = format!("{}/api/status", base_url);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
-
-    for _ in 0..10 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if client.get(&status_url).send().is_ok() {
-            println!("  Health: ok (listening on {})", base_url);
-            return Ok(());
-        }
-    }
-
-    println!("  Health: starting (not yet responding — check log for details)");
+    let last = poll_health(&client, &base_url, 10, true);
+    print_health_after_start(last.as_ref(), &base_url);
     Ok(())
 }
 
@@ -968,22 +1103,14 @@ fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::R
     println!("  Port: {}", effective_port);
     println!("  Log:  {}", log_path(project_root).display());
 
-    // Wait for health.
+    // Wait for health. A daemon waiting for a Keychain approval answers
+    // `starting` with the reason; show it with the next step.
     let base_url = resolve_daemon_url(project_root, port);
-    let status_url = format!("{}/api/status", base_url);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
-
-    for _ in 0..20 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if client.get(&status_url).send().is_ok() {
-            println!("  Health: ok");
-            return Ok(());
-        }
-    }
-
-    println!("  Health: starting (not yet responding — check log)");
+    let last = poll_health(&client, &base_url, 20, true);
+    print_health_after_start(last.as_ref(), &base_url);
     Ok(())
 }
 
@@ -1009,6 +1136,17 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     let active_goals = json["active_goals"].as_u64().unwrap_or(0);
                     let pending_drafts = json["pending_drafts"].as_u64().unwrap_or(0);
 
+                    if daemon_state(&json) == "starting" {
+                        println!("Daemon is running but still starting.");
+                        println!("  PID:            {}", p);
+                        println!("  URL:            {}", base_url);
+                        println!("  Version:        {}", version);
+                        for line in startup_report_lines(&json) {
+                            println!("{line}");
+                        }
+                        println!("  Log:            {}", log_path(project_root).display());
+                        return Ok(());
+                    }
                     println!("Daemon is running.");
                     println!("  PID:            {}", p);
                     println!("  URL:            {}", base_url);
@@ -1029,6 +1167,9 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     println!("  Active agents:  {}", active_count);
                     println!("  Pending drafts: {}", pending_drafts);
                     println!("  Log:            {}", log_path(project_root).display());
+                    for line in startup_report_lines(&json) {
+                        println!("{line}");
+                    }
                     if let Some(line) = super::status::outstanding_update_message(&json) {
                         println!("  Update:         {}", line);
                     }
@@ -1130,6 +1271,9 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     println!("Daemon is running (started externally, no PID file).");
                     println!("  URL:     {}", base_url);
                     println!("  Version: {}", version);
+                    for line in startup_report_lines(&json) {
+                        println!("{line}");
+                    }
                     return Ok(());
                 }
             }
@@ -2270,5 +2414,46 @@ mod tests {
         let result = cmd_health(dir.path());
         // May return error (fail count > 0) or ok with warnings — either is fine.
         let _ = result;
+    }
+
+    fn starting_body() -> serde_json::Value {
+        serde_json::json!({
+            "status": "starting",
+            "version": "0.0.0",
+            "reasons": [{
+                "component": "keychain",
+                "reason": "waiting for keychain approval for audit-log signing key (12s of 60s)",
+                "next_step": "Click Always Allow in the macOS Keychain dialog"
+            }]
+        })
+    }
+
+    #[test]
+    fn an_ok_or_pre_upgrade_daemon_prints_no_startup_lines() {
+        assert!(startup_report_lines(&serde_json::json!({"status": "ok"})).is_empty());
+        // A daemon from before the field existed has no status at all.
+        assert!(startup_report_lines(&serde_json::json!({"version": "0.1"})).is_empty());
+        assert_eq!(daemon_state(&serde_json::json!({})), "ok");
+    }
+
+    #[test]
+    fn a_starting_daemon_prints_its_reason_and_the_next_step() {
+        let lines = startup_report_lines(&starting_body()).join("\n");
+        assert!(lines.contains("State:          starting"), "{lines}");
+        assert!(
+            lines.contains("keychain: waiting for keychain approval"),
+            "{lines}"
+        );
+        assert!(lines.contains("Next step: Click Always Allow"), "{lines}");
+    }
+
+    #[test]
+    fn a_degraded_daemon_without_reasons_still_points_at_the_log() {
+        let lines = startup_report_lines(&serde_json::json!({"status": "degraded", "reasons": []}))
+            .join("\n");
+        assert!(
+            lines.contains("degraded") && lines.contains("ta daemon log"),
+            "{lines}"
+        );
     }
 }

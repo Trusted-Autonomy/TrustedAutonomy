@@ -25,8 +25,7 @@ use crate::state::{
     self, ControlSecret, CustodyOpts, Posture, ProjectState, SecretOrigin, StateLocator,
 };
 
-const KEYRING_SERVICE: &str = "trusted-autonomy-vault";
-const KEYRING_USER: &str = "credential-vault-age-identity";
+use crate::keychain::{VAULT_ITEM as KEYRING_USER, VAULT_SERVICE as KEYRING_SERVICE};
 
 /// Filename of the fallback key file, stored next to the vault file itself.
 pub const FALLBACK_KEY_FILENAME: &str = "credentials.key";
@@ -93,7 +92,8 @@ fn keychain_guard_message(operation: &str, vault_dir: &Path, test_name: &str, ex
 
 /// Panic loudly if the real keychain is about to be touched while tests run.
 fn guard_real_keychain(operation: &str, vault_dir: &Path) {
-    if !keychain_guard_active() {
+    // An injected backend (a test double) is not the real keychain.
+    if !keychain_guard_active() || !crate::keychain::is_real_backend() {
         return;
     }
     let thread = std::thread::current();
@@ -138,6 +138,14 @@ pub fn load_or_create_identity(
         guard_real_keychain("load_or_create_identity", vault_dir);
         match keyring_load_or_create() {
             Ok(identity) => return Ok((identity, KeyCustody::Keychain)),
+            Err(reason) if crate::keychain::request_mode() => {
+                // The daemon is serving requests: falling back to a fresh
+                // file key here would shadow the real key in the keychain.
+                return Err(VaultError::Other(format!(
+                    "the credential vault key is held by the OS keychain and is not available \
+                     while the daemon serves requests: {reason}"
+                )));
+            }
             Err(reason) => {
                 warn!(
                     reason = %reason,
@@ -228,10 +236,11 @@ fn state_dir_identity_with(
 pub fn probe_key_custody(vault_dir: &Path) -> Option<KeyCustody> {
     if std::env::var_os(NO_KEYCHAIN_ENV).is_none() {
         guard_real_keychain("probe_key_custody", vault_dir);
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-            if entry.get_password().is_ok() {
-                return Some(KeyCustody::Keychain);
-            }
+        if matches!(
+            crate::keychain::get(KEYRING_SERVICE, KEYRING_USER),
+            Ok(Some(_))
+        ) {
+            return Some(KeyCustody::Keychain);
         }
     }
     let key_path = vault_dir.join(FALLBACK_KEY_FILENAME);
@@ -259,17 +268,18 @@ fn probe_project_file_custody(project_root: &Path, locator: &StateLocator) -> Op
 }
 
 fn keyring_load_or_create() -> Result<Identity, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .map_err(|e| format!("keyring entry error: {e}"))?;
-    match entry.get_password() {
-        Ok(secret) => {
+    match crate::keychain::get(KEYRING_SERVICE, KEYRING_USER) {
+        Ok(Some(secret)) => {
             Identity::from_str(&secret).map_err(|e| format!("stored age identity is corrupt: {e}"))
         }
-        Err(keyring::Error::NoEntry) => {
+        Ok(None) => {
             let identity = Identity::generate();
-            entry
-                .set_password(identity.to_string().expose_secret())
-                .map_err(|e| format!("keyring write error: {e}"))?;
+            crate::keychain::set(
+                KEYRING_SERVICE,
+                KEYRING_USER,
+                identity.to_string().expose_secret(),
+            )
+            .map_err(|e| format!("keyring write error: {e}"))?;
             Ok(identity)
         }
         Err(e) => Err(format!("keyring read error: {e}")),

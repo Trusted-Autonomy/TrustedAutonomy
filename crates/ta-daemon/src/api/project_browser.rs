@@ -140,6 +140,11 @@ pub async fn open_project(
         tracing::warn!(path = %body.path, error = %e, "Failed to update recent-projects.json");
     }
 
+    // Load this project's keychain items off the request thread, with a
+    // short timeout, so later requests for it are served from memory and a
+    // pending approval dialog can never hold this request (v0.17.12.16).
+    crate::startup::preload_project(&path, std::time::Duration::from_secs(5)).await;
+
     // Update the active project root in daemon state.
     {
         let mut active = state.active_project_root.write().unwrap();

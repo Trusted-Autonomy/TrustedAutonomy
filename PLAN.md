@@ -11207,16 +11207,16 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.15`
 
 ### v0.17.12.16 - Daemon Startup Robustness: Keychain Approval at Start, Bounded NATS Retry
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.14
 
 **Goal**: An unattended daemon start must not look healthy and then hang. Found 2026-10-12 in the live end-to-end test: the scratch daemon hung reading the broker root key from the macOS Keychain in the middle of its first wake. The Keychain approval prompt appears only at first use, HTTP stops answering, logging stops, and nothing says the daemon is waiting for a person to click "Always Allow"; separately the wake listener never retries a failed NATS connection. Evidence: `/tmp/vt-live-test/evidence/run8/run8-report.txt` and `daemon-hang-keychain-stack.txt`.
 
-1. [ ] **Keychain access at start, time-boxed.** The daemon reads every keychain item it needs at startup, before it reports ready, off the async runtime (`spawn_blocking`) with a timeout (default 60 s, configurable), so the approval prompt appears at start and `/health` keeps answering ("starting: waiting for keychain approval for <service>"). It logs a clear line when it begins waiting (what it is waiting for, the dialog to click, the timeout) and when it resumes. On timeout: the default posture starts degraded with the reason in `/api/status` and `ta doctor`; the strict posture refuses to start.
-2. [ ] **No keychain read in the request path.** After startup every secret is served from memory loaded at start (or read with `spawn_blocking` plus timeout), so a locked or revoked keychain can never freeze HTTP.
-3. [ ] **Status says why.** `/health` and `/api/status` report `starting` or `degraded` with reasons (for example `keychain`), and `ta daemon start`, `status` and `restart` print them with the next step.
-4. [ ] **Wake listener connects with retry.** A failed NATS connection retries with bounded exponential backoff and jitter, logs each attempt (server, attempt, next delay), reconnects after a drop, and surfaces "whiteboard disconnected" in `/api/status`; it never gives up silently.
-5. [ ] Tests: an injected blocked or slow keychain (behind a trait; no real Keychain) leaves `/health` answering, logs the waiting line and falls back per posture; secrets are not read on the request path; NATS connect fails twice then succeeds, reconnect after a drop, status reflects it; Windows-safe, tempdir.
+1. [x] **Keychain access at start, time-boxed.** The daemon reads every keychain item it needs at startup, before it reports ready, off the async runtime (`spawn_blocking`) with a timeout (default 60 s, configurable), so the approval prompt appears at start and `/health` keeps answering ("starting: waiting for keychain approval for <service>"). It logs a clear line when it begins waiting (what it is waiting for, the dialog to click, the timeout) and when it resumes. On timeout: the default posture starts degraded with the reason in `/api/status` and `ta doctor`; the strict posture refuses to start.
+2. [x] **No keychain read in the request path.** After startup every secret is served from memory loaded at start (or read with `spawn_blocking` plus timeout), so a locked or revoked keychain can never freeze HTTP.
+3. [x] **Status says why.** `/health` and `/api/status` report `starting` or `degraded` with reasons (for example `keychain`), and `ta daemon start`, `status` and `restart` print them with the next step.
+4. [x] **Wake listener connects with retry.** A failed NATS connection retries with bounded exponential backoff and jitter, logs each attempt (server, attempt, next delay), reconnects after a drop, and surfaces "whiteboard disconnected" in `/api/status`; it never gives up silently.
+5. [x] Tests: an injected blocked or slow keychain (behind a trait; no real Keychain) leaves `/health` answering, logs the waiting line and falls back per posture; secrets are not read on the request path; NATS connect fails twice then succeeds, reconnect after a drop, status reflects it; Windows-safe, tempdir.
 
 **Effort**: S to M.
 

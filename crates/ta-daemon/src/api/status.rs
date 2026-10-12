@@ -147,17 +147,23 @@ pub struct AgentInfo {
 }
 
 /// `GET /api/status` — Project dashboard as JSON (cached for 5 seconds).
+///
+/// `status` (`ok` | `starting` | `degraded`), `reasons` and `whiteboard` are
+/// added fresh on every call, never from the cache, so a keychain approval or
+/// a NATS reconnect shows up at once.
 pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Fast path: return cached response if fresh.
-    if let Some(cached) = state.status_cache.get().await {
-        return Json(cached).into_response();
-    }
-
-    // Slow path: compute response and cache it.
-    let response = compute_project_status(&state).await;
-    let value = serde_json::to_value(&response).unwrap_or_default();
-    state.status_cache.set(value).await;
-    Json(response).into_response()
+    let mut value = if let Some(cached) = state.status_cache.get().await {
+        cached
+    } else {
+        // Slow path: compute response and cache it.
+        let response = compute_project_status(&state).await;
+        let value = serde_json::to_value(&response).unwrap_or_default();
+        state.status_cache.set(value.clone()).await;
+        value
+    };
+    state.health.apply_to(&mut value);
+    Json(value).into_response()
 }
 
 /// Compute the full project status (called at most once per 5 seconds).

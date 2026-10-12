@@ -54,6 +54,7 @@ pub mod question_registry;
 pub mod rotation_policy;
 pub mod router;
 pub mod self_update;
+pub mod startup;
 pub mod team_session;
 pub mod token_refresh;
 pub mod transport;
@@ -61,6 +62,7 @@ pub mod wake_listener;
 pub mod wake_retry;
 pub mod watchdog;
 mod web;
+pub mod whiteboard_link;
 pub mod wiki_sync;
 
 use anyhow::Result;
@@ -218,12 +220,46 @@ async fn main() -> Result<()> {
 
     // Control-plane secrets belong in the per-user state directory, not the
     // project tree. Warn about old-location copies; refuse under `strict`.
-    {
+    let posture = {
         let locator = ta_credentials::state::StateLocator::from_env();
         let posture = ta_credentials::state::Posture::resolve(&locator);
         if let Err(e) = ta_credentials::state::startup_check(&project_root, posture) {
             anyhow::bail!("Refusing to start: {e}");
         }
+        posture
+    };
+
+    // Read every keychain item this daemon needs NOW, on a blocking thread
+    // with a timeout, so a macOS "Always Allow" dialog appears at start (not
+    // in the middle of the first request) and `/health` answers `starting`
+    // meanwhile. After this no secret is read from the keychain on the
+    // request path (v0.17.12.16). Strict posture refuses to start on timeout.
+    let health = startup::begin(
+        &project_root,
+        daemon_config.daemon.keychain_timeout(),
+        posture,
+    );
+    // Backstop for modes where the API server does not own startup: when the
+    // strict posture refused, make sure the process really stops.
+    {
+        let h = health.clone();
+        let pid_path = project_root.join(".ta").join("daemon.pid");
+        tokio::spawn(async move {
+            let reason = h.refused().await;
+            tracing::error!(
+                reason = %reason,
+                "Refusing to start under the strict posture. Approve the Keychain dialog \
+                 (Always Allow) and run `ta daemon start` again"
+            );
+            eprintln!(
+                "Refusing to start: {reason}. Approve the Keychain dialog (Always Allow) and \
+                 run `ta daemon start` again, or use the default posture."
+            );
+            let _ = std::fs::remove_file(&pid_path);
+            // Give the log a moment to flush, then stop the process.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            std::process::exit(2);
+        });
     }
 
     // Validate security-sensitive config fields at startup (v0.17.0.9).
@@ -478,30 +514,30 @@ async fn main() -> Result<()> {
                 watchdog::run_watchdog(wd_root, wd_config, Some(pm), wd_shutdown).await;
             });
 
-            // Start the persistent team session supervisor (v0.17.5.1).
+            // The three supervisors below mint or verify capability tokens
+            // and read the credential vault, so they start only once startup
+            // has loaded (or given up on) the keychain items they need.
             {
-                let ts_root = project_root.clone();
-                let ts_shutdown = shutdown.clone();
-                team_session::start(ts_root, ts_shutdown);
-            }
-
-            // Periodic whiteboard-token refresh (v0.17.11.12) — independent
-            // of the rotation supervisor above, see token_refresh.rs's
-            // module doc for why.
-            {
-                let tr_root = project_root.clone();
-                let tr_shutdown = shutdown.clone();
-                token_refresh::start(tr_root, tr_shutdown);
-            }
-
-            // Periodic Wayfinder wiki cache sync -- independent of the
-            // rotation supervisor for the same reason token_refresh is,
-            // see wiki_sync.rs's module doc. No-ops for a project with no
-            // .ta/wiki-resources.toml.
-            {
-                let ws_root = project_root.clone();
-                let ws_shutdown = shutdown.clone();
-                wiki_sync::start(ws_root, ws_shutdown);
+                let h = health.clone();
+                let root = project_root.clone();
+                let sd = shutdown.clone();
+                tokio::spawn(async move {
+                    h.wait_resolved().await;
+                    if h.refusal().is_some() {
+                        return;
+                    }
+                    // Start the persistent team session supervisor (v0.17.5.1).
+                    team_session::start(root.clone(), sd.clone());
+                    // Periodic whiteboard-token refresh (v0.17.11.12) --
+                    // independent of the rotation supervisor above, see
+                    // token_refresh.rs's module doc for why.
+                    token_refresh::start(root.clone(), sd.clone());
+                    // Periodic Wayfinder wiki cache sync -- independent of
+                    // the rotation supervisor for the same reason
+                    // token_refresh is, see wiki_sync.rs's module doc.
+                    // No-ops for a project with no .ta/wiki-resources.toml.
+                    wiki_sync::start(root, sd);
+                });
             }
 
             // Periodic GC task: run every `gc_interval_hours` (default 6h).
@@ -540,7 +576,7 @@ async fn main() -> Result<()> {
             });
         }
 
-        web::serve_daemon_api(project_root, daemon_config, shutdown).await?;
+        web::serve_daemon_api(project_root, daemon_config, shutdown, health.clone()).await?;
     } else {
         // MCP mode: use the configured transport (v0.13.2).
         // Default: stdio — backward-compatible with existing .mcp.json setups.
@@ -555,6 +591,13 @@ async fn main() -> Result<()> {
             Ok(p) => p,
             Err(e) => anyhow::bail!("Refusing to start: {e}"),
         };
+
+        // The gateway opens the broker, audit log and credential vault, so it
+        // waits for the startup keychain loading to finish first.
+        health.wait_resolved().await;
+        if let Some(reason) = health.refusal() {
+            anyhow::bail!("Refusing to start: {reason}");
+        }
 
         let server = TaGatewayServer::new(gateway_config)?;
 
@@ -581,8 +624,9 @@ async fn main() -> Result<()> {
             let root = project_root.clone();
             let dc = daemon_config.clone();
             let sd = shutdown.clone();
+            let h = health.clone();
             tokio::spawn(async move {
-                if let Err(e) = web::serve_daemon_api(root, dc, sd).await {
+                if let Err(e) = web::serve_daemon_api(root, dc, sd, h).await {
                     tracing::error!("Daemon API error: {}", e);
                 }
             });
