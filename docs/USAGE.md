@@ -15011,6 +15011,38 @@ Each record carries `id`, `title`, `timestamp`, `tokens_input` (uncached input o
 
 Re-running is safe. Records are matched by `id` (`<source>:<session or goal id>`), so a second run updates them in place instead of adding copies, and any other lines already in the file are kept. The file is written to a temporary file and renamed into place, so an interrupted run cannot leave it half-written. If the existing file has a line that is not valid JSON, nothing is changed and the error names the line. With `--json`, the confirmation goes to stderr so stdout stays valid JSON.
 
+### Testing a cost optimization on identical work (golden set)
+
+A golden entry is a finished goal saved as its start commit, its prompt and its result. Replaying it with one setting changed shows what that setting does to cost and outcome on the same work, without a large multi-arm grid.
+
+```bash
+# 1. Save a finished goal. --check is a command that exits 0 when a result is acceptable.
+ta golden capture 98a823ac --check "cargo test -p mycrate"
+
+# 2. See what you have (baseline cost, age, replay count).
+ta golden list
+
+# 3. Replay it with an override. Prints a cost estimate first.
+ta golden replay fix-the-thing-98a823ac --set optimizers.input.use=none --tag no-optimizer --max-usd 5
+
+# 4. Compare every replay with its baseline.
+ta golden report fix-the-thing-98a823ac
+```
+
+`capture` refuses a goal that started from uncommitted changes, because a replay starts from the clean commit and could differ for that reason alone. Pass `--allow-dirty` to capture it anyway. It also refuses a goal that is unfinished, stopped on a budget ceiling, or has no recorded start commit.
+
+`replay` checks the start commit out into a scratch git worktree and runs a normal `ta run` there, so your working tree, branch and index are never touched. The scratch worktree is removed afterwards. Values given with `--set key=value` are read as JSON where they parse (`3`, `true`, `"x"`) and as plain text otherwise. The replay's draft is never applied for you: review it with `ta draft list` and close it when done. Only committed files are replayed; uncommitted work in your tree is not part of the replay.
+
+`report` shows cost, tokens, outcome, whether the check passes and how similar the diff is, per replay. The verdict is:
+
+| Verdict | Meaning |
+|---|---|
+| `equivalent` | The check did not fail and the diff is at least 80% similar to the baseline's. With no check defined, this rests on diff similarity alone. |
+| `differs` | The run finished and the check did not fail, but the diff is less than 80% similar. |
+| `failed` | The check failed, the replay hit a budget ceiling, or it produced no result to compare. |
+
+Anything that is not `equivalent` is listed for human review and is never accepted automatically. One replay is one sample, since agent runs vary: repeat a replay before acting on a borderline result. Turns are not recorded by the agent runtime, so they are not compared. The `--check` command runs with no timeout, so keep it fast. Use `--json` on `list` and `report` for scripting.
+
 ### Viewing aggregate stats
 
 ```bash
