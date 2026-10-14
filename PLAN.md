@@ -11306,7 +11306,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.21`
 
 ### v0.17.12.22 - Apply After an Interrupted Apply Must Not Commit a Half-Bumped Version
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.5
 
 **Goal**: Found 2026-10-14 on PR #678 (v0.17.12.5): all three CI platforms failed at `Build all crates` with `failed to select a version for the requirement ta-changeset = "^0.17.12-alpha.5"`. Cause: earlier `ta draft apply` attempts were killed mid-run and left the version bump to `0.17.12-alpha.5` in 30 manifests in the working tree. The next apply logged `[recover] ... Rolled it back` and `uncommitted changes` warnings for every manifest, then `bump_workspace_version` found most files already current and returned only the two it changed, so only those two were staged (`[version] bumped crates/ta-data-spec/Cargo.toml + crates/ta-workspace/Cargo.toml`). The committed tree had workspace `alpha.4` but two crates requiring siblings at `alpha.5`. The `Version consistency` job did not catch it because it compares only `Cargo.toml` and `CLAUDE.md`. The fix was a manual follow-up commit of the other 30 files.
