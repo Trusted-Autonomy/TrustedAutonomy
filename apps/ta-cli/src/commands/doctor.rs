@@ -627,7 +627,8 @@ fn check_vcs(config: &GatewayConfig) -> Vec<CheckResult> {
     use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
 
     let mut results = Vec::new();
-    let vcs = VcsBackend::detect(&config.workspace_root);
+    let detection = ta_submit::detect_vcs(&config.workspace_root);
+    let vcs = detection.backend();
 
     match &vcs {
         VcsBackend::None => {
@@ -646,10 +647,10 @@ fn check_vcs(config: &GatewayConfig) -> Vec<CheckResult> {
                 ));
             }
         }
-        VcsBackend::Git => {}
+        VcsBackend::Git | VcsBackend::Svn | VcsBackend::Plugin(_) => {}
     }
 
-    results.push(CheckResult::ok("VCS", vcs.as_str().to_string()));
+    results.push(CheckResult::ok("VCS", detection.summary()));
 
     // Check VCS ignore coverage for .ta/ paths that exist on disk (VCS-agnostic).
     for path in LOCAL_TA_PATHS {
@@ -662,7 +663,7 @@ fn check_vcs(config: &GatewayConfig) -> Vec<CheckResult> {
                 results.push(CheckResult::warn(
                     "VCS ignore",
                     format!(".ta/{} exists but is not ignored by {}", path, vcs.as_str()),
-                    "run: ta setup vcs --force",
+                    "run: ta setup vcs  (refreshes the TA block in place; --force rewrites it)",
                 ));
             }
         }
@@ -810,7 +811,8 @@ pub(crate) fn check_stale_ephemeral_in(root: &Path) -> CheckResult {
                 "Remove it: rm {}\n\
                  This file should only ever exist inside a goal's staging \
                  overlay — its presence in the source tree means an agent ran \
-                 unisolated against the real project. Fix: ta doctor --fix-ephemeral",
+                 unisolated against the real project. `ta doctor --fix` does not \
+                 cover it, so delete the file by hand.",
                 stale.display()
             ),
         )
@@ -1028,7 +1030,7 @@ fn execute_fix_denied(config: &GatewayConfig) -> anyhow::Result<()> {
 pub(super) fn vcs_gitignore_gaps(config: &GatewayConfig) -> Vec<&'static str> {
     use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
 
-    let vcs = VcsBackend::detect(&config.workspace_root);
+    let vcs = ta_submit::detect_vcs(&config.workspace_root).backend();
     if vcs == VcsBackend::None {
         return vec![];
     }
@@ -2466,7 +2468,8 @@ mod tests {
         let result = check_stale_ephemeral_in(dir.path());
         assert_eq!(result.status, CheckStatus::Warn);
         assert!(result.detail.contains(".ta-decisions.json"));
-        assert!(result.fix.contains("ta doctor --fix-ephemeral"));
+        assert!(result.fix.contains("rm "));
+        assert!(!result.fix.contains("fix-ephemeral"));
     }
 
     /// `warn_on_stale_decisions_after_goal` must not panic or error on a

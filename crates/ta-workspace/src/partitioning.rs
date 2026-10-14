@@ -153,60 +153,34 @@ pub fn ta_runtime_dirs() -> impl Iterator<Item = &'static str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VcsBackend {
     Git,
+    Svn,
     Perforce,
+    /// A VCS adapter plugin (by name) claimed the project. TA does not know
+    /// its ignore-file format, so `ta setup vcs` reports instead of writing.
+    Plugin(String),
     None,
 }
 
 impl VcsBackend {
     /// Detect the VCS backend for the given project root.
     ///
-    /// Check order:
-    /// 1. `.git/` directory present — Git
-    /// 2. `.p4config` in any parent directory or `P4PORT`/`P4CLIENT` env vars — Perforce
-    /// 3. Otherwise — None
+    /// Thin wrapper over the shared detector
+    /// ([`crate::vcs_detect::detect_vcs`]) with no plugin markers. Callers
+    /// that must recognise VCS adapter plugins (`ta setup vcs`, `ta init`,
+    /// `ta doctor`) use `ta_submit::detect_vcs`, which supplies the markers
+    /// declared in installed plugin manifests, and want the evidence list too.
     pub fn detect(project_root: &std::path::Path) -> Self {
-        // Git: .git/ directory exists, or git rev-parse succeeds.
-        if project_root.join(".git").exists() {
-            return Self::Git;
-        }
-        // Try git rev-parse (handles worktrees and submodules).
-        // Clear TA agent VCS isolation env vars (set by v0.13.17.3) so we
-        // detect VCS based on project_root's own repo, not the staging dir.
-        let git_ok = std::process::Command::new("git")
-            .args(["rev-parse", "--git-dir"])
-            .current_dir(project_root)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_CEILING_DIRECTORIES")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if git_ok {
-            return Self::Git;
-        }
-
-        // Perforce: P4PORT or P4CLIENT env vars, or .p4config in ancestor dirs.
-        if std::env::var("P4PORT").is_ok() || std::env::var("P4CLIENT").is_ok() {
-            return Self::Perforce;
-        }
-        let mut dir = Some(project_root);
-        while let Some(d) = dir {
-            if d.join(".p4config").exists() {
-                return Self::Perforce;
-            }
-            dir = d.parent();
-        }
-
-        Self::None
+        crate::vcs_detect::detect_vcs(project_root, &[]).backend()
     }
 
-    /// Machine-readable name for workflow.toml serialization.
-    pub fn as_str(&self) -> &'static str {
+    /// Machine-readable name for workflow.toml serialization. For a plugin
+    /// this is the plugin's name (its adapter name).
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Git => "git",
+            Self::Svn => "svn",
             Self::Perforce => "perforce",
+            Self::Plugin(name) => name,
             Self::None => "none",
         }
     }
@@ -221,7 +195,8 @@ impl VcsBackend {
     /// `ta plan shared`, `ta goal`) do not need VCS-specific branches.
     ///
     /// `VcsBackend::None` always returns `Ok(true)` — no VCS means nothing
-    /// will ever be committed, so all paths are effectively "safe".
+    /// will ever be committed, so all paths are effectively "safe". A plugin
+    /// backend returns `Err`: its ignore semantics are not known to TA.
     pub fn is_path_ignored(
         &self,
         project_root: &std::path::Path,
@@ -229,10 +204,74 @@ impl VcsBackend {
     ) -> Result<bool, String> {
         match self {
             Self::Git => git_is_ignored(project_root, ta_rel_path),
+            Self::Svn => svn_is_ignored(project_root, ta_rel_path),
             Self::Perforce => p4_is_ignored(project_root, ta_rel_path),
+            Self::Plugin(name) => Err(format!(
+                "ignore status is not known for VCS plugin '{name}'; check its ignore file by hand"
+            )),
             Self::None => Ok(true),
         }
     }
+}
+
+/// Check whether a `.ta/`-relative path is ignored by Subversion (`svn:ignore`).
+///
+/// Uses `svn status --no-ignore <path>`: a line starting with `I` means the
+/// path is ignored. Returns `Err` if `svn` is missing or the directory is not
+/// a working copy.
+pub fn svn_is_ignored(project_root: &std::path::Path, ta_rel_path: &str) -> Result<bool, String> {
+    let path = format!(".ta/{}", ta_rel_path.trim_end_matches('/'));
+    let output = std::process::Command::new("svn")
+        .args(["status", "--no-ignore", &path])
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| format!("svn status failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "svn status returned status {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().any(|l| l.starts_with('I')))
+}
+
+/// Patterns for the `svn:ignore` property on the `.ta` directory.
+///
+/// `svn:ignore` matches names within one directory (no slashes), which suits
+/// `.ta/` because every `LOCAL_TA_PATHS` entry is a direct child.
+pub fn svn_ignore_patterns() -> Vec<String> {
+    LOCAL_TA_PATHS
+        .iter()
+        .map(|p| p.trim_end_matches('/').to_string())
+        .collect()
+}
+
+/// Merge the TA patterns into an existing `svn:ignore` value for `.ta`.
+///
+/// `svn:ignore` has no comment syntax, so there is no marker block: TA only
+/// ever appends patterns that are missing, and never removes, reorders or
+/// rewrites an existing line. Returns `(new_value, added_patterns)`; when
+/// nothing is missing `new_value == existing`.
+pub fn merge_svn_ignore(existing: &str) -> (String, Vec<String>) {
+    let present: Vec<&str> = existing.lines().map(|l| l.trim()).collect();
+    let added: Vec<String> = svn_ignore_patterns()
+        .into_iter()
+        .filter(|p| !present.contains(&p.as_str()))
+        .collect();
+    if added.is_empty() {
+        return (existing.to_string(), added);
+    }
+    let mut value = existing.to_string();
+    if !value.is_empty() && !value.ends_with('\n') {
+        value.push('\n');
+    }
+    for p in &added {
+        value.push_str(p);
+        value.push('\n');
+    }
+    (value, added)
 }
 
 /// Check whether a given `.ta/` relative path is currently ignored by Git.
@@ -325,61 +364,137 @@ fn is_recognized_ta_line(line: &str) -> bool {
         })
 }
 
+/// Result of refreshing the TA block of an ignore file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoreUpdate {
+    /// The full new file content (identical to the input when `changed` is false).
+    pub content: String,
+    /// Whether the content differs from the input.
+    pub changed: bool,
+    /// `.ta/` entries the TA block gained (e.g. a stale block missing a newer path).
+    pub added: Vec<String>,
+    /// `.ta/`-prefixed lines in the old block that TA does not recognize.
+    pub unregistered: Vec<String>,
+}
+
+/// Refresh the TA block of an ignore file whose block starts with `marker`.
+///
+/// Only the TA block (the marker line and the contiguous `.ta/` lines after
+/// it) is ever touched. Every other byte of `existing` is preserved,
+/// including its line endings: a CRLF file stays CRLF. A block that is
+/// present but stale (missing an entry from `LOCAL_TA_PATHS`, for example
+/// `.ta/setup-progress.json` in a project created before that entry existed)
+/// is refreshed in place without `force`; `force` rewrites it regardless.
+fn update_ignore_block(existing: &str, force: bool, marker: &str) -> IgnoreUpdate {
+    let eol = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let required: Vec<String> = LOCAL_TA_PATHS
+        .iter()
+        .map(|p| format!(".ta/{}", p))
+        .collect();
+    let mut new_block = String::new();
+    new_block.push_str(marker);
+    new_block.push_str(eol);
+    for line in &required {
+        new_block.push_str(line);
+        new_block.push_str(eol);
+    }
+
+    let segments: Vec<&str> = existing.split_inclusive('\n').collect();
+    let marker_idx = segments.iter().position(|l| l.trim() == marker.trim());
+
+    let Some(start) = marker_idx else {
+        // No block yet: append one, separated by exactly one blank line.
+        let mut content = existing.to_string();
+        if !content.is_empty() {
+            if !content.ends_with('\n') {
+                content.push_str(eol);
+            }
+            let blank_end = content.ends_with("\n\n") || content.ends_with("\r\n\r\n");
+            if !blank_end {
+                content.push_str(eol);
+            }
+        }
+        content.push_str(&new_block);
+        return IgnoreUpdate {
+            content,
+            changed: true,
+            added: required,
+            unregistered: Vec::new(),
+        };
+    };
+
+    // The block is the marker plus the contiguous `.ta/` lines after it.
+    let mut end = start + 1;
+    while end < segments.len() && segments[end].trim().starts_with(".ta/") {
+        end += 1;
+    }
+    let old_lines: Vec<&str> = segments[start + 1..end].iter().map(|l| l.trim()).collect();
+    let added: Vec<String> = required
+        .iter()
+        .filter(|r| !old_lines.contains(&r.as_str()))
+        .cloned()
+        .collect();
+    let unregistered: Vec<String> = old_lines
+        .iter()
+        .filter(|l| !is_recognized_ta_line(l))
+        .map(|l| l.to_string())
+        .collect();
+
+    if !force && added.is_empty() {
+        return IgnoreUpdate {
+            content: existing.to_string(),
+            changed: false,
+            added,
+            unregistered,
+        };
+    }
+
+    // Rebuild in place: text before the block, the fresh block, any
+    // unrecognized lines (kept, never dropped), then the rest verbatim.
+    let mut content: String = segments[..start].concat();
+    content.push_str(&new_block);
+    for seg in &segments[start + 1..end] {
+        if !is_recognized_ta_line(seg.trim()) {
+            content.push_str(seg);
+            if !seg.ends_with('\n') {
+                content.push_str(eol);
+            }
+        }
+    }
+    content.push_str(&segments[end..].concat());
+    let changed = content != existing;
+    IgnoreUpdate {
+        content,
+        changed,
+        added,
+        unregistered,
+    }
+}
+
+/// Refresh the TA block of a `.gitignore`. See [`update_ignore_block`] rules.
+pub fn update_gitignore_detailed(existing: &str, force: bool) -> IgnoreUpdate {
+    update_ignore_block(existing, force, GITIGNORE_MARKER)
+}
+
 /// Append (or update) the TA block in the given `.gitignore` content.
 ///
-/// Idempotent: if the marker is already present, replaces the existing block.
-/// If `force` is true, always rewrites the block even if already present.
+/// Idempotent: a complete block is left alone. A block missing entries from
+/// `LOCAL_TA_PATHS` is refreshed in place. `force` rewrites the block even
+/// when complete. Content outside the block and the file's line endings are
+/// always preserved.
 ///
 /// Returns `(new_content, changed, unregistered_lines)`. `unregistered_lines`
 /// lists any `.ta/`-prefixed line found in the old TA block that isn't a
-/// recognized `LOCAL_TA_PATHS`/`SHARED_TA_PATHS` entry — these are preserved
+/// recognized `LOCAL_TA_PATHS`/`SHARED_TA_PATHS` entry; these are preserved
 /// in the output (never silently dropped), but callers should surface them
 /// as a warning so the entry can be registered properly (v0.17.0.12.32).
 pub fn update_gitignore(existing: &str, force: bool) -> (String, bool, Vec<String>) {
-    if !force && existing.contains(GITIGNORE_MARKER) {
-        // Already present — nothing to do.
-        return (existing.to_string(), false, Vec::new());
-    }
-
-    // Remove any existing TA block (marker line + the .ta/ lines that follow),
-    // but only the lines we actually recognize — anything else that happens
-    // to start with `.ta/` is preserved and reported, not dropped.
-    let mut result = String::new();
-    let mut in_ta_block = false;
-    let mut unregistered = Vec::new();
-    for line in existing.lines() {
-        if line.trim() == GITIGNORE_MARKER.trim() {
-            in_ta_block = true;
-            continue;
-        }
-        if in_ta_block {
-            let trimmed = line.trim();
-            if trimmed.starts_with(".ta/") {
-                if is_recognized_ta_line(trimmed) {
-                    continue;
-                }
-                unregistered.push(trimmed.to_string());
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            }
-            in_ta_block = false;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    // Ensure there's exactly one blank line separator before our block.
-    if !result.is_empty() && !result.ends_with("\n\n") {
-        if result.ends_with('\n') {
-            result.push('\n');
-        } else {
-            result.push_str("\n\n");
-        }
-    }
-
-    result.push_str(&gitignore_block());
-    (result, true, unregistered)
+    let u = update_gitignore_detailed(existing, force);
+    (u.content, u.changed, u.unregistered)
 }
 
 /// The marker line used in .p4ignore to identify the TA-managed block.
@@ -396,51 +511,17 @@ pub fn p4ignore_block() -> String {
     block
 }
 
+/// Refresh the TA block of a `.p4ignore`. See [`update_ignore_block`] rules.
+pub fn update_p4ignore_detailed(existing: &str, force: bool) -> IgnoreUpdate {
+    update_ignore_block(existing, force, P4IGNORE_MARKER)
+}
+
 /// Append (or update) the TA block in the given `.p4ignore` content.
 ///
-/// Idempotent: if the marker is already present, skips unless `force`.
-///
-/// Returns `(new_content, changed, unregistered_lines)` — see
-/// [`update_gitignore`] for the meaning of `unregistered_lines`.
+/// Same rules as [`update_gitignore`].
 pub fn update_p4ignore(existing: &str, force: bool) -> (String, bool, Vec<String>) {
-    if !force && existing.contains(P4IGNORE_MARKER) {
-        return (existing.to_string(), false, Vec::new());
-    }
-
-    let mut result = String::new();
-    let mut in_ta_block = false;
-    let mut unregistered = Vec::new();
-    for line in existing.lines() {
-        if line.trim() == P4IGNORE_MARKER.trim() {
-            in_ta_block = true;
-            continue;
-        }
-        if in_ta_block {
-            let trimmed = line.trim();
-            if trimmed.starts_with(".ta/") {
-                if is_recognized_ta_line(trimmed) {
-                    continue;
-                }
-                unregistered.push(trimmed.to_string());
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            }
-            in_ta_block = false;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    if !result.is_empty() && !result.ends_with("\n\n") {
-        if result.ends_with('\n') {
-            result.push('\n');
-        } else {
-            result.push_str("\n\n");
-        }
-    }
-    result.push_str(&p4ignore_block());
-    (result, true, unregistered)
+    let u = update_p4ignore_detailed(existing, force);
+    (u.content, u.changed, u.unregistered)
 }
 
 #[cfg(test)]
@@ -969,5 +1050,113 @@ mod tests {
              SHARED_TA_PATHS (if it should be committed).",
             unaccounted
         );
+    }
+
+    #[test]
+    fn stale_block_missing_an_entry_is_refreshed_without_force() {
+        // A project whose block predates `.ta/setup-progress.json`.
+        let stale = format!(
+            "# mine\n*.o\n\n{}\n.ta/staging/\n.ta/goals/\n\n# after\nbuild/\n",
+            GITIGNORE_MARKER
+        );
+        let u = update_gitignore_detailed(&stale, false);
+        assert!(u.changed, "a stale block must be refreshed without --force");
+        assert!(u.added.contains(&".ta/setup-progress.json".to_string()));
+        assert!(u.content.contains(".ta/setup-progress.json"));
+        assert!(u.content.starts_with("# mine\n*.o\n\n"));
+        assert!(
+            u.content.ends_with("\n\n# after\nbuild/\n"),
+            "content after the block is untouched:\n{}",
+            u.content
+        );
+        assert_eq!(u.content.matches(GITIGNORE_MARKER).count(), 1);
+        // A second run is a no-op.
+        let again = update_gitignore_detailed(&u.content, false);
+        assert!(!again.changed);
+        assert!(again.added.is_empty());
+    }
+
+    #[test]
+    fn generated_block_contains_setup_progress() {
+        let (content, _, _) = update_gitignore("", false);
+        assert!(content.lines().any(|l| l == ".ta/setup-progress.json"));
+        let (p4, _, _) = update_p4ignore("", false);
+        assert!(p4.lines().any(|l| l == ".ta/setup-progress.json"));
+    }
+
+    #[test]
+    fn crlf_file_keeps_crlf_and_outside_bytes() {
+        let existing = format!(
+            "# mine\r\n*.o\r\n\r\n{}\r\n.ta/staging/\r\n\r\n# after\r\nbuild/",
+            GITIGNORE_MARKER
+        );
+        let u = update_gitignore_detailed(&existing, false);
+        assert!(u.changed);
+        assert!(
+            !u.content.replace("\r\n", "").contains('\n'),
+            "every newline must stay CRLF:\n{:?}",
+            u.content
+        );
+        assert!(u.content.starts_with("# mine\r\n*.o\r\n\r\n"));
+        assert!(u.content.ends_with("\r\n\r\n# after\r\nbuild/"));
+    }
+
+    #[test]
+    fn crlf_append_uses_crlf() {
+        let u = update_gitignore_detailed("node_modules/\r\n", false);
+        assert!(u.changed);
+        assert!(u.content.starts_with("node_modules/\r\n\r\n"));
+        assert!(!u.content.replace("\r\n", "").contains('\n'));
+    }
+
+    #[test]
+    fn force_on_complete_block_keeps_unrecognized_line_and_reports_it() {
+        let (first, _, _) = update_gitignore("", false);
+        let with_extra = first.replace(".ta/staging/\n", ".ta/staging/\n.ta/handmade.json\n");
+        let u = update_gitignore_detailed(&with_extra, true);
+        assert!(u.content.contains(".ta/handmade.json"));
+        assert_eq!(u.unregistered, vec![".ta/handmade.json".to_string()]);
+        // Not forced: a complete block is untouched, but the line is still reported.
+        let u = update_gitignore_detailed(&with_extra, false);
+        assert!(!u.changed);
+        assert_eq!(u.unregistered, vec![".ta/handmade.json".to_string()]);
+    }
+
+    #[test]
+    fn svn_ignore_patterns_are_names_without_slashes() {
+        let pats = svn_ignore_patterns();
+        assert!(pats.contains(&"staging".to_string()));
+        assert!(pats.contains(&"setup-progress.json".to_string()));
+        assert!(pats.contains(&"*.log".to_string()));
+        assert!(pats.iter().all(|p| !p.contains('/')));
+    }
+
+    #[test]
+    fn merge_svn_ignore_only_appends_and_is_idempotent() {
+        let existing = "keep-me\r\nstaging\n*.tmp";
+        let (merged, added) = merge_svn_ignore(existing);
+        assert!(merged.starts_with("keep-me\r\nstaging\n*.tmp\n"));
+        assert!(!added.contains(&"staging".to_string()), "already present");
+        assert!(added.contains(&"goals".to_string()));
+        assert_eq!(merged.matches("staging").count(), 1);
+        let (again, added2) = merge_svn_ignore(&merged);
+        assert_eq!(again, merged);
+        assert!(added2.is_empty());
+    }
+
+    #[test]
+    fn merge_svn_ignore_on_empty_value() {
+        let (merged, added) = merge_svn_ignore("");
+        assert_eq!(added.len(), svn_ignore_patterns().len());
+        assert!(merged.ends_with('\n'));
+    }
+
+    #[test]
+    fn plugin_backend_has_no_ignore_status() {
+        let b = VcsBackend::Plugin("hg".into());
+        assert_eq!(b.as_str(), "hg");
+        assert!(b
+            .is_path_ignored(std::path::Path::new("."), "staging/")
+            .is_err());
     }
 }

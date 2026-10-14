@@ -775,6 +775,7 @@ fn run_new(
             non_interactive: true,
             overwrite: false,
         }),
+        false,
         &project_config,
     );
     if let Err(e) = init_result {

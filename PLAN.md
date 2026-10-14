@@ -11006,15 +11006,15 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.4`
 
 ### v0.17.12.5 - VCS Detection and `ta setup vcs`
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none
 
 **Goal**: One VCS detector shared by `ta init`, the VT installer and the add-project wizard.
 
-1. [ ] Shared detector (git, svn, perforce, none, plugin) used by `ta init`.
-2. [ ] `ta setup vcs --vcs svn` with ignore rules, and `--json` output for detection.
-3. [ ] `ta init` runs setup vcs on re-run.
-4. [ ] Detection output includes the evidence list (which markers and files led to the chosen kind), not only the chosen kind, in `ta setup vcs --dry-run --json` and `ta init --json`, so the installer report and the Wayfinder wizard can show why.
+1. [x] Shared detector (git, svn, perforce, none, plugin) used by `ta init`.
+2. [x] `ta setup vcs --vcs svn` with ignore rules, and `--json` output for detection.
+3. [x] `ta init` runs setup vcs on re-run.
+4. [x] Detection output includes the evidence list (which markers and files led to the chosen kind), not only the chosen kind, in `ta setup vcs --dry-run --json` and `ta init --json`, so the installer report and the Wayfinder wizard can show why.
 
 **Effort**: M. **Unblocks VT**: V5 (wizard and installer).
 

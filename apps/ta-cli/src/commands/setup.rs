@@ -13,7 +13,11 @@ use std::path::Path;
 use clap::Subcommand;
 use ta_mcp_gateway::GatewayConfig;
 use ta_workspace::partitioning::{
-    update_gitignore, update_p4ignore, VcsBackend, LOCAL_TA_PATHS, SHARED_TA_PATHS,
+    update_gitignore_detailed, update_p4ignore_detailed, VcsBackend, LOCAL_TA_PATHS,
+    SHARED_TA_PATHS,
+};
+use ta_workspace::{
+    IgnoreAction, IgnoreReport, VcsDetection, VcsKind, VcsSetupReport, VCS_DETECTION_SCHEMA_VERSION,
 };
 
 #[derive(Subcommand, Debug)]
@@ -47,13 +51,16 @@ pub enum SetupCommands {
     },
     /// Configure VCS ignore rules for the current project (v0.13.13).
     ///
-    /// Detects Git or Perforce, writes the correct ignore entries for local .ta/
-    /// runtime state, and reports what was changed.
+    /// Detects Git, Subversion, Perforce or a VCS adapter plugin, writes the
+    /// ignore rules for local .ta/ runtime state, and reports what changed and
+    /// which markers led to the detected VCS (the evidence list).
     ///
     /// Examples:
     ///   ta setup vcs                        # auto-detect VCS and update ignore files
     ///   ta setup vcs --force                # rewrite the TA block even if already present
     ///   ta setup vcs --dry-run              # show what would change without writing
+    ///   ta setup vcs --dry-run --json       # machine-readable detection + evidence
+    ///   ta setup vcs --vcs svn              # set svn:ignore on .ta (appends only)
     ///   ta setup vcs --project-type rust    # pre-populate [commit] auto_stage with Cargo.lock
     ///   ta setup vcs --project-type node    # pre-populate with package-lock.json
     ///   ta setup vcs --project-type python  # pre-populate with poetry.lock / Pipfile.lock
@@ -65,13 +72,18 @@ pub enum SetupCommands {
         /// Show what would change without writing any files.
         #[arg(long)]
         dry_run: bool,
-        /// Override VCS backend: git, perforce, or none.
+        /// Override VCS backend: git, svn, perforce, none, or the name of an
+        /// installed VCS adapter plugin.
         #[arg(long)]
         vcs: Option<String>,
         /// Project type for auto-stage pre-population: rust, node, python, go.
         /// Auto-detected from project files if not specified.
         #[arg(long)]
         project_type: Option<String>,
+        /// Print one JSON document (detection, evidence, what changed) instead
+        /// of text. Combine with --dry-run to preview.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -86,106 +98,323 @@ pub fn execute(command: &SetupCommands, config: &GatewayConfig) -> anyhow::Resul
             dry_run,
             vcs,
             project_type,
-        } => run_vcs_setup(
-            config,
-            *force,
-            *dry_run,
-            vcs.as_deref(),
-            project_type.as_deref(),
-        ),
+            json,
+        } => {
+            if *json {
+                run_vcs_setup_json(
+                    config,
+                    *force,
+                    *dry_run,
+                    vcs.as_deref(),
+                    project_type.as_deref(),
+                )
+            } else {
+                run_vcs_setup(
+                    config,
+                    *force,
+                    *dry_run,
+                    vcs.as_deref(),
+                    project_type.as_deref(),
+                )
+            }
+        }
     }
 }
 
-/// VCS setup: detect VCS backend, write ignore files, update workflow.toml.
-pub fn run_vcs_setup(
+/// Resolve `--vcs` to a backend, or fall back to the detected one.
+fn resolve_backend(
+    project_root: &Path,
+    detection: &VcsDetection,
+    vcs_override: Option<&str>,
+) -> anyhow::Result<(VcsBackend, &'static str)> {
+    let Some(name) = vcs_override else {
+        return Ok((detection.backend(), "detected"));
+    };
+    let backend = match name {
+        "git" => VcsBackend::Git,
+        "svn" => VcsBackend::Svn,
+        "perforce" => VcsBackend::Perforce,
+        "none" => VcsBackend::None,
+        other => {
+            if ta_submit::find_vcs_plugin(other, project_root).is_some() {
+                VcsBackend::Plugin(other.to_string())
+            } else {
+                anyhow::bail!(
+                    "Unknown VCS backend '{}'. Valid values: git, svn, perforce, none, or the \
+                     name of an installed VCS adapter plugin (see .ta/plugins/vcs/ and \
+                     ~/.config/ta/plugins/vcs/)",
+                    other
+                )
+            }
+        }
+    };
+    Ok((backend, "override"))
+}
+
+fn backend_kind(backend: &VcsBackend) -> (VcsKind, Option<String>) {
+    match backend {
+        VcsBackend::Git => (VcsKind::Git, None),
+        VcsBackend::Svn => (VcsKind::Svn, None),
+        VcsBackend::Perforce => (VcsKind::Perforce, None),
+        VcsBackend::None => (VcsKind::None, None),
+        VcsBackend::Plugin(n) => (VcsKind::Plugin, Some(n.clone())),
+    }
+}
+
+/// Apply (or preview) a marker-block ignore file update and describe it.
+fn apply_ignore_file(
+    path: &Path,
+    file_name: &str,
+    dry_run: bool,
+    update: impl FnOnce(&str) -> ta_workspace::IgnoreUpdate,
+) -> anyhow::Result<IgnoreReport> {
+    let existed = path.exists();
+    let existing = if existed {
+        std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("could not read {}: {}", path.display(), e))?
+    } else {
+        String::new()
+    };
+    let u = update(&existing);
+    let action = match (u.changed, existed, dry_run) {
+        (false, _, _) => IgnoreAction::Unchanged,
+        (true, false, true) => IgnoreAction::WouldCreate,
+        (true, true, true) => IgnoreAction::WouldUpdate,
+        (true, false, false) => IgnoreAction::Created,
+        (true, true, false) => IgnoreAction::Updated,
+    };
+    if u.changed && !dry_run {
+        std::fs::write(path, &u.content).map_err(|e| {
+            anyhow::anyhow!(
+                "could not write {}: {}. Check permissions, then re-run `ta setup vcs`",
+                path.display(),
+                e
+            )
+        })?;
+    }
+    let note = if u.unregistered.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} unrecognized .ta/ line(s) in {} were preserved, not removed",
+            u.unregistered.len(),
+            file_name
+        ))
+    };
+    Ok(IgnoreReport {
+        target: file_name.to_string(),
+        action,
+        added_entries: if u.changed { u.added } else { Vec::new() },
+        preserved_unrecognized: u.unregistered,
+        note,
+    })
+}
+
+/// Detect the VCS, write (or preview) the ignore rules, and return what
+/// happened. Prints nothing: callers render the report as text or JSON.
+pub fn compute_vcs_setup(
     config: &GatewayConfig,
     force: bool,
     dry_run: bool,
     vcs_override: Option<&str>,
     project_type_override: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<VcsSetupReport> {
     let project_root = &config.workspace_root;
+    let detection = ta_submit::detect_vcs(project_root);
+    let (backend, source) = resolve_backend(project_root, &detection, vcs_override)?;
+    let (kind, plugin) = backend_kind(&backend);
+    let mut notes = Vec::new();
+    let mut workflow_changes = Vec::new();
 
-    // Detect or use override.
-    let backend = match vcs_override {
-        Some("git") => VcsBackend::Git,
-        Some("perforce") => VcsBackend::Perforce,
-        Some("none") => VcsBackend::None,
-        Some(other) => anyhow::bail!(
-            "Unknown VCS backend '{}'. Valid values: git, perforce, none",
-            other
-        ),
-        None => VcsBackend::detect(project_root),
-    };
-
-    println!("VCS: {}", backend.as_str());
-
-    match &backend {
+    let ignore = match &backend {
         VcsBackend::Git => {
-            let gitignore_path = project_root.join(".gitignore");
-            let existing = if gitignore_path.exists() {
-                std::fs::read_to_string(&gitignore_path)?
-            } else {
-                String::new()
-            };
-            let (updated, changed, unregistered) = update_gitignore(&existing, force);
-            if dry_run {
-                if changed {
-                    println!("  [dry-run] Would update .gitignore with TA local-state block.");
-                } else {
-                    println!("  [ok] .gitignore already contains TA block — no change needed.");
-                    println!("       Use --force to rewrite the block.");
-                }
-            } else if changed {
-                std::fs::write(&gitignore_path, &updated)?;
-                println!("  [updated] .gitignore — appended TA local runtime state block.");
-            } else {
-                println!("  [ok] .gitignore already contains TA block — no change needed.");
-                println!("       Use --force to rewrite the block.");
-            }
-            warn_unregistered_ta_lines(&unregistered, ".gitignore");
-            // Update workflow.toml [submit] adapter field and [commit] auto_stage.
-            update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
+            let r = apply_ignore_file(
+                &project_root.join(".gitignore"),
+                ".gitignore",
+                dry_run,
+                |e| update_gitignore_detailed(e, force),
+            )?;
+            workflow_changes =
+                update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
+            Some(r)
         }
         VcsBackend::Perforce => {
-            let p4ignore_path = project_root.join(".p4ignore");
-            let existing = if p4ignore_path.exists() {
-                std::fs::read_to_string(&p4ignore_path)?
-            } else {
-                String::new()
-            };
-            let (updated, changed, unregistered) = update_p4ignore(&existing, force);
-            if dry_run {
-                if changed {
-                    println!("  [dry-run] Would update .p4ignore with TA local-state block.");
-                } else {
-                    println!("  [ok] .p4ignore already contains TA block — no change needed.");
-                }
-            } else if changed {
-                std::fs::write(&p4ignore_path, &updated)?;
-                println!("  [updated] .p4ignore — appended TA local runtime state block.");
-            } else {
-                println!("  [ok] .p4ignore already contains TA block — no change needed.");
-            }
-            warn_unregistered_ta_lines(&unregistered, ".p4ignore");
-            // Warn if P4IGNORE env var is not set.
+            let r =
+                apply_ignore_file(&project_root.join(".p4ignore"), ".p4ignore", dry_run, |e| {
+                    update_p4ignore_detailed(e, force)
+                })?;
             if std::env::var("P4IGNORE").is_err() {
-                println!();
-                println!("  ⚠ Perforce: P4IGNORE env var is not set.");
-                println!(
-                    "    TA wrote local-only paths to .p4ignore, but Perforce won't use it until:"
+                notes.push(
+                    "P4IGNORE is not set, so Perforce will not use .p4ignore until you run \
+                     `export P4IGNORE=.p4ignore` (add it to your shell profile). Without it, \
+                     .ta/staging/, .ta/goals/ and similar may be submitted accidentally."
+                        .to_string(),
                 );
-                println!("      export P4IGNORE=.p4ignore   (add to your shell profile)");
-                println!("    Without this, .ta/staging/, .ta/goals/, etc. may be submitted accidentally.");
             }
-            update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
+            workflow_changes =
+                update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
+            Some(r)
+        }
+        VcsBackend::Svn => {
+            let target = "svn:ignore on .ta".to_string();
+            let r = match ta_submit::ensure_ta_ignore(project_root, dry_run) {
+                Ok(out) => {
+                    let action = match (out.added.is_empty(), dry_run) {
+                        (true, _) => IgnoreAction::Unchanged,
+                        (false, true) => IgnoreAction::WouldUpdate,
+                        (false, false) => IgnoreAction::Updated,
+                    };
+                    let note = out.applied.then(|| {
+                        "svn:ignore changed in the working copy; commit .ta with `svn commit` \
+                         to share it"
+                            .to_string()
+                    });
+                    IgnoreReport {
+                        target,
+                        action,
+                        added_entries: out.added,
+                        preserved_unrecognized: Vec::new(),
+                        note,
+                    }
+                }
+                Err(e) => IgnoreReport {
+                    target,
+                    action: IgnoreAction::Skipped,
+                    added_entries: Vec::new(),
+                    preserved_unrecognized: Vec::new(),
+                    note: Some(e.to_string()),
+                },
+            };
+            workflow_changes =
+                update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
+            Some(r)
+        }
+        VcsBackend::Plugin(name) => {
+            notes.push(format!(
+                "VCS adapter plugin '{name}' owns this project. TA does not know its ignore \
+                 format, so no ignore file was written. Add the local .ta/ paths listed by \
+                 `ta plan shared` to that VCS's ignore mechanism by hand."
+            ));
+            workflow_changes =
+                update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
+            None
         }
         VcsBackend::None => {
-            println!("  No VCS detected — skipping ignore file generation.");
-            println!("  Run `ta setup vcs --vcs git` or `--vcs perforce` to override.");
+            notes.push(
+                "No VCS detected, so no ignore file was generated. Run `ta setup vcs --vcs git`, \
+                 `--vcs svn` or `--vcs perforce` to override."
+                    .to_string(),
+            );
+            None
         }
+    };
+
+    Ok(VcsSetupReport {
+        schema_version: VCS_DETECTION_SCHEMA_VERSION,
+        dry_run,
+        forced: force,
+        source: source.to_string(),
+        kind,
+        plugin,
+        detection,
+        ignore,
+        workflow_changes,
+        notes,
+    })
+}
+
+fn action_label(a: IgnoreAction) -> &'static str {
+    match a {
+        IgnoreAction::Created => "[created]",
+        IgnoreAction::Updated => "[updated]",
+        IgnoreAction::Unchanged => "[ok]",
+        IgnoreAction::WouldCreate => "[dry-run] Would create",
+        IgnoreAction::WouldUpdate => "[dry-run] Would update",
+        IgnoreAction::Skipped => "[skipped]",
+    }
+}
+
+/// Print the human-readable form of a setup report. `with_paths` adds the
+/// shared/local `.ta/` path status listing.
+pub fn print_vcs_setup(config: &GatewayConfig, report: &VcsSetupReport, with_paths: bool) {
+    let project_root = &config.workspace_root;
+    let name = match &report.plugin {
+        Some(p) => format!("plugin:{p}"),
+        None => report.kind.as_str().to_string(),
+    };
+    println!("VCS: {} ({})", name, report.source);
+    if report.source == "override" {
+        println!("  detected: {}", report.detection.summary());
+    }
+    for e in &report.detection.evidence {
+        println!("  evidence: {} at {}: {}", e.marker, e.path, e.reason);
+    }
+    for e in &report.detection.ignored_evidence {
+        println!(
+            "  also found (not used): {} at {} ({})",
+            e.marker,
+            e.path,
+            e.kind.as_str()
+        );
+    }
+    if report.detection.evidence.is_empty() && report.detection.ignored_evidence.is_empty() {
+        println!(
+            "  no VCS marker found; checked: {}",
+            report.detection.checked.join(", ")
+        );
     }
 
+    if let Some(ig) = &report.ignore {
+        match ig.action {
+            IgnoreAction::Unchanged => println!(
+                "  [ok] {} already contains the TA block. No change needed. Use --force to rewrite it.",
+                ig.target
+            ),
+            IgnoreAction::Skipped => println!(
+                "  [skipped] {}: {}",
+                ig.target,
+                ig.note.as_deref().unwrap_or("see notes")
+            ),
+            a => {
+                println!(
+                    "  {} {} ({} entr{} added)",
+                    action_label(a),
+                    ig.target,
+                    ig.added_entries.len(),
+                    if ig.added_entries.len() == 1 { "y" } else { "ies" }
+                );
+                for entry in &ig.added_entries {
+                    println!("      + {entry}");
+                }
+                if let Some(n) = &ig.note {
+                    println!("  {n}");
+                }
+            }
+        }
+        warn_unregistered_ta_lines(&ig.preserved_unrecognized, &ig.target);
+    }
+    for c in &report.workflow_changes {
+        if report.dry_run {
+            println!("  [dry-run] Would update .ta/workflow.toml: {c}");
+        } else {
+            println!("  [updated] .ta/workflow.toml: {c}");
+        }
+    }
+    for n in &report.notes {
+        println!();
+        println!("  Note: {n}");
+    }
+
+    if !with_paths {
+        return;
+    }
+    let backend = match (report.kind, &report.plugin) {
+        (VcsKind::Git, _) => VcsBackend::Git,
+        (VcsKind::Svn, _) => VcsBackend::Svn,
+        (VcsKind::Perforce, _) => VcsBackend::Perforce,
+        (VcsKind::Plugin, Some(p)) => VcsBackend::Plugin(p.clone()),
+        _ => VcsBackend::None,
+    };
     println!();
     println!("Shared (commit to VCS):");
     for path in SHARED_TA_PATHS {
@@ -201,22 +430,58 @@ pub fn run_vcs_setup(
     println!("Local (should be ignored):");
     for path in LOCAL_TA_PATHS {
         let full = project_root.join(".ta").join(path.trim_end_matches('/'));
-        let exists = full.exists();
-        let ignored = if backend == VcsBackend::Git {
-            ta_workspace::partitioning::git_is_ignored(project_root, path).unwrap_or(false)
+        let status = if !full.exists() {
+            "[absent]"
         } else {
-            // For non-Git, assume ignored if we wrote the block above.
-            !dry_run
-        };
-        let status = match (exists, ignored) {
-            (true, true) => "[ignored ✓]",
-            (true, false) => "[NOT IGNORED ⚠ — run `ta doctor` to fix]",
-            (false, _) => "[absent]",
+            match backend.is_path_ignored(project_root, path) {
+                Ok(true) => "[ignored ✓]",
+                Ok(false) => "[NOT IGNORED ⚠ — run `ta doctor` to fix]",
+                Err(_) => "[ignore status unknown]",
+            }
         };
         println!("  .ta/{}  {}", path, status);
     }
+}
 
+/// Fail (after the report is printed) when a real run could not apply the
+/// ignore rules, so scripts see a non-zero exit instead of a quiet no-op.
+fn fail_if_skipped(report: &VcsSetupReport) -> anyhow::Result<()> {
+    if let Some(ig) = &report.ignore {
+        if ig.action == IgnoreAction::Skipped && !report.dry_run {
+            anyhow::bail!(
+                "could not apply ignore rules to {}: {}",
+                ig.target,
+                ig.note.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
     Ok(())
+}
+
+/// VCS setup: detect VCS backend, write ignore files, update workflow.toml.
+pub fn run_vcs_setup(
+    config: &GatewayConfig,
+    force: bool,
+    dry_run: bool,
+    vcs_override: Option<&str>,
+    project_type_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let report = compute_vcs_setup(config, force, dry_run, vcs_override, project_type_override)?;
+    print_vcs_setup(config, &report, true);
+    fail_if_skipped(&report)
+}
+
+/// Like [`run_vcs_setup`] but prints only the JSON report on stdout.
+pub fn run_vcs_setup_json(
+    config: &GatewayConfig,
+    force: bool,
+    dry_run: bool,
+    vcs_override: Option<&str>,
+    project_type_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let report = compute_vcs_setup(config, force, dry_run, vcs_override, project_type_override)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    fail_if_skipped(&report)
 }
 
 /// Print a warning for any `.ta/`-prefixed line preserved from the existing
@@ -259,12 +524,13 @@ fn update_workflow_vcs(
     backend: &VcsBackend,
     dry_run: bool,
     project_type_override: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
+    let mut changes: Vec<String> = Vec::new();
     let ta_dir = project_root.join(".ta");
     let workflow_path = ta_dir.join("workflow.toml");
 
     if !workflow_path.exists() {
-        return Ok(()); // Don't create workflow.toml; just update if it exists.
+        return Ok(changes); // Don't create workflow.toml; just update if it exists.
     }
 
     let existing = std::fs::read_to_string(&workflow_path)?;
@@ -295,17 +561,7 @@ fn update_workflow_vcs(
             )
         };
 
-        if dry_run {
-            println!(
-                "  [dry-run] Would update .ta/workflow.toml [submit] adapter = \"{}\"",
-                vcs_str
-            );
-        } else {
-            println!(
-                "  [updated] .ta/workflow.toml — set [submit] adapter = \"{}\"",
-                vcs_str
-            );
-        }
+        changes.push(format!("set [submit] adapter = \"{}\"", vcs_str));
     }
 
     // ── [commit] auto_stage ─────────────────────────────────────────
@@ -313,23 +569,18 @@ fn update_workflow_vcs(
     let lock_files = lock_files_for_project_type(project_root, project_type_override);
     if !lock_files.is_empty() {
         updated = add_auto_stage_entries(&updated, &lock_files);
-        if dry_run {
-            println!(
-                "  [dry-run] Would add to [commit] auto_stage in .ta/workflow.toml: {}",
+        if updated != existing {
+            changes.push(format!(
+                "add [commit] auto_stage: {}",
                 lock_files.join(", ")
-            );
-        } else if updated != existing {
-            println!(
-                "  [updated] .ta/workflow.toml — added [commit] auto_stage: {}",
-                lock_files.join(", ")
-            );
+            ));
         }
     }
 
     if !dry_run && updated != existing {
         std::fs::write(&workflow_path, &updated)?;
     }
-    Ok(())
+    Ok(changes)
 }
 
 /// Return the lock file name(s) appropriate for the given project type.
@@ -1236,8 +1487,9 @@ source = "registry:ta-channel-slack"
     fn vcs_setup_unknown_backend_errors() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        let result = run_vcs_setup(&config, false, false, Some("svn"), None);
-        assert!(result.is_err());
+        let result = run_vcs_setup(&config, false, false, Some("bogus"), None);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Valid values"), "{msg}");
     }
 
     // ── v0.14.3.7: [commit] auto_stage helpers ───────────────────
@@ -1335,5 +1587,185 @@ source = "registry:ta-channel-slack"
             content.contains("\"Cargo.lock\""),
             "workflow.toml should have Cargo.lock in auto_stage"
         );
+    }
+
+    // ── v0.17.12.5: shared detector, evidence, svn, re-run ───────
+
+    #[test]
+    fn setup_report_carries_evidence_and_dry_run_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let config = test_config(&dir);
+        let report = compute_vcs_setup(&config, false, true, None, None).unwrap();
+        assert_eq!(report.kind, VcsKind::Git);
+        assert_eq!(report.source, "detected");
+        assert!(report.dry_run);
+        assert_eq!(report.detection.evidence[0].path, ".git");
+        let ig = report.ignore.as_ref().unwrap();
+        assert_eq!(ig.action, IgnoreAction::WouldCreate);
+        assert!(ig
+            .added_entries
+            .contains(&".ta/setup-progress.json".to_string()));
+        assert!(!dir.path().join(".gitignore").exists());
+    }
+
+    /// Golden test for the documented `ta setup vcs --dry-run --json` shape.
+    #[test]
+    fn setup_report_json_golden() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        let config = test_config(&dir);
+        let report = compute_vcs_setup(&config, false, true, None, None).unwrap();
+        let mut v = serde_json::to_value(&report).unwrap();
+        // The entry list tracks LOCAL_TA_PATHS; pin its length separately.
+        let ig = v["ignore"].as_object_mut().unwrap();
+        let added = ig.remove("added_entries").unwrap();
+        assert_eq!(added.as_array().unwrap().len(), LOCAL_TA_PATHS.len());
+        v.as_object_mut()
+            .unwrap()
+            .get_mut("detection")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("checked");
+        let expected = serde_json::json!({
+            "schema_version": 1,
+            "dry_run": true,
+            "forced": false,
+            "source": "detected",
+            "kind": "git",
+            "plugin": null,
+            "detection": {
+                "schema_version": 1,
+                "kind": "git",
+                "plugin": null,
+                "evidence": [{
+                    "kind": "git",
+                    "plugin": null,
+                    "marker": ".git",
+                    "path": ".git",
+                    "reason": ".git directory present in the project root"
+                }],
+                "ignored_evidence": []
+            },
+            "ignore": {
+                "target": ".gitignore",
+                "action": "would_update",
+                "preserved_unrecognized": [],
+                "note": null
+            },
+            "workflow_changes": [],
+            "notes": []
+        });
+        assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn setup_refreshes_stale_block_without_force_and_reports_added() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "target/\n\n# Trusted Autonomy — local runtime state (do not commit)\n.ta/staging/\n\nkeep/\n",
+        )
+        .unwrap();
+        let config = test_config(&dir);
+        let report = compute_vcs_setup(&config, false, false, None, None).unwrap();
+        let ig = report.ignore.unwrap();
+        assert_eq!(ig.action, IgnoreAction::Updated);
+        assert!(ig
+            .added_entries
+            .contains(&".ta/setup-progress.json".to_string()));
+        let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(content.starts_with("target/\n\n"));
+        assert!(content.ends_with("\nkeep/\n"));
+        // Second run: nothing to do.
+        let again = compute_vcs_setup(&config, false, false, None, None).unwrap();
+        assert_eq!(again.ignore.unwrap().action, IgnoreAction::Unchanged);
+    }
+
+    #[test]
+    fn setup_svn_override_reports_actionable_skip_when_svn_cannot_apply() {
+        // A plain tempdir is not an svn working copy (and svn may be absent),
+        // so applying fails; the report must say so and the run must error.
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let report = compute_vcs_setup(&config, false, false, Some("svn"), None).unwrap();
+        assert_eq!(report.kind, VcsKind::Svn);
+        assert_eq!(report.source, "override");
+        let ig = report.ignore.as_ref().unwrap();
+        assert_eq!(ig.action, IgnoreAction::Skipped);
+        let note = ig.note.as_deref().unwrap();
+        assert!(
+            note.contains("svn add --depth=empty .ta") || note.contains("Install Subversion"),
+            "{note}"
+        );
+        assert!(run_vcs_setup(&config, false, false, Some("svn"), None).is_err());
+        // A dry run only reports.
+        assert!(run_vcs_setup(&config, false, true, Some("svn"), None).is_ok());
+    }
+
+    #[test]
+    fn setup_override_keeps_detection_evidence() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let config = test_config(&dir);
+        let report = compute_vcs_setup(&config, false, true, Some("perforce"), None).unwrap();
+        assert_eq!(report.kind, VcsKind::Perforce);
+        assert_eq!(report.detection.kind, VcsKind::Git);
+        assert_eq!(report.ignore.unwrap().target, ".p4ignore");
+    }
+
+    #[test]
+    fn setup_plugin_detected_writes_no_ignore_file() {
+        let dir = TempDir::new().unwrap();
+        let plugin_dir = dir.path().join(".ta/plugins/vcs/hgish");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            "name = \"hgish\"\ncommand = \"ta-submit-hgish\"\n[detect]\nmarkers = [\".hgish\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join(".hgish")).unwrap();
+        let config = test_config(&dir);
+        let report = compute_vcs_setup(&config, false, false, None, None).unwrap();
+        assert_eq!(report.kind, VcsKind::Plugin);
+        assert_eq!(report.plugin.as_deref(), Some("hgish"));
+        assert!(report.ignore.is_none());
+        assert!(report.notes[0].contains("hgish"));
+        assert!(!dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn setup_preserves_crlf_gitignore() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "target/\r\nnode_modules/\r\n",
+        )
+        .unwrap();
+        let config = test_config(&dir);
+        run_vcs_setup(&config, false, false, None, None).unwrap();
+        let bytes = std::fs::read(dir.path().join(".gitignore")).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("target/\r\nnode_modules/\r\n"));
+        assert!(
+            !text.replace("\r\n", "").contains('\n'),
+            "mixed line endings"
+        );
+    }
+
+    #[test]
+    fn setup_never_touches_content_outside_the_block() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let before = "# mine\nsecret.txt\n*.bak\n";
+        std::fs::write(dir.path().join(".gitignore"), before).unwrap();
+        let config = test_config(&dir);
+        run_vcs_setup(&config, true, false, None, None).unwrap();
+        let after = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(after.starts_with(before));
     }
 }

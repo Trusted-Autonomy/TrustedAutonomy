@@ -92,6 +92,32 @@ pub struct VcsPluginManifest {
     /// ```
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub staging_env: std::collections::HashMap<String, String>,
+
+    /// Markers that tell the shared VCS detector a project is under this
+    /// plugin's VCS (v0.17.12.5). Without them the plugin is only used when
+    /// named explicitly (`adapter = "<name>"` or `ta setup vcs --vcs <name>`).
+    ///
+    /// ```toml
+    /// [detect]
+    /// markers = [".hg", ".hgrc"]
+    /// ```
+    #[serde(default, skip_serializing_if = "VcsPluginDetect::is_empty")]
+    pub detect: VcsPluginDetect,
+}
+
+/// `[detect]` table of a VCS plugin manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsPluginDetect {
+    /// Files or directories, relative to the project root (no `..`, no
+    /// absolute paths). Any one being present claims the project.
+    #[serde(default)]
+    pub markers: Vec<String>,
+}
+
+impl VcsPluginDetect {
+    pub fn is_empty(&self) -> bool {
+        self.markers.is_empty()
+    }
 }
 
 fn default_version() -> String {
@@ -136,6 +162,21 @@ impl VcsPluginManifest {
             return Err(VcsPluginError::MissingCommand {
                 name: self.name.clone(),
             });
+        }
+        for marker in &self.detect.markers {
+            let p = Path::new(marker);
+            let escapes = p
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+            if marker.trim().is_empty() || p.is_absolute() || marker.starts_with('/') || escapes {
+                return Err(VcsPluginError::InvalidManifest {
+                    path: PathBuf::from("<inline>"),
+                    reason: format!(
+                        "[detect] marker '{}' must be a non-empty path relative to the project root (no absolute paths, no '..')",
+                        marker
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -325,6 +366,7 @@ pub fn find_vcs_plugin(adapter_name: &str, project_root: &Path) -> Option<Discov
                 min_daemon_version: None,
                 source_url: None,
                 staging_env: std::collections::HashMap::new(),
+                detect: Default::default(),
             },
             plugin_dir: None,
             source: VcsPluginSource::Path,
@@ -404,6 +446,7 @@ description = "Perforce adapter"
             min_daemon_version: None,
             source_url: None,
             staging_env: std::collections::HashMap::new(),
+            detect: Default::default(),
         };
         let err = manifest.validate().unwrap_err();
         assert!(err.to_string().contains("vcs"));
@@ -423,6 +466,7 @@ description = "Perforce adapter"
             min_daemon_version: None,
             source_url: None,
             staging_env: std::collections::HashMap::new(),
+            detect: Default::default(),
         };
         let err = manifest.validate().unwrap_err();
         assert!(matches!(err, VcsPluginError::MissingCommand { .. }));
@@ -442,6 +486,7 @@ description = "Perforce adapter"
             min_daemon_version: None,
             source_url: None,
             staging_env: std::collections::HashMap::new(),
+            detect: Default::default(),
         };
         assert!(manifest.has_protected_targets());
     }
@@ -460,6 +505,7 @@ description = "Perforce adapter"
             min_daemon_version: None,
             source_url: None,
             staging_env: std::collections::HashMap::new(),
+            detect: Default::default(),
         };
         assert!(!manifest.has_protected_targets());
     }

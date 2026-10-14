@@ -56,6 +56,86 @@ impl SvnAdapter {
     }
 }
 
+/// Result of [`ensure_ta_ignore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SvnIgnoreOutcome {
+    /// Patterns added to `svn:ignore` on `.ta` (empty when already complete).
+    pub added: Vec<String>,
+    /// True when the property was actually set (false for a dry run or when
+    /// nothing was missing).
+    pub applied: bool,
+}
+
+/// Output of one `svn` invocation: `(success, stdout, stderr)`.
+pub type SvnRun = std::io::Result<(bool, String, String)>;
+
+fn run_real_svn(project_root: &Path, args: &[&str]) -> SvnRun {
+    let out = Command::new("svn")
+        .args(args)
+        .current_dir(project_root)
+        .output()?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    ))
+}
+
+/// Add TA's local-state patterns to the `svn:ignore` property of `.ta`.
+///
+/// Subversion has no ignore file and `svn:ignore` has no comment syntax, so
+/// there is no marker block to own. The only change TA ever makes is
+/// appending patterns that are missing; existing lines (the project's own
+/// ignores) are never removed, reordered or rewritten, and no tracked file
+/// content is touched. The property change itself is a working-copy
+/// modification the user commits like any other.
+///
+/// Requires `.ta` to be under version control (`svn add --depth=empty .ta`).
+pub fn ensure_ta_ignore(project_root: &Path, dry_run: bool) -> Result<SvnIgnoreOutcome> {
+    ensure_ta_ignore_with(&|args| run_real_svn(project_root, args), dry_run)
+}
+
+/// [`ensure_ta_ignore`] with an injectable `svn` runner (for tests).
+pub fn ensure_ta_ignore_with(
+    run: &dyn Fn(&[&str]) -> SvnRun,
+    dry_run: bool,
+) -> Result<SvnIgnoreOutcome> {
+    let missing_svn = |e: std::io::Error| {
+        SubmitError::VcsError(format!(
+            "could not run `svn` ({e}). Install Subversion and make sure `svn` is on PATH, \
+             then re-run `ta setup vcs --vcs svn`"
+        ))
+    };
+    let (ok, current, stderr) = run(&["propget", "svn:ignore", ".ta"]).map_err(missing_svn)?;
+    if !ok {
+        return Err(SubmitError::VcsError(format!(
+            "`svn propget svn:ignore .ta` failed: {}. `.ta` must be under version control \
+             before TA can set svn:ignore on it. Run `svn add --depth=empty .ta`, then re-run \
+             `ta setup vcs --vcs svn`",
+            stderr.trim()
+        )));
+    }
+    let (merged, added) = ta_workspace::merge_svn_ignore(&current);
+    if added.is_empty() || dry_run {
+        return Ok(SvnIgnoreOutcome {
+            added,
+            applied: false,
+        });
+    }
+    let (ok, _, stderr) = run(&["propset", "svn:ignore", &merged, ".ta"]).map_err(missing_svn)?;
+    if !ok {
+        return Err(SubmitError::VcsError(format!(
+            "`svn propset svn:ignore .ta` failed: {}. Nothing was changed. Fix the \
+             working copy error above and re-run `ta setup vcs --vcs svn`",
+            stderr.trim()
+        )));
+    }
+    Ok(SvnIgnoreOutcome {
+        added,
+        applied: true,
+    })
+}
+
 impl SourceAdapter for SvnAdapter {
     fn prepare(&self, _ctx: &CommitContext, _config: &SubmitConfig) -> Result<()> {
         // SVN doesn't use branches the same way as Git.
@@ -388,5 +468,76 @@ mod tests {
         let ctx = ta_goal::CommitContext::from(&goal);
         let result = adapter.push(&ctx).unwrap();
         assert_eq!(result.remote_ref, "svn://committed");
+    }
+
+    #[test]
+    fn ensure_ta_ignore_appends_only_missing_and_keeps_existing() {
+        use std::cell::RefCell;
+        let calls: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let run = |args: &[&str]| -> SvnRun {
+            calls
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            if args[0] == "propget" {
+                Ok((true, "my-own-ignore\nstaging\n".into(), String::new()))
+            } else {
+                Ok((true, String::new(), String::new()))
+            }
+        };
+        let out = ensure_ta_ignore_with(&run, false).unwrap();
+        assert!(out.applied);
+        assert!(!out.added.contains(&"staging".to_string()));
+        assert!(out.added.contains(&"setup-progress.json".to_string()));
+        let calls = calls.borrow();
+        let set = calls.iter().find(|c| c[0] == "propset").unwrap();
+        assert!(set[2].starts_with("my-own-ignore\nstaging\n"));
+        assert_eq!(set[3], ".ta");
+    }
+
+    #[test]
+    fn ensure_ta_ignore_dry_run_never_sets() {
+        let run = |args: &[&str]| -> SvnRun {
+            assert_eq!(args[0], "propget", "dry run must not propset");
+            Ok((true, String::new(), String::new()))
+        };
+        let out = ensure_ta_ignore_with(&run, true).unwrap();
+        assert!(!out.applied);
+        assert!(!out.added.is_empty());
+    }
+
+    #[test]
+    fn ensure_ta_ignore_complete_property_is_a_noop() {
+        let all = ta_workspace::svn_ignore_patterns().join("\n");
+        let run = |args: &[&str]| -> SvnRun {
+            assert_eq!(args[0], "propget");
+            Ok((true, all.clone(), String::new()))
+        };
+        let out = ensure_ta_ignore_with(&run, false).unwrap();
+        assert!(out.added.is_empty() && !out.applied);
+    }
+
+    #[test]
+    fn ensure_ta_ignore_unversioned_ta_dir_gives_actionable_error() {
+        let run = |_: &[&str]| -> SvnRun {
+            Ok((
+                false,
+                String::new(),
+                "svn: E200009: not under version control".into(),
+            ))
+        };
+        let err = ensure_ta_ignore_with(&run, false).unwrap_err().to_string();
+        assert!(err.contains("svn add --depth=empty .ta"), "{err}");
+    }
+
+    #[test]
+    fn ensure_ta_ignore_missing_svn_binary_gives_actionable_error() {
+        let run = |_: &[&str]| -> SvnRun {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "not found",
+            ))
+        };
+        let err = ensure_ta_ignore_with(&run, false).unwrap_err().to_string();
+        assert!(err.contains("Install Subversion"), "{err}");
     }
 }
