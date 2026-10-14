@@ -20,7 +20,9 @@ use ta_mcp_gateway::GatewayConfig;
 use ta_runtime::sandbox_launch::{
     degraded_label, readiness, representative_profile, Outcome, RoleClass, SandboxPosture,
 };
-use ta_runtime::{SandboxPolicy, SandboxProvider};
+use ta_runtime::SandboxPolicy;
+#[cfg(unix)]
+use ta_runtime::SandboxProvider;
 
 #[derive(Subcommand, Debug)]
 pub enum SandboxCommands {
@@ -335,13 +337,15 @@ pub fn format_violations(provider: &str, violations: &[EventEnvelope]) -> String
     out
 }
 
-/// One labelled check in `ta sandbox test`.
+/// One labelled check in `ta sandbox test` (live probes run on Unix only).
+#[cfg(unix)]
 pub struct Check {
     pub name: &'static str,
     pub expect_ok: bool,
     pub got_ok: bool,
 }
 
+#[cfg(unix)]
 impl Check {
     pub fn passed(&self) -> bool {
         self.expect_ok == self.got_ok
@@ -615,6 +619,7 @@ pub fn draft_label_for_goal(root: &Path, goal_id: uuid::Uuid) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ta_runtime::SandboxProvider;
 
     fn store_with(dir: &Path, goal: uuid::Uuid, outcome: &str, missing: &[&str]) {
         let store = FsEventStore::new(dir);
