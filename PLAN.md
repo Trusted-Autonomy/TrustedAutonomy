@@ -11052,7 +11052,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.6`
 
 ### v0.17.12.7 - macOS Seatbelt Profile v2 and Egress Proxy
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.6
 
 1. [ ] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths. Starting point from v0.17.12.6: the profile is now `(allow file-read*)` followed by ordered denies from `protected_paths` (`.ssh`, `.gnupg`, `.aws`, `.config/gh`, `.netrc`, `Library/Keychains`); the earlier explicit allow list could not run `/usr/bin/true`. That is a denylist, so anything not named (browser profiles, `.docker`, `.npmrc`, other projects' source) is readable. This item must widen the deny set and prove it with `ta-sandbox-probe`, and must not describe macOS reads as confined until it does.
