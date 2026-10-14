@@ -51,6 +51,8 @@ enum FixAction {
     VcsGitignore,
     VscodeExcludes,
     IdeManifest,
+    /// Windows: remove AppContainer ACEs left by goals whose `ta` process died.
+    StaleAppContainerAcls(std::path::PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +243,37 @@ fn collect(config: &GatewayConfig) -> (Vec<Finding>, Vec<ManualFinding>) {
         });
     }
 
+    // Windows AppContainer grants that outlived their goal (kill -9, power loss).
+    if let Some(state_dir) = super::sandbox_launch::project_state_dir(&config.workspace_root) {
+        let stale = ta_runtime::sandbox_windows::stale_acl_grants(&state_dir);
+        if !stale.is_empty() {
+            findings.push(Finding {
+                id: "appcontainer-acls".into(),
+                label: "[warn]",
+                message: format!(
+                    "{} AppContainer access entr(ies) were left on disk by goals whose ta \
+                     process is gone",
+                    stale.len()
+                ),
+                detail: stale
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{} (goal {}, container {})",
+                            r.path, r.goal_id, r.container_name
+                        )
+                    })
+                    .collect(),
+                fix: "remove the stale entries; live goals are not touched and a failed removal \
+                      stays recorded for the next run"
+                    .into(),
+                destructive: false,
+                rewrites: Vec::new(),
+                action: FixAction::StaleAppContainerAcls(state_dir),
+            });
+        }
+    }
+
     (findings, manual)
 }
 
@@ -330,6 +363,35 @@ fn apply(config: &GatewayConfig, f: &Finding) -> anyhow::Result<String> {
         FixAction::IdeManifest => {
             crate::commands::init::write_ide_excludes_manifest(&config.workspace_root)?;
             Ok("regenerated .ta/ide-excludes.json".to_string())
+        }
+        FixAction::StaleAppContainerAcls(state_dir) => {
+            let report = ta_runtime::sandbox_windows::sweep_stale_acls(state_dir);
+            for (rec, why) in &report.failed {
+                tracing::warn!(path = %rec.path, container = %rec.container_name, error = %why,
+                    "could not remove a stale AppContainer access entry");
+            }
+            if !report.failed.is_empty() {
+                anyhow::bail!(
+                    "removed {} stale entr(ies), {} could not be removed: {}. They stay recorded \
+                     in {}; close whatever holds the path and re-run `ta doctor --fix --only \
+                     appcontainer-acls`",
+                    report.revoked.len(),
+                    report.failed.len(),
+                    report
+                        .failed
+                        .iter()
+                        .map(|(r, e)| format!("{}: {e}", r.path))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    state_dir.display()
+                );
+            }
+            Ok(format!(
+                "removed {} stale AppContainer access entr(ies); {} belong to running goals and \
+                 were left alone",
+                report.revoked.len(),
+                report.live.len()
+            ))
         }
     }
 }

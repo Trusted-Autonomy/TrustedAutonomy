@@ -50,6 +50,12 @@ pub struct SandboxPlan {
     /// Stops (and removes its socket) on drop.
     #[cfg(unix)]
     pub egress_relay: Option<ta_runtime::linux_relay::HostRelay>,
+    /// Windows AppContainer: carries the egress proxy over a named pipe locked to
+    /// the container SID (no loopback exemption). Stops on drop.
+    #[cfg(windows)]
+    pub egress_pipe: Option<super::egress_pipe::HostPipeRelay>,
+    /// TA state directory, where the Windows ACL grant ledger lives.
+    pub state_dir: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -85,6 +91,58 @@ pub fn project_request(project_root: &Path) -> ProjectRequest {
         allow_write: wf.sandbox.allow_write.clone(),
         allow_network: wf.sandbox.allow_network.clone(),
     }
+}
+
+/// The TA state directory for `project_root`, when one exists (where the
+/// AppContainer grant ledger lives).
+pub fn project_state_dir(project_root: &Path) -> Option<PathBuf> {
+    let locator = ta_credentials::state::StateLocator::from_env();
+    ta_credentials::state::ProjectState::locate(project_root, &locator)
+        .ok()
+        .flatten()
+        .map(|s| s.dir)
+}
+
+/// Pre-population hook for the staging directory (Windows AppContainer only).
+///
+/// Sets the goal container's inheritable ACE on the EMPTY staging root, so the
+/// files copied in afterwards inherit it. Returns `Ok(())` without doing
+/// anything when no AppContainer sandbox is going to be used for this goal.
+pub fn prepare_staging(project_root: &Path, goal_id: &str, staging: &Path) -> Result<(), String> {
+    if SandboxPolicy::detect_provider() != SandboxProvider::WindowsAppContainer {
+        return Ok(());
+    }
+    let state = ta_credentials::state::StateLocator::from_env();
+    let state = ta_credentials::state::ProjectState::locate(project_root, &state)
+        .ok()
+        .flatten();
+    let trusted = match &state {
+        Some(s) => TrustedPolicy::load(&s.sandbox_dir())?,
+        None => None,
+    };
+    let project = project_request(project_root);
+    // Whether this goal is a team role is not known at staging time, so be
+    // generous: an unused ACE on a staging dir TA owns costs nothing.
+    let wanted = [false, true].into_iter().any(|team_role| {
+        let ctx = LaunchContext {
+            goal_id: goal_id.to_string(),
+            role_class: RoleClass::Worker,
+            team_role,
+            project_root: project_root.to_path_buf(),
+            staging: staging.to_path_buf(),
+            state_dir: state.as_ref().map(|s| s.dir.clone()),
+            agent_home: PathBuf::new(),
+            user_home: dirs::home_dir(),
+            mediation_socket: None,
+            egress_proxy: false,
+        };
+        SandboxProfile::compile(trusted.as_ref(), &project, &ctx).requested
+    });
+    if !wanted {
+        return Ok(());
+    }
+    let name = ta_runtime::windows_policy::container_name(goal_id);
+    ta_runtime::sandbox_windows::prepare_staging_acl(&name, staging)
 }
 
 /// Build the plan. `Err` is a launch refusal reason that is already
@@ -157,6 +215,7 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         match mediation::spawn_gateway(
+            &goal,
             input.staging,
             input.project_root,
             &gateway_env,
@@ -182,6 +241,7 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
             SandboxProvider::MacosSandboxExec
                 | SandboxProvider::LinuxBwrap
                 | SandboxProvider::LinuxLandlock
+                | SandboxProvider::WindowsAppContainer
         );
     let open_network = first.allow_network.iter().any(|h| h == "*");
     if sandbox_will_wrap && !open_network {
@@ -223,6 +283,19 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
             )),
         }
     }
+    // Windows AppContainer cannot reach host loopback either: a named pipe whose
+    // DACL admits only this container carries the proxy across.
+    #[cfg(windows)]
+    let mut egress_pipe = None;
+    #[cfg(windows)]
+    if let (Some(p), SandboxProvider::WindowsAppContainer) = (&egress, &provider) {
+        match super::egress_pipe::HostPipeRelay::start(&goal, p.port()) {
+            Ok(r) => egress_pipe = Some(r),
+            Err(e) => warnings.push(format!(
+                "could not start the egress pipe relay: {e}. The agent will have no network access."
+            )),
+        }
+    }
     if let Some(note) = ta_runtime::linux_probe::provider_note() {
         if matches!(
             provider,
@@ -232,6 +305,14 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         }
     }
     ctx.egress_proxy = egress.is_some();
+    if wanted && provider == SandboxProvider::WindowsJobObject {
+        warnings.push(
+            "AppContainer is not available on this machine, so the only Windows layer is a Job \
+             Object (process-tree limits, no filesystem or network confinement). The posture \
+             decision below says whether this launch may proceed; it is not a silent fallback."
+                .to_string(),
+        );
+    }
 
     let profile = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
     let scrubs_env = profile.requested;
@@ -286,6 +367,9 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         egress_hosts,
         #[cfg(unix)]
         egress_relay,
+        #[cfg(windows)]
+        egress_pipe,
+        state_dir: state.as_ref().map(|s| s.dir.clone()),
         warnings,
     })
 }
@@ -386,7 +470,31 @@ impl SandboxPlan {
                 .as_ref()
                 .map(|r| r.socket_path().to_path_buf());
         }
+        policy.windows = self.windows_launch();
         policy
+    }
+
+    /// Windows-only launch inputs: the egress pipe, Job Object limits for the
+    /// role, the ledger directory, and the folder holding the TA helper binaries.
+    fn windows_launch(&self) -> ta_runtime::windows_policy::WindowsLaunch {
+        let mut extra_read_dirs = Vec::new();
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+        {
+            extra_read_dirs.push(dir);
+        }
+        ta_runtime::windows_policy::WindowsLaunch {
+            #[cfg(windows)]
+            egress_pipe: self.egress_pipe.as_ref().map(|r| r.pipe_name().to_string()),
+            #[cfg(not(windows))]
+            egress_pipe: None,
+            job_limits: Some(ta_runtime::windows_policy::JobLimits::for_role(
+                self.profile.role_class,
+            )),
+            state_dir: self.state_dir.clone(),
+            extra_read_dirs,
+        }
     }
 
     /// Watch the unified log for this goal's Seatbelt denials and record each

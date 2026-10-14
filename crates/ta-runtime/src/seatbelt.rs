@@ -308,6 +308,7 @@ mod tests {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         }
     }

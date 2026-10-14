@@ -34,6 +34,8 @@
 // // When guard drops, the agent process tree is killed.
 // ```
 
+use crate::windows_policy::{GrantLedger, GrantPlan, JobLimits, SweepReport};
+
 /// A guard wrapping a Windows Job Object handle.
 ///
 /// On Windows: creates a real Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
@@ -94,11 +96,18 @@ mod win32 {
         pub peak_job_memory_used: usize,
     }
 
-    pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+    // JOBOBJECT_BASIC_UI_RESTRICTIONS
+    #[repr(C)]
+    pub struct JobObjectBasicUiRestrictions {
+        pub ui_restrictions_class: u32,
+    }
+
     pub const PROCESS_ALL_ACCESS: u32 = 0x001F_FFFF;
     pub const FALSE: i32 = 0;
     // JOBOBJECTINFOCLASS::JobObjectExtendedLimitInformation = 9
     pub const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    // JOBOBJECTINFOCLASS::JobObjectBasicUIRestrictions = 4
+    pub const JOB_OBJECT_BASIC_UI_RESTRICTIONS_CLASS: i32 = 4;
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -132,11 +141,19 @@ mod win32 {
 
 #[cfg(target_os = "windows")]
 impl WindowsJobObjectGuard {
-    /// Create a new anonymous Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+    /// Create a new anonymous Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+    /// and no other limits.
     ///
     /// Returns an error if `CreateJobObject` or `SetInformationJobObject` fails.
     /// The error message includes the Win32 error code for diagnostics.
     pub fn new() -> Result<Self, String> {
+        Self::with_limits(&JobLimits::default())
+    }
+
+    /// Create a Job Object that kills the process tree on close and enforces
+    /// `limits` (active-process cap, job memory cap, UI restrictions). Breakaway
+    /// is never allowed, so a child cannot leave the job.
+    pub fn with_limits(limits: &JobLimits) -> Result<Self, String> {
         use win32::*;
 
         // Safety: CreateJobObjectW with NULL attributes and NULL name creates an
@@ -145,15 +162,22 @@ impl WindowsJobObjectGuard {
 
         if handle == 0 {
             return Err(format!(
-                "CreateJobObjectW failed (Win32 error {})",
+                "CreateJobObjectW failed (Win32 error {}). TA could not create the process \
+                 limits for this goal; check that the account may create Job Objects.",
                 unsafe { GetLastError() }
             ));
         }
 
-        // Configure KILL_ON_JOB_CLOSE so the process tree is torn down when the
-        // last handle to this Job Object is closed (i.e., when the guard drops).
+        // KILL_ON_JOB_CLOSE tears the process tree down when the last handle to
+        // this Job Object closes (i.e., when the guard drops).
         let mut info: JobObjectExtendedLimitInfo = unsafe { std::mem::zeroed() };
-        info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.basic_limit_information.limit_flags = limits.limit_flags();
+        if let Some(n) = limits.active_process_limit {
+            info.basic_limit_information.active_process_limit = n;
+        }
+        if let Some(bytes) = limits.job_memory_bytes {
+            info.job_memory_limit = bytes;
+        }
 
         let ok = unsafe {
             SetInformationJobObject(
@@ -168,9 +192,32 @@ impl WindowsJobObjectGuard {
             let err = unsafe { GetLastError() };
             unsafe { CloseHandle(handle) };
             return Err(format!(
-                "SetInformationJobObject(KILL_ON_JOB_CLOSE) failed (Win32 error {})",
+                "SetInformationJobObject(limits: {}) failed (Win32 error {})",
+                limits.describe(),
                 err
             ));
+        }
+
+        let ui_flags = limits.ui_flags();
+        if ui_flags != 0 {
+            let mut ui = JobObjectBasicUiRestrictions {
+                ui_restrictions_class: ui_flags,
+            };
+            let ok = unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JOB_OBJECT_BASIC_UI_RESTRICTIONS_CLASS,
+                    &mut ui as *mut _ as *mut std::ffi::c_void,
+                    std::mem::size_of::<JobObjectBasicUiRestrictions>() as u32,
+                )
+            };
+            if ok == FALSE {
+                let err = unsafe { GetLastError() };
+                unsafe { CloseHandle(handle) };
+                return Err(format!(
+                    "SetInformationJobObject(UI restrictions) failed (Win32 error {err})"
+                ));
+            }
         }
 
         Ok(Self { handle })
@@ -239,6 +286,11 @@ unsafe impl Send for WindowsJobObjectGuard {}
 impl WindowsJobObjectGuard {
     /// No-op on non-Windows platforms.
     pub fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    /// No-op on non-Windows platforms.
+    pub fn with_limits(_limits: &JobLimits) -> Result<Self, String> {
         Ok(Self)
     }
 
@@ -394,6 +446,8 @@ pub(crate) mod appcontainer_win32 {
     pub const OPEN_EXISTING: u32 = 3;
     // HRESULT S_OK
     pub const S_OK: i32 = 0;
+    pub const REVOKE_ACCESS: u32 = 4;
+    pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     // internetClient capability: S-1-15-3-1
     pub const SECURITY_APP_PACKAGE_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 15];
     pub const SECURITY_CAPABILITY_BASE_RID: u32 = 3;
@@ -533,6 +587,8 @@ pub(crate) mod appcontainer_win32 {
         ) -> u32;
 
         pub fn LocalFree(h_mem: *mut c_void) -> *mut c_void;
+
+        pub fn ConvertSidToStringSidW(sid: *mut c_void, string_sid: *mut *mut u16) -> i32;
     }
 }
 
@@ -694,6 +750,12 @@ pub struct WindowsAppContainerGuard {
     capabilities_storage: Box<[appcontainer_win32::SidAndAttributes]>,
     /// Extra SIDs that need FreeSid on drop (one per network capability SID).
     extra_sids: Vec<*mut std::ffi::c_void>,
+    /// Container name as given to `new` (the ledger and the revoke path key on it).
+    name: String,
+    /// Toolchain read grants applied by `grant_toolchain_reads`, revoked on drop.
+    granted_reads: Vec<crate::windows_policy::GrantRecord>,
+    /// Ledger the grants were recorded in.
+    ledger: Option<GrantLedger>,
 }
 
 #[cfg(target_os = "windows")]
@@ -826,7 +888,57 @@ impl WindowsAppContainerGuard {
             container_sid,
             capabilities_storage,
             extra_sids,
+            name: container_name.to_string(),
+            granted_reads: Vec::new(),
+            ledger: None,
         })
+    }
+
+    /// The container SID as `S-1-15-2-...`.
+    pub fn sid_string(&self) -> Result<String, String> {
+        sid_to_string(self.container_sid)
+    }
+
+    /// Apply the read+execute grants in `plan` and return how many were applied.
+    ///
+    /// Each grant is written to the ledger BEFORE the ACE is applied, so a crash
+    /// between the two leaves a record for `ta doctor --fix` to sweep rather than
+    /// an unrecorded ACE. A grant that fails is reported in the returned errors and
+    /// the goal continues without that directory. Grants are revoked when the guard
+    /// drops.
+    pub fn grant_toolchain_reads(
+        &mut self,
+        goal_id: &str,
+        plan: &GrantPlan,
+        ledger: &GrantLedger,
+    ) -> (usize, Vec<String>) {
+        let mut errors = Vec::new();
+        let mut applied = 0;
+        self.ledger = Some(ledger.clone());
+        for g in &plan.grants {
+            let rec = crate::windows_policy::GrantRecord {
+                goal_id: goal_id.to_string(),
+                container_name: self.name.clone(),
+                path: g.path.display().to_string(),
+                granted_at: crate::windows_policy::now_rfc3339(),
+                owner_pid: std::process::id(),
+            };
+            if let Err(e) = ledger.record(&rec) {
+                errors.push(format!("{}: {e}", g.path.display()));
+                continue;
+            }
+            match grant_read_execute(&self.name, &g.path) {
+                Ok(()) => {
+                    applied += 1;
+                    self.granted_reads.push(rec);
+                }
+                Err(e) => {
+                    let _ = ledger.forget(&rec);
+                    errors.push(format!("{} ({}): {e}", g.path.display(), g.reason));
+                }
+            }
+        }
+        (applied, errors)
     }
 
     /// Build a SECURITY_CAPABILITIES struct pointing into this guard's stable storage.
@@ -850,6 +962,22 @@ impl WindowsAppContainerGuard {
 #[cfg(target_os = "windows")]
 impl Drop for WindowsAppContainerGuard {
     fn drop(&mut self) {
+        // Remove the toolchain read grants first, while the SID still derives.
+        for rec in std::mem::take(&mut self.granted_reads) {
+            match revoke_container_access(&rec.container_name, std::path::Path::new(&rec.path)) {
+                Ok(()) => {
+                    if let Some(l) = &self.ledger {
+                        let _ = l.forget(&rec);
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    path = %rec.path,
+                    container = %rec.container_name,
+                    error = %e,
+                    "could not remove a toolchain ACL grant; run `ta doctor --fix` to sweep it"
+                ),
+            }
+        }
         // Delete the AppContainer profile.
         unsafe { appcontainer_win32::DeleteAppContainerProfile(self.container_name.as_ptr()) };
         // Free the container SID.
@@ -866,22 +994,22 @@ impl Drop for WindowsAppContainerGuard {
 #[cfg(target_os = "windows")]
 unsafe impl Send for WindowsAppContainerGuard {}
 
-/// Grant the AppContainer SID read+write+execute access on the staging workspace.
-///
-/// Modifies the DACL of `staging_path` to add an explicit allow ACE for
-/// `container_sid`.  The ACE inherits to all children of the directory so the
-/// container can access files the agent creates at runtime.
+/// Add (`SET_ACCESS`) or remove (`REVOKE_ACCESS`) an inheritable ACE for
+/// `container_sid` on `path`.
 #[cfg(target_os = "windows")]
-fn grant_staging_path_access(
-    staging_path: &std::path::Path,
+fn change_path_access(
+    path: &std::path::Path,
     container_sid: *mut std::ffi::c_void,
+    permissions: u32,
+    mode: u32,
+    what: &str,
 ) -> Result<(), String> {
     use appcontainer_win32::*;
     use std::ptr::null_mut;
 
-    let mut path_wide = path_to_wide(staging_path);
+    let mut path_wide = path_to_wide(path);
 
-    // Get the current DACL for the staging path.
+    // Get the current DACL.
     let mut p_dacl: *mut std::ffi::c_void = null_mut();
     let mut p_security_descriptor: *mut std::ffi::c_void = null_mut();
     let rc = unsafe {
@@ -898,12 +1026,11 @@ fn grant_staging_path_access(
     };
     if rc != ERROR_SUCCESS {
         return Err(format!(
-            "GetNamedSecurityInfoW on staging path failed (Win32 error {})",
-            rc
+            "GetNamedSecurityInfoW on {what} {} failed (Win32 error {rc})",
+            path.display()
         ));
     }
 
-    // Build an EXPLICIT_ACCESS entry that grants the container SID RW+X access.
     let trustee = TrusteeW {
         p_multiple_trustee: null_mut(),
         multiple_trustee_operation: NO_MULTIPLE_TRUSTEE,
@@ -912,8 +1039,8 @@ fn grant_staging_path_access(
         ptr_str_name: container_sid,
     };
     let explicit_access = ExplicitAccessW {
-        grf_access_permissions: FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE,
-        grf_access_mode: SET_ACCESS,
+        grf_access_permissions: permissions,
+        grf_access_mode: mode,
         grf_inheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
         trustee,
     };
@@ -921,15 +1048,16 @@ fn grant_staging_path_access(
     // Merge with the existing DACL.
     let mut new_dacl: *mut std::ffi::c_void = null_mut();
     let rc = unsafe { SetEntriesInAclW(1, &explicit_access, p_dacl, &mut new_dacl) };
-    // Free the security descriptor from GetNamedSecurityInfoW.
     if !p_security_descriptor.is_null() {
         unsafe { LocalFree(p_security_descriptor) };
     }
     if rc != ERROR_SUCCESS {
-        return Err(format!("SetEntriesInAclW failed (Win32 error {})", rc));
+        return Err(format!(
+            "SetEntriesInAclW for {what} {} failed (Win32 error {rc})",
+            path.display()
+        ));
     }
 
-    // Apply the new DACL to the staging path.
     let rc = unsafe {
         SetNamedSecurityInfoW(
             path_wide.as_mut_ptr(),
@@ -941,17 +1069,198 @@ fn grant_staging_path_access(
             null_mut(),
         )
     };
-    // Free the new DACL allocated by SetEntriesInAclW.
     unsafe { LocalFree(new_dacl) };
 
     if rc != ERROR_SUCCESS {
         return Err(format!(
-            "SetNamedSecurityInfoW on staging path failed (Win32 error {})",
-            rc
+            "SetNamedSecurityInfoW on {what} {} failed (Win32 error {rc})",
+            path.display()
         ));
     }
-
     Ok(())
+}
+
+/// Grant the AppContainer SID read+write+execute access on the staging workspace.
+///
+/// The ACE inherits to all children, so files created later are covered.
+#[cfg(target_os = "windows")]
+fn grant_staging_path_access(
+    staging_path: &std::path::Path,
+    container_sid: *mut std::ffi::c_void,
+) -> Result<(), String> {
+    use appcontainer_win32::*;
+    change_path_access(
+        staging_path,
+        container_sid,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE,
+        SET_ACCESS,
+        "staging path",
+    )
+}
+
+/// Derive the container SID for `container_name`. The SID is a pure function
+/// of the name, so it can be computed before the profile exists and after it
+/// was deleted. The caller frees it with `FreeSid`.
+#[cfg(target_os = "windows")]
+fn derive_container_sid(container_name: &str) -> Result<*mut std::ffi::c_void, String> {
+    use appcontainer_win32::*;
+    let name = str_to_wide(container_name);
+    let mut sid: *mut std::ffi::c_void = std::ptr::null_mut();
+    let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+    if hr != S_OK || sid.is_null() {
+        return Err(format!(
+            "DeriveAppContainerSidFromAppContainerName({container_name}) failed (HRESULT 0x{:08X})",
+            hr as u32
+        ));
+    }
+    Ok(sid)
+}
+
+#[cfg(target_os = "windows")]
+fn sid_to_string(sid: *mut std::ffi::c_void) -> Result<String, String> {
+    use appcontainer_win32::*;
+    let mut wide: *mut u16 = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut wide) } == 0 || wide.is_null() {
+        return Err(format!(
+            "ConvertSidToStringSidW failed (Win32 error {})",
+            unsafe { win32::GetLastError() }
+        ));
+    }
+    let mut len = 0usize;
+    while unsafe { *wide.add(len) } != 0 {
+        len += 1;
+    }
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(wide, len) });
+    unsafe { LocalFree(wide as *mut std::ffi::c_void) };
+    Ok(text)
+}
+
+/// The container SID for `container_name` as `S-1-15-2-...`. Used to build the
+/// named-pipe security descriptor before the container exists.
+#[cfg(target_os = "windows")]
+pub fn container_sid_string(container_name: &str) -> Result<String, String> {
+    let sid = derive_container_sid(container_name)?;
+    let text = sid_to_string(sid);
+    unsafe { appcontainer_win32::FreeSid(sid) };
+    text
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn container_sid_string(container_name: &str) -> Result<String, String> {
+    Err(format!(
+        "AppContainer SIDs exist only on Windows (container {container_name})"
+    ))
+}
+
+/// Set the container's inheritable ACE on the staging root. Call this on the
+/// EMPTY staging directory, before it is populated: files copied in afterwards
+/// inherit the ACE, so there is no window in which the tree exists without it
+/// and no need for a recursive ACL rewrite over a populated tree.
+#[cfg(target_os = "windows")]
+pub fn prepare_staging_acl(
+    container_name: &str,
+    staging_dir: &std::path::Path,
+) -> Result<(), String> {
+    let sid = derive_container_sid(container_name)?;
+    let r = grant_staging_path_access(staging_dir, sid);
+    unsafe { appcontainer_win32::FreeSid(sid) };
+    r
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn prepare_staging_acl(
+    _container_name: &str,
+    _staging_dir: &std::path::Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// Remove every ACE for `container_name`'s SID from `path` (a toolchain read
+/// grant or a stale staging ACE). A path that no longer exists counts as done.
+#[cfg(target_os = "windows")]
+pub fn revoke_container_access(container_name: &str, path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let sid = derive_container_sid(container_name)?;
+    let r = change_path_access(
+        path,
+        sid,
+        0,
+        appcontainer_win32::REVOKE_ACCESS,
+        "granted path",
+    );
+    unsafe { appcontainer_win32::FreeSid(sid) };
+    r
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn revoke_container_access(
+    _container_name: &str,
+    _path: &std::path::Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn grant_read_execute(container_name: &str, path: &std::path::Path) -> Result<(), String> {
+    use appcontainer_win32::*;
+    let sid = derive_container_sid(container_name)?;
+    let r = change_path_access(
+        path,
+        sid,
+        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        SET_ACCESS,
+        "toolchain path",
+    );
+    unsafe { FreeSid(sid) };
+    r
+}
+
+#[cfg(target_os = "windows")]
+fn process_is_alive(pid: u32) -> bool {
+    use appcontainer_win32::*;
+    let h = unsafe { win32::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h == 0 {
+        // ERROR_ACCESS_DENIED means it exists; anything else means it is gone.
+        return unsafe { win32::GetLastError() } == 5;
+    }
+    let mut code: u32 = 0;
+    let ok = unsafe { GetExitCodeProcess(h, &mut code) };
+    unsafe { win32::CloseHandle(h) };
+    ok != 0 && code == STILL_ACTIVE
+}
+
+/// Remove the ACEs left behind by goals whose `ta` process is gone (crash,
+/// kill -9, power loss). Used by `ta doctor --fix`. Live goals are untouched;
+/// a failed revoke stays in the ledger so the next sweep retries it.
+#[cfg(target_os = "windows")]
+pub fn sweep_stale_acls(state_dir: &std::path::Path) -> SweepReport {
+    let ledger = GrantLedger::in_dir(state_dir);
+    crate::windows_policy::sweep_stale_grants(&ledger, &process_is_alive, &|rec| {
+        revoke_container_access(&rec.container_name, std::path::Path::new(&rec.path))
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn sweep_stale_acls(_state_dir: &std::path::Path) -> SweepReport {
+    SweepReport::default()
+}
+
+/// Ledger entries whose owning `ta` process is gone: grants a sweep would remove.
+/// Read-only, so `ta doctor` can report them before `--fix` touches anything.
+#[cfg(target_os = "windows")]
+pub fn stale_acl_grants(state_dir: &std::path::Path) -> Vec<crate::windows_policy::GrantRecord> {
+    GrantLedger::in_dir(state_dir)
+        .list()
+        .into_iter()
+        .filter(|rec| !process_is_alive(rec.owner_pid))
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn stale_acl_grants(_state_dir: &std::path::Path) -> Vec<crate::windows_policy::GrantRecord> {
+    Vec::new()
 }
 
 /// Probe whether AppContainer APIs are available on this Windows installation.
@@ -1255,15 +1564,30 @@ impl WindowsAppContainerGuard {
     ) -> Result<Self, String> {
         Ok(Self)
     }
+
+    pub fn sid_string(&self) -> Result<String, String> {
+        Err("AppContainer SIDs exist only on Windows".to_string())
+    }
+
+    pub fn grant_toolchain_reads(
+        &mut self,
+        _goal_id: &str,
+        _plan: &GrantPlan,
+        _ledger: &GrantLedger,
+    ) -> (usize, Vec<String>) {
+        (0, Vec::new())
+    }
 }
 
 // ── sandboxed_spawn ───────────────────────────────────────────────────────────
 
 /// Spawn the agent process, using AppContainer if a guard is provided.
 ///
-/// On Windows with a `Some(guard)`: attempts `spawn_in_appcontainer` first.
-/// If that fails (e.g., nested-container restriction), logs a warning and falls
-/// back to `runtime.spawn()` — the agent runs without AppContainer isolation.
+/// With `Some(guard)` on Windows the agent is spawned in the container or the
+/// call fails. It never degrades to an unconfined spawn on its own: whether to
+/// run without the container is a posture decision made before launch
+/// (`downgrade_to_job_object` in the CLI, recorded in the capability report),
+/// not something this function may do after the fact.
 ///
 /// On non-Windows, or with `None`: delegates to `runtime.spawn()` directly.
 pub fn sandboxed_spawn(
@@ -1273,20 +1597,23 @@ pub fn sandboxed_spawn(
 ) -> crate::adapter::Result<Box<dyn crate::adapter::AgentHandle>> {
     #[cfg(target_os = "windows")]
     if let Some(guard) = ac_guard {
-        match spawn_in_appcontainer(&request, guard) {
-            Ok(h) => return Ok(h),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "AppContainer spawn failed — falling back to normal spawn without \
-                     filesystem isolation. Check that TA is not running inside a nested \
-                     Job Object that prohibits child processes."
-                );
-            }
-        }
+        return spawn_in_appcontainer(&request, guard).map_err(|e| {
+            tracing::error!(
+                error = %e,
+                container = %guard.name,
+                "AppContainer spawn failed; refusing to start the agent unconfined"
+            );
+            crate::adapter::RuntimeError::SpawnFailed(format!(
+                "could not start the agent in AppContainer {}: {e}. TA does not fall back to an \
+                 unconfined spawn on its own. Check that TA is not inside a Job Object that \
+                 forbids child processes, then retry. To run without the container, set the \
+                 sandbox posture to one that allows the Job Object fallback (`ta doctor` shows \
+                 the sandbox capabilities of this machine).",
+                guard.name
+            ))
+        });
     }
-    // Suppress unused-variable warning on non-Windows platforms where the cfg
-    // block above is compiled out.  Option<&T> is Copy so this is always safe.
+    // On non-Windows the cfg block above is compiled out; Option<&T> is Copy.
     let _ = ac_guard;
     runtime.spawn(request)
 }
@@ -1612,6 +1939,7 @@ mod tests {
             unix_sockets: vec![],
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         };
 

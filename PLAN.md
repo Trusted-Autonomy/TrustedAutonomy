@@ -11083,10 +11083,10 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: Windows gets the same isolation as macOS and Linux in the same release. All platforms launch at once.
 
-1. [ ] Named-pipe gateway bridge and egress relay with container-SID access control (no loopback exemption).
-2. [ ] Staging ACL set before population; toolchain read grants with teardown and a `ta doctor --fix` sweep.
-3. [ ] ProjFS provider refuses infrastructure directories case-insensitively; alternate-stream, short-name and device-name rejection.
-4. [ ] Job Object process limits; the AppContainer-to-Job-Object fallback becomes a posture decision, never silent.
+1. [x] Named-pipe gateway bridge and egress relay with container-SID access control (no loopback exemption).
+2. [x] Staging ACL set before population; toolchain read grants with teardown and a `ta doctor --fix` sweep.
+3. [x] ProjFS provider refuses infrastructure directories case-insensitively; alternate-stream, short-name and device-name rejection.
+4. [x] Job Object process limits; the AppContainer-to-Job-Object fallback becomes a posture decision, never silent.
 5. [ ] Open questions from the sandbox plan resolved by testing on Windows CI: whether an AppContainer process can read Credential Manager, and how the secrets move in v0.17.12.1 maps to DPAPI or Credential Manager.
 6. [ ] Conformance suite on Windows CI; default-on for team roles on Windows (v0.17.12.10).
 

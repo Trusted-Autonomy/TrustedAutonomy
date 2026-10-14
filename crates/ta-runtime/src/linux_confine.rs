@@ -997,7 +997,13 @@ pub fn seccomp_supported() -> bool {
     false
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Windows: the helper is the in-container egress relay plus launcher.
+#[cfg(target_os = "windows")]
+pub fn run_helper(argv: &[String]) -> i32 {
+    crate::windows_relay::run_helper(argv)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn run_helper(_argv: &[String]) -> i32 {
     eprintln!(
         "ta-sandbox-exec: the Landlock and seccomp helper runs on Linux only. On this platform \
@@ -1314,7 +1320,7 @@ mod tests {
         assert_eq!(a.seccomp, SeccompMode::Enforce);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     #[test]
     fn helper_refuses_to_run_off_linux() {
         assert_eq!(

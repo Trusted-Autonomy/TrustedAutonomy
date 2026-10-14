@@ -117,6 +117,7 @@ fn world() -> World {
         unix_sockets: Vec::new(),
         egress_proxy_port: Some(proxy_port),
         egress_unix_socket: Some(relay.socket_path().to_path_buf()),
+        windows: Default::default(),
         violation_tag: None,
     };
     World {

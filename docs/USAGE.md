@@ -5486,6 +5486,27 @@ On Linux the box has three layers, and `ta run` prints which ones it got on the 
 
 **Running the checks yourself.** `TA_REQUIRE_SANDBOX_CONFORMANCE=1 cargo test -p ta-runtime --test linux_conformance` runs the Linux suite (it skips layers the machine lacks unless that variable is set). `scripts/ci-linux-sandbox-containers.sh` repeats it inside containers with user namespaces or Landlock removed, which is what CI does.
 
+### Sandboxing on Windows
+
+On Windows the box has two layers, and `ta run` prints which ones it got on the `[sandbox]` line.
+
+1. **AppContainer** runs the agent as a low-privilege app package. It can write inside the goal's staging directory and read the system and your toolchain, and nothing else on the machine. TA sets the staging permissions on the empty directory before it is filled, so every file inherits them.
+2. **A Job Object** puts the agent and everything it starts in one group with process-count and memory limits for its role, and kills the whole group when `ta` exits.
+
+**No loopback exemption.** An AppContainer cannot reach `127.0.0.1`, and TA never turns that off. The agent reaches TA through two named pipes instead. Each pipe is created with an access list that names only you and this goal's container, rejects remote clients, and carries a random name. The gateway pipe carries MCP calls. The egress pipe carries outbound HTTPS to the per-goal egress proxy, which applies your `allow_network` list and writes the audit log. Inside the box a small relay (`ta-sandbox-exec`, or `ta sandbox-exec-helper`) listens on the proxy port so `HTTPS_PROXY` works unchanged. The `internetClient` capability is not granted when the egress pipe is in use.
+
+**Toolchain reads.** The agent's own executable directory and the toolchain directories your project lists are made readable to the container for the length of the goal, and each grant is recorded in a ledger in the TA state directory before it is applied and removed when the goal ends.
+
+**If the container cannot be used.** When AppContainer is unavailable or its setup fails, TA does not quietly continue with the Job Object alone. The launch is evaluated again against your posture: your posture decides whether the launch proceeds (see the table below), and the `[sandbox]` line and the `sandbox_decision` event say that only the Job Object is in place.
+
+**The Windows staging provider (ProjFS)** refuses, in any letter case, the `.ta`, `.git`, `.svn`, `.hg` and agent-runtime directories, names that use NTFS alternate data streams, 8.3 short names such as `PROGRA~1`, and reserved device names such as `CON`, `NUL`, `COM1`. A refusal is logged with the path and the reason.
+
+**Cleaning up after a crash.** If `ta` is killed, the permissions it granted stay on disk. `ta doctor` lists them under `appcontainer-acls`, and `ta doctor --fix --only appcontainer-acls` removes the ones whose goal is no longer running. Goals still running are left alone, and an entry that cannot be removed stays recorded for the next run.
+
+**Known limits.** A byte pipe has no half-close, so a tool that sends a request and waits for the other side to close first can stall behind the egress relay. Reads are confined to the granted directories, not to a named list of files.
+
+**Running the checks yourself.** `TA_REQUIRE_SANDBOX_CONFORMANCE=1 cargo test -p ta-runtime --test windows_conformance -- --nocapture` runs the suite on a Windows machine. It also prints `FINDING` lines saying whether an AppContainer process can see Credential Manager entries and use per-user DPAPI.
+
 ### How the Sandbox Is Switched On, and What Happens When the Box Is Incomplete
 
 **Where the settings come from.** `ta run` reads `[sandbox]` and `[security] level` from your real project's `.ta/workflow.toml`, not from the agent's staging copy. The owner can also keep a policy the agent can never edit, in the TA state directory (the same place as your other control-plane secrets):

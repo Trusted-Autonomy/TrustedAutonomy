@@ -229,13 +229,13 @@ pub fn parse_endpoint_reply(reply: &str) -> Result<Option<ShimResolution>, ShimE
 }
 
 /// Ask the out-of-sandbox gateway at `endpoint` for the secret backing `host`.
-#[cfg(unix)]
+///
+/// `endpoint` is a Unix socket path, or a `\\.\pipe\...` name on Windows.
 pub fn resolve_via_endpoint(
     endpoint: &Path,
     token: &str,
     host: &str,
 ) -> Result<Option<ShimResolution>, ShimError> {
-    use std::io::{Read, Write};
     let fail = |reason: String| ShimError::CredentialLookupFailed {
         connector_id: "(gateway)".into(),
         reason: format!(
@@ -243,20 +243,77 @@ pub fn resolve_via_endpoint(
             endpoint.display()
         ),
     };
+    let request = format!("Bearer {token} {CREDENTIAL_PURPOSE}\nhost={host}\n");
+    let reply = exchange(endpoint, &request).map_err(fail)?;
+    parse_endpoint_reply(&reply)
+}
+
+#[cfg(unix)]
+fn exchange(endpoint: &Path, request: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
     let mut stream = std::os::unix::net::UnixStream::connect(endpoint)
-        .map_err(|e| fail(format!("could not connect: {e}")))?;
+        .map_err(|e| format!("could not connect: {e}"))?;
     let timeout = Some(std::time::Duration::from_secs(30));
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
     stream
-        .write_all(format!("Bearer {token} {CREDENTIAL_PURPOSE}\nhost={host}\n").as_bytes())
-        .map_err(|e| fail(format!("could not send the request: {e}")))?;
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("could not send the request: {e}"))?;
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let mut reply = String::new();
     stream
         .read_to_string(&mut reply)
-        .map_err(|e| fail(format!("could not read the reply: {e}")))?;
-    parse_endpoint_reply(&reply)
+        .map_err(|e| format!("could not read the reply: {e}"))?;
+    Ok(reply)
+}
+
+/// Named pipe client. A byte pipe has no half-close, so the gateway answers as
+/// soon as it has read the request line and then closes its end; the read below
+/// ends there. A file handle has no read timeout, so the exchange runs on a
+/// thread that is abandoned after 30 seconds.
+#[cfg(windows)]
+fn exchange(endpoint: &Path, request: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let deadline = std::time::Duration::from_secs(30);
+    let endpoint = endpoint.to_path_buf();
+    let request = request.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let run = || -> Result<String, String> {
+            let start = std::time::Instant::now();
+            let mut pipe = loop {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&endpoint)
+                {
+                    Ok(f) => break f,
+                    Err(e)
+                        if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                            && start.elapsed() < std::time::Duration::from_secs(5) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    Err(e) => return Err(format!("could not connect: {e}")),
+                }
+            };
+            pipe.write_all(request.as_bytes())
+                .map_err(|e| format!("could not send the request: {e}"))?;
+            let mut reply = String::new();
+            pipe.read_to_string(&mut reply)
+                .map_err(|e| format!("could not read the reply: {e}"))?;
+            Ok(reply)
+        };
+        let _ = tx.send(run());
+    });
+    rx.recv_timeout(deadline)
+        .map_err(|_| format!("no reply within {}s", deadline.as_secs()))?
+}
+
+#[cfg(not(any(unix, windows)))]
+fn exchange(_endpoint: &Path, _request: &str) -> Result<String, String> {
+    Err("this platform has no gateway transport".to_string())
 }
 
 #[cfg(test)]

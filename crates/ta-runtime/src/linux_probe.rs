@@ -374,7 +374,7 @@ pub fn find_helper() -> Option<HelperCommand> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     for d in [Some(dir), dir.parent()].into_iter().flatten() {
-        let cand = d.join(HELPER_BIN_NAME);
+        let cand = d.join(format!("{HELPER_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
         if cand.is_file() {
             return Some(HelperCommand {
                 program: cand,

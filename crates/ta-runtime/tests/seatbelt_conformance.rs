@@ -76,6 +76,7 @@ fn world() -> World {
         unix_sockets: vec![sock.clone()],
         egress_proxy_port: Some(proxy.local_addr().unwrap().port()),
         egress_unix_socket: None,
+        windows: Default::default(),
         violation_tag: Some(seatbelt::violation_tag("conformance-goal")),
     };
     World {

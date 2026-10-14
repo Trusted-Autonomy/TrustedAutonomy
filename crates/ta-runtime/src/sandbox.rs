@@ -87,6 +87,10 @@ pub struct SandboxPolicy {
     /// in-namespace relay serves `egress_proxy_port` and forwards to it.
     pub egress_unix_socket: Option<PathBuf>,
 
+    /// Windows-only launch inputs (v0.17.12.9): the egress relay pipe, Job
+    /// Object limits, and the directories to grant the container read access to.
+    pub windows: crate::windows_policy::WindowsLaunch,
+
     /// Tag the macOS profile appends to every denial in the unified log, so
     /// violations can be attributed to this goal.
     pub violation_tag: Option<String>,
@@ -135,6 +139,7 @@ impl SandboxPolicy {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         }
     }
@@ -212,8 +217,10 @@ impl SandboxPolicy {
             }
             // Job Objects are applied post-spawn; the SpawnRequest is unchanged.
             SandboxProvider::WindowsJobObject => request,
-            // AppContainer is applied pre-spawn via pre_spawn_appcontainer(); unchanged here.
-            SandboxProvider::WindowsAppContainer => request,
+            // The container itself is created pre-spawn (pre_spawn_appcontainer). Here the
+            // command is only wrapped with the in-container relay helper when the
+            // egress pipe is in use.
+            SandboxProvider::WindowsAppContainer => self.apply_windows_relay(request),
             SandboxProvider::None => request,
         }
     }
@@ -236,15 +243,120 @@ impl SandboxPolicy {
         if !self.enabled || self.provider != SandboxProvider::WindowsAppContainer {
             return Ok(None);
         }
-        // Container name: "ta-" + first 8 chars of goal ID (unique per goal).
-        let container_name = format!("ta-{}", goal_id.chars().take(8).collect::<String>());
-        let allow_network = !self.allow_network.is_empty();
-        let guard = crate::sandbox_windows::WindowsAppContainerGuard::new(
+        let container_name = crate::windows_policy::container_name(goal_id);
+        // Direct network (`internetClient`) is granted only when there is no relay.
+        // With the relay, the pipe is the sole path out, so a failed relay means
+        // no network rather than unproxied network.
+        let allow_network = !self.allow_network.is_empty() && self.windows.egress_pipe.is_none();
+        let mut guard = crate::sandbox_windows::WindowsAppContainerGuard::new(
             &container_name,
             staging_path,
             allow_network,
         )?;
+        self.grant_toolchain_reads(&mut guard, goal_id);
         Ok(Some(guard))
+    }
+
+    /// Grant the container read+execute on the toolchain directories, with a
+    /// ledger entry per grant. A failed or skipped grant is logged, never fatal:
+    /// the agent then fails visibly on the missing tool instead of TA widening
+    /// access.
+    fn grant_toolchain_reads(
+        &self,
+        guard: &mut crate::sandbox_windows::WindowsAppContainerGuard,
+        goal_id: &str,
+    ) {
+        let Some(state_dir) = &self.windows.state_dir else {
+            return;
+        };
+        let extras: Vec<_> = self
+            .windows
+            .extra_read_dirs
+            .iter()
+            .map(|p| crate::windows_policy::ToolchainGrant {
+                path: p.clone(),
+                reason: "required by the agent launch".to_string(),
+            })
+            .collect();
+        let owner: Vec<String> = self
+            .allow_read
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        let plan = crate::windows_policy::plan_toolchain_grants(
+            &|k| std::env::var(k).ok(),
+            &extras,
+            &owner,
+            &self.deny_paths,
+            &|p| p.exists(),
+        );
+        for (path, why) in &plan.skipped {
+            tracing::warn!(
+                path = %path.display(),
+                reason = %why,
+                "toolchain directory not granted to the AppContainer"
+            );
+        }
+        let ledger = crate::windows_policy::GrantLedger::in_dir(state_dir);
+        let (applied, errors) = guard.grant_toolchain_reads(goal_id, &plan, &ledger);
+        for e in &errors {
+            tracing::warn!(
+                error = %e,
+                ledger = %ledger.path().display(),
+                "toolchain ACL grant failed; the agent may not find that tool. \
+                 `ta doctor --fix` removes any grant left behind"
+            );
+        }
+        tracing::info!(
+            granted = applied,
+            skipped = plan.skipped.len(),
+            failed = errors.len(),
+            goal_id = goal_id,
+            "AppContainer toolchain read grants"
+        );
+    }
+
+    /// Wrap the command with `ta-sandbox-exec` so the agent reaches the egress
+    /// proxy through the in-container loopback listener and the named pipe.
+    fn apply_windows_relay(&self, request: SpawnRequest) -> SpawnRequest {
+        let (Some(pipe), Some(port)) = (&self.windows.egress_pipe, self.egress_proxy_port) else {
+            return request;
+        };
+        let Some(helper) = crate::linux_probe::find_helper() else {
+            // Fail closed: without the helper the agent would have no network
+            // path, so make the cause the visible failure.
+            tracing::error!(
+                helper = crate::linux_probe::HELPER_BIN_NAME,
+                "sandbox helper not found; the agent would start without an egress path"
+            );
+            let mut r = request;
+            r.args = vec![
+                "/c".into(),
+                format!(
+                    "echo ta: the sandbox helper {} was not found next to ta.exe. Reinstall TA \
+                     or set {} to its path. 1>&2 & exit /b 126",
+                    crate::linux_probe::HELPER_BIN_NAME,
+                    crate::linux_probe::HELPER_ENV
+                ),
+            ];
+            r.command = "cmd.exe".into();
+            return r;
+        };
+        let args = crate::windows_relay::HelperArgs {
+            egress_pipe: Some(pipe.clone()),
+            egress_port: Some(port),
+            command: std::iter::once(request.command.clone())
+                .chain(request.args.iter().cloned())
+                .collect(),
+        };
+        let mut r = request;
+        r.command = helper.program.display().to_string();
+        r.args = helper
+            .prefix_args
+            .into_iter()
+            .chain(args.to_args())
+            .collect();
+        r
     }
 
     /// Create a Job Object guard and assign the agent process to it (Windows only).
@@ -270,15 +382,29 @@ impl SandboxPolicy {
             return None;
         }
 
-        let guard = match WindowsJobObjectGuard::new() {
+        let limits = self.windows.job_limits.unwrap_or_default();
+        // Under the Job Object provider the job is the confinement, so a failure is an
+        // error; under AppContainer it is defence in depth.
+        let confinement = self.provider == SandboxProvider::WindowsJobObject;
+        let guard = match WindowsJobObjectGuard::with_limits(&limits) {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to create Windows Job Object — agent process tree will not be \
-                     auto-killed on TA exit. Check that TA is running without AppContainer \
-                     nesting restrictions."
-                );
+                if confinement {
+                    tracing::error!(
+                        error = %e,
+                        limits = %limits.describe(),
+                        "Failed to create the Windows Job Object that confines this agent. \
+                         Its process tree will not be limited or auto-killed."
+                    );
+                } else {
+                    tracing::warn!(
+                        error = %e,
+                        limits = %limits.describe(),
+                        "Failed to create the Windows Job Object; the AppContainer still \
+                         confines the agent but its process tree will not be limited or \
+                         auto-killed on TA exit."
+                    );
+                }
                 return None;
             }
         };
@@ -432,6 +558,7 @@ mod tests {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         };
         let working_dir = std::path::Path::new("/tmp/ta-staging/abc123");
@@ -464,6 +591,7 @@ mod tests {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
@@ -489,6 +617,7 @@ mod tests {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
@@ -546,6 +675,7 @@ mod tests {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         };
         let guard = policy.post_spawn_apply(1234);
@@ -572,6 +702,7 @@ mod tests {
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: None,
         };
         // PID 0 / 0xFFFFFFFF are never valid on any platform.

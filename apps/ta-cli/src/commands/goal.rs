@@ -614,12 +614,15 @@ fn start_goal(
             }
             ta_submit::config::StagingStrategy::ProjFs => ta_workspace::OverlayStagingMode::ProjFs,
         };
-        let overlay = OverlayWorkspace::create_with_strategy(
+        let overlay = OverlayWorkspace::create_with_prepare(
             &goal_id,
             &source_dir,
             &config.staging_dir,
             excludes,
             staging_mode,
+            Some(&|staging: &std::path::Path| {
+                super::sandbox_launch::prepare_staging(&source_dir, &goal_id, staging)
+            }),
         )?;
 
         // v0.2.1: Capture source snapshot for conflict detection.
