@@ -90,7 +90,6 @@ pub fn execute(
     let host = host_without_port(host);
 
     // Inside a sandbox `.ta/` is unreadable: ask the out-of-sandbox gateway.
-    #[cfg(unix)]
     if let (Some(endpoint), Some(token)) = (
         std::env::var_os("TA_CREDENTIAL_ENDPOINT"),
         std::env::var("TA_MCP_CONNECTION_TOKEN").ok(),

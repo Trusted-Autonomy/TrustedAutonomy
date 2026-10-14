@@ -180,8 +180,9 @@ impl Capability {
             Capability::EnvScrubbed => "launch through `ta run` so the environment is scrubbed",
             Capability::IpcNoDaemonSocket => "needs a network namespace (Linux: bubblewrap) or AppContainer",
             Capability::GatewayOutside => {
-                "the out-of-sandbox gateway needs a Unix socket (macOS and Linux); \
-                 Windows named-pipe support is not yet shipped"
+                "the out-of-sandbox gateway needs a Unix socket (macOS and Linux) or a \
+                 named pipe locked to the container SID (Windows); check that the gateway \
+                 started (`ta doctor` reports why it did not)"
             }
         }
     }
@@ -268,8 +269,12 @@ pub fn provider_capabilities(
                 }
             }
         }
-        // AppContainer: no ACE outside staging, loopback blocked by default,
-        // no handles to processes outside the container, no Task Scheduler/WMI.
+        // AppContainer: no ACE outside staging, loopback blocked by default (and no
+        // loopback exemption is ever configured), no handles to processes outside
+        // the container, no Task Scheduler/WMI. When the egress proxy is in use the
+        // container is NOT granted `internetClient`: the only way out is the
+        // container-SID-locked named pipe to the host relay, so the hostname
+        // allowlist holds even if the relay fails (the agent then has no network).
         SandboxProvider::WindowsAppContainer => {
             caps.insert(FsDenyTaTree);
             caps.insert(FsWriteConfined);
@@ -277,6 +282,10 @@ pub fn provider_capabilities(
             caps.insert(ProcNoPtraceOut);
             caps.insert(ProcNoUnsandboxedSpawn);
             caps.insert(IpcNoDaemonSocket);
+            let open_network = profile.allow_network.iter().any(|h| h == "*");
+            if profile.egress_proxy && !open_network {
+                caps.insert(NetEgressAllowlist);
+            }
         }
     }
     caps
@@ -552,6 +561,7 @@ impl SandboxProfile {
             unix_sockets: self.unix_sockets.clone(),
             egress_proxy_port: None,
             egress_unix_socket: None,
+            windows: Default::default(),
             violation_tag: Some(crate::seatbelt::violation_tag(&self.goal_id)),
         }
     }
@@ -1383,6 +1393,38 @@ mod tests {
         let caps = provider_capabilities(&SandboxProvider::WindowsAppContainer, &p);
         assert!(caps.contains(&Capability::FsDenyTaTree));
         assert!(caps.contains(&Capability::ProcNoPtraceOut));
+    }
+
+    #[test]
+    fn appcontainer_reports_egress_allowlist_only_with_the_proxy_and_no_star() {
+        let trusted = |hosts: &[&str]| TrustedPolicy {
+            enabled: Some(true),
+            posture: Some(SandboxPosture::Balanced),
+            allow_network: hosts.iter().map(|h| h.to_string()).collect(),
+            ..Default::default()
+        };
+        let ac = SandboxProvider::WindowsAppContainer;
+        let mut with_proxy = ctx(RoleClass::Worker, true);
+        with_proxy.egress_proxy = true;
+
+        let listed = SandboxProfile::compile(
+            Some(&trusted(&["api.anthropic.com"])),
+            &project_open(),
+            &with_proxy,
+        );
+        assert!(provider_capabilities(&ac, &listed).contains(&Capability::NetEgressAllowlist));
+
+        let star = SandboxProfile::compile(Some(&trusted(&["*"])), &project_open(), &with_proxy);
+        let caps = provider_capabilities(&ac, &star);
+        assert!(!caps.contains(&Capability::NetEgressAllowlist));
+        assert!(caps.contains(&Capability::NetLoopbackBlocked));
+
+        let no_proxy = SandboxProfile::compile(
+            Some(&trusted(&["api.anthropic.com"])),
+            &project_open(),
+            &ctx(RoleClass::Worker, true),
+        );
+        assert!(!provider_capabilities(&ac, &no_proxy).contains(&Capability::NetEgressAllowlist));
     }
 
     #[test]

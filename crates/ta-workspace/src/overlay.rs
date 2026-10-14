@@ -212,6 +212,9 @@ pub enum OverlayChange {
     Deleted { path: String },
 }
 
+/// Hook run on the empty staging directory before it is populated.
+pub type StagingPrepare<'a> = dyn Fn(&Path) -> Result<(), String> + 'a;
+
 /// An overlay workspace that copies a source project for transparent agent work.
 ///
 /// The agent works in `staging_dir` using its native tools (Read, Write, Edit,
@@ -287,6 +290,25 @@ impl OverlayWorkspace {
         excludes: ExcludePatterns,
         mode: OverlayStagingMode,
     ) -> Result<Self, WorkspaceError> {
+        Self::create_with_prepare(goal_id, source_dir, staging_root, excludes, mode, None)
+    }
+
+    /// Like [`Self::create_with_strategy`], with a hook that runs on the EMPTY
+    /// staging directory before anything is copied into it (v0.17.12.9).
+    ///
+    /// The Windows AppContainer launcher uses it to set an inheritable ACE for the
+    /// goal's container SID on the staging root, so every file populated afterwards
+    /// inherits it and no recursive ACL rewrite over a full tree is needed. A hook
+    /// failure is logged and staging continues: the sandbox launch grants access
+    /// again before the agent starts, so the failure costs time, not safety.
+    pub fn create_with_prepare(
+        goal_id: impl Into<String>,
+        source_dir: impl AsRef<Path>,
+        staging_root: impl AsRef<Path>,
+        excludes: ExcludePatterns,
+        mode: OverlayStagingMode,
+        prepare: Option<&StagingPrepare<'_>>,
+    ) -> Result<Self, WorkspaceError> {
         let goal_id = goal_id.into();
         let source_dir = source_dir.as_ref().to_path_buf();
         let staging_dir = staging_root.as_ref().join(&goal_id);
@@ -295,6 +317,17 @@ impl OverlayWorkspace {
             path: staging_dir.clone(),
             source,
         })?;
+
+        if let Some(prepare) = prepare {
+            if let Err(e) = prepare(&staging_dir) {
+                tracing::warn!(
+                    staging = %staging_dir.display(),
+                    error = %e,
+                    "staging pre-population hook failed; the sandbox launch will grant access \
+                     to the populated tree instead (slower, same result)"
+                );
+            }
+        }
 
         // Resolve the effective mode: RefsCow falls back to Smart on non-ReFS.
         let effective_mode = resolve_staging_mode(mode, &staging_dir);

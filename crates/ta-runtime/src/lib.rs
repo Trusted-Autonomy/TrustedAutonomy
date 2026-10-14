@@ -69,6 +69,10 @@ pub mod sandbox_launch;
 pub mod sandbox_windows;
 pub mod seatbelt;
 pub mod seatbelt_log;
+#[cfg(target_os = "windows")]
+pub mod windows_pipe;
+pub mod windows_policy;
+pub mod windows_relay;
 
 // Re-export the most commonly used types.
 pub use adapter::{

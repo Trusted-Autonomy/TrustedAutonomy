@@ -212,6 +212,30 @@ mod windows_impl {
         &*(ctx as *const ProjFsState)
     }
 
+    /// Is this projected-relative path one the provider must refuse?
+    ///
+    /// The root (empty path) is allowed. Everything else goes through
+    /// `path_safety::check_provider_path`: infrastructure directories in any
+    /// case or spelling, alternate data streams, reserved device names and 8.3
+    /// short-name shapes. Refusals are logged so a probing agent is visible.
+    fn refused(rel_path: &str) -> bool {
+        if rel_path.is_empty() {
+            return false;
+        }
+        match crate::path_safety::check_provider_path(rel_path) {
+            Ok(()) => false,
+            Err(issue) => {
+                tracing::warn!(
+                    path = %rel_path,
+                    reason = %issue,
+                    "ProjFS provider refused a path; the agent asked for something the \
+                     sandbox never projects"
+                );
+                true
+            }
+        }
+    }
+
     /// Convert a `PCWSTR` to a Rust `String` (lossy).
     unsafe fn pcwstr_to_string(p: PCWSTR) -> String {
         let mut len = 0usize;
@@ -256,6 +280,14 @@ mod windows_impl {
                 .map(|rd| {
                     rd.filter_map(|e| e.ok())
                         .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|name| {
+                            let child = if rel_path.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{rel_path}\\{name}")
+                            };
+                            !refused(&child)
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -344,6 +376,9 @@ mod windows_impl {
     ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let rel_path = pcwstr_to_string((*callback_data).FilePathName);
+        if refused(&rel_path) {
+            return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+        }
         let source_path = state.source_dir.join(rel_path.replace('\\', "/"));
 
         let (is_dir, file_size) = if source_path.is_dir() {
@@ -385,6 +420,9 @@ mod windows_impl {
     ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let rel_path = pcwstr_to_string((*callback_data).FilePathName);
+        if refused(&rel_path) {
+            return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+        }
         let source_path = state.source_dir.join(rel_path.replace('\\', "/"));
 
         let data = match std::fs::read(&source_path) {

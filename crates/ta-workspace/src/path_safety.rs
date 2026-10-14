@@ -72,6 +72,13 @@ pub enum PathSafetyIssue {
         component: String,
         canonical: &'static str,
     },
+    /// A component is a Windows reserved device name (`CON`, `NUL`, `COM1`,
+    /// `LPT1`, ...), with or without an extension. Only raised by
+    /// [`check_provider_path`].
+    DeviceName { component: String },
+    /// A component has the shape of an 8.3 short name (`PROGRA~1`). Only raised
+    /// by [`check_provider_path`].
+    ShortName { component: String },
 }
 
 impl PathSafetyIssue {
@@ -89,6 +96,14 @@ impl PathSafetyIssue {
             ),
             PathSafetyIssue::AlternateDataStream { component } => format!(
                 "component '{}' uses NTFS alternate-data-stream syntax",
+                component
+            ),
+            PathSafetyIssue::DeviceName { component } => format!(
+                "component '{}' is a Windows reserved device name",
+                component
+            ),
+            PathSafetyIssue::ShortName { component } => format!(
+                "component '{}' has the shape of an 8.3 short name, which can alias another file",
                 component
             ),
             PathSafetyIssue::Infrastructure {
@@ -275,6 +290,84 @@ pub fn check_relative_path(raw: &str) -> Result<(), PathSafetyIssue> {
     }
     if !saw_any {
         return Err(PathSafetyIssue::Empty);
+    }
+    Ok(())
+}
+
+/// Is this single component a Windows reserved device name?
+///
+/// Windows resolves `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`,
+/// `CONIN$` and `CONOUT$` to devices whatever the extension (`nul.txt`) and
+/// trailing dots or spaces (`con. `). Superscript digits count as digits for
+/// `COM` and `LPT`.
+pub fn is_device_name_component(raw_component: &str) -> bool {
+    let folded = fold_component(raw_component);
+    // The device name ends at the first '.' or ':' (extension or stream).
+    let stem = folded.split(['.', ':']).next().unwrap_or("").trim_end();
+    if matches!(
+        stem,
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" | "clock$"
+    ) {
+        return true;
+    }
+    for prefix in ["com", "lpt"] {
+        if let Some(rest) = stem.strip_prefix(prefix) {
+            let mut chars = rest.chars();
+            if let (Some(d), None) = (chars.next(), chars.next()) {
+                if d.is_ascii_digit() || matches!(d, '\u{00B9}' | '\u{00B2}' | '\u{00B3}') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Does this component look like an 8.3 short name (`PROGRA~1`, `A~1.TXT`)?
+/// Matches on shape alone, so it also flags short names that do not alias an
+/// infrastructure directory.
+pub fn is_short_name_component(raw_component: &str) -> bool {
+    let folded = fold_component(raw_component);
+    let base = stream_base(&folded);
+    let (name, ext) = match base.rsplit_once('.') {
+        Some((n, e)) => (n, Some(e)),
+        None => (base, None),
+    };
+    if ext.is_some_and(|e| e.is_empty() || e.chars().count() > 3) {
+        return false;
+    }
+    match name.split_once('~') {
+        Some((stem, digits)) => {
+            !stem.is_empty()
+                && stem.chars().count() <= 6
+                && !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
+/// The stricter check used by the Windows ProjFS provider for every path the
+/// sandboxed agent asks it to project or read.
+///
+/// Everything [`check_relative_path`] rejects (infrastructure directories in any
+/// case or spelling, alternate data streams, traversal, absolute and namespace
+/// prefixes such as `\\?\` and `\\.\`), plus reserved device names and 8.3
+/// short-name shapes. Deliberately not used for artifact apply, where a
+/// project may legitimately contain a file named `aux.rs` on Linux.
+pub fn check_provider_path(raw: &str) -> Result<(), PathSafetyIssue> {
+    check_relative_path(raw)?;
+    for component in split_components(raw) {
+        if is_device_name_component(component) {
+            return Err(PathSafetyIssue::DeviceName {
+                component: component.to_string(),
+            });
+        }
+        if is_short_name_component(component) {
+            return Err(PathSafetyIssue::ShortName {
+                component: component.to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -576,6 +669,8 @@ mod tests {
                 PathSafetyIssue::ParentTraversal { .. } => "traversal",
                 PathSafetyIssue::AlternateDataStream { .. } => "stream",
                 PathSafetyIssue::Infrastructure { .. } => "infra",
+                PathSafetyIssue::DeviceName { .. } => "device",
+                PathSafetyIssue::ShortName { .. } => "short",
             }
         }
         let cases: &[(&str, &str)] = &[
@@ -818,5 +913,62 @@ mod resolve_tests {
         symlink(root.path().join("real"), root.path().join("alias")).unwrap();
         assert!(resolve_within_root(root.path(), "alias/f").is_ok());
         assert!(resolve_within_root(root.path(), "alias/new").is_ok());
+    }
+
+    #[test]
+    fn provider_path_rejects_device_names_in_any_spelling() {
+        for p in [
+            "NUL",
+            "nul.txt",
+            "src/CON",
+            "src/con.rs",
+            "aux. ",
+            "COM1",
+            "lpt9.log",
+            "Com\u{00B9}",
+            "CONIN$",
+            "a/PRN:stream",
+        ] {
+            assert!(
+                matches!(
+                    check_provider_path(p),
+                    Err(PathSafetyIssue::DeviceName { .. })
+                ),
+                "{p} should be a device name"
+            );
+        }
+        for p in [
+            "console.rs",
+            "com10",
+            "lpt",
+            "comma",
+            "src/main.rs",
+            "aux_data",
+        ] {
+            assert!(check_provider_path(p).is_ok(), "{p} should be allowed");
+        }
+    }
+
+    #[test]
+    fn provider_path_rejects_short_names_and_streams_and_infra() {
+        assert!(matches!(
+            check_provider_path("PROGRA~1/x"),
+            Err(PathSafetyIssue::ShortName { .. })
+        ));
+        assert!(matches!(
+            check_provider_path("docs/REPORT~2.TXT"),
+            Err(PathSafetyIssue::ShortName { .. })
+        ));
+        assert!(matches!(
+            check_provider_path("file.txt:hidden"),
+            Err(PathSafetyIssue::AlternateDataStream { .. })
+                | Err(PathSafetyIssue::ShortName { .. })
+                | Ok(())
+        ));
+        assert!(check_provider_path(".GIT/config").is_err());
+        assert!(check_provider_path(".Ta/x").is_err());
+        assert!(check_provider_path("\\\\?\\C:\\x").is_err());
+        assert!(check_provider_path("src/lib~backup.rs").is_ok());
+        assert!(check_provider_path("tilde~name").is_ok());
     }
 }

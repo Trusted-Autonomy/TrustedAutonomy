@@ -3251,12 +3251,15 @@ pub fn execute(
             }
             ta_submit::config::StagingStrategy::ProjFs => ta_workspace::OverlayStagingMode::ProjFs,
         };
-        let overlay = ta_workspace::OverlayWorkspace::create_with_strategy(
+        let overlay = ta_workspace::OverlayWorkspace::create_with_prepare(
             goal_uuid.to_string(),
             &source_dir,
             &config.staging_dir,
             excludes,
             staging_mode,
+            Some(&|staging: &std::path::Path| {
+                super::sandbox_launch::prepare_staging(&source_dir, &goal_uuid.to_string(), staging)
+            }),
         )?;
 
         // Capture source snapshot for conflict detection.
@@ -6797,27 +6800,20 @@ fn launch_agent_via_runtime(
     // Apply the sandbox policy compiled above (v0.17.12.6): the provider wraps
     // the spawn in sandbox-exec (macOS) or bwrap (Linux); on Windows, Job Objects
     // are applied post-spawn via `sandbox_policy.post_spawn_apply()` (v0.16.4).
-    let sandbox_policy: Option<ta_runtime::SandboxPolicy> = sandbox_plan
+    let mut sandbox_policy: Option<ta_runtime::SandboxPolicy> = sandbox_plan
         .as_ref()
         .filter(|p| p.wraps)
         .map(|p| p.policy());
-    let request = match &sandbox_policy {
-        Some(policy) => {
-            tracing::info!(
-                provider = ?policy.provider,
-                "Applying sandbox policy to agent process"
-            );
-            match policy.try_apply(raw_request) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(std::io::Error::other(format!(
-                        "the sandbox could not be applied: {e} The agent was not started."
-                    )));
-                }
-            }
+    // The agent binary's own directory must be readable inside an AppContainer
+    // (v0.17.12.9). Granted by the toolchain-read step and revoked on teardown.
+    if let Some(policy) = sandbox_policy.as_mut() {
+        if let Some(dir) = std::path::Path::new(&raw_request.command)
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+        {
+            policy.windows.extra_read_dirs.push(dir.to_path_buf());
         }
-        None => raw_request,
-    };
+    }
 
     // Resolve the runtime (default: "process").
     let registry = RuntimeRegistry::new();
@@ -6867,6 +6863,11 @@ fn launch_agent_via_runtime(
                 // provided: run the degraded-mode table again, never fall back silently.
                 if let Some(plan) = sandbox_plan.as_mut() {
                     plan.downgrade_to_job_object(&format!("AppContainer setup failed: {e}"));
+                    // The downgrade is a posture decision: from here the Job Object is the
+                    // confinement, so the egress relay wrapper must not be applied.
+                    if let Some(policy) = sandbox_policy.as_mut() {
+                        policy.provider = ta_runtime::SandboxProvider::WindowsJobObject;
+                    }
                     plan.emit(events_dir, goal_id);
                     println!("{}", plan.decision.banner());
                     if plan.decision.is_refused() {
@@ -6880,6 +6881,29 @@ fn launch_agent_via_runtime(
             }
         },
         None => None,
+    };
+
+    // Apply the sandbox policy compiled above (v0.17.12.6): the provider wraps
+    // the spawn in sandbox-exec (macOS) or bwrap (Linux); on Windows, Job Objects
+    // are applied post-spawn via `sandbox_policy.post_spawn_apply()` (v0.16.4).
+    // This runs AFTER the AppContainer pre-spawn step so a downgrade to a Job
+    // Object is reflected in the request (no relay wrapper without a container).
+    let request = match &sandbox_policy {
+        Some(policy) => {
+            tracing::info!(
+                provider = ?policy.provider,
+                "Applying sandbox policy to agent process"
+            );
+            match policy.try_apply(raw_request) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "the sandbox could not be applied: {e} The agent was not started."
+                    )));
+                }
+            }
+        }
+        None => raw_request,
     };
 
     // Spawn the agent.  On Windows with an AppContainer guard, uses CreateProcessW

@@ -337,6 +337,27 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
         timeout-minutes: 15
 
+      # AppContainer conformance and the Credential Manager / DPAPI probe
+      # (v0.17.12.9). A runner that cannot create an AppContainer profile fails
+      # the step instead of skipping. The FINDING lines record what an
+      # AppContainer process can reach; they are uploaded with the job.
+      - name: AppContainer conformance and Credential Manager probe
+        if: env.CODE == 'true'
+        env:
+          TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
+          TA_WINDOWS_FINDINGS: ${{ runner.temp }}\windows-findings.txt
+        run: cargo test -p ta-runtime --test windows_conformance -- --test-threads=1 --nocapture
+        timeout-minutes: 20
+
+      - name: Upload Windows sandbox findings
+        if: always() && env.CODE == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-sandbox-findings
+          path: ${{ runner.temp }}\windows-findings.txt
+          if-no-files-found: ignore
+        timeout-minutes: 5
+
       - name: Test ta-cli --version (debug)
         if: env.CODE == 'true'
         run: target\debug\ta.exe --version
