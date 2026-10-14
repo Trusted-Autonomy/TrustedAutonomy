@@ -9,7 +9,7 @@
 //
 // SBPL takes the LAST matching rule, so the order below is load-bearing:
 //
-//   1. `(deny default)`, tagged so the unified log can be filtered to a goal.
+//   1. `(deny default)`, untagged (a message here hides the tags on the explicit denies).
 //   2. Broad reads, then process, signal and process-info rules.
 //   3. A mach-lookup ALLOWLIST (never a blanket allow) and explicit denies
 //      for Apple events, LaunchServices and exec of `ta-daemon` / `security`.
@@ -170,15 +170,11 @@ pub fn generate(policy: &SandboxPolicy, working_dir: &Path) -> String {
     let mut l: Vec<String> = Vec::new();
     let workspace = sb_path(working_dir);
 
-    // 1. Default deny, tagged for the violation tail.
+    // 1. Default deny. It stays untagged on purpose: probed on macOS, a message
+    // on the default rule shadows the message on the explicit deny rules, and the
+    // explicit denies (credentials, TA state) are the ones owners need attributed.
     l.push("(version 1)".into());
-    match &policy.violation_tag {
-        Some(tag) => l.push(format!(
-            r#"(deny default (with message "{}"))"#,
-            escape(tag)
-        )),
-        None => l.push("(deny default)".into()),
-    }
+    l.push("(deny default)".into());
 
     // 2. Reads, processes, signals. Metadata is needed for even `/usr/bin/true`.
     l.push("(allow file-read*)".into());
@@ -349,14 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn tag_appears_in_default_deny() {
+    fn explicit_denies_carry_the_tag_and_the_default_rule_does_not() {
         let mut p = policy();
         p.violation_tag = Some("ta:goal-1".into());
         let out = generate(&p, Path::new("/tmp/ws"));
-        assert!(out.contains(r#"(deny default (with message "ta:goal-1"))"#));
-        // Explicit denies are tagged as well, and every (deny ...) stays balanced.
+        // Probed on macOS: a message on `(deny default ...)` suppresses the tag on
+        // the explicit deny rules (credential and state denials never reach the
+        // log), so the default rule stays plain.
+        assert!(out.lines().any(|l| l == "(deny default)"), "{out}");
+        assert!(!out.contains(r#"(deny default (with message"#), "{out}");
         assert!(out.contains(r#"(deny signal (with message "ta:goal-1") (target others))"#));
-        for line in out.lines().filter(|l| l.starts_with("(deny ")) {
+        // Every other (deny ...) stays tagged and balanced.
+        for line in out
+            .lines()
+            .filter(|l| l.starts_with("(deny ") && *l != "(deny default)")
+        {
             assert!(line.contains(r#"(with message "ta:goal-1")"#), "{line}");
         }
     }
@@ -411,17 +414,28 @@ mod tests {
     fn denies_come_before_goal_grants_so_staging_survives() {
         let home = tempfile::tempdir().unwrap();
         let ssh_path = canonical(&home.path().join(".ssh"));
+        // The generator canonicalizes every path. On Windows that rewrites a
+        // Unix-looking literal (drive prefix, backslashes), so the expected
+        // text is built from the same function instead of hardcoded.
+        let ta_dir = canonical(Path::new("/proj/.ta"));
+        let staging = canonical(Path::new("/proj/.ta/staging/g1"));
         let mut p = policy();
         p.deny_paths = vec![PathBuf::from("/proj/.ta"), home.path().join(".ssh")];
         let out = generate(&p, Path::new("/proj/.ta/staging/g1"));
         let deny = pos(
             &out,
-            r#"(deny file-read* file-write* (subpath "/proj/.ta"))"#,
+            &format!(
+                r#"(deny file-read* file-write* (subpath "{}"))"#,
+                escape(&ta_dir.to_string_lossy())
+            ),
         );
         let ssh = pos(&out, &format!(r#"(subpath "{}")"#, ssh_path.display()));
         let grant = pos(
             &out,
-            r#"(allow file-read* file-write* (subpath "/proj/.ta/staging/g1"))"#,
+            &format!(
+                r#"(allow file-read* file-write* (subpath "{}"))"#,
+                escape(&staging.to_string_lossy())
+            ),
         );
         assert!(deny < grant && ssh < grant);
     }

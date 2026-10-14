@@ -11052,13 +11052,13 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.6`
 
 ### v0.17.12.7 - macOS Seatbelt Profile v2 and Egress Proxy
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.6
 
-1. [ ] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths. Starting point from v0.17.12.6: the profile is now `(allow file-read*)` followed by ordered denies from `protected_paths` (`.ssh`, `.gnupg`, `.aws`, `.config/gh`, `.netrc`, `Library/Keychains`); the earlier explicit allow list could not run `/usr/bin/true`. That is a denylist, so anything not named (browser profiles, `.docker`, `.npmrc`, other projects' source) is readable. This item must widen the deny set and prove it with `ta-sandbox-probe`, and must not describe macOS reads as confined until it does.
-2. [ ] Mach-service allowlist; deny Apple events, process inspection and signalling of others; deny exec of `ta-daemon` and `/usr/bin/security`.
-3. [ ] Per-goal egress proxy with a hostname allowlist and audit log, shared by all platforms; the profile allows only the proxy and the bridge.
-4. [x] Violation events from the unified log; Rosetta paths; a conformance suite (`ta-sandbox-probe`) in macOS CI.
+1. [x] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths. Done in `crates/ta-runtime/src/seatbelt.rs`, proven by `crates/ta-runtime/tests/seatbelt_conformance.rs` through `ta-sandbox-probe` (credential, `.npmrc`, state and `.ta` denies including a case-folded spelling; writes confined to staging and the agent home). The deny set is `HOME_PROTECTED` (browser profiles, `.docker`, `.npmrc`, cloud CLIs, `Library/Keychains` and similar) plus the project `.ta` tree and state dir. Reads are still NOT confined on macOS: it is a denylist, anything not named is readable, and `docs/USAGE.md` says so.
+2. [x] Mach-service allowlist; deny Apple events, process inspection and signalling of others; deny exec of `ta-daemon` and `/usr/bin/security`. The `(target others)` filter does not stop `proc_pidpath` on a foreign pid (probed), so process-info is denied unconditionally with an allow for self and the box.
+3. [x] Per-goal egress proxy with a hostname allowlist and audit log, shared by all platforms; the profile allows only the proxy and the bridge. `crates/ta-runtime/src/egress_proxy.rs` is platform-neutral (std only); `ta run` starts it for macOS launches and injects `HTTPS_PROXY`. The Linux (bind-mounted socket) and Windows (named pipe relay) transports are wired by v0.17.12.8 and v0.17.12.9, which already depend on this phase.
+4. [x] Violation events from the unified log; Rosetta paths; a conformance suite (`ta-sandbox-probe`) in macOS CI. Violation events are best-effort, not guaranteed: a message on `(deny default ...)` hid the tag on explicit denies (fixed: the default rule is now plain), but even then roughly 1 run in 6 to 1 in 4 delivered no tagged line for a whole test while the refusal was still enforced, cause unexplained. The conformance test therefore asserts the refusal and only warns on missing delivery. Making delivery dependable (or sourcing denials from a different channel) is routed to v0.17.12.10 item 3, where violations are surfaced in `ta sandbox explain` and review.
 
 **Effort**: M.
 
@@ -11100,7 +11100,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 1. [ ] Per-role profiles (CoS chat strictest, reviewer, worker, librarian) from role class intersected with persona and rules; origins `cos` and `chat` force the CoS class.
 2. [ ] On by default under `balanced` on macOS, Linux and Windows; CoS and chat refuse to launch without the required capabilities in every posture except `open`.
-3. [ ] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor`; badges in Studio and `ta status`; drafts built without a required capability are labelled in review.
+3. [ ] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor`; badges in Studio and `ta status`; drafts built without a required capability are labelled in review. Also owns making macOS violation events dependable (from v0.17.12.7 item 4): unified-log delivery of tagged denials is best-effort today (about 1 run in 6 to 1 in 4 delivers none, cause unexplained), so `ta sandbox explain` must not present an empty violation list as proof of no denials until delivery is fixed or sourced from another channel.
 4. [ ] USAGE.md sandbox section rewritten as how-to with honest per-platform limits.
 
 **Effort**: M.

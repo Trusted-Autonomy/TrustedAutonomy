@@ -1,7 +1,8 @@
 // seatbelt_log.rs: Seatbelt denials from the macOS unified log (v0.17.12.7).
 //
-// The v2 profile is `(deny default (with message "ta:<goal>"))`, so every
-// kernel denial for a sandboxed goal carries that tag in the unified log:
+// The v2 profile tags every explicit deny rule with `(with message "ta:<goal>")`
+// (the default rule stays untagged, see seatbelt.rs), so a denial of a protected
+// path carries that tag in the unified log:
 //
 //   Sandbox: cat(4242) deny(1) file-read-data /Users/u/.ssh/id_ed25519
 //   ta:e0d16d67
@@ -12,6 +13,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// One parsed denial.
@@ -83,6 +85,7 @@ pub fn parse_ndjson_line(line: &str, tag: &str) -> Option<Violation> {
 pub struct ViolationTail {
     child: Child,
     thread: Option<std::thread::JoinHandle<()>>,
+    lines_seen: Arc<AtomicU64>,
 }
 
 impl ViolationTail {
@@ -116,10 +119,13 @@ impl ViolationTail {
         let stdout = child.stdout.take().ok_or_else(|| {
             std::io::Error::other("/usr/bin/log gave no stdout; sandbox denial events are off")
         })?;
+        let lines_seen = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&lines_seen);
         let thread = std::thread::Builder::new()
             .name("ta-seatbelt-log".into())
             .spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    counter.fetch_add(1, Ordering::Relaxed);
                     if let Some(v) = parse_ndjson_line(&line, &tag) {
                         on_violation(v);
                     }
@@ -128,7 +134,15 @@ impl ViolationTail {
         Ok(Self {
             child,
             thread: Some(thread),
+            lines_seen,
         })
+    }
+
+    /// Raw lines `log stream` has delivered so far, tagged or not. Zero after a
+    /// busy window means the stream itself is blind (restricted log access), as
+    /// opposed to the stream working while a denial went missing.
+    pub fn lines_seen(&self) -> u64 {
+        self.lines_seen.load(Ordering::Relaxed)
     }
 }
 
