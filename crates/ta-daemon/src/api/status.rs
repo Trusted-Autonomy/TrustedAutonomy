@@ -144,6 +144,36 @@ pub struct AgentInfo {
     /// Allows Studio to navigate directly to the draft review panel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_id: Option<String>,
+    /// Sandbox badge from the goal's recorded launch decision, e.g.
+    /// `sandbox enforced (chat, balanced)`; absent when none was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_badge: Option<String>,
+}
+
+/// The sandbox badge for `goal_id` from its latest `sandbox_decision` event.
+fn sandbox_badge(events_dir: &std::path::Path, goal_id: uuid::Uuid) -> Option<String> {
+    let events = FsEventStore::new(events_dir)
+        .query(&EventQueryFilter {
+            goal_id: Some(goal_id),
+            event_types: vec!["sandbox_decision".into()],
+            ..Default::default()
+        })
+        .ok()?;
+    match events.into_iter().last()?.payload {
+        ta_events::SessionEvent::SandboxDecision {
+            outcome,
+            posture,
+            role_class,
+            missing,
+            ..
+        } => Some(ta_runtime::sandbox_launch::badge_from_parts(
+            &outcome,
+            &posture,
+            &role_class,
+            &missing,
+        )),
+        _ => None,
+    }
 }
 
 /// `GET /api/status` — Project dashboard as JSON (cached for 5 seconds).
@@ -233,6 +263,7 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
                             process_health: health_opt,
                             agent_pid: g.agent_pid,
                             draft_id: g.pr_package_id.map(|id| id.to_string()),
+                            sandbox_badge: sandbox_badge(&state.events_dir, g.goal_run_id),
                         }
                     })
                     .collect();

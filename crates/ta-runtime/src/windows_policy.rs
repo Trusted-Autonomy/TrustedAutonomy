@@ -592,6 +592,11 @@ impl JobLimits {
                 job_memory_bytes: None,
                 ui_restrictions: true,
             },
+            RoleClass::Librarian => Self {
+                active_process_limit: Some(32),
+                job_memory_bytes: Some(2 << 30),
+                ui_restrictions: true,
+            },
             RoleClass::Plugin => Self {
                 active_process_limit: Some(64),
                 job_memory_bytes: Some(2 << 30),
@@ -1027,6 +1032,7 @@ mod tests {
             RoleClass::Chat,
             RoleClass::Reviewer,
             RoleClass::Worker,
+            RoleClass::Librarian,
             RoleClass::Plugin,
         ] {
             let f = JobLimits::for_role(role).limit_flags();

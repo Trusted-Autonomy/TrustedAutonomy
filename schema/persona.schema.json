@@ -74,6 +74,28 @@
       ],
       "type": "object"
     },
+    "PersonaSandboxConfig": {
+      "description": "A persona's `[sandbox]` table: additions it asks for on top of its role\nclass's box. They apply only while the persona file is pinned by the owner\n(`ta sandbox pin-persona`) and never beyond the class ceiling; a persona\ncannot loosen anything on its own.",
+      "properties": {
+        "allow_hosts": {
+          "default": [],
+          "description": "Hosts the persona needs to reach (package registries, docs sites).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allow_read": {
+          "default": [],
+          "description": "Extra read-only paths (toolchains).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "PersonaStyle": {
       "description": "Style/output preferences for a persona.",
       "properties": {
@@ -106,6 +128,13 @@
     },
     "persona": {
       "$ref": "#/$defs/PersonaInner"
+    },
+    "sandbox": {
+      "$ref": "#/$defs/PersonaSandboxConfig",
+      "default": {
+        "allow_hosts": [],
+        "allow_read": []
+      }
     },
     "style": {
       "$ref": "#/$defs/PersonaStyle",

@@ -118,6 +118,7 @@ pub async fn save_persona(
             output_format: body.output_format.clone(),
             max_response_length: String::new(),
         },
+        sandbox: Default::default(),
     };
 
     let project_root = state.active_project_root.read().unwrap().clone();

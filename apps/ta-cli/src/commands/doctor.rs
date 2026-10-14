@@ -288,6 +288,9 @@ fn run_all_checks_with(
     // 24. AppContainer availability — Windows filesystem + network isolation (v0.16.4.2).
     results.push(check_appcontainer(config));
 
+    // 24b. Sandbox capability matrix per role class and posture (v0.17.12.10).
+    results.push(check_sandbox_matrix(config));
+
     // 25. ProjFS availability — fast virtual staging on Windows (v0.16.4.1).
     results.push(check_projfs(config));
 
@@ -2214,6 +2217,57 @@ fn enable_projfs_windows() -> anyhow::Result<()> {
             eprintln!("    Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart");
             Err(anyhow::anyhow!("Dism.exe not found or inaccessible: {e}"))
         }
+    }
+}
+
+// ── Sandbox capability matrix (v0.17.12.10) ───────────────────────────────────
+
+/// Role-by-posture readiness for this machine. Fails when the CoS/chat class
+/// could not launch under `balanced`, because that launch would be refused.
+fn check_sandbox_matrix(_config: &GatewayConfig) -> CheckResult {
+    use ta_runtime::sandbox_launch::{readiness, Outcome, RoleClass, SandboxPosture};
+    let provider = ta_runtime::SandboxPolicy::detect_provider();
+    let rows = readiness(&provider);
+    let text = super::sandbox::format_matrix(&rows);
+    let balanced = |role: RoleClass| {
+        rows.iter()
+            .find(|r| r.role == role)
+            .and_then(|r| {
+                r.by_posture
+                    .iter()
+                    .find(|(p, _)| *p == SandboxPosture::Balanced)
+            })
+            .map(|(_, o)| *o)
+    };
+    let provider_name = ta_runtime::sandbox_launch::provider_name(&provider);
+    let detail = format!("provider {provider_name}\n{}", text.trim_end());
+    match balanced(RoleClass::Chat) {
+        Some(Outcome::Refused) => {
+            let missing = rows
+                .iter()
+                .find(|r| r.role == RoleClass::Chat)
+                .map(|r| {
+                    r.missing
+                        .iter()
+                        .map(|c| format!("{}: {}", c.name(), c.fix_hint()))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            CheckResult::fail(
+                "Sandbox",
+                format!("CoS and chat launches will be refused under balanced\n{detail}"),
+                format!(
+                    "{missing}. Or set posture = \"open\" in the trusted sandbox policy if you accept the risk."
+                ),
+            )
+        }
+        Some(Outcome::Enforced) => CheckResult::ok("Sandbox", detail),
+        _ => CheckResult::warn(
+            "Sandbox",
+            detail,
+            "Run `ta sandbox explain chat` for what is missing and how to fix it.",
+        ),
     }
 }
 

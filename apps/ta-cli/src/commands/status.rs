@@ -282,6 +282,11 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
                 g.title,
                 &g.goal_run_id.to_string()[..8]
             );
+            if let Some(badge) =
+                super::sandbox::badge_for_goal(&config.workspace_root, g.goal_run_id)
+            {
+                println!("│        {}", badge);
+            }
         }
     }
 

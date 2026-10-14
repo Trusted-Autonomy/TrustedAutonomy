@@ -235,3 +235,40 @@ fn credential_manager_and_dpapi_from_inside_the_container() {
         );
     }
 }
+
+/// The egress relay assumes loopback works INSIDE one container: the helper
+/// listens on `127.0.0.1:PORT` and the agent (same container token) connects
+/// to it. TA grants no loopback exemption to the host, so this is only true if
+/// Windows lets a container reach its own loopback listener. Records the answer
+/// and fails when the relay's premise does not hold, because the egress path
+/// would then silently never carry traffic.
+#[test]
+fn loopback_relay_inside_container() {
+    let Some(w) = world("ta-conf-relay") else {
+        return;
+    };
+    // One process binds, connects to itself, and echoes a byte: the same shape
+    // as `ta-sandbox-exec` (listener) plus the agent (client) in one token.
+    let script = "try { \
+        $l = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0); $l.Start(); \
+        $port = $l.LocalEndpoint.Port; \
+        $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $port); \
+        $s = $l.AcceptTcpClient(); \
+        $c.GetStream().WriteByte(42); \
+        if ($s.GetStream().ReadByte() -eq 42) { exit 0 } else { exit 1 } \
+        } catch { exit 2 }";
+    let code = powershell(&w, script);
+    finding(
+        "loopback-inside-container",
+        &format!(
+            "an AppContainer process {} reach its own loopback listener (probe exit code {code})",
+            if code == 0 { "CAN" } else { "can NOT" }
+        ),
+    );
+    assert_eq!(
+        code, 0,
+        "loopback inside one container does not work, so the in-container egress relay \
+         (ta-sandbox-exec listening on 127.0.0.1) cannot carry agent traffic. The relay needs a \
+         different in-container transport on this Windows build"
+    );
+}

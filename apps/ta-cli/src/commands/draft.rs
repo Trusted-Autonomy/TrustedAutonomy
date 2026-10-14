@@ -4025,6 +4025,22 @@ fn view_package(
         }
     }
 
+    // v0.17.12.10: a draft built without a required sandbox capability is
+    // labelled before the reviewer reads the diff.
+    if !matches!(format_str, "json" | "html") {
+        if let Some(label) = uuid::Uuid::parse_str(&pkg.goal.goal_id)
+            .ok()
+            .and_then(|g| super::sandbox::draft_label_for_goal(&config.workspace_root, g))
+        {
+            println!("SANDBOX: {}", label);
+            println!(
+                "  Run `ta sandbox explain {}` for the recorded decision.",
+                pkg.goal.goal_id
+            );
+            println!();
+        }
+    }
+
     // H9: say up front when this draft can never be auto-approved because
     // of where its goal came from.
     if let Some(refusal) = auto_approve_refusal_for_draft(config, &pkg.goal.goal_id) {

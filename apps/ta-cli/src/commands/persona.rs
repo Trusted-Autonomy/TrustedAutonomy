@@ -158,6 +158,7 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
                     output_format: "markdown".to_string(),
                     max_response_length: String::new(),
                 },
+                sandbox: Default::default(),
             };
 
             let path = persona.save(project_root)?;
@@ -221,6 +222,7 @@ mod tests {
             },
             capabilities: PersonaCapabilities::default(),
             style: PersonaStyle::default(),
+            sandbox: Default::default(),
         }
     }
 

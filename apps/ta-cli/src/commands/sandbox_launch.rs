@@ -18,7 +18,8 @@ use ta_runtime::egress_proxy::{
 };
 use ta_runtime::sandbox_launch::{
     decide, prepare_agent_home, scrub_env, EnvScrub, GatewayPlacement, LaunchContext,
-    ProjectRequest, RoleClass, SandboxDecision, SandboxPosture, SandboxProfile, TrustedPolicy,
+    PersonaSandbox, ProjectRequest, RoleClass, SandboxDecision, SandboxPosture, SandboxProfile,
+    TrustedPolicy,
 };
 use ta_runtime::seatbelt_log::{Violation, ViolationTail};
 use ta_runtime::{SandboxPolicy, SandboxProvider};
@@ -67,6 +68,10 @@ pub struct PlanInput<'a> {
     pub is_claude_code: bool,
     pub chat: bool,
     pub team_role: bool,
+    /// The team role's name (daemon-provided), mapped to a role class.
+    pub team_role_name: Option<&'a str>,
+    /// The persona this launch uses, for its `[sandbox]` table.
+    pub persona: Option<&'a str>,
     /// The agent's own env map, for chat-mode variables the gateway needs too.
     pub agent_env: &'a HashMap<String, String>,
     /// Where denial events are appended (egress proxy denials are reported live).
@@ -91,6 +96,49 @@ pub fn project_request(project_root: &Path) -> ProjectRequest {
         allow_write: wf.sandbox.allow_write.clone(),
         allow_network: wf.sandbox.allow_network.clone(),
     }
+}
+
+/// Posture from the owner's verified rules file (`posture = "..."`), when one
+/// is in effect. The shipped default posture (no owner file) says nothing here,
+/// and an invalid file is reported but does not change the box.
+pub fn rules_posture(project_root: &Path) -> (Option<SandboxPosture>, Option<String>) {
+    use ta_actions::rules::{RulesLoader, Status};
+    let loaded = RulesLoader::for_project(project_root).load(None);
+    match (&loaded.status, loaded.compiled.as_ref()) {
+        (Status::Verified { .. }, Some(c)) => (SandboxPosture::parse(&c.posture), None),
+        (Status::Invalid, _) => (
+            None,
+            Some(
+                "the owner rules file is not in effect (invalid or unsigned), so its posture \
+                 does not shape the sandbox. Run `ta rules status` for the fix."
+                    .to_string(),
+            ),
+        ),
+        _ => (None, None),
+    }
+}
+
+/// The persona's `[sandbox]` table with its pin status. `Err` is a warning
+/// string: the persona could not be read, so no additions apply.
+pub fn persona_sandbox(
+    project_root: &Path,
+    name: &str,
+    sandbox_dir: Option<&Path>,
+) -> Result<PersonaSandbox, String> {
+    let (cfg, hash) = ta_goal::PersonaConfig::load_with_hash(project_root, name)
+        .map_err(|e| format!("could not read persona \"{name}\" for its sandbox table: {e}"))?;
+    let pins = match sandbox_dir {
+        Some(dir) => ta_runtime::sandbox_launch::load_persona_pins(dir)?,
+        None => Default::default(),
+    };
+    let pinned = pins.get(name).is_some_and(|h| *h == hash);
+    Ok(PersonaSandbox {
+        name: name.to_string(),
+        allow_hosts: cfg.sandbox.allow_hosts,
+        allow_read: cfg.sandbox.allow_read,
+        file_hash: hash,
+        pinned,
+    })
 }
 
 /// The TA state directory for `project_root`, when one exists (where the
@@ -135,6 +183,7 @@ pub fn prepare_staging(project_root: &Path, goal_id: &str, staging: &Path) -> Re
             user_home: dirs::home_dir(),
             mediation_socket: None,
             egress_proxy: false,
+            persona: None,
         };
         SandboxProfile::compile(trusted.as_ref(), &project, &ctx).requested
     });
@@ -157,13 +206,41 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         Some(s) => TrustedPolicy::load(&s.sandbox_dir())?,
         None => None,
     };
-    let project = project_request(input.project_root);
+    let mut project = project_request(input.project_root);
     let goal = input.goal_id.to_string();
+    let mut warnings = Vec::new();
 
-    let role = if input.chat {
-        RoleClass::Chat
-    } else {
-        RoleClass::Worker
+    // Role class from launch data: chat mode (which includes origins `cos` and
+    // `chat`) forces the strictest class; a team role maps through the owner's
+    // state-dir table, then the built-in names.
+    let owner_roles = trusted
+        .as_ref()
+        .map(|t| t.roles.clone())
+        .unwrap_or_default();
+    let role = RoleClass::resolve(input.chat, input.team_role_name, &owner_roles);
+
+    // The owner's verified rules posture tightens chat and team launches.
+    if input.chat || input.team_role {
+        let (posture, note) = rules_posture(input.project_root);
+        if let Some(p) = posture {
+            project.posture = Some(project.posture.map_or(p, |q| q.tighten(p)));
+        }
+        warnings.extend(note);
+    }
+
+    let persona = match input.persona {
+        Some(name) => match persona_sandbox(
+            input.project_root,
+            name,
+            state.as_ref().map(|s| s.sandbox_dir()).as_deref(),
+        ) {
+            Ok(p) => Some(p),
+            Err(w) => {
+                warnings.push(w);
+                None
+            }
+        },
+        None => None,
     };
     let mut ctx = LaunchContext {
         goal_id: goal.clone(),
@@ -176,6 +253,7 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         user_home: dirs::home_dir(),
         mediation_socket: None,
         egress_proxy: false,
+        persona,
     };
 
     // First pass: is a sandbox wanted at all?
@@ -189,7 +267,6 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         (None, true) => std::env::temp_dir().join("ta-agent-home").join(&goal),
         (None, false) => PathBuf::new(),
     };
-    let mut warnings = Vec::new();
     let mut claude_config_dir = None;
     if wanted {
         match prepare_agent_home(&ctx.agent_home) {

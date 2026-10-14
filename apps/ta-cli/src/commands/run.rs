@@ -139,6 +139,11 @@ struct AgentLaunchConfig {
     #[serde(skip)]
     chat_mcp_config: Option<PathBuf>,
 
+    /// Set by `execute()` (never read from YAML): the persona this launch uses,
+    /// so the sandbox plan can read its `[sandbox]` table.
+    #[serde(skip)]
+    persona: Option<String>,
+
     /// Set by `execute()` for a restricted Claude Code launch: the file
     /// holding the context TA injected into the staged CLAUDE.md
     /// (`.ta/logs/goals/<goal-id>/system-prompt.txt`, outside staging). A
@@ -396,6 +401,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            persona: None,
             system_prompt_file: None,
         },
         "codex" => AgentLaunchConfig {
@@ -423,6 +429,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            persona: None,
             system_prompt_file: None,
         },
         "claude-flow" => AgentLaunchConfig {
@@ -483,6 +490,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            persona: None,
             system_prompt_file: None,
         },
         _ => AgentLaunchConfig {
@@ -506,6 +514,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            persona: None,
             system_prompt_file: None,
         },
     }
@@ -604,6 +613,7 @@ fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> 
         restricted_tool_surface: false,
         chat_mode: false,
         chat_mcp_config: None,
+        persona: None,
         system_prompt_file: None,
     }
 }
@@ -3058,6 +3068,7 @@ pub fn execute(
     };
     // agent_config is mutable so we can extend its env with framework-specific vars.
     let mut agent_config = agent_config;
+    agent_config.persona = persona_name.map(str::to_string);
 
     // ── Model override (--model, independent of --agent/framework) ─────────
     //
@@ -5820,6 +5831,7 @@ fn execute_resume(
             restricted_tool_surface: false,
             chat_mode: false,
             chat_mcp_config: None,
+            persona: None,
             system_prompt_file: None,
         };
 
@@ -6696,6 +6708,9 @@ fn launch_agent_via_runtime(
         let team_role = std::env::var("TA_WHITEBOARD_TEAM_SESSION")
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
+        let team_role_name = std::env::var("TA_WHITEBOARD_TEAM_ROLE")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
         let input = super::sandbox_launch::PlanInput {
             project_root: root,
             staging: staging_path,
@@ -6703,6 +6718,8 @@ fn launch_agent_via_runtime(
             is_claude_code: is_claude_code_launch(config),
             chat,
             team_role,
+            team_role_name: team_role_name.as_deref(),
+            persona: config.persona.as_deref(),
             agent_env: &env,
             events_dir,
         };

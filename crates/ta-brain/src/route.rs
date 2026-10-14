@@ -785,6 +785,7 @@ mod tests {
             },
             capabilities: Default::default(),
             style: Default::default(),
+            sandbox: Default::default(),
         };
         persona.save(tmp.path()).unwrap();
         let mut req = ExplicitGoalRequest::new("Add a new dashboard widget");

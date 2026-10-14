@@ -52,6 +52,20 @@ pub struct PersonaCapabilities {
     pub origin: Option<String>,
 }
 
+/// A persona's `[sandbox]` table: additions it asks for on top of its role
+/// class's box. They apply only while the persona file is pinned by the owner
+/// (`ta sandbox pin-persona`) and never beyond the class ceiling; a persona
+/// cannot loosen anything on its own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PersonaSandboxConfig {
+    /// Hosts the persona needs to reach (package registries, docs sites).
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    /// Extra read-only paths (toolchains).
+    #[serde(default)]
+    pub allow_read: Vec<String>,
+}
+
 /// Style/output preferences for a persona.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PersonaStyle {
@@ -93,6 +107,8 @@ pub struct PersonaConfig {
     pub capabilities: PersonaCapabilities,
     #[serde(default)]
     pub style: PersonaStyle,
+    #[serde(default)]
+    pub sandbox: PersonaSandboxConfig,
 }
 
 /// Summary for API/CLI listing.
@@ -122,6 +138,31 @@ impl PersonaConfig {
         let cfg: PersonaConfig = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("Invalid persona config '{}': {}", name, e))?;
         Ok(cfg)
+    }
+
+    /// Load a persona and the SHA-256 (hex) of the exact file text, for the
+    /// sandbox pin check.
+    pub fn load_with_hash(project_root: &Path, name: &str) -> anyhow::Result<(Self, String)> {
+        use sha2::{Digest, Sha256};
+        let path = project_root
+            .join(".ta")
+            .join("personas")
+            .join(format!("{}.toml", name));
+        let text = std::fs::read(&path).map_err(|e| {
+            anyhow::anyhow!(
+                "Could not read persona '{}' at {}: {}",
+                name,
+                path.display(),
+                e
+            )
+        })?;
+        let cfg: PersonaConfig = toml::from_str(&String::from_utf8_lossy(&text))
+            .map_err(|e| anyhow::anyhow!("Invalid persona config '{}': {}", name, e))?;
+        let hash = Sha256::digest(&text)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Ok((cfg, hash))
     }
 
     /// List all personas in `.ta/personas/`.
@@ -228,6 +269,7 @@ mod tests {
                 output_format: "markdown".to_string(),
                 max_response_length: "2000 words".to_string(),
             },
+            sandbox: Default::default(),
         }
     }
 
