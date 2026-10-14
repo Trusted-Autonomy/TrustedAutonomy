@@ -5255,6 +5255,7 @@ dependencies = [
  "clap",
  "crossterm",
  "decision-gate",
+ "dirs",
  "glob",
  "libc",
  "rand 0.8.7",

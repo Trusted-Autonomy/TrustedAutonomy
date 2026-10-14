@@ -33,6 +33,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+dirs = { workspace = true }
 rmcp = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }

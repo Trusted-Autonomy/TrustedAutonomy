@@ -11239,17 +11239,17 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.17`
 
 ### v0.17.12.18 - `ta cost report`: Spend Across Goals and Interactive Sessions
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.15
 
 **Goal**: `/api/spend` only sees TA goals. Measured on 2026-10-13, the expensive workload is long interactive Claude Code and OMP sessions (one session: 64% cache read, 31% cache write, 5% output, average context 491k tokens), which TA cannot see. Add one command that reports spend across goals and interactive sessions, with the context-size breakdown that exposed the cost driver. Spec: same file, section 3.
 
-1. [ ] **`ta cost report`** reads (each source optional, auto-detected): TA goals through the existing `ta_goal::spend::aggregate`; Claude Code sessions under `~/.claude/projects/**/*.jsonl`; OMP sessions under `~/.omp/agent/sessions/**/*.jsonl`. Flags: `--since`, `--until` (reuse `parse_time_bound`), `--group-by day|source|model|project|context_bucket|origin_class`, `--project`, `--json`.
-2. [ ] **Correct counting.** Claude assistant rows are deduplicated by `message.id` (last row wins; streamed rows repeat an id) and `<synthetic>` rows are skipped. OMP uses the per-message usage and cost it already records. A test proves a transcript with repeated ids is counted once.
-3. [ ] **1 hour cache write rate.** Add a `cache_write_1h` rate to `token_cost.rs` (2x input) and use `cache_creation.ephemeral_1h_input_tokens` when a transcript splits the write classes. Costs are marked `exact` when the runtime or OMP reports them and `estimated` otherwise; an unknown model is never given an invented price.
-4. [ ] **Context buckets.** Report turns, cache-read tokens and cost for context sizes 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k, per source.
-5. [ ] **Honest output.** A header says which sources were found and which were missing, how many rows were deduplicated, and which costs are estimated. Missing source directories are reported, not errors.
-6. [ ] Tests against a tempdir fixture of both transcript formats; totals match an independent sum. `docs/USAGE.md` how-to with example output.
+1. [x] **`ta cost report`** reads (each source optional, auto-detected): TA goals through the existing `ta_goal::spend::aggregate`; Claude Code sessions under `~/.claude/projects/**/*.jsonl`; OMP sessions under `~/.omp/agent/sessions/**/*.jsonl`. Flags: `--since`, `--until` (reuse `parse_time_bound`), `--group-by day|source|model|project|context_bucket|origin_class`, `--project`, `--json`.
+2. [x] **Correct counting.** Claude assistant rows are deduplicated by `message.id` (last row wins; streamed rows repeat an id) and `<synthetic>` rows are skipped. OMP uses the per-message usage and cost it already records. A test proves a transcript with repeated ids is counted once.
+3. [x] **1 hour cache write rate.** Add a `cache_write_1h` rate to `token_cost.rs` (2x input) and use `cache_creation.ephemeral_1h_input_tokens` when a transcript splits the write classes. Costs are marked `exact` when the runtime or OMP reports them and `estimated` otherwise; an unknown model is never given an invented price.
+4. [x] **Context buckets.** Report turns, cache-read tokens and cost for context sizes 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k, per source.
+5. [x] **Honest output.** A header says which sources were found and which were missing, how many rows were deduplicated, and which costs are estimated. Missing source directories are reported, not errors.
+6. [x] Tests against a tempdir fixture of both transcript formats; totals match an independent sum. `docs/USAGE.md` how-to with example output.
 
 **Effort**: M.
 

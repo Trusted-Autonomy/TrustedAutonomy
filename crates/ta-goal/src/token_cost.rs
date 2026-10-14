@@ -23,8 +23,10 @@
 //
 // Cache rates follow Anthropic's published multipliers: a cache read costs
 // 0.1x the input price and a cache write (5 minute TTL) costs 1.25x. A write
-// with the 1 hour TTL costs 2x; the runtime does not split the two in the
-// field TA reads, so one write rate is used.
+// with the 1 hour TTL costs 2x (`cache_write_1h_per_m`). The goal path reads a
+// single `cache_creation_input_tokens` total and prices it at the 5 minute
+// rate; `ta cost report` reads the split (`cache_creation.ephemeral_1h_input_tokens`)
+// from transcripts and prices the 1 hour part at the 2x rate.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +43,9 @@ pub struct ModelRate {
     pub cache_read_per_m: f64,
     /// USD per 1M cache-creation (cache-write) input tokens.
     pub cache_write_per_m: f64,
+    /// USD per 1M cache-creation tokens written with the 1 hour TTL (2x input
+    /// unless a `.ta/pricing.toml` row sets `cache_write_1h`).
+    pub cache_write_1h_per_m: f64,
 }
 
 /// Token counts for one goal, split the way the agent runtime reports them.
@@ -79,6 +84,7 @@ const fn rate(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Mod
         output_per_m: output,
         cache_read_per_m: cache_read,
         cache_write_per_m: cache_write,
+        cache_write_1h_per_m: input * 2.0,
     }
 }
 
@@ -164,6 +170,9 @@ struct OverrideRow {
     output: f64,
     cache_read: f64,
     cache_write: f64,
+    /// Optional 1 hour cache-write rate; defaults to 2x `input`.
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +221,7 @@ impl PriceTable {
                 ("output", row.output),
                 ("cache_read", row.cache_read),
                 ("cache_write", row.cache_write),
+                ("cache_write_1h", row.cache_write_1h.unwrap_or(0.0)),
             ] {
                 if !v.is_finite() || v < 0.0 {
                     return Err(format!(
@@ -224,11 +234,11 @@ impl PriceTable {
                     ));
                 }
             }
-            overrides.push((
-                name,
-                row.exact,
-                rate(row.input, row.output, row.cache_read, row.cache_write),
-            ));
+            let mut r = rate(row.input, row.output, row.cache_read, row.cache_write);
+            if let Some(v) = row.cache_write_1h {
+                r.cache_write_1h_per_m = v;
+            }
+            overrides.push((name, row.exact, r));
         }
         Ok(Self {
             overrides,
@@ -296,6 +306,20 @@ impl PriceTable {
     /// Price `usage` for `model`. `None` when no row matches.
     pub fn price(&self, model: &str, usage: &TokenUsage) -> Option<f64> {
         self.rate_for(model).map(|r| price_with(&r, usage))
+    }
+
+    /// Price `usage` for `model` when `cache_write_1h` of the cache-creation
+    /// tokens were written with the 1 hour TTL (the rest at the 5 minute
+    /// rate). `None` when no row matches: no price is invented.
+    pub fn price_split(&self, model: &str, usage: &TokenUsage, cache_write_1h: u64) -> Option<f64> {
+        self.rate_for(model).map(|r| {
+            let one_hour = cache_write_1h.min(usage.cache_creation);
+            let five_min = TokenUsage {
+                cache_creation: usage.cache_creation - one_hour,
+                ..*usage
+            };
+            price_with(&r, &five_min) + (one_hour as f64 / 1_000_000.0) * r.cache_write_1h_per_m
+        })
     }
 }
 
@@ -386,6 +410,31 @@ mod tests {
             cache_read: r,
             cache_creation: w,
         }
+    }
+
+    #[test]
+    fn one_hour_cache_write_is_twice_input_and_split_is_priced() {
+        let t = PriceTable::builtin();
+        let r = t.rate_for("claude-sonnet-5-5").unwrap();
+        assert_eq!(r.cache_write_1h_per_m, 6.0);
+        // 1M creation tokens, 400k of them 1h: 600k*3.75 + 400k*6.0 per M.
+        let u = usage(0, 0, 0, 1_000_000);
+        let got = t.price_split("claude-sonnet-5-5", &u, 400_000).unwrap();
+        assert!((got - (0.6 * 3.75 + 0.4 * 6.0)).abs() < 1e-9, "{got}");
+        // 1h part larger than the total is clamped, not negative.
+        let all = t.price_split("claude-sonnet-5-5", &u, 9_000_000).unwrap();
+        assert!((all - 6.0).abs() < 1e-9);
+        assert!(t.price_split("ollama/qwen2.5vl:7b", &u, 1).is_none());
+    }
+
+    #[test]
+    fn override_row_can_set_the_one_hour_rate() {
+        let toml = "[[model]]\nname = \"x\"\ninput = 1.0\noutput = 2.0\ncache_read = 0.1\ncache_write = 1.25\ncache_write_1h = 5.0\n";
+        let t = PriceTable::from_toml(toml, Path::new("pricing.toml")).unwrap();
+        assert_eq!(t.rate_for("x-model").unwrap().cache_write_1h_per_m, 5.0);
+        let toml = toml.replace("cache_write_1h = 5.0\n", "");
+        let t = PriceTable::from_toml(&toml, Path::new("pricing.toml")).unwrap();
+        assert_eq!(t.rate_for("x-model").unwrap().cache_write_1h_per_m, 2.0);
     }
 
     #[test]

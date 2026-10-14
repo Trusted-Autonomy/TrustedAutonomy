@@ -14780,7 +14780,7 @@ cache_read = 0.0
 cache_write = 0.0
 ```
 
-All four rates are required. A malformed file is reported in the log and the built-in table is used.
+All four rates are required. An optional `cache_write_1h = <USD per million>` sets the 1 hour cache-write rate, which otherwise defaults to twice `input`. A malformed file is reported in the log and the built-in table is used.
 
 **Capping a goal.** `--max-tokens` and `--max-usd` stop the agent when the goal reaches the ceiling; `[budget] max_tokens` and `max_usd` in `.ta/workflow.toml` set project defaults that the flags override:
 
@@ -14795,6 +14795,47 @@ max_usd = 20.0
 ```
 
 When a ceiling is reached TA stops the agent, prints which ceiling and what was used, records the outcome `aborted_budget` on the goal, and builds the draft from the partial work, marked as incomplete (`ta draft view` says so first). What it can promise: TA reads the runtime's usage report after each agent turn, so the agent is stopped at the first turn boundary after the ceiling is crossed. Overshoot is possible by up to one turn (a single long turn can cost a lot); undershoot is capped, since a goal is never stopped before it reaches the ceiling. Ceilings are enforced only for headless runs, because that is where TA reads the usage report. `--max-usd` needs a price: from the runtime's reported cost or the price table. For an unpriced model it warns and only `--max-tokens` applies. A goal that finishes on its own over the ceiling is not marked incomplete.
+
+### Spend across goals and interactive sessions
+
+`GET /api/spend` only sees TA goals, but long interactive Claude Code and OMP sessions are often the larger bill. `ta cost report` totals all of them in one table:
+
+```bash
+ta cost report                                  # by source
+ta cost report --since 2026-10-01 --group-by day,source
+ta cost report --group-by model --project myapp
+ta cost report --group-by context_bucket --json
+```
+
+It reads three sources, each optional and found automatically: this project's TA goals, Claude Code sessions in `~/.claude/projects/**/*.jsonl`, and OMP sessions in `~/.omp/agent/sessions/**/*.jsonl`. Use `--claude-dir` and `--omp-dir` to read from somewhere else. A source that is not there is named in the header as missing; it is not an error.
+
+`--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket` and `origin_class` (the last applies to TA goals; other rows show `n/a`). `--since` and `--until` take a date or an RFC 3339 time (UTC), and `--project` keeps projects whose name contains the text.
+
+Example output (trimmed):
+
+```
+Cost report
+Sources:
+  ta_goals     missing: no .ta/goals directory here (run from a TA project root)
+  claude_code  found: 3970 file(s), 53949 turn(s) kept, 48777 duplicate row(s) folded, 85 synthetic skipped  [~/.claude/projects]
+  omp          found: 1 file(s), 335 turn(s) kept, 0 duplicate row(s) folded, 0 synthetic skipped  [~/.omp/agent/sessions]
+Costs: 335 exact, 17672 estimated, 36277 unpriced (unpriced models count tokens, cost 0)
+
+source / model                      turns   sess     input    output  cache-rd  cache-wr        usd  cost
+claude-sonnet-5-5 / claude_code      8661   2437     18.3k     5.32M  1644.13M    115.41M    1249.03  8661 est
+claude-sonnet-5-5 / omp               335      1       702    194.0k    43.45M    700.1k       9.09  335 exact
+
+By context size (prompt tokens per turn), per source:
+source / bucket           turns   sess  ...  cache-rd        usd  cost
+50-100k / claude_code     10682   2061  ...   663.28M     695.18  5111 est, 5571 unpriced
+>400k / claude_code       17832     16  ...  11707.21M   1857.21  2311 est, 15521 unpriced
+```
+
+How the numbers are made:
+
+- Claude Code writes an assistant message once per streamed block, all with the same `message.id`. TA keeps the last row for each id, so a message counts once, and skips `<synthetic>` rows. The header says how many duplicates were folded.
+- OMP's own per-message cost is used and marked **exact**. Claude Code costs are **estimated** from the price table (`.ta/pricing.toml`, then the built-in table); where a transcript splits cache writes by lifetime, the 1 hour part is priced at twice the input rate. A model with no price row is **unpriced**: its tokens are counted, its cost is 0 and nothing is invented. Add a row to `.ta/pricing.toml` to price it.
+- The context-size table groups turns by prompt size (input plus cache-read plus cache-creation tokens): 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k. A long session that keeps re-reading a large context shows up as most of its cost in the top rows. TA goals are many turns each and are not in this table.
 
 ### Viewing aggregate stats
 
