@@ -1028,9 +1028,14 @@ fn read_text(path: &Path) -> Option<String> {
     std::fs::read(path).ok().map(|b| text_or_marker(&b))
 }
 
+/// Text for diffing, with line endings normalised to `\n`. A git checkout applies the platform's
+/// `core.autocrlf` (CRLF on Windows) while `git show` and an agent's own files may be LF, so
+/// without this every line of a file would look changed and a replay would score as "differs"
+/// only because of the platform. A file whose only difference is CRLF versus LF therefore
+/// diffs as unchanged; for a similarity heuristic that is the intended trade.
 fn text_or_marker(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
-        Ok(s) => s.to_string(),
+        Ok(s) => s.replace("\r\n", "\n"),
         Err(_) => {
             use sha2::{Digest, Sha256};
             let h: String = Sha256::digest(bytes)
@@ -1414,8 +1419,12 @@ mod tests {
             let src = PathBuf::from(&args[args.iter().position(|a| a == "--source").unwrap() + 1]);
             // The scratch worktree is the start commit, not the user's HEAD.
             assert_eq!(rev(&src), f.start);
+            // A git checkout applies the platform's `core.autocrlf` (CRLF on Windows), so compare
+            // the content, not the line endings.
             assert_eq!(
-                std::fs::read_to_string(src.join("a.txt")).unwrap(),
+                std::fs::read_to_string(src.join("a.txt"))
+                    .unwrap()
+                    .replace("\r\n", "\n"),
                 "one\ntwo\n"
             );
             assert_ne!(src, f.project.path());
@@ -1806,6 +1815,32 @@ mod tests {
             .unwrap();
         assert_eq!(paths, vec!["keep.rs".to_string()]);
         assert!(draft_paths(&f.config, "no-such-goal").unwrap().is_none());
+    }
+
+    #[test]
+    fn line_endings_do_not_make_a_replay_diff_look_different() {
+        // A Windows checkout (autocrlf) versus an LF file: same content, same diff.
+        let lf = text_or_marker(b"one\ntwo\n");
+        let crlf = text_or_marker(b"one\r\ntwo\r\n");
+        assert_eq!(lf, crlf);
+        let same = build_diff(
+            &["a.txt".to_string()],
+            |_| Some(crlf.clone()),
+            |_| Some(lf.clone()),
+        );
+        assert!(same.is_empty(), "no change expected, got: {same}");
+        // A real edit still shows, whichever ending the old side used.
+        let changed = build_diff(
+            &["a.txt".to_string()],
+            |_| Some(text_or_marker(b"one\r\ntwo\r\n")),
+            |_| Some(text_or_marker(b"one\n2\n")),
+        );
+        assert!(
+            changed.contains("-two") && changed.contains("+2"),
+            "{changed}"
+        );
+        // Binary content is still a hash marker, not altered by the normalisation.
+        assert!(text_or_marker(&[0xff, 0xfe, 0x00]).starts_with("<binary file sha256:"));
     }
 
     #[test]
