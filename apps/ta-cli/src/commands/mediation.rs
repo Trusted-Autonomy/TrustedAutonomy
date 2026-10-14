@@ -25,6 +25,10 @@ use std::path::{Path, PathBuf};
 pub const ENV_TOKEN: &str = "TA_MCP_CONNECTION_TOKEN";
 
 /// A fresh unguessable per-goal token.
+// The next four items are platform-neutral so their tests run on every OS, but
+// only the Unix socket gateway calls them today. The Windows named-pipe gateway
+// (v0.17.12.9 item 1) will use them; until then they are dead code on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn new_connection_token() -> String {
     format!(
         "{}{}",
@@ -34,6 +38,7 @@ pub fn new_connection_token() -> String {
 }
 
 /// What a handshake line asked for.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Handshake {
     Mcp,
@@ -42,6 +47,7 @@ pub enum Handshake {
 }
 
 /// Parse and check the first line against the expected token.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn parse_handshake(line: &str, expected: &str) -> Handshake {
     let Some(rest) = line.trim().strip_prefix("Bearer ") else {
         return Handshake::Rejected;
@@ -58,6 +64,7 @@ pub fn parse_handshake(line: &str, expected: &str) -> Handshake {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
