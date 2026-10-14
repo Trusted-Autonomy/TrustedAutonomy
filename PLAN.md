@@ -11223,6 +11223,100 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 #### Version: `0.17.12-alpha.16`
 
+### v0.17.12.17 - Goal Start State Capture
+<!-- status: pending -->
+**Depends on**: v0.17.12.15
+
+**Goal**: A goal cannot be reproduced today. `GoalRun` records the objective and a per-file content-hash `source_snapshot` (for conflict detection) but not the git commit it started from, so there is no way to replay a goal against a candidate cost optimization. Spec: `docs/superpowers/specs/2026-10-13-token-cost-optimization-and-ab-harness.md` section 4.1.
+
+1. [ ] **Start state on `GoalRun`.** Add `start_commit` (full SHA of `HEAD` at goal start, absent when the project is not a git repo), `start_dirty` (true when the working tree had uncommitted changes), `start_branch`. All `#[serde(default)]`, so existing goal records still load. Recorded for git projects at goal start; other VCS kinds record nothing and say so (no error).
+2. [ ] **Prompt preserved.** When `--objective-file` is used, store the file's contents on the goal (the file can change later), alongside the existing `objective`. Never record environment values or secrets.
+3. [ ] **Visible.** `ta goal status` and `--json` show the start state and print a plain line when `start_dirty` is true ("this goal started from uncommitted changes and cannot be replayed exactly").
+4. [ ] Tests: start state recorded for a real git repo in a tempdir (clean and dirty), absent for a non-git directory, old records without the fields load, objective-file contents stored, no env values recorded. Observability Mandate for every error. `docs/USAGE.md` how-to.
+
+**Effort**: S.
+
+#### Version: `0.17.12-alpha.17`
+
+### v0.17.12.18 - `ta cost report`: Spend Across Goals and Interactive Sessions
+<!-- status: pending -->
+**Depends on**: v0.17.12.15
+
+**Goal**: `/api/spend` only sees TA goals. Measured on 2026-10-13, the expensive workload is long interactive Claude Code and OMP sessions (one session: 64% cache read, 31% cache write, 5% output, average context 491k tokens), which TA cannot see. Add one command that reports spend across goals and interactive sessions, with the context-size breakdown that exposed the cost driver. Spec: same file, section 3.
+
+1. [ ] **`ta cost report`** reads (each source optional, auto-detected): TA goals through the existing `ta_goal::spend::aggregate`; Claude Code sessions under `~/.claude/projects/**/*.jsonl`; OMP sessions under `~/.omp/agent/sessions/**/*.jsonl`. Flags: `--since`, `--until` (reuse `parse_time_bound`), `--group-by day|source|model|project|context_bucket|origin_class`, `--project`, `--json`.
+2. [ ] **Correct counting.** Claude assistant rows are deduplicated by `message.id` (last row wins; streamed rows repeat an id) and `<synthetic>` rows are skipped. OMP uses the per-message usage and cost it already records. A test proves a transcript with repeated ids is counted once.
+3. [ ] **1 hour cache write rate.** Add a `cache_write_1h` rate to `token_cost.rs` (2x input) and use `cache_creation.ephemeral_1h_input_tokens` when a transcript splits the write classes. Costs are marked `exact` when the runtime or OMP reports them and `estimated` otherwise; an unknown model is never given an invented price.
+4. [ ] **Context buckets.** Report turns, cache-read tokens and cost for context sizes 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k, per source.
+5. [ ] **Honest output.** A header says which sources were found and which were missing, how many rows were deduplicated, and which costs are estimated. Missing source directories are reported, not errors.
+6. [ ] Tests against a tempdir fixture of both transcript formats; totals match an independent sum. `docs/USAGE.md` how-to with example output.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.18`
+
+### v0.17.12.19 - `ta cost report` Export to Meridian
+<!-- status: pending -->
+**Depends on**: v0.17.12.18
+
+**Goal**: The cost report must also land in Meridian so cost can be analysed against KPIs. Meridian's generic JSONL loader reads `id`, `title`, `timestamp`, `tokens_input`, `tokens_output`, `source`, `phase` and keeps string-valued extras as metadata.
+
+1. [ ] **`ta cost report --meridian <file.jsonl>`** writes one record per session or goal in that shape, with string metadata `cost_usd`, `cost_exact`, `model`, `cache_read_tokens`, `cache_write_tokens`, `context_peak`, `workload`. The write is atomic (temp file then rename), idempotent by record `id`, and prints the path, record count and the exact Meridian command to read it.
+2. [ ] **Meridian ingester fixes (Meridian repo, separate PR).** Its `claude_code` ingester sums every assistant row without deduplicating by `message.id`: measured 2.49x input and 2.69x output overcount on a real session. It also drops `cache_read_input_tokens`, which is 64% of interactive cost. Dedupe by message id and carry cache-read as separate metadata. Needs the owner's approval because it changes Meridian's numbers for past data.
+3. [ ] Tests: output parses with Meridian's own loader (path dependency or fixture round trip), re-running does not duplicate records, a session with repeated ids exports once. `docs/USAGE.md` how-to.
+
+**Effort**: S.
+
+#### Version: `0.17.12-alpha.19`
+
+### v0.17.12.20 - Golden Set: Capture and Replay Goals
+<!-- status: pending -->
+**Depends on**: v0.17.12.17, v0.17.12.18
+
+**Goal**: Test a cost optimization on identical work without a large multi-arm grid. A golden entry is a completed goal captured as (git commit, prompt, baseline result); replay runs the same prompt from the same commit with an override and compares cost and outcome. Reuses the existing `experiment_id`, `experiment_arm` and `experiment_overrides` on `GoalRun`; no parallel mechanism. Spec: same file, section 4.
+
+1. [ ] **`ta golden capture <goal-id> [--check "<cmd>"]`** stores `.ta/golden/<id>/entry.json`, `prompt.md` and `baseline.diff` from a completed goal, with its baseline cost, tokens, turns, outcome and diff hash. Refuses a goal with `start_dirty` unless `--allow-dirty`.
+2. [ ] **`ta golden list`** shows entries with baseline cost and age.
+3. [ ] **`ta golden replay <id> [--set key=value ...] [--tag <label>]`** makes a clean checkout of `start_commit` in a scratch worktree (never the user's tree), launches a normal `ta run` with the stored prompt tagged `experiment_id = golden:<id>`, `experiment_arm = <tag>`, applies `--set` through `experiment_overrides`, prints a cost estimate first, and respects `--max-usd`.
+4. [ ] **`ta golden report [<id>...]`** compares each replay to its baseline: cost, tokens, turns, outcome, whether `--check` passes, and a normalized diff comparison. Verdict is `equivalent`, `differs` or `failed`; anything not `equivalent` is listed for human review and never auto-accepted. A single replay is labelled as one sample.
+5. [ ] Tests with a tempdir git repo: capture refuses dirty, replay checks out the right commit and leaves the user's tree untouched, verdict logic, `experiment_*` fields set. `docs/USAGE.md` how-to.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.20`
+
+### v0.17.12.21 - Swappable Optimizer Slots and Optimizer Spawn Safety
+<!-- status: pending -->
+**Depends on**: v0.17.12.20
+
+**Goal**: Input, context and output optimization sit behind one abstraction so an open-source tool (RTK, headroom) can be started with and replaced later. Owner condition: no repeated shell windows. Spec: same file, section 5.
+
+1. [ ] **No visible windows.** Every optimizer process is spawned with `CREATE_NO_WINDOW` on Windows (`crates/ta-daemon/src/prompt_optimizer_supervisor.rs` currently sets no flag and the constant appears nowhere in the repo). A test asserts the flag on the constructed command; a manual Windows smoke check is added to the release checklist.
+2. [ ] **Flap guard.** After the existing five failures in five minutes the optimizer is disabled for the session with one user-visible message, never restarted forever; `ta compression status` shows restart count and last failure.
+3. [ ] **`ta-context-opt` crate.** Traits `InputOptimizer`, `ContextOptimizer`, `OutputOptimizer`; a registry selected per slot in config; a `none` implementation; and a metrics record `{bytes_in, bytes_out, est_tokens_in, est_tokens_out, ms, lossless, original_ref}` with the full original kept on disk so any reduction is reversible. `[compression.plugin]` becomes the `proxy` kind of the input slot.
+4. [ ] **Replay-able selection.** `--set optimizers.input.use=none|rtk|headroom` works through `ta golden replay`.
+5. [ ] Tests and docs: slot selection, `none` baseline, metrics and original recovery, spawn flag. `docs/USAGE.md` how-to including licences recorded per optimizer.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.21`
+
+### v0.17.12.22 - Apply After an Interrupted Apply Must Not Commit a Half-Bumped Version
+<!-- status: pending -->
+**Depends on**: v0.17.12.5
+
+**Goal**: Found 2026-10-14 on PR #678 (v0.17.12.5): all three CI platforms failed at `Build all crates` with `failed to select a version for the requirement ta-changeset = "^0.17.12-alpha.5"`. Cause: earlier `ta draft apply` attempts were killed mid-run and left the version bump to `0.17.12-alpha.5` in 30 manifests in the working tree. The next apply logged `[recover] ... Rolled it back` and `uncommitted changes` warnings for every manifest, then `bump_workspace_version` found most files already current and returned only the two it changed, so only those two were staged (`[version] bumped crates/ta-data-spec/Cargo.toml + crates/ta-workspace/Cargo.toml`). The committed tree had workspace `alpha.4` but two crates requiring siblings at `alpha.5`. The `Version consistency` job did not catch it because it compares only `Cargo.toml` and `CLAUDE.md`. The fix was a manual follow-up commit of the other 30 files.
+
+1. [ ] **Stage the whole bump, not the delta.** After a bump (including `AlreadyCurrent` results), stage every version file that differs from `HEAD` and is a version file by pattern (`Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `.release.toml`), so a bump left by an interrupted run is committed with the rest.
+2. [ ] **Refuse an inconsistent tree before committing.** Before the commit, resolve the workspace (`cargo metadata --locked --offline` or the equivalent) and fail with a clear message listing the crates whose version disagrees with the workspace version, instead of committing a tree that cannot build.
+3. [ ] **Say what it found.** When apply starts with a dirty tree it lists the files by category (version files, plan files, other) and states which it will include and which it will leave, rather than 30 identical warnings.
+4. [ ] **Extend `Version consistency` CI** to run the same resolve check, so the next occurrence fails in seconds with the reason.
+5. [ ] Tests: a tempdir workspace left half-bumped by a simulated interrupted apply is fully staged by the next apply; an inconsistent tree is refused with the crate list; a clean apply is unchanged. `docs/USAGE.md` note on recovery after an interrupted apply.
+
+**Effort**: S.
+
+#### Version: `0.17.12-alpha.22`
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
 

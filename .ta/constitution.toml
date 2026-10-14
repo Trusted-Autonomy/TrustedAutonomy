@@ -53,6 +53,13 @@ restore_fns = []
 patterns = []
 severity = "medium"
 
+[rules.no-ip-docs-in-public-repos]
+description = "No IP-sensitive documents in a public repository, ever. Invention disclosures (IDD-*), patent drafts, attorney work product, counsel correspondence and any file marked IP-SENSITIVE or DO NOT DISTRIBUTE EXTERNALLY belong in the private Wayfinder repository. TrustedAutonomy is public: a pushed file is in every clone, every tag archive and every release tarball, and rewriting history does not recall those copies, so prevention is the only reliable control. If unsure whether a document is IP-sensitive, do not commit it; ask the owner. If one is found already committed, stop and tell the owner immediately rather than quietly deleting it, because counsel may need to assess the disclosure. scripts/check-no-ip-docs.sh is a tripwire for the two signals that identified the first leak (an IP-named path, a confidentiality marker in the content); it is not a substitute for judgment."
+inject_fns = []
+restore_fns = []
+patterns = []
+severity = "high"
+
 [scan]
 include = ["src/"]
 exclude = [
@@ -77,6 +84,13 @@ stage = "pre_draft_build"
 commands = [
     "bash -c 'untracked=$(git status --short | grep \"^?? .ta/\" | grep \"/$\"); if [ -n \"$untracked\" ]; then echo \"ERROR: Untracked .ta/ subdirectories not in .gitignore — add them:\"; echo \"$untracked\"; exit 1; fi'",
 ]
+on_failure = "block"
+
+[[validate]]
+# no-ip-docs-in-public-repos: block any change that adds an IP-named path or a
+# confidentiality marker. See the rule above and scripts/check-no-ip-docs.sh.
+stage = "pre_draft_build"
+commands = ["bash scripts/check-no-ip-docs.sh"]
 on_failure = "block"
 
 [[validate]]
