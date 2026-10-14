@@ -11097,7 +11097,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.9`
 
 ### v0.17.12.10 - Default-On Isolation for CoS and Team Roles
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.4, v0.17.12.7, v0.17.12.8, v0.17.12.9
 
 1. [ ] Per-role profiles (CoS chat strictest, reviewer, worker, librarian) from role class intersected with persona and rules; origins `cos` and `chat` force the CoS class.
