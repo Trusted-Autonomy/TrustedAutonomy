@@ -11006,7 +11006,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.4`
 
 ### v0.17.12.5 - VCS Detection and `ta setup vcs`
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none
 
 **Goal**: One VCS detector shared by `ta init`, the VT installer and the add-project wizard.
