@@ -11274,7 +11274,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.19`
 
 ### v0.17.12.20 - Golden Set: Capture and Replay Goals
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.17, v0.17.12.18
 
 **Goal**: Test a cost optimization on identical work without a large multi-arm grid. A golden entry is a completed goal captured as (git commit, prompt, baseline result); replay runs the same prompt from the same commit with an override and compares cost and outcome. Reuses the existing `experiment_id`, `experiment_arm` and `experiment_overrides` on `GoalRun`; no parallel mechanism. Spec: same file, section 4.
