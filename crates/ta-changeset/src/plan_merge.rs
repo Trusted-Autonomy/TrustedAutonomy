@@ -252,7 +252,24 @@ fn build_section(id: String, raw_header: String, lines: &[String]) -> PlanSectio
 /// - Agent inserted new sub-phase absent from base+source → insert into merged output
 /// - Both agent and source changed same section incompatibly → CONFLICT
 /// - Agent changed item text (not just checkbox) → CONFLICT
+///
+/// Line endings are preserved: the merge itself runs on LF-normalized text, and the output
+/// uses CRLF when `source` (the document being merged into) is predominantly CRLF, so a merge
+/// of identical inputs on a Windows checkout returns the document byte for byte.
 pub fn merge_plan_md(base: &str, staging: &str, source: &str) -> MergeResult {
+    let crlf = source.matches("\r\n").count() > source.matches('\n').count() / 2;
+    if !crlf && !source.contains('\r') && !base.contains('\r') && !staging.contains('\r') {
+        return merge_plan_md_lf(base, staging, source);
+    }
+    let lf = |t: &str| t.replace("\r\n", "\n");
+    let mut result = merge_plan_md_lf(&lf(base), &lf(staging), &lf(source));
+    if crlf {
+        result.merged = result.merged.replace('\n', "\r\n");
+    }
+    result
+}
+
+fn merge_plan_md_lf(base: &str, staging: &str, source: &str) -> MergeResult {
     let base_sections = parse_plan_sections(base);
     let staging_sections = parse_plan_sections(staging);
     let source_sections = parse_plan_sections(source);
@@ -1728,5 +1745,35 @@ Some narrative prose with no status marker at all.
             .any(|c| c.conflict_type == ConflictType::SectionBodyConflict
                 && c.section_id == "v0.1.0"));
         assert!(result.merged.contains("a human's own note."));
+    }
+    // ── CRLF fidelity (v0.17.12.11 item 10) ──────────────────────────────
+
+    const CRLF_PLAN: &str = "# Plan\r\n\r\n### v0.1.0 - One\r\n<!-- status: pending -->\r\n\r\n1. [ ] first  \r\n2. [ ] second\r\n\r\n### v0.2.0 - Two\r\n<!-- status: done -->\r\n\r\n1. [x] only\r\n";
+
+    #[test]
+    fn crlf_merge_of_identical_inputs_is_byte_identical() {
+        let r = merge_plan_md(CRLF_PLAN, CRLF_PLAN, CRLF_PLAN);
+        assert_eq!(r.merged, CRLF_PLAN);
+        assert!(r.conflicts.is_empty());
+    }
+
+    #[test]
+    fn crlf_merge_keeps_crlf_when_the_agent_checks_an_item() {
+        // The legacy merge reconciles bullet items (`- [ ]`) only.
+        let base = CRLF_PLAN.replace("1. [ ] first", "- [ ] first");
+        let staging = base.replace("- [ ] first", "- [x] first");
+        let r = merge_plan_md(&base, &staging, &base);
+        assert!(r.merged.contains("- [x] first  \r\n"), "{:?}", r.merged);
+        assert!(
+            !r.merged.replace("\r\n", "").contains('\n'),
+            "every line ending must stay CRLF: {:?}",
+            r.merged
+        );
+    }
+
+    #[test]
+    fn lf_merge_of_identical_inputs_is_still_byte_identical() {
+        let lf = CRLF_PLAN.replace("\r\n", "\n");
+        assert_eq!(merge_plan_md(&lf, &lf, &lf).merged, lf);
     }
 }

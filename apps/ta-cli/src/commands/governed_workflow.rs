@@ -1921,6 +1921,7 @@ fn stage_apply_draft_branch(
             "--branch",
             branch,
             "--no-version-check",
+            "--no-replay-actions",
         ]);
         if let Some(phase) = opts.plan_phase {
             cmd.args(["--phase", phase]);
@@ -2329,6 +2330,7 @@ fn stage_static_analysis(
                 "apply",
                 &draft_id,
                 "--no-version-check",
+                "--no-replay-actions",
             ])
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta draft apply': {}", e))?;
@@ -3430,6 +3432,7 @@ fn stage_apply_draft(
         draft_id,
         "--git-commit",
         "--no-version-check",
+        "--no-replay-actions",
     ]);
     if let Some(phase) = opts.plan_phase {
         cmd.args(["--phase", phase]);

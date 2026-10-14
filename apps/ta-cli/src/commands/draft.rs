@@ -284,6 +284,16 @@ pub enum DraftCommands {
         /// Skipping is recorded in the audit trail with a warning.
         #[arg(long)]
         skip_plan_merge: bool,
+        /// Replay the draft's approved external actions (Wayfinder task proposals) after the
+        /// apply, even when no terminal is attached. Without this flag a non-interactive
+        /// apply (no TTY on stdin and stdout) applies the files but replays nothing.
+        #[arg(long, conflicts_with = "no_replay_actions")]
+        replay_actions: bool,
+        /// Never replay external actions after this apply. Also set by the environment
+        /// variable `TA_NO_REPLAY_ACTIONS=1`. Automated callers pass this so no external
+        /// action runs without a human present.
+        #[arg(long)]
+        no_replay_actions: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -782,6 +792,8 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             status,
             auto_repair,
             skip_plan_merge,
+            replay_actions,
+            no_replay_actions,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -796,9 +808,18 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
 
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
 
+            let replay = ReplayDecision::resolve(*replay_actions, *no_replay_actions);
+
             // --chain: walk up to root parent and apply all unapplied drafts in order.
             if *chain {
-                apply_chain(config, &resolved, target.as_deref(), *skip_verify)?;
+                apply_chain(
+                    config,
+                    &resolved,
+                    target.as_deref(),
+                    *skip_verify,
+                    *dry_run,
+                    replay,
+                )?;
                 if !*dry_run {
                     super::human_auth::record_delegation(config, &resolved, "apply");
                 }
@@ -891,6 +912,9 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 *auto_repair,
                 *skip_plan_merge,
             )?;
+            if !*dry_run {
+                replay.run(config, &resolved);
+            }
 
             // --watch: poll until merged, then auto-sync.
             if *watch && !*dry_run {
@@ -3428,6 +3452,80 @@ fn compute_chain_file_count(pkg: &DraftPackage, all_packages: &[DraftPackage]) -
     total
 }
 
+/// Environment variable that disables external-action replay for an apply (CR-07).
+pub(crate) const NO_REPLAY_ACTIONS_ENV: &str = "TA_NO_REPLAY_ACTIONS";
+
+/// Whether `ta draft apply` replays a draft's approved external actions afterwards.
+///
+/// Replay reaches external systems (Wayfinder task proposals), so it needs a human:
+/// it is on for an interactive terminal or an explicit `--replay-actions`, and off
+/// for `--no-replay-actions`, `TA_NO_REPLAY_ACTIONS`, or any non-interactive apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayDecision {
+    pub replay: bool,
+    reason: &'static str,
+}
+
+impl ReplayDecision {
+    pub(crate) fn resolve(explicit_on: bool, explicit_off: bool) -> Self {
+        use std::io::IsTerminal;
+        let env_off = std::env::var(NO_REPLAY_ACTIONS_ENV)
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        Self::decide(explicit_on, explicit_off, env_off, interactive)
+    }
+
+    pub(crate) fn decide(
+        explicit_on: bool,
+        explicit_off: bool,
+        env_off: bool,
+        interactive: bool,
+    ) -> Self {
+        let (replay, reason) = if explicit_off {
+            (false, "--no-replay-actions was passed")
+        } else if env_off {
+            (false, "TA_NO_REPLAY_ACTIONS is set")
+        } else if explicit_on {
+            (true, "--replay-actions was passed")
+        } else if interactive {
+            (true, "interactive terminal")
+        } else {
+            (false, "non-interactive apply without --replay-actions")
+        };
+        Self { replay, reason }
+    }
+
+    /// Replay the applied draft's external actions if allowed; otherwise say what was skipped.
+    fn run(&self, config: &GatewayConfig, draft_id: &str) {
+        let Ok(id) = resolve_draft_id(draft_id, config) else {
+            return;
+        };
+        let Ok(pkg) = load_package(config, id) else {
+            return;
+        };
+        if !self.replay {
+            let pending = pkg.changes.pending_actions.len();
+            if pending > 0 {
+                tracing::warn!(
+                    draft_id = %id,
+                    pending_actions = pending,
+                    reason = self.reason,
+                    "external actions not replayed after apply"
+                );
+                println!(
+                    "  {} external action(s) NOT replayed ({}). To replay them, run `ta draft apply {} --replay-actions` from a terminal.",
+                    pending,
+                    self.reason,
+                    &id.to_string()[..8]
+                );
+            }
+            return;
+        }
+        super::draft_task_replay::replay_task_proposals(config, &pkg);
+    }
+}
+
 /// Apply the full draft chain: walk up from `child_id` to the root parent,
 /// then apply all unapplied drafts in order (root → leaf).
 ///
@@ -3437,6 +3535,8 @@ fn apply_chain(
     child_id: &str,
     target: Option<&str>,
     skip_verify: bool,
+    dry_run: bool,
+    replay: ReplayDecision,
 ) -> anyhow::Result<()> {
     let all_packages = load_all_packages(config)?;
 
@@ -3520,7 +3620,7 @@ fn apply_chain(
             false, // push
             false, // review
             skip_verify,
-            false, // dry_run
+            dry_run,
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns {
                 approve: &[],
@@ -3533,8 +3633,18 @@ fn apply_chain(
             false, // auto_repair
             false, // skip_plan_merge
         )?;
+        if !dry_run {
+            replay.run(config, &draft_id_str);
+        }
     }
 
+    if dry_run {
+        println!(
+            "\nChain apply dry run complete: {} draft(s) previewed, nothing was changed or replayed.",
+            to_apply.len()
+        );
+        return Ok(());
+    }
     println!(
         "\nChain apply complete: {} draft(s) applied.",
         to_apply.len()
@@ -9900,15 +10010,9 @@ fn apply_package(
         run_governed_paths_auto_gc(config);
     }
 
-    // CoS read-only chat-mode design, item 4: replay approved
-    // ta_propose_task_* pending actions against Wayfinder now that this
-    // draft has actually been applied. See draft_task_replay.rs.
-    if !dry_run {
-        if let Ok(applied_pkg) = load_package(config, package_id) {
-            super::draft_task_replay::replay_task_proposals(config, &applied_pkg);
-        }
-    }
-
+    // External actions (Wayfinder task proposals) are NOT replayed here. The
+    // callers replay through `ReplayDecision` so a non-interactive apply never
+    // reaches an external system without a human (CR-07).
     Ok(())
 }
 
@@ -13301,6 +13405,9 @@ fn release_phase_claim_via_daemon(workspace_root: &std::path::Path, phase_id: &s
 
 #[cfg(test)]
 mod fidelity_tests;
+
+#[cfg(test)]
+mod replay_gate_tests;
 
 #[cfg(test)]
 mod tests {

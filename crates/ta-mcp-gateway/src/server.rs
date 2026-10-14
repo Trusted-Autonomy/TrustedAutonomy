@@ -2981,6 +2981,64 @@ mod tests {
         );
     }
 
+    fn goal_start_params() -> GoalStartParams {
+        serde_json::from_value(serde_json::json!({"title": "t", "objective": "o"})).unwrap()
+    }
+
+    /// Runs `f` with `TA_GOAL_ORIGIN` set to `value` (or removed), restoring it after.
+    fn with_origin_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("TA_GOAL_ORIGIN").ok();
+        match value {
+            Some(v) => std::env::set_var("TA_GOAL_ORIGIN", v),
+            None => std::env::remove_var("TA_GOAL_ORIGIN"),
+        }
+        let out = f();
+        match saved {
+            Some(v) => std::env::set_var("TA_GOAL_ORIGIN", v),
+            None => std::env::remove_var("TA_GOAL_ORIGIN"),
+        }
+        out
+    }
+
+    #[test]
+    fn ta_goal_start_stamps_origin_from_the_callers_environment() {
+        let (server, _dir) = test_server();
+        with_origin_env(Some("cos"), || {
+            crate::tools::goal::handle_goal_start(&server.state, goal_start_params())
+                .unwrap_or_else(|e| panic!("ta_goal_start failed: {}", e.message));
+        });
+        let state = server.state.lock().unwrap();
+        let goals = state.goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].origin.as_deref(), Some("cos"));
+        assert!(ta_goal::origin::origin_blocks_auto_approve(
+            goals[0].origin.as_deref()
+        ));
+    }
+
+    #[test]
+    fn ta_goal_start_without_an_origin_stamps_none() {
+        let (server, _dir) = test_server();
+        with_origin_env(None, || {
+            crate::tools::goal::handle_goal_start(&server.state, goal_start_params()).unwrap();
+        });
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.goal_store.list().unwrap()[0].origin, None);
+    }
+
+    #[test]
+    fn ta_goal_start_refuses_an_invalid_origin_and_creates_no_goal() {
+        let (server, _dir) = test_server();
+        let err = with_origin_env(Some("Not Valid!"), || {
+            crate::tools::goal::handle_goal_start(&server.state, goal_start_params())
+        })
+        .expect_err("an invalid TA_GOAL_ORIGIN must fail closed");
+        assert!(err.message.contains("TA_GOAL_ORIGIN"), "{}", err.message);
+        let state = server.state.lock().unwrap();
+        assert!(state.goal_store.list().unwrap().is_empty());
+    }
+
     /// The origin class is accounting data: whatever it is, a `cos` or `chat`
     /// goal is still refused auto-approve and any other goal behaves as before.
     #[test]

@@ -813,6 +813,8 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             status: false,
             auto_repair: false,
             skip_plan_merge: false,
+            replay_actions: false,
+            no_replay_actions: false,
         },
         // Checks and Fix are handled before reaching this function.
         PrCommands::Checks { .. } | PrCommands::Fix { .. } => {

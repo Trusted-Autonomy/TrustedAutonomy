@@ -564,7 +564,10 @@ fn execute_option(
     match opt.action_type.as_str() {
         "apply" => {
             println!("Applying the current draft...");
-            run_ta_command(config, &["draft", "apply", "--latest"])
+            run_ta_command(
+                config,
+                &["draft", "apply", "--latest", "--no-replay-actions"],
+            )
         }
         "deny" => {
             println!("Denying the current draft...");

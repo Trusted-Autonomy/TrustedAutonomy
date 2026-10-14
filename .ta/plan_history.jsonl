@@ -593,3 +593,4 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.12.9","timestamp":"2026-10-14T12:16:38.523741+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.12.10","timestamp":"2026-10-14T13:53:44.005820+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.12.11","timestamp":"2026-10-14T15:13:29.644498+00:00"}
+{"new_status":"done","old_status":"in_progress","phase_id":"v0.17.12.11","timestamp":"2026-10-14T15:35:52.114314+00:00"}

@@ -886,6 +886,9 @@ async fn apply_draft_endpoint(
             .arg("apply")
             .arg(&short_id)
             .arg("--git-commit")
+            // A reviewer approved this apply in the web UI, so replay is human-initiated
+            // (a headless child has no terminal and would otherwise skip it).
+            .arg("--replay-actions")
             // The daemon already recorded actor_context for this apply; the
             // headless child would otherwise label a direct action as delegated.
             .env(crate::actor_context::DAEMON_RECORDED_ENV, "1");

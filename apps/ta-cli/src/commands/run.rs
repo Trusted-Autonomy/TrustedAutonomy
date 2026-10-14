@@ -177,6 +177,54 @@ pub(crate) const SYSTEM_PROMPT_FILE_FLAG: &str = "--append-system-prompt-file";
 /// log dir next to `first-message.txt`.
 const SYSTEM_PROMPT_FILE: &str = "system-prompt.txt";
 
+/// Marker written next to [`SYSTEM_PROMPT_FILE`] when a goal launched with a restricted tool
+/// surface, so `ta session resume` can relaunch it with the same restriction.
+const RESTRICTED_LAUNCH_MARKER: &str = "restricted-launch";
+
+fn goal_launch_log_dir(project_root: &Path, goal_id: uuid::Uuid) -> PathBuf {
+    project_root
+        .join(".ta")
+        .join("logs")
+        .join("goals")
+        .join(goal_id.to_string())
+}
+
+/// Record that this goal's launch was restricted (persona allowlist, read-only, chat mode or
+/// a posture ceiling). Failing to write it would let a later resume drop the restriction, so
+/// the launch fails rather than continuing without the record.
+fn record_restricted_launch(project_root: &Path, goal_id: uuid::Uuid) -> anyhow::Result<()> {
+    let dir = goal_launch_log_dir(project_root, goal_id);
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join(RESTRICTED_LAUNCH_MARKER), b"restricted\n"))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not record the restricted launch for goal {} in {}: {}. The agent was not \
+                 launched because a later `ta session resume` could not restore the restriction. \
+                 Check that {} is writable and retry.",
+                goal_id,
+                dir.display(),
+                e,
+                dir.display()
+            )
+        })
+}
+
+/// What `ta session resume` must carry for a goal that launched restricted: `None` when the
+/// goal launched unrestricted, otherwise the system-prompt file that delivered its context
+/// (absent when the launch delivered context another way).
+fn restricted_launch_state(project_root: &Path, goal_id: uuid::Uuid) -> Option<Option<PathBuf>> {
+    let dir = goal_launch_log_dir(project_root, goal_id);
+    let prompt = dir.join(SYSTEM_PROMPT_FILE);
+    let has_prompt = prompt.is_file();
+    // A system-prompt file only exists for a restricted launch, so it also marks goals
+    // launched before the marker existed.
+    if dir.join(RESTRICTED_LAUNCH_MARKER).is_file() || has_prompt {
+        Some(has_prompt.then_some(prompt))
+    } else {
+        None
+    }
+}
+
 /// The permission mode written into a restricted launch's settings file
 /// (matches [`RESTRICTED_LAUNCH_FLAGS`]).
 pub(crate) const RESTRICTED_DEFAULT_MODE: &str = "dontAsk";
@@ -4240,6 +4288,9 @@ pub fn execute(
     // would never reach the agent. Deliver it explicitly instead, from a
     // file outside staging (so the agent cannot edit it), redacted. Done
     // last, after every injection and before CLAUDE.md is restored.
+    if agent_config.restricted_tool_surface {
+        record_restricted_launch(&config.workspace_root, goal.goal_run_id)?;
+    }
     if agent_config.restricted_tool_surface
         && agent_config.injects_context_file
         && is_claude_code_launch(&agent_config)
@@ -5779,7 +5830,37 @@ fn execute_resume(
         }
     }
 
-    let agent_config = agent_launch_config(agent, goal.source_dir.as_deref());
+    let mut agent_config = agent_launch_config(agent, goal.source_dir.as_deref());
+
+    // A goal that launched with a restricted tool surface resumes with the same restriction
+    // and the context it was given (red-team: resume rebuilt the config unrestricted).
+    let (restricted, system_prompt_file) =
+        match restricted_launch_state(&config.workspace_root, goal.goal_run_id) {
+            Some(prompt) => {
+                if prompt.is_none()
+                    && agent_config.injects_context_file
+                    && is_claude_code_launch(&agent_config)
+                {
+                    anyhow::bail!(
+                        "Goal {} launched with a restricted tool surface but its delivered \
+                         context file is missing, so `ta session resume` cannot relaunch it \
+                         with the same restriction and context. It was not relaunched. Start \
+                         a new session with `ta run` instead.",
+                        goal.goal_run_id
+                    );
+                }
+                (true, prompt)
+            }
+            None => (false, None),
+        };
+    agent_config.restricted_tool_surface = restricted;
+    agent_config.system_prompt_file = system_prompt_file.clone();
+    if restricted {
+        tracing::info!(
+            goal_id = %goal.goal_run_id,
+            "resuming a restricted launch with its restriction flags and delivered context"
+        );
+    }
 
     // Build resume command: use agent config's resume_cmd if available,
     // otherwise use the standard launch command.
@@ -5828,11 +5909,11 @@ fn execute_resume(
             context_file: None,
             runtime: Default::default(),
             heartbeat_required: false,
-            restricted_tool_surface: false,
+            restricted_tool_surface: restricted,
             chat_mode: false,
             chat_mcp_config: None,
             persona: None,
-            system_prompt_file: None,
+            system_prompt_file,
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -17195,5 +17276,67 @@ mod start_state_tests {
             true,
         );
         assert!(g.objective_file_content.is_none());
+    }
+}
+
+#[cfg(test)]
+mod resume_restriction_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn claude_config() -> AgentLaunchConfig {
+        agent_launch_config("claude-code", None)
+    }
+
+    #[test]
+    fn unrestricted_goal_resumes_unrestricted() {
+        let root = tempdir().unwrap();
+        assert_eq!(
+            restricted_launch_state(root.path(), uuid::Uuid::new_v4()),
+            None
+        );
+    }
+
+    #[test]
+    fn marker_alone_marks_a_goal_restricted_without_a_prompt_file() {
+        let root = tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        record_restricted_launch(root.path(), id).unwrap();
+        assert_eq!(restricted_launch_state(root.path(), id), Some(None));
+    }
+
+    #[test]
+    fn prompt_file_marks_a_legacy_goal_restricted_and_is_carried() {
+        let root = tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let dir = goal_launch_log_dir(root.path(), id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SYSTEM_PROMPT_FILE), "context").unwrap();
+        assert_eq!(
+            restricted_launch_state(root.path(), id),
+            Some(Some(dir.join(SYSTEM_PROMPT_FILE)))
+        );
+    }
+
+    #[test]
+    fn restricted_resume_config_carries_flags_and_system_prompt() {
+        let root = tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        record_restricted_launch(root.path(), id).unwrap();
+        let prompt = goal_launch_log_dir(root.path(), id).join(SYSTEM_PROMPT_FILE);
+        std::fs::write(&prompt, "context").unwrap();
+
+        let Some(system_prompt_file) = restricted_launch_state(root.path(), id) else {
+            panic!("goal should be restricted");
+        };
+        let mut config = claude_config();
+        config.restricted_tool_surface = true;
+        config.system_prompt_file = system_prompt_file;
+        let args = agent_launch_args(&config, "").unwrap();
+        for flag in RESTRICTED_LAUNCH_FLAGS {
+            assert!(args.iter().any(|a| a == flag), "missing {flag}: {args:?}");
+        }
+        assert!(args.iter().any(|a| a == SYSTEM_PROMPT_FILE_FLAG));
+        assert!(args.contains(&prompt.display().to_string()));
     }
 }
