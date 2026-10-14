@@ -11256,7 +11256,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.18`
 
 ### v0.17.12.19 - `ta cost report` Export to Meridian
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.18
 
 **Goal**: The cost report must also land in Meridian so cost can be analysed against KPIs. Meridian's generic JSONL loader reads `id`, `title`, `timestamp`, `tokens_input`, `tokens_output`, `source`, `phase` and keeps string-valued extras as metadata.
