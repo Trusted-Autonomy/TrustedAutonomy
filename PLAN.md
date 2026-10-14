@@ -11290,15 +11290,15 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.20`
 
 ### v0.17.12.21 - Swappable Optimizer Slots and Optimizer Spawn Safety
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.20
 
 **Goal**: Input, context and output optimization sit behind one abstraction so an open-source tool (RTK, headroom) can be started with and replaced later. Owner condition: no repeated shell windows. Spec: same file, section 5.
 
-1. [ ] **No visible windows.** Every optimizer process is spawned with `CREATE_NO_WINDOW` on Windows (`crates/ta-daemon/src/prompt_optimizer_supervisor.rs` currently sets no flag and the constant appears nowhere in the repo). A test asserts the flag on the constructed command; a manual Windows smoke check is added to the release checklist.
-2. [ ] **Flap guard.** After the existing five failures in five minutes the optimizer is disabled for the session with one user-visible message, never restarted forever; `ta compression status` shows restart count and last failure.
-3. [ ] **`ta-context-opt` crate.** Traits `InputOptimizer`, `ContextOptimizer`, `OutputOptimizer`; a registry selected per slot in config; a `none` implementation; and a metrics record `{bytes_in, bytes_out, est_tokens_in, est_tokens_out, ms, lossless, original_ref}` with the full original kept on disk so any reduction is reversible. `[compression.plugin]` becomes the `proxy` kind of the input slot.
-4. [ ] **Replay-able selection.** `--set optimizers.input.use=none|rtk|headroom` works through `ta golden replay`.
+1. [x] **No visible windows.** Every optimizer process is spawned with `CREATE_NO_WINDOW` on Windows (`crates/ta-daemon/src/prompt_optimizer_supervisor.rs` set no flag and the constant appeared nowhere in the repo). Implemented as `build_command` in the supervisor (the only place an optimizer process is built), which calls `creation_flags(OPTIMIZER_CREATION_FLAGS)` under `#[cfg(windows)]` (tokio's inherent Windows method, checked against the vendored source; Windows CI compiled it). The unit test asserts the flag value only: `std::process::Command` does not expose its creation flags, so a unit test cannot observe that a Windows child really opens no console. That check is the manual Windows smoke test written into `docs/RELEASING.md`, NOT yet run on a Windows host: moved to v0.17.12.24 item 2, so it is not claimed here. `DETACHED_PROCESS` is not set: the supervisor only runs the proxy kind.
+2. [x] **Flap guard.** After the existing five failures in five minutes the optimizer is disabled for the session with one user-visible message, never restarted forever; `ta compression status` shows restart count and last failure. The supervisor already stopped after five failures; this adds the single `Warning:` message, `last_failure`, `last_failure_at` and `notice` in `status.json`, and the `ta compression status` lines. `ta compression enable` is still the way to resume. Verified against the built binary: a `status.json` holding a suspension renders the restart count, last failure with timestamp, the notice and the resume command.
+3. [x] **`ta-context-opt` crate.** Traits `InputOptimizer`, `ContextOptimizer`, `OutputOptimizer`; a registry selected per slot in config; a `none` implementation; and a metrics record `{bytes_in, bytes_out, est_tokens_in, est_tokens_out, ms, lossless, original_ref}` with the full original kept on disk so any reduction is reversible. `[compression.plugin]` becomes the `proxy` kind of the input slot. Slot config is `[optimizers.<slot>] use = ...`; `proxy`/`headroom` are the proxy kind and the supervisor and `ta run` honor the selection. `rtk` is registered (hook kind) so its licence is on record, but TA has no integration for it: selecting it is REFUSED (`OptError::NotWired`) in replay validation and `select_*`, `apply` refuses rather than returning a `lossless` row for work that never happened, and a goal whose config names it prints a warning and runs with no input optimization. Reason: a silent no-op would report the same numbers as `none`, so an A/B arm would conclude rtk saves nothing. The rtk adapter and the first-party minimizers that call `apply` are v0.17.12.24 items 1 and 3.
+4. [x] **Replay-able selection.** `--set optimizers.input.use=none|headroom` works through `ta golden replay` (`rtk` is refused until v0.17.12.24 item 1 wires it). Overrides reach `ta run` through the goal's `experiment_overrides`; unknown and unintegrated names are refused before the replay launches. Verified against the built binary: `use=rtk` and a typo (`rkt`) each fail with their own message and create no goal.
 5. [x] Tests and docs: slot selection, `none` baseline, metrics and original recovery, spawn flag. `docs/USAGE.md` how-to including licences recorded per optimizer.
 
 **Effort**: M.
@@ -11337,6 +11337,21 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 **Effort**: L.
 
 #### Version: `0.17.12-alpha.23`
+
+### v0.17.12.24 - Optimizer Integrations: RTK Adapter, Windows Smoke Check, First-Party Minimizers
+<!-- status: pending -->
+**Depends on**: v0.17.12.21
+
+**Goal**: The parts of the optimizer-slot work (v0.17.12.21) that need a real binary, a Windows host, or consumers that do not exist yet. They are separate because ticking them in v0.17.12.21 would have claimed behaviour that was never run. Spec: `docs/superpowers/specs/2026-10-13-token-cost-optimization-and-ab-harness.md` section 5 (items S5c, S5d).
+
+1. [ ] **RTK adapter (input slot, spec S5c).** Install and remove RTK's hook for a goal's agent (`rtk init -g --agent ...`), only for the goal's lifetime and only in the goal's staging, record the installed version and licence in the metrics record, and make `ensure_wired` accept `rtk` once this works. Trial it through `ta golden replay --set optimizers.input.use=rtk` against `none` on a real golden entry and record the measured token and cost delta. Confirm the open decision D7 (RTK full edition is Apache-2.0 plus BUSL-1.1) before TA bundles or recommends it.
+2. [ ] **Run the Windows no-window smoke check.** Execute the manual check in `docs/RELEASING.md` on a real Windows build with a failing optimizer and confirm no console window appears, then record the result here. Until it is run, `CREATE_NO_WINDOW` is verified only by a unit test of the constant and a Windows CI compile of the call.
+3. [ ] **First-party minimizers call `apply`.** Wire at least the `cargo`, `git` and `ta` output minimizers through the `InputOptimizer` contract so the metrics record and the stored original are produced for real, and replay them against `rtk` and `none` (spec S5d). Nothing in the repo calls `apply` outside tests today.
+4. [ ] **Keep failure history across a daemon restart.** `run_supervisor` deletes `.ta/compression/status.json` at startup, discarding the previous run's `last_failure` and `notice`. Keep the last failure visible in `ta compression status` until a run succeeds, so a restart does not hide why the optimizer was disabled.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.24`
 
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
