@@ -1251,6 +1251,15 @@ mod tests {
         }
     }
 
+    /// A `PATH` value built with the platform separator (`:` on Unix, `;` on
+    /// Windows), so fixtures and expectations match what `split_paths` reads.
+    fn native_path_list(entries: &[&str]) -> String {
+        std::env::join_paths(entries.iter().map(PathBuf::from))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn scrub_drops_secrets_and_control_plane_variables() {
         let inherited: HashMap<String, String> = [
@@ -1295,7 +1304,12 @@ mod tests {
         assert_eq!(out.env["LC_ALL"], "en_US.UTF-8");
         assert_eq!(out.env["MY_EXTRA"], "ok", "role-declared extras survive");
         assert_eq!(out.env["HOME"], "/state/agent-homes/g1");
-        assert_eq!(out.env["TMPDIR"], "/state/agent-homes/g1/tmp");
+        assert_eq!(
+            out.env["TMPDIR"],
+            Path::new("/state/agent-homes/g1")
+                .join("tmp")
+                .to_string_lossy()
+        );
         assert_eq!(out.env["TA_GOAL_ID"], "g1");
         // Removed lists hold names only, never values.
         assert!(!out.removed.iter().any(|n| n.contains("secret")));
@@ -1303,10 +1317,12 @@ mod tests {
 
     #[test]
     fn scrub_sets_the_mediation_handoff_and_filters_protected_path_entries() {
-        let inherited: HashMap<String, String> = [("PATH", "/usr/bin:/work/proj/.ta/bin:/opt/x")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let inherited: HashMap<String, String> = [(
+            "PATH".to_string(),
+            native_path_list(&["/usr/bin", "/work/proj/.ta/bin", "/opt/x"]),
+        )]
+        .into_iter()
+        .collect();
         let protected = vec![PathBuf::from("/work/proj/.ta")];
         let home = PathBuf::from("/h");
         let sock = PathBuf::from("/tmp/ta-1/mcp.sock");
@@ -1317,16 +1333,23 @@ mod tests {
             ..scrub_ctx(&protected, &home)
         };
         let out = scrub_env(&inherited, &HashMap::new(), &scrub);
-        assert_eq!(out.env["PATH"], "/usr/bin:/opt/x");
+        assert_eq!(
+            out.env["PATH"],
+            native_path_list(&["/usr/bin", "/opt/x"]),
+            "the protected .ta/bin entry is dropped, the others keep their order"
+        );
 
         // A shim dir inside the agent home survives even when the home lies
         // under a protected path.
         let inherited2: HashMap<String, String> = [(
-            "PATH",
-            "/usr/bin:/state/p/agent-homes/g1/.ta/bin:/state/p/rules",
+            "PATH".to_string(),
+            native_path_list(&[
+                "/usr/bin",
+                "/state/p/agent-homes/g1/.ta/bin",
+                "/state/p/rules",
+            ]),
         )]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         let protected2 = vec![PathBuf::from("/state/p")];
         let home2 = PathBuf::from("/state/p/agent-homes/g1");
@@ -1335,7 +1358,10 @@ mod tests {
             &HashMap::new(),
             &scrub_ctx(&protected2, &home2),
         );
-        assert_eq!(out2.env["PATH"], "/usr/bin:/state/p/agent-homes/g1/.ta/bin");
+        assert_eq!(
+            out2.env["PATH"],
+            native_path_list(&["/usr/bin", "/state/p/agent-homes/g1/.ta/bin"])
+        );
         assert_eq!(out.env["TA_MCP_ENDPOINT"], "/tmp/ta-1/mcp.sock");
         assert_eq!(out.env["TA_CREDENTIAL_ENDPOINT"], "/tmp/ta-1/mcp.sock");
         assert_eq!(out.env["TA_MCP_CONNECTION_TOKEN"], "tok");
