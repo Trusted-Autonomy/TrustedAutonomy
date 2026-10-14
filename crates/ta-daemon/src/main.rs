@@ -454,6 +454,7 @@ async fn main() -> Result<()> {
     prompt_optimizer_supervisor::start(
         project_root.clone(),
         daemon_config.compression.clone(),
+        daemon_config.optimizers.clone(),
         shutdown.clone(),
     );
 

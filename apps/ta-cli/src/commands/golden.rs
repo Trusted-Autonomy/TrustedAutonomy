@@ -548,6 +548,10 @@ fn replay(
     let store = GoldenStore::new(&config.workspace_root);
     let entry = store.load_entry(id)?;
     let overrides = parse_overrides(set)?;
+    ta_context_opt::OptimizersConfig::validate_overrides(
+        &overrides,
+        &ta_context_opt::Registry::builtin(),
+    )?;
     if let Some(cap) = max_usd {
         if !(cap.is_finite() && cap > 0.0) {
             anyhow::bail!("--max-usd must be a positive number of USD, got {cap}.");
@@ -1636,6 +1640,38 @@ mod tests {
         // Scratch worktree removed even on this path.
         let worktrees = git(f.project.path(), &["worktree", "list", "--porcelain"]).unwrap();
         assert_eq!(worktrees.matches("worktree ").count(), 1);
+    }
+
+    #[test]
+    fn replay_validates_optimizer_slot_selection_before_launching() {
+        let f = fixture();
+        let entry = captured_entry(&f, None);
+        let launched = std::cell::Cell::new(0);
+        let mut run = |_: &mut Command| {
+            launched.set(launched.get() + 1);
+            Ok(ok_status())
+        };
+        let e = replay(
+            &f.config,
+            Path::new("ta"),
+            &entry.id,
+            &["optimizers.input.use=rkt".into()],
+            None,
+            None,
+            &mut run,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            e.contains("'rkt'") && e.contains("none, rtk, headroom"),
+            "{e}"
+        );
+        assert_eq!(
+            launched.get(),
+            0,
+            "a bad slot name must not launch a replay"
+        );
     }
 
     #[test]

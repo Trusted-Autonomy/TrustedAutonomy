@@ -5280,6 +5280,7 @@ dependencies = [
  "ta-connector-fs",
  "ta-connector-unity",
  "ta-connector-unreal",
+ "ta-context-opt",
  "ta-credential-broker",
  "ta-credentials",
  "ta-events",
@@ -5442,6 +5443,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-context-opt"
+version = "0.17.12-alpha.5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "which",
+]
+
+[[package]]
 name = "ta-credential-broker"
 version = "0.17.12-alpha.5"
 dependencies = [
@@ -5507,6 +5520,7 @@ dependencies = [
  "ta-changeset",
  "ta-connector-email",
  "ta-connector-slack",
+ "ta-context-opt",
  "ta-credential-broker",
  "ta-credentials",
  "ta-data-spec",

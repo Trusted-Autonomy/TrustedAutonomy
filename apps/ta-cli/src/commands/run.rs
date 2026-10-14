@@ -6780,7 +6780,7 @@ fn launch_agent_via_runtime(
 
     // Inject ANTHROPIC_BASE_URL when context compression is enabled (v0.17.0.7).
     // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
-    inject_compression_url(&mut env, config, staging_path);
+    inject_compression_url(&mut env, config, staging_path, goal_id);
 
     // Sandbox plan (v0.17.12.6). Settings come from the REAL project root (staging
     // has no `.ta/`), the trusted policy from the daemon-only state dir. A
@@ -10622,25 +10622,63 @@ impl Default for CompressionSection {
 #[serde(default)]
 struct DaemonTomlCompression {
     compression: CompressionSection,
+    optimizers: ta_context_opt::OptimizersConfig,
 }
 
-/// Load the `[compression]` section from `project_root/.ta/daemon.toml`.
-fn load_compression_section(project_root: &std::path::Path) -> CompressionSection {
+/// Load the `[compression]` and `[optimizers]` sections from
+/// `project_root/.ta/daemon.toml`.
+fn load_compression_section(
+    project_root: &std::path::Path,
+) -> (CompressionSection, ta_context_opt::OptimizersConfig) {
     let path = project_root.join(".ta").join("daemon.toml");
     if let Ok(content) = std::fs::read_to_string(&path) {
         if let Ok(parsed) = toml::from_str::<DaemonTomlCompression>(&content) {
-            return parsed.compression;
+            return (parsed.compression, parsed.optimizers);
         }
     }
-    CompressionSection::default()
+    (CompressionSection::default(), Default::default())
+}
+
+/// The goal's experiment overrides (`ta golden replay --set ...`), if any.
+fn goal_experiment_overrides(
+    project_root: &std::path::Path,
+    goal_id: uuid::Uuid,
+) -> Option<serde_json::Value> {
+    let store = GoalRunStore::new(project_root.join(".ta").join("goals")).ok()?;
+    store.get(goal_id).ok()??.experiment_overrides
 }
 
 /// Return the headroom proxy URL (as `ANTHROPIC_BASE_URL`) if compression is
 /// enabled for this agent AND the headroom proxy is currently running.
-fn compression_base_url(project_root: &std::path::Path, agent_name: &str) -> Option<String> {
-    let cfg = load_compression_section(project_root);
+fn compression_base_url(
+    project_root: &std::path::Path,
+    agent_name: &str,
+    overrides: Option<&serde_json::Value>,
+) -> Option<String> {
+    let (cfg, optimizers) = load_compression_section(project_root);
 
     if !cfg.enabled {
+        return None;
+    }
+
+    // `[optimizers.input] use` (or a replay's `--set optimizers.input.use=...`)
+    // that names a non-proxy optimizer (`none`, `rtk`) means no proxy for this run.
+    let effective = optimizers.with_overrides(overrides);
+    if let Some(name) = effective.input.use_.as_deref() {
+        // A registered optimizer TA has not integrated (`rtk`) would otherwise run unoptimised
+        // and look identical to `none`. The goal still runs; the user is told once, plainly.
+        if let Err(e) =
+            ta_context_opt::Registry::builtin().ensure_wired(ta_context_opt::Slot::Input, name)
+        {
+            tracing::warn!(agent = %agent_name, optimizer = %name, error = %e, "selected optimizer is not integrated; running without it");
+            eprintln!("[warn] {e}. This goal runs with no input optimization.");
+        }
+    }
+    if let Some(false) = effective.input_wants_proxy() {
+        tracing::info!(
+            agent = %agent_name,
+            "Input optimizer slot does not select the proxy kind; not routing through the compression proxy"
+        );
         return None;
     }
 
@@ -10686,6 +10724,7 @@ fn inject_compression_url(
     env: &mut std::collections::HashMap<String, String>,
     config: &AgentLaunchConfig,
     staging_path: &std::path::Path,
+    goal_id: uuid::Uuid,
 ) {
     // Derive project_root from staging_path (project_root/.ta/staging/<uuid>).
     let project_root = staging_path
@@ -10697,7 +10736,8 @@ fn inject_compression_url(
 
     let agent_name = config.name.as_deref().unwrap_or("claude-code");
 
-    if let Some(url) = compression_base_url(root, agent_name) {
+    let overrides = goal_experiment_overrides(root, goal_id);
+    if let Some(url) = compression_base_url(root, agent_name, overrides.as_ref()) {
         env.insert("ANTHROPIC_BASE_URL".to_string(), url.clone());
         tracing::info!(
             agent = %agent_name,
@@ -17341,5 +17381,85 @@ mod resume_restriction_tests {
         }
         assert!(args.iter().any(|a| a == SYSTEM_PROMPT_FILE_FLAG));
         assert!(args.contains(&prompt.display().to_string()));
+    }
+}
+
+#[cfg(test)]
+mod optimizer_slot_tests {
+    use super::*;
+
+    /// A project whose proxy is running, with `daemon_toml` as its config.
+    fn project(daemon_toml: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let ta = dir.path().join(".ta");
+        std::fs::create_dir_all(ta.join("compression")).unwrap();
+        std::fs::write(ta.join("daemon.toml"), daemon_toml).unwrap();
+        std::fs::write(
+            ta.join("compression").join("status.json"),
+            r#"{"status":"running"}"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn unchosen_slot_keeps_legacy_proxy_routing() {
+        let dir = project("[compression]\nenabled = true\n");
+        assert_eq!(
+            compression_base_url(dir.path(), "claude-code", None).as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+    }
+
+    #[test]
+    fn slot_none_or_rtk_means_no_proxy() {
+        for name in ["none", "rtk"] {
+            let dir = project(&format!("[optimizers.input]\nuse = \"{name}\"\n"));
+            assert_eq!(
+                compression_base_url(dir.path(), "claude-code", None),
+                None,
+                "use = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn slot_headroom_routes_through_the_proxy() {
+        let dir = project("[optimizers.input]\nuse = \"headroom\"\n");
+        assert!(compression_base_url(dir.path(), "claude-code", None).is_some());
+    }
+
+    #[test]
+    fn replay_override_turns_the_proxy_off_and_on() {
+        let dir = project("[optimizers.input]\nuse = \"headroom\"\n");
+        let off = serde_json::json!({"optimizers.input.use": "none"});
+        assert_eq!(
+            compression_base_url(dir.path(), "claude-code", Some(&off)),
+            None
+        );
+        let dir = project("[optimizers.input]\nuse = \"none\"\n");
+        let on = serde_json::json!({"optimizers.input.use": "headroom"});
+        assert!(compression_base_url(dir.path(), "claude-code", Some(&on)).is_some());
+    }
+
+    #[test]
+    fn goal_overrides_are_read_from_the_goal_store() {
+        let dir = project("[optimizers.input]\nuse = \"headroom\"\n");
+        let store = GoalRunStore::new(dir.path().join(".ta").join("goals")).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "agent",
+            dir.path().join("staging"),
+            dir.path().join("store"),
+        );
+        goal.experiment_overrides = Some(serde_json::json!({"optimizers.input.use": "none"}));
+        store.save(&goal).unwrap();
+        let ov = goal_experiment_overrides(dir.path(), goal.goal_run_id);
+        assert_eq!(
+            compression_base_url(dir.path(), "claude-code", ov.as_ref()),
+            None
+        );
+        assert!(goal_experiment_overrides(dir.path(), uuid::Uuid::new_v4()).is_none());
     }
 }

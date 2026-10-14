@@ -1,0 +1,530 @@
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{estimate_tokens, OptError, OptMetrics, OptimizersConfig, OriginalStore};
+
+/// The three places an optimizer can sit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Slot {
+    Input,
+    Context,
+    Output,
+}
+
+impl Slot {
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::Input => "input",
+            Slot::Context => "context",
+            Slot::Output => "output",
+        }
+    }
+}
+
+/// How an optimizer reaches the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptimizerKind {
+    /// A child process TA supervises.
+    Process,
+    /// An HTTP proxy on `ANTHROPIC_BASE_URL` (the `[compression.plugin]` kind).
+    Proxy,
+    /// A hook installed into the agent (RTK rewriting shell commands).
+    Hook,
+    /// Code that runs inside TA or the agent.
+    InProcess,
+}
+
+/// Identity and provenance, shown by `ta compression status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptimizerInfo {
+    pub name: String,
+    pub version: String,
+    pub kind: OptimizerKind,
+    /// SPDX-style licence of the optimizer itself, recorded so a reviewer can
+    /// see what is in use.
+    pub licence: String,
+}
+
+/// Contract shared by every slot.
+pub trait Optimizer: Send + Sync {
+    fn info(&self) -> OptimizerInfo;
+
+    /// Cheap probe. Must never start a visible window or a long-running
+    /// process: a PATH lookup, not a spawn.
+    fn available(&self) -> bool;
+}
+
+/// Acts on tool and command output, files and logs before they enter context.
+pub trait InputOptimizer: Optimizer {
+    fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError>;
+}
+
+/// Acts on the accumulated conversation.
+pub trait ContextOptimizer: Optimizer {
+    fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError>;
+}
+
+/// Acts on what the model writes.
+pub trait OutputOptimizer: Optimizer {
+    fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError>;
+}
+
+/// Save the original, time `reduce`, and build the metrics record. Every
+/// implementation goes through this so the record and the stored original
+/// can never disagree.
+pub fn run_measured(
+    input: &str,
+    store: &OriginalStore,
+    lossless: bool,
+    reduce: impl FnOnce(&str) -> String,
+) -> Result<(String, OptMetrics), OptError> {
+    let started = Instant::now();
+    let original_ref = store.save(input)?;
+    let output = reduce(input);
+    let metrics = OptMetrics {
+        bytes_in: input.len(),
+        bytes_out: output.len(),
+        est_tokens_in: estimate_tokens(input),
+        est_tokens_out: estimate_tokens(&output),
+        ms: started.elapsed().as_millis() as u64,
+        lossless,
+        original_ref,
+    };
+    Ok((output, metrics))
+}
+
+/// The baseline: changes nothing, valid in every slot.
+struct NoneOptimizer;
+
+impl Optimizer for NoneOptimizer {
+    fn info(&self) -> OptimizerInfo {
+        OptimizerInfo {
+            name: "none".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            kind: OptimizerKind::InProcess,
+            licence: "Apache-2.0".into(),
+        }
+    }
+    fn available(&self) -> bool {
+        true
+    }
+}
+
+macro_rules! impl_none {
+    ($($tr:ident),*) => {$(
+        impl $tr for NoneOptimizer {
+            fn apply(&self, input: &str, store: &OriginalStore)
+                -> Result<(String, OptMetrics), OptError> {
+                run_measured(input, store, true, |s| s.to_string())
+            }
+        }
+    )*};
+}
+impl_none!(InputOptimizer, ContextOptimizer, OutputOptimizer);
+
+/// An optimizer that works out of band (a proxy or a hook), so TA never hands
+/// it text. `apply` is an identity that still records the original, which keeps
+/// it comparable in the golden set; the real reduction shows in `ta cost report`.
+struct OutOfBand {
+    name: &'static str,
+    kind: OptimizerKind,
+    licence: &'static str,
+    /// Binary probed on PATH; `None` for a user-supplied proxy.
+    binary: Option<&'static str>,
+}
+
+impl Optimizer for OutOfBand {
+    fn info(&self) -> OptimizerInfo {
+        OptimizerInfo {
+            name: self.name.into(),
+            version: "external".into(),
+            kind: self.kind,
+            licence: self.licence.into(),
+        }
+    }
+    fn available(&self) -> bool {
+        self.binary.is_none_or(|b| which::which(b).is_ok())
+    }
+}
+
+impl OutOfBand {
+    /// A hook-kind optimizer (RTK) needs TA to install the hook into the agent, and TA does not
+    /// yet. `apply` therefore refuses instead of returning the input unchanged with a
+    /// `lossless` metrics row for work that never happened.
+    fn refuse_if_hook(&self, slot: &'static str) -> Result<(), OptError> {
+        if self.kind == OptimizerKind::Hook {
+            return Err(OptError::NotWired {
+                slot,
+                name: self.name.to_string(),
+                usable: String::new(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl InputOptimizer for OutOfBand {
+    fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError> {
+        self.refuse_if_hook("input")?;
+        run_measured(input, store, true, |s| s.to_string())
+    }
+}
+
+impl ContextOptimizer for OutOfBand {
+    fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError> {
+        self.refuse_if_hook("context")?;
+        run_measured(input, store, true, |s| s.to_string())
+    }
+}
+
+/// Name -> implementation for each slot.
+pub struct Registry {
+    input: Vec<Box<dyn InputOptimizer>>,
+    context: Vec<Box<dyn ContextOptimizer>>,
+    output: Vec<Box<dyn OutputOptimizer>>,
+}
+
+impl Registry {
+    /// The shipped set: `none` everywhere, RTK / headroom / the generic
+    /// `[compression.plugin]` proxy for input, and the agent's own compaction
+    /// for context.
+    pub fn builtin() -> Self {
+        Self {
+            input: vec![
+                Box::new(NoneOptimizer),
+                Box::new(OutOfBand {
+                    name: "rtk",
+                    kind: OptimizerKind::Hook,
+                    licence: "Apache-2.0 (rtk-oss core; full rtk and rtk-proxy add BUSL-1.1 parts)",
+                    binary: Some("rtk"),
+                }),
+                Box::new(OutOfBand {
+                    name: "headroom",
+                    kind: OptimizerKind::Proxy,
+                    licence: "Apache-2.0",
+                    binary: Some("headroom"),
+                }),
+                Box::new(OutOfBand {
+                    name: "proxy",
+                    kind: OptimizerKind::Proxy,
+                    licence: "see the configured [compression.plugin] command",
+                    binary: None,
+                }),
+            ],
+            context: vec![
+                Box::new(NoneOptimizer),
+                Box::new(OutOfBand {
+                    name: "agent-native",
+                    kind: OptimizerKind::InProcess,
+                    licence: "n/a (built into the agent)",
+                    binary: None,
+                }),
+            ],
+            output: vec![Box::new(NoneOptimizer)],
+        }
+    }
+
+    pub fn names(&self, slot: Slot) -> Vec<String> {
+        self.infos(slot).into_iter().map(|i| i.name).collect()
+    }
+
+    pub fn infos(&self, slot: Slot) -> Vec<OptimizerInfo> {
+        match slot {
+            Slot::Input => self.input.iter().map(|o| o.info()).collect(),
+            Slot::Context => self.context.iter().map(|o| o.info()).collect(),
+            Slot::Output => self.output.iter().map(|o| o.info()).collect(),
+        }
+    }
+
+    fn unknown(&self, slot: Slot, name: &str) -> OptError {
+        OptError::Unknown {
+            slot: slot.name(),
+            name: name.to_string(),
+            available: self.names(slot).join(", "),
+        }
+    }
+
+    pub fn input(&self, name: &str) -> Result<&dyn InputOptimizer, OptError> {
+        self.input
+            .iter()
+            .find(|o| o.info().name == name)
+            .map(|o| o.as_ref())
+            .ok_or_else(|| self.unknown(Slot::Input, name))
+    }
+
+    pub fn context(&self, name: &str) -> Result<&dyn ContextOptimizer, OptError> {
+        self.context
+            .iter()
+            .find(|o| o.info().name == name)
+            .map(|o| o.as_ref())
+            .ok_or_else(|| self.unknown(Slot::Context, name))
+    }
+
+    pub fn output(&self, name: &str) -> Result<&dyn OutputOptimizer, OptError> {
+        self.output
+            .iter()
+            .find(|o| o.info().name == name)
+            .map(|o| o.as_ref())
+            .ok_or_else(|| self.unknown(Slot::Output, name))
+    }
+
+    /// Refuse a name that is registered but has no TA integration (hook kind today). Without
+    /// this, `use = "rtk"` would run unoptimised and report the same numbers as `none`, so an
+    /// A/B replay arm would conclude the optimizer saves nothing. Unknown names are left to the
+    /// plain lookup so the two failures keep distinct messages.
+    pub fn ensure_wired(&self, slot: Slot, name: &str) -> Result<(), OptError> {
+        let infos = self.infos(slot);
+        match infos.iter().find(|i| i.name == name) {
+            Some(i) if i.kind == OptimizerKind::Hook => Err(OptError::NotWired {
+                slot: slot.name(),
+                name: name.to_string(),
+                usable: infos
+                    .iter()
+                    .filter(|i| i.kind != OptimizerKind::Hook)
+                    .map(|i| i.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// The optimizer a config selects for the input slot (`none` when unset).
+    pub fn select_input(&self, cfg: &OptimizersConfig) -> Result<&dyn InputOptimizer, OptError> {
+        let name = cfg.input.use_.as_deref().unwrap_or("none");
+        self.ensure_wired(Slot::Input, name)?;
+        self.input(name)
+    }
+
+    pub fn select_context(
+        &self,
+        cfg: &OptimizersConfig,
+    ) -> Result<&dyn ContextOptimizer, OptError> {
+        let name = cfg.context.use_.as_deref().unwrap_or("none");
+        self.ensure_wired(Slot::Context, name)?;
+        self.context(name)
+    }
+
+    pub fn select_output(&self, cfg: &OptimizersConfig) -> Result<&dyn OutputOptimizer, OptError> {
+        let name = cfg.output.use_.as_deref().unwrap_or("none");
+        self.ensure_wired(Slot::Output, name)?;
+        self.output(name)
+    }
+}
+
+impl OptimizersConfig {
+    /// Whether the input slot, as configured, wants the proxy-kind optimizer
+    /// (`[compression.plugin]` / headroom) running. `None` = not chosen, so the
+    /// caller keeps its legacy `[compression] enabled` behaviour.
+    pub fn input_wants_proxy(&self) -> Option<bool> {
+        let name = self.input.use_.as_deref()?;
+        Some(matches!(name, "headroom" | "proxy"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(input: Option<&str>) -> OptimizersConfig {
+        let mut c = OptimizersConfig::default();
+        c.input.use_ = input.map(str::to_string);
+        c
+    }
+
+    #[test]
+    fn unset_slot_selects_none() {
+        let r = Registry::builtin();
+        assert_eq!(r.select_input(&cfg(None)).unwrap().info().name, "none");
+        assert_eq!(
+            r.select_context(&OptimizersConfig::default())
+                .unwrap()
+                .info()
+                .name,
+            "none"
+        );
+        assert_eq!(
+            r.select_output(&OptimizersConfig::default())
+                .unwrap()
+                .info()
+                .name,
+            "none"
+        );
+    }
+
+    #[test]
+    fn slot_selection_by_name() {
+        let r = Registry::builtin();
+        for name in ["none", "headroom", "proxy"] {
+            assert_eq!(r.select_input(&cfg(Some(name))).unwrap().info().name, name);
+        }
+        assert_eq!(
+            r.input("headroom").unwrap().info().kind,
+            OptimizerKind::Proxy
+        );
+        assert_eq!(r.input("rtk").unwrap().info().kind, OptimizerKind::Hook);
+    }
+
+    #[test]
+    fn unknown_name_lists_choices_and_the_fix() {
+        let r = Registry::builtin();
+        let err = r.input("caveman").err().unwrap().to_string();
+        assert!(err.contains("'caveman'"), "{err}");
+        assert!(err.contains("none, rtk, headroom, proxy"), "{err}");
+        assert!(err.contains("--set optimizers.input.use=none"), "{err}");
+    }
+
+    #[test]
+    fn licences_are_recorded_for_every_optimizer() {
+        let r = Registry::builtin();
+        for slot in [Slot::Input, Slot::Context, Slot::Output] {
+            for info in r.infos(slot) {
+                assert!(!info.licence.is_empty(), "{} has no licence", info.name);
+            }
+        }
+        assert!(r.input("rtk").unwrap().info().licence.contains("BUSL-1.1"));
+    }
+
+    #[test]
+    fn none_is_an_identity_baseline_with_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        let text = "warning: unused\nwarning: unused\nerror: boom\n";
+        let (out, m) = Registry::builtin()
+            .input("none")
+            .unwrap()
+            .apply(text, &store)
+            .unwrap();
+        assert_eq!(out, text);
+        assert_eq!(m.bytes_in, text.len());
+        assert_eq!(m.bytes_out, text.len());
+        assert_eq!(m.est_tokens_in, m.est_tokens_out);
+        assert!(m.lossless);
+        assert_eq!(m.reduction(), 0.0);
+    }
+
+    #[test]
+    fn original_is_recoverable_from_the_metrics_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path().join("originals"));
+        let text = "the full unmodified content";
+        let (_, m) = Registry::builtin()
+            .input("none")
+            .unwrap()
+            .apply(text, &store)
+            .unwrap();
+        assert_eq!(store.recover(&m.original_ref).unwrap(), text);
+    }
+
+    #[test]
+    fn recover_rejects_path_escape_and_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        assert!(matches!(
+            store.recover("../../etc/passwd"),
+            Err(OptError::BadReference(_))
+        ));
+        assert!(matches!(
+            store.recover(&"a".repeat(64)),
+            Err(OptError::MissingOriginal(_))
+        ));
+    }
+
+    #[test]
+    fn run_measured_records_reduction_and_lossiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        let (out, m) =
+            run_measured("aaaa bbbb cccc", &store, false, |s| s[..4].to_string()).unwrap();
+        assert_eq!(out, "aaaa");
+        assert!(!m.lossless);
+        assert!(m.reduction() > 0.7);
+        assert_eq!(store.recover(&m.original_ref).unwrap(), "aaaa bbbb cccc");
+    }
+
+    #[test]
+    fn overrides_replace_config_selection() {
+        let base = cfg(Some("headroom"));
+        let ov = serde_json::json!({"optimizers.input.use": "None", "other": 1});
+        let got = base.with_overrides(Some(&ov));
+        assert_eq!(got.input.use_.as_deref(), Some("none"));
+        assert_eq!(got.input_wants_proxy(), Some(false));
+        let same = cfg(Some("headroom")).with_overrides(None);
+        assert_eq!(same.input_wants_proxy(), Some(true));
+        assert_eq!(cfg(None).input_wants_proxy(), None);
+    }
+
+    #[test]
+    fn config_parses_from_toml_shape() {
+        let c: OptimizersConfig = serde_json::from_value(serde_json::json!({
+            "input": {"use": "rtk"}
+        }))
+        .unwrap();
+        assert_eq!(c.input.use_.as_deref(), Some("rtk"));
+        assert_eq!(c.output.use_, None);
+    }
+
+    #[test]
+    fn override_validation_accepts_known_and_rejects_typos() {
+        let r = Registry::builtin();
+        for name in ["none", "headroom"] {
+            let ov = serde_json::json!({"optimizers.input.use": name});
+            OptimizersConfig::validate_overrides(&ov, &r).unwrap();
+            let sel = OptimizersConfig::default().with_overrides(Some(&ov));
+            assert_eq!(r.select_input(&sel).unwrap().info().name, name);
+        }
+        let bad = serde_json::json!({"optimizers.input.use": "rkt"});
+        let err = OptimizersConfig::validate_overrides(&bad, &r)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("'rkt'") && err.contains("none, rtk, headroom, proxy"),
+            "{err}"
+        );
+        let non_string = serde_json::json!({"optimizers.input.use": 3});
+        assert!(OptimizersConfig::validate_overrides(&non_string, &r).is_err());
+        OptimizersConfig::validate_overrides(&serde_json::json!({"wiki.disabled": true}), &r)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_registered_but_unintegrated_optimizer_is_refused_not_silently_ignored() {
+        let r = Registry::builtin();
+        // Replay validation fails before a replay spends tokens on an arm that would run
+        // unoptimised and be reported identically to `none`.
+        let ov = serde_json::json!({"optimizers.input.use": "rtk"});
+        let err = OptimizersConfig::validate_overrides(&ov, &r)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("rtk") && err.contains("no integration"),
+            "{err}"
+        );
+        assert!(
+            err.contains("none, headroom, proxy"),
+            "the message must name what can be used: {err}"
+        );
+        // The config path refuses the same way, for every slot that selects.
+        let sel = OptimizersConfig::default().with_overrides(Some(&ov));
+        assert!(matches!(
+            r.select_input(&sel),
+            Err(crate::OptError::NotWired { .. })
+        ));
+        // `apply` cannot be used to fabricate a metrics row for work that never happened.
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        let rtk = r.input("rtk").unwrap();
+        assert!(matches!(
+            rtk.apply("some command output", &store),
+            Err(crate::OptError::NotWired { .. })
+        ));
+        // It is still registered, so its licence stays on record for `ta compression status`.
+        assert!(rtk.info().licence.contains("BUSL-1.1"));
+        // A wired optimizer and an unknown name keep their own behaviour.
+        assert!(r.ensure_wired(Slot::Input, "headroom").is_ok());
+        assert!(r.ensure_wired(Slot::Input, "nonesuch").is_ok());
+    }
+}
