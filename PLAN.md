@@ -11065,13 +11065,13 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.7`
 
 ### v0.17.12.8 - Linux Hardened Sandbox: bubblewrap, Landlock, seccomp
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
 
-1. [ ] bubblewrap with user, pid, ipc, uts and network namespaces, a constructed root without `.ta`, private `/proc`, tmpfs `/tmp`, die-with-parent.
-2. [ ] Pre-exec helper applying Landlock (ABI-aware, never silently best-effort) and a seccomp deny list (ptrace, process_vm, bpf, keyctl, io_uring, nested user namespaces).
-3. [ ] Runtime probes and actionable errors for AppArmor user-namespace restriction, disabled namespaces, containers, WSL2 and Nix; a Landlock-only degraded path.
-4. [ ] Conformance suite in Linux CI, including container and missing-syscall jobs.
+1. [x] bubblewrap with user, pid, ipc, uts and network namespaces, a constructed root without `.ta`, private `/proc`, tmpfs `/tmp`, die-with-parent. Verified on real Linux (Docker and the new `Linux Sandbox Conformance` CI job).
+2. [x] Pre-exec helper applying Landlock (ABI-aware, never silently best-effort) and a seccomp deny list (ptrace, process_vm, bpf, keyctl, io_uring, nested user namespaces). Hand-built classic BPF for x86_64 and aarch64, no new crates; failure to apply any required layer exits 125 and the agent is not started. `clone3` answers ENOSYS so libc falls back to the filtered `clone`.
+3. [x] Runtime probes and actionable errors for AppArmor user-namespace restriction, disabled namespaces, containers, WSL2 and Nix; a Landlock-only degraded path. In Landlock-only mode the workspace is granted whole (Landlock cannot hide a denied child of a granted directory); documented in USAGE.md.
+4. [x] Conformance suite in Linux CI, including container and missing-syscall jobs. `scripts/ci-linux-sandbox-containers.sh` runs the default-container and no-Landlock scenarios; its build cache is a Docker named volume because root-owned files in a bind mount broke cleanup.
 
 **Effort**: M.
 
