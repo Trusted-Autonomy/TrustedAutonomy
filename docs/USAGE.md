@@ -4258,7 +4258,7 @@ ta doctor --fix
 #   Fix: move them to the TA state directory (each copy is verified before the old one is removed)
 #
 # [warn] (id: vcs-gitignore) 2 .ta/ path(s) exist but are not ignored by version control
-#   Fix: ta setup vcs --force (rewrites the TA block of .gitignore)
+#   Fix: ta setup vcs (refreshes the TA block of .gitignore in place)
 #   Rewrites: .gitignore (tracked by git)
 #
 # Apply fix for secrets? [y/N]: y
@@ -15952,8 +15952,10 @@ ta plan shared
 Run this once per project clone to add the TA block to your VCS ignore file:
 
 ```bash
-ta setup vcs                        # auto-detect Git or Perforce, update .gitignore / .p4ignore
+ta setup vcs                        # auto-detect the VCS, update .gitignore / .p4ignore / svn:ignore
 ta setup vcs --dry-run              # preview what would change without writing
+ta setup vcs --dry-run --json       # machine-readable detection, evidence and changes
+ta setup vcs --vcs svn              # force a VCS (git, svn, perforce, none, or a plugin name)
 ta setup vcs --force                # rewrite the TA block (e.g. after upgrading TA)
 ta setup vcs --project-type rust    # pre-populate [commit] auto_stage with Cargo.lock
 ta setup vcs --project-type node    # pre-populate with package-lock.json
@@ -15982,6 +15984,75 @@ For Perforce projects, it writes the same entries to `.p4ignore`. If `P4IGNORE` 
   TA wrote local-only paths to .p4ignore, but Perforce won't use it until:
     export P4IGNORE=.p4ignore   (add to your shell profile)
 ```
+
+### How `ta setup vcs` picks the VCS (detection evidence)
+
+One detector is shared by `ta init`, `ta setup vcs` and `ta doctor`. It recognizes git, Subversion (`svn`), Perforce, VCS adapter plugins, and `none`. Every run prints the markers that led to the choice, so you can see why:
+
+```
+VCS: git (detected)
+  evidence: .git at .git: .git directory present in the project root
+```
+
+A marker in the project root beats one in an enclosing directory, which beats an environment variable (`P4PORT`, `P4CLIENT`; the value is never printed or stored). Within the same level the order is git, svn, perforce, plugin. Markers that were found but lost are listed as `also found (not used)`. In an empty tree the output lists everything that was checked.
+
+For scripts and installers, `--json` prints one document instead of text. It is safe with `--dry-run`:
+
+```bash
+ta setup vcs --dry-run --json
+ta init --json
+```
+
+```json
+{
+  "schema_version": 1,
+  "dry_run": true,
+  "forced": false,
+  "source": "detected",
+  "kind": "git",
+  "plugin": null,
+  "detection": {
+    "schema_version": 1,
+    "kind": "git",
+    "plugin": null,
+    "evidence": [
+      { "kind": "git", "plugin": null, "marker": ".git", "path": ".git",
+        "reason": ".git directory present in the project root" }
+    ],
+    "ignored_evidence": [],
+    "checked": [".git", ".svn", ".p4config"]
+  },
+  "ignore": {
+    "target": ".gitignore",
+    "action": "would_update",
+    "added_entries": [".ta/staging/"],
+    "preserved_unrecognized": [],
+    "note": null
+  },
+  "workflow_changes": [],
+  "notes": []
+}
+```
+
+- `kind` is `git`, `svn`, `perforce`, `none` or `plugin` (then `plugin` holds the plugin name).
+- `evidence` lists what supports the chosen kind; `ignored_evidence` lists markers for other kinds that lost.
+- Paths use forward slashes on every platform and are relative to the project root; a marker found in an enclosing directory is an absolute path, and an environment variable appears as `env:P4PORT`.
+- `source` is `override` when `--vcs` was given. `detection` still shows what was found.
+- `ignore.action` is one of `created`, `updated`, `unchanged`, `would_create`, `would_update`, `skipped`. `ta init --json` wraps the same document as its `vcs` field, next to `project`, `already_initialized`, `created` and `skipped`.
+- The JSON Schemas are `schema/vcs_setup_report.schema.json`, `schema/vcs_detection.schema.json` and `schema/init_report.schema.json`.
+
+**Subversion.** `ta setup vcs --vcs svn` adds TA's local paths to the `svn:ignore` property of the `.ta` directory. `svn:ignore` has no comment syntax, so TA has no block to own: it only ever appends missing patterns and never removes, reorders or rewrites a line you already have. The change is a working copy modification you commit yourself. `.ta` must be under version control first (`svn add --depth=empty .ta`); if it is not, or `svn` is not installed, TA says so, changes nothing and exits non-zero.
+
+**VCS adapter plugins.** A plugin can declare detection markers in its `plugin.toml`:
+
+```toml
+[detect]
+markers = [".hg"]
+```
+
+When one of those exists in the project root and no built-in marker does, the kind is `plugin`. TA does not know a plugin's ignore format, so it writes no ignore file and prints what to add by hand. A plugin cannot take the names `git`, `svn`, `perforce` or `none`.
+
+**Re-running.** `ta setup vcs` only touches the TA block of the ignore file: everything else in the file, including its line endings (CRLF stays CRLF), is left exactly as it was. If the block is present but out of date (for example it predates `.ta/setup-progress.json`), a plain run refreshes it in place and lists the entries it added; `--force` is only needed to rewrite a block that is already complete. `ta init` runs the same step every time, including on an already-initialized project, and reports what changed.
 
 **`--force` never silently drops lines it doesn't recognize.** If you've manually added a `.ta/`-prefixed entry to your ignore file that isn't one of TA's own known paths, `ta setup vcs --force` preserves it as-is and prints a warning instead of removing it:
 

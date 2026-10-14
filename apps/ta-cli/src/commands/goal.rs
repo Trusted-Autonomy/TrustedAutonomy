@@ -3456,7 +3456,8 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
     // ── VCS checks (v0.13.13, VCS-agnostic v0.16.1.4) ───────────
     {
         use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
-        let vcs = VcsBackend::detect(&config.workspace_root);
+        let detection = ta_submit::detect_vcs(&config.workspace_root);
+        let vcs = detection.backend();
         print!("  VCS... ");
         match &vcs {
             VcsBackend::None => {
@@ -3464,7 +3465,7 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
                 pass += 1;
             }
             _ => {
-                println!("{} (ok)", vcs.as_str());
+                println!("{} (ok)", detection.summary());
                 pass += 1;
 
                 // Warn if Perforce ignore file is not configured.
@@ -3497,7 +3498,7 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
                     for p in &unignored {
                         println!("    .ta/{}", p);
                     }
-                    println!("    Fix: ta setup vcs --force");
+                    println!("    Fix: ta setup vcs");
                     warn += 1;
                 }
             }
@@ -3745,7 +3746,7 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
             );
             println!("    This file is written by agents during a goal run and must not");
             println!("    exist in the source tree — it may bleed into subsequent goals.");
-            println!("    Fix: rm .ta-decisions.json   (or: ta doctor --fix-ephemeral)");
+            println!("    Fix: rm .ta-decisions.json");
             warn += 1;
         } else {
             print!("  Stale ephemeral file check... ");

@@ -28,6 +28,7 @@ pub mod registry;
 pub mod social_adapter;
 pub mod social_plugin_protocol;
 pub mod svn;
+pub mod vcs_detect;
 pub mod vcs_plugin_manifest;
 pub mod vcs_plugin_protocol;
 
@@ -74,7 +75,8 @@ pub use social_plugin_protocol::{
     SocialDraftStatusParams, SocialHealthParams, SocialPluginError, SocialPluginRequest,
     SocialPluginResponse, SocialPostContent, SocialPostState, SOCIAL_PROTOCOL_VERSION,
 };
-pub use svn::SvnAdapter;
+pub use svn::{ensure_ta_ignore, SvnAdapter, SvnIgnoreOutcome};
+pub use vcs_detect::{detect_vcs, plugin_markers};
 pub use vcs_plugin_manifest::{
     discover_vcs_plugins, find_vcs_plugin, DiscoveredVcsPlugin, VcsPluginError, VcsPluginManifest,
     VcsPluginSource,

@@ -492,6 +492,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapte
             min_daemon_version: None,
             source_url: None,
             staging_env: std::collections::HashMap::new(),
+            detect: Default::default(),
         };
         // Should not panic or error — just logs.
         enforce_section15_plugin(&manifest);
@@ -511,6 +512,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapte
             min_daemon_version: None,
             source_url: None,
             staging_env: std::collections::HashMap::new(),
+            detect: Default::default(),
         };
         // Should warn (logged) but not fail.
         enforce_section15_plugin(&manifest);
