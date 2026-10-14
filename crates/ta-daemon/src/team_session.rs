@@ -75,6 +75,10 @@ pub fn role_launch_env(
         Ok(g) => vec![
             ("TA_WHITEBOARD_TOKEN".into(), g.token),
             ("TA_WHITEBOARD_TEAM_SESSION".into(), state.id.clone()),
+            // The role name selects the sandbox role class (reviewer, librarian,
+            // worker). The class is resolved by `ta run` against the owner's
+            // state-dir mapping, so the name alone grants nothing.
+            ("TA_WHITEBOARD_TEAM_ROLE".into(), role.to_string()),
             (
                 "TA_WHITEBOARD_SOURCE_DIR".into(),
                 project_root.display().to_string(),

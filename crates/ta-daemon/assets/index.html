@@ -1593,6 +1593,18 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   html += `<div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">Total Drafts</div></div>`;
   html += '</div>';
 
+  // Sandbox badge per running agent (v0.17.12.10). A degraded or unsandboxed
+  // launch is shown in the warning colour; `ta sandbox explain <goal-id>` has the detail.
+  const boxed = runningAgents.filter(a => a.sandbox_badge);
+  if (boxed.length > 0) {
+    html += '<div class="dash-section"><div class="dash-section-title">Agent Sandboxes</div>';
+    for (const a of boxed) {
+      const bad = /DEGRADED|UNSANDBOXED|REFUSED/.test(a.sandbox_badge);
+      html += `<div style="font-size:0.85rem;margin:0.2rem 0"><strong>${esc(a.title)}</strong> <span style="color:${bad ? 'var(--yellow)' : 'var(--green)'}">${esc(a.sandbox_badge)}</span></div>`;
+    }
+    html += '</div>';
+  }
+
   // ── Advisor quick-dialog (v0.17.0.12.6 item 4) ─────────────────
   // Sits below the Project Health stat boxes as a fast entry point for
   // queueing work without leaving Overview. Shares the same unified

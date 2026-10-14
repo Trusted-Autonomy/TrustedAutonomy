@@ -69,6 +69,7 @@ pub mod rules;
 pub mod rules_gate;
 pub mod run;
 pub mod runbook;
+pub mod sandbox;
 pub mod sandbox_launch;
 pub mod serve;
 pub mod session;

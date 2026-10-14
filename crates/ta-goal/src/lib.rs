@@ -64,7 +64,10 @@ pub use human_review::{
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use origin::OriginClass;
-pub use persona::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle, PersonaSummary};
+pub use persona::{
+    PersonaCapabilities, PersonaConfig, PersonaInner, PersonaSandboxConfig, PersonaStyle,
+    PersonaSummary,
+};
 pub use phase_selector::{PhaseSelector, PhaseSelectorConfig, SelectedPhase};
 pub use reviewer::{
     auto_correct_plan_md, parse_phase_items, verify_phase_completion, CompletionReport,

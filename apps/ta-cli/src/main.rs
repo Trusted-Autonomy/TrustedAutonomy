@@ -975,6 +975,15 @@ enum Commands {
         #[command(subcommand)]
         command: commands::rules::RulesCommands,
     },
+    /// See, check and pin the sandbox agents run in.
+    ///
+    /// `ta sandbox explain [goal-id|role]` shows the recorded decision or what a
+    /// role gets here, `ta sandbox test` probes the real box, and
+    /// `ta sandbox pin-persona <name>` approves a persona's `[sandbox]` table.
+    Sandbox {
+        #[command(subcommand)]
+        command: commands::sandbox::SandboxCommands,
+    },
     /// Manage the project behavioral constitution (.ta/constitution.md).
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
@@ -2170,6 +2179,7 @@ fn dispatch_raw(
         }
         Commands::Constitution { command } => commands::constitution::execute(command, config),
         Commands::Rules { command } => commands::rules::execute(command, config),
+        Commands::Sandbox { command } => commands::sandbox::execute(command, config),
         Commands::Memory { command } => commands::memory::execute(command, config),
         Commands::Adapter { command } => commands::adapter::execute(command, project_root),
         Commands::Install => commands::install::execute(project_root),

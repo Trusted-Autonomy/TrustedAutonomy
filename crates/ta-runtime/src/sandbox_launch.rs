@@ -80,7 +80,7 @@ impl SandboxPosture {
 // ── Role class ─────────────────────────────────────────────────────────────
 
 /// Role class a launch is compiled for. It comes from launch data (chat mode,
-/// team role), never from a free-form string the agent can influence.
+/// origin, team role), never from a free-form string the agent can influence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RoleClass {
@@ -88,16 +88,47 @@ pub enum RoleClass {
     Chat,
     Reviewer,
     Worker,
+    /// Wiki ingestion: a cache directory and the Wayfinder host, nothing else.
+    Librarian,
     Plugin,
 }
 
+/// What a role class may ever be given on top of its base box, whatever the
+/// owner policy, project config or persona asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ceiling {
+    pub extra_read: bool,
+    pub extra_write: bool,
+    pub extra_network: bool,
+}
+
 impl RoleClass {
+    pub const ALL: [RoleClass; 5] = [
+        RoleClass::Chat,
+        RoleClass::Reviewer,
+        RoleClass::Worker,
+        RoleClass::Librarian,
+        RoleClass::Plugin,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             RoleClass::Chat => "chat",
             RoleClass::Reviewer => "reviewer",
             RoleClass::Worker => "worker",
+            RoleClass::Librarian => "librarian",
             RoleClass::Plugin => "plugin",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "chat" | "cos" => Some(RoleClass::Chat),
+            "reviewer" => Some(RoleClass::Reviewer),
+            "worker" => Some(RoleClass::Worker),
+            "librarian" => Some(RoleClass::Librarian),
+            "plugin" => Some(RoleClass::Plugin),
+            _ => None,
         }
     }
 
@@ -105,6 +136,82 @@ impl RoleClass {
     /// capability refuses the launch under `balanced`, not just `strict`.
     pub fn is_untrusted_origin(self) -> bool {
         matches!(self, RoleClass::Chat | RoleClass::Reviewer)
+    }
+
+    /// The class for a launch. `chat` is true for chat mode and for origins
+    /// `cos` and `chat`; it forces the strictest class whatever the team role,
+    /// persona or owner mapping says. Otherwise the owner's `[sandbox.roles]`
+    /// mapping (state dir, so the agent cannot edit it) wins, then the built-in
+    /// name mapping. A launch with no team role is a worker.
+    pub fn resolve(
+        chat: bool,
+        team_role: Option<&str>,
+        owner_map: &std::collections::BTreeMap<String, RoleClass>,
+    ) -> RoleClass {
+        if chat {
+            return RoleClass::Chat;
+        }
+        let Some(role) = team_role.map(|r| r.trim().to_ascii_lowercase()) else {
+            return RoleClass::Worker;
+        };
+        if role.is_empty() {
+            return RoleClass::Worker;
+        }
+        owner_map
+            .iter()
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case(&role))
+            .map(|(_, class)| *class)
+            .unwrap_or_else(|| Self::builtin_for_role_name(&role))
+    }
+
+    /// Built-in mapping from a team role name. Names that read or review
+    /// become `reviewer`, wiki roles become `librarian`, everything else is a
+    /// worker. The owner can pin any name to a class in `policy.toml`.
+    pub fn builtin_for_role_name(role: &str) -> RoleClass {
+        let r = role.trim().to_ascii_lowercase();
+        let has = |words: &[&str]| words.iter().any(|w| r.contains(w));
+        if has(&[
+            "review",
+            "audit",
+            "qa",
+            "read_only",
+            "readonly",
+            "read-only",
+        ]) {
+            RoleClass::Reviewer
+        } else if has(&["librarian", "wiki", "scribe", "archivist"]) {
+            RoleClass::Librarian
+        } else {
+            RoleClass::Worker
+        }
+    }
+
+    /// What this class may be given beyond its base box. Chat gets nothing
+    /// (it reads project content only through MCP tools and reaches only the
+    /// model API); a reviewer may read more but never write or reach more hosts.
+    pub fn ceiling(self) -> Ceiling {
+        match self {
+            RoleClass::Chat => Ceiling {
+                extra_read: false,
+                extra_write: false,
+                extra_network: false,
+            },
+            RoleClass::Reviewer => Ceiling {
+                extra_read: true,
+                extra_write: false,
+                extra_network: false,
+            },
+            RoleClass::Librarian => Ceiling {
+                extra_read: true,
+                extra_write: false,
+                extra_network: true,
+            },
+            RoleClass::Worker | RoleClass::Plugin => Ceiling {
+                extra_read: true,
+                extra_write: true,
+                extra_network: true,
+            },
+        }
     }
 }
 
@@ -207,6 +314,17 @@ pub fn required_capabilities(role: RoleClass) -> BTreeSet<Capability> {
         RoleClass::Worker => [FsDenyTaTree, FsWriteConfined, EnvScrubbed, GatewayOutside]
             .into_iter()
             .collect(),
+        // The librarian reads untrusted wiki text but is not a chat surface:
+        // loopback must be closed, a missing capability degrades under balanced.
+        RoleClass::Librarian => [
+            FsDenyTaTree,
+            FsWriteConfined,
+            NetLoopbackBlocked,
+            EnvScrubbed,
+            GatewayOutside,
+        ]
+        .into_iter()
+        .collect(),
         RoleClass::Plugin => [FsDenyTaTree, FsWriteConfined, EnvScrubbed]
             .into_iter()
             .collect(),
@@ -331,6 +449,11 @@ pub struct TrustedPolicy {
     pub allow_write: Vec<String>,
     #[serde(default)]
     pub allow_network: Vec<String>,
+    /// Team role name -> role class (`reviewer`, `worker`, `librarian`,
+    /// `plugin`). Lives in the state dir, so an agent cannot reclassify its own
+    /// role. Names not listed use the built-in mapping.
+    #[serde(default)]
+    pub roles: std::collections::BTreeMap<String, RoleClass>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,6 +491,57 @@ impl TrustedPolicy {
     }
 }
 
+/// File name of the owner's persona pins inside `ProjectState::sandbox_dir()`.
+pub const PERSONA_PINS_FILENAME: &str = "persona-pins.toml";
+
+/// Persona name -> sha256 (hex) of the persona file the owner reviewed.
+pub fn load_persona_pins(
+    sandbox_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    #[derive(Deserialize, Default)]
+    struct Pins {
+        #[serde(default)]
+        pins: std::collections::BTreeMap<String, String>,
+    }
+    let path = sandbox_dir.join(PERSONA_PINS_FILENAME);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str::<Pins>(&text).map(|p| p.pins).map_err(|e| {
+            format!(
+                "invalid persona pins file {}: {e}. Fix or delete it, then re-run \
+                 `ta sandbox pin-persona <name>`.",
+                path.display()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(format!(
+            "could not read the persona pins {}: {e}. Check its permissions.",
+            path.display()
+        )),
+    }
+}
+
+/// Record `hash` as the reviewed hash of persona `name`.
+pub fn save_persona_pin(sandbox_dir: &Path, name: &str, hash: &str) -> Result<PathBuf, String> {
+    let mut pins = load_persona_pins(sandbox_dir)?;
+    pins.insert(name.to_string(), hash.to_string());
+    let mut text = String::from(
+        "# Persona files whose [sandbox] additions the owner has reviewed (ta sandbox pin-persona).\n\
+         # Written by TA; lives outside the project so an agent cannot edit it.\n[pins]\n",
+    );
+    for (k, v) in &pins {
+        text.push_str(&format!("{k:?} = {v:?}\n"));
+    }
+    std::fs::create_dir_all(sandbox_dir).map_err(|e| {
+        format!(
+            "could not create {}: {e}. Check that the TA state directory is writable.",
+            sandbox_dir.display()
+        )
+    })?;
+    let path = sandbox_dir.join(PERSONA_PINS_FILENAME);
+    std::fs::write(&path, text).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// What project config (read from the real project root, never from
 /// staging) asks for. It can only add requirements.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -403,6 +577,32 @@ pub struct LaunchContext {
     /// The launcher runs the per-goal egress proxy for this goal, so hostname
     /// allowlisting is enforceable where the provider can confine the network.
     pub egress_proxy: bool,
+    /// The persona's `[sandbox]` table, when the launch has a persona.
+    pub persona: Option<PersonaSandbox>,
+}
+
+/// A persona's `[sandbox]` additions plus the facts needed to trust them.
+/// Persona files live in the project tree and earlier goals can write them, so
+/// the additions count only while the file's hash matches a pin the owner made
+/// in the state dir (`ta sandbox pin-persona`, stored in `persona-pins.toml`). Unpinned or drifted additions
+/// are ignored with a warning; the persona can never loosen the box.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PersonaSandbox {
+    pub name: String,
+    /// Hosts the persona asks to reach (package registries, docs sites).
+    pub allow_hosts: Vec<String>,
+    /// Read-only paths the persona asks for (toolchains).
+    pub allow_read: Vec<String>,
+    /// sha256 (hex) of the persona file as read for this launch.
+    pub file_hash: String,
+    /// The owner's pin for this persona name matches `file_hash`.
+    pub pinned: bool,
+}
+
+impl PersonaSandbox {
+    pub fn has_additions(&self) -> bool {
+        !self.allow_hosts.is_empty() || !self.allow_read.is_empty()
+    }
 }
 
 // ── Profile ────────────────────────────────────────────────────────────────
@@ -425,6 +625,8 @@ pub struct SandboxProfile {
     pub unix_sockets: Vec<PathBuf>,
     /// The per-goal egress proxy is available to this launch.
     pub egress_proxy: bool,
+    /// Persona additions that were applied (pinned and within the class ceiling).
+    pub persona_applied: Option<String>,
     /// Entries dropped or ignored while compiling, each with the reason.
     pub warnings: Vec<String>,
 }
@@ -439,11 +641,18 @@ impl SandboxProfile {
         let mut warnings = Vec::new();
 
         // Posture: the stricter of the owner's floor and the project's ask.
-        // With neither, `open` (the pre-existing behavior); project config can
-        // only move toward `strict`, never away from the owner's floor.
-        let floor = trusted
-            .and_then(|t| t.posture)
-            .unwrap_or(SandboxPosture::Open);
+        // Chat and team-role launches are on by default: with no owner floor
+        // they get `balanced`. Everything else keeps `open` (the pre-existing
+        // behavior). The owner opts out with `posture = "open"` in the state-dir
+        // policy; project config can only move toward `strict`, never away from
+        // the owner's floor.
+        let default_on = ctx.role_class == RoleClass::Chat || ctx.team_role;
+        let default_floor = if default_on {
+            SandboxPosture::Balanced
+        } else {
+            SandboxPosture::Open
+        };
+        let floor = trusted.and_then(|t| t.posture).unwrap_or(default_floor);
         let posture = match project.posture {
             Some(p) => floor.tighten(p),
             None => floor,
@@ -485,6 +694,23 @@ impl SandboxProfile {
             }
         }
 
+        // Persona additions: only a pinned persona, only up to the class ceiling.
+        let mut persona_applied = None;
+        if let Some(persona) = ctx.persona.as_ref().filter(|p| p.has_additions()) {
+            if !persona.pinned {
+                warnings.push(format!(
+                    "ignored the [sandbox] additions in persona \"{}\": its file is not pinned \
+                     (or changed since it was pinned). Review it, then run \
+                     `ta sandbox pin-persona {}`; a persona can never loosen the box without a pin",
+                    persona.name, persona.name
+                ));
+            } else {
+                allow_read.extend(persona.allow_read.iter().map(PathBuf::from));
+                allow_network.extend(persona.allow_hosts.iter().cloned());
+                persona_applied = Some(persona.file_hash.clone());
+            }
+        }
+
         // Deny wins: an allowance that reaches into a protected path is dropped.
         let ci = filesystem_is_case_insensitive();
         let keep = |kind: &str, p: PathBuf, warnings: &mut Vec<String>| -> Option<PathBuf> {
@@ -510,14 +736,45 @@ impl SandboxProfile {
                 Some(p)
             }
         };
-        let allow_read: Vec<PathBuf> = allow_read
+        let mut allow_read: Vec<PathBuf> = allow_read
             .into_iter()
             .filter_map(|p| keep("read", p, &mut warnings))
             .collect();
-        let allow_write: Vec<PathBuf> = allow_write
+        let mut allow_write: Vec<PathBuf> = allow_write
             .into_iter()
             .filter_map(|p| keep("write", p, &mut warnings))
             .collect();
+
+        // Class ceiling: whatever the sources asked for, the class cannot get
+        // more than its ceiling. Applied on every platform, before capabilities
+        // are checked, so a chat or reviewer goal that was granted network has
+        // the grant stripped identically on macOS, Linux and Windows.
+        let ceiling = ctx.role_class.ceiling();
+        let class = ctx.role_class.name();
+        if !ceiling.extra_read && !allow_read.is_empty() {
+            warnings.push(format!(
+                "dropped {} read allowance(s) for the {class} class: it reads project content only \
+                 through the MCP tools",
+                allow_read.len()
+            ));
+            allow_read.clear();
+        }
+        if !ceiling.extra_write && !allow_write.is_empty() {
+            warnings.push(format!(
+                "dropped {} write allowance(s) for the {class} class: it writes only to its own \
+                 scratch and agent home",
+                allow_write.len()
+            ));
+            allow_write.clear();
+        }
+        if !ceiling.extra_network && !allow_network.is_empty() {
+            warnings.push(format!(
+                "dropped network grant(s) [{}] for the {class} class: it reaches the model API \
+                 host only",
+                allow_network.join(", ")
+            ));
+            allow_network.clear();
+        }
         allow_network.sort();
         allow_network.dedup();
 
@@ -537,6 +794,7 @@ impl SandboxProfile {
             deny_paths,
             unix_sockets,
             egress_proxy: ctx.egress_proxy,
+            persona_applied,
             warnings,
         }
     }
@@ -857,6 +1115,110 @@ pub fn decide(
     }
 }
 
+impl SandboxDecision {
+    /// Short badge for `ta status` and Studio, e.g. `sandbox enforced (chat, balanced)`.
+    pub fn badge(&self) -> String {
+        badge_from_parts(
+            self.outcome.name(),
+            self.posture.name(),
+            self.role_class.name(),
+            &self.missing,
+        )
+    }
+}
+
+/// The badge text from a decision's recorded fields (the `sandbox_decision`
+/// event stores strings), so `ta status`, `ta sandbox explain` and Studio
+/// word it identically.
+pub fn badge_from_parts(
+    outcome: &str,
+    posture: &str,
+    role_class: &str,
+    missing: &[String],
+) -> String {
+    let missing = missing.join(", ");
+    match outcome {
+        "not_requested" => "sandbox off".to_string(),
+        "enforced" => format!("sandbox enforced ({role_class}, {posture})"),
+        "degraded" => format!("sandbox DEGRADED, missing {missing} ({role_class}, {posture})"),
+        "unsandboxed" => format!("UNSANDBOXED, missing {missing} ({role_class}, {posture})"),
+        "refused" => format!("sandbox REFUSED, missing {missing} ({role_class}, {posture})"),
+        other => format!("sandbox {other} ({role_class}, {posture})"),
+    }
+}
+
+/// How ready this machine is to run one role class under each posture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RoleReadiness {
+    pub role: RoleClass,
+    pub required: Vec<Capability>,
+    pub missing: Vec<Capability>,
+    /// What `decide` concludes for this class under each posture.
+    pub by_posture: Vec<(SandboxPosture, Outcome)>,
+}
+
+/// A representative profile for `role` (egress proxy running, no network grant,
+/// gateway outside, environment scrubbed), for the doctor matrix and
+/// `ta sandbox explain <role>` when there is no goal to read a profile from.
+pub fn representative_profile(role: RoleClass, posture: SandboxPosture) -> SandboxProfile {
+    let ctx = LaunchContext {
+        goal_id: "role-preview".to_string(),
+        role_class: role,
+        team_role: true,
+        project_root: PathBuf::from("/project"),
+        staging: PathBuf::from("/project/.ta/staging/role-preview"),
+        state_dir: None,
+        agent_home: PathBuf::from("/agent-home"),
+        user_home: None,
+        mediation_socket: Some(PathBuf::from("/agent-home/mediation.sock")),
+        egress_proxy: true,
+        persona: None,
+    };
+    let mut profile = SandboxProfile::compile(None, &ProjectRequest::default(), &ctx);
+    profile.posture = posture;
+    profile.requested = true;
+    profile
+}
+
+/// The role-by-posture readiness table for `provider`, for `ta doctor` and
+/// `ta sandbox explain`. Computed from the same capability matrix and decision
+/// table a real launch uses, never from the provider's name.
+pub fn readiness(provider: &SandboxProvider) -> Vec<RoleReadiness> {
+    RoleClass::ALL
+        .iter()
+        .map(|&role| {
+            let probe = representative_profile(role, SandboxPosture::Balanced);
+            let mut enforced = provider_capabilities(provider, &probe);
+            enforced.insert(Capability::EnvScrubbed);
+            enforced.insert(Capability::GatewayOutside);
+            let missing: Vec<Capability> = probe.required.difference(&enforced).copied().collect();
+            let by_posture = [
+                SandboxPosture::Strict,
+                SandboxPosture::Balanced,
+                SandboxPosture::Open,
+            ]
+            .into_iter()
+            .map(|posture| {
+                let profile = representative_profile(role, posture);
+                let d = decide(
+                    &profile,
+                    provider,
+                    true,
+                    GatewayPlacement::OutOfSandboxSocket,
+                );
+                (posture, d.outcome)
+            })
+            .collect();
+            RoleReadiness {
+                role,
+                required: probe.required.iter().copied().collect(),
+                missing,
+                by_posture,
+            }
+        })
+        .collect()
+}
+
 /// The draft label shown in review for a degraded launch, or `None`.
 pub fn degraded_label(decision: &SandboxDecision) -> Option<String> {
     match decision.outcome {
@@ -1064,6 +1426,7 @@ mod tests {
             user_home: Some(PathBuf::from("/home/u")),
             mediation_socket: None,
             egress_proxy: false,
+            persona: None,
         }
     }
 
@@ -1303,7 +1666,11 @@ mod tests {
                 allow_network: hosts.iter().map(|h| h.to_string()).collect(),
                 ..Default::default()
             };
-            SandboxProfile::compile(Some(&trusted), &project_open(), &ctx(RoleClass::Chat, true))
+            SandboxProfile::compile(
+                Some(&trusted),
+                &project_open(),
+                &ctx(RoleClass::Worker, true),
+            )
         };
         // Named hosts: the network namespace stays, the egress relay is the only way out.
         let named = make(&["api.anthropic.com"]);
@@ -1321,14 +1688,15 @@ mod tests {
         let caps = provider_capabilities(&SandboxProvider::LinuxBwrap, &open);
         assert!(!caps.contains(&Capability::NetLoopbackBlocked));
         assert!(!caps.contains(&Capability::NetEgressAllowlist));
-        let d = decide(
-            &open,
-            &SandboxProvider::LinuxBwrap,
-            true,
-            GatewayPlacement::OutOfSandboxSocket,
-        );
-        assert_eq!(d.outcome, Outcome::Refused);
-        assert!(d.missing.contains(&"net.loopback_blocked".to_string()));
+        // The chat and reviewer classes never keep the "*" grant (class ceiling),
+        // so for them loopback stays blocked on Linux too.
+        let trusted = TrustedPolicy {
+            allow_network: vec!["*".into()],
+            ..Default::default()
+        };
+        let chat =
+            SandboxProfile::compile(Some(&trusted), &project_open(), &ctx(RoleClass::Chat, true));
+        assert!(chat.allow_network.is_empty());
     }
 
     #[test]
@@ -1659,6 +2027,7 @@ mod tests {
             user_home: None,
             mediation_socket: Some(sock.clone()),
             egress_proxy: false,
+            persona: None,
         };
         let project_req = ProjectRequest {
             enabled: true,
@@ -1714,5 +2083,263 @@ mod tests {
             stdout.contains("SOCKET_VISIBLE"),
             "socket not reachable: {stdout} {stderr}"
         );
+    }
+
+    // ── v0.17.12.10: per-role profiles and default-on ──────────────────────
+
+    #[test]
+    fn chat_and_team_roles_are_on_by_default_under_balanced() {
+        let chat = SandboxProfile::compile(None, &project_open(), &ctx(RoleClass::Chat, false));
+        assert!(chat.requested);
+        assert_eq!(chat.posture, SandboxPosture::Balanced);
+        let team = SandboxProfile::compile(None, &project_open(), &ctx(RoleClass::Worker, true));
+        assert!(team.requested);
+        assert_eq!(team.posture, SandboxPosture::Balanced);
+        // A plain solo worker keeps the pre-existing behavior.
+        let solo = SandboxProfile::compile(None, &project_open(), &ctx(RoleClass::Worker, false));
+        assert!(!solo.requested);
+    }
+
+    #[test]
+    fn only_the_owner_can_turn_default_on_off() {
+        let owner_open = TrustedPolicy {
+            posture: Some(SandboxPosture::Open),
+            ..Default::default()
+        };
+        let p = SandboxProfile::compile(
+            Some(&owner_open),
+            &project_open(),
+            &ctx(RoleClass::Chat, false),
+        );
+        assert_eq!(p.posture, SandboxPosture::Open);
+        assert!(!p.requested);
+        // Project config asking for open changes nothing.
+        let project_open_ask = ProjectRequest {
+            posture: Some(SandboxPosture::Open),
+            ..Default::default()
+        };
+        let p = SandboxProfile::compile(None, &project_open_ask, &ctx(RoleClass::Chat, false));
+        assert_eq!(p.posture, SandboxPosture::Balanced);
+        assert!(p.requested);
+    }
+
+    #[test]
+    fn chat_without_capabilities_is_refused_in_every_posture_but_open() {
+        for posture in [SandboxPosture::Balanced, SandboxPosture::Strict] {
+            let mut p =
+                SandboxProfile::compile(None, &project_open(), &ctx(RoleClass::Chat, false));
+            p.posture = posture;
+            let d = decide(
+                &p,
+                &SandboxProvider::None,
+                true,
+                GatewayPlacement::StdioUnsandboxed,
+            );
+            assert!(d.is_refused(), "{posture:?}: {}", d.detail);
+        }
+        let mut p = SandboxProfile::compile(None, &project_open(), &ctx(RoleClass::Chat, false));
+        p.posture = SandboxPosture::Open;
+        let d = decide(
+            &p,
+            &SandboxProvider::None,
+            true,
+            GatewayPlacement::StdioUnsandboxed,
+        );
+        assert!(!d.is_refused());
+    }
+
+    #[test]
+    fn origin_forces_the_chat_class_over_team_role_and_owner_mapping() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("cos".to_string(), RoleClass::Worker);
+        assert_eq!(
+            RoleClass::resolve(true, Some("cos"), &map),
+            RoleClass::Chat,
+            "a chat or cos origin wins whatever the role is mapped to"
+        );
+        assert_eq!(RoleClass::resolve(false, None, &map), RoleClass::Worker);
+    }
+
+    #[test]
+    fn team_role_names_map_to_classes_and_the_owner_can_override() {
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(
+            RoleClass::resolve(false, Some("Code-Reviewer"), &none),
+            RoleClass::Reviewer
+        );
+        assert_eq!(
+            RoleClass::resolve(false, Some("wiki-librarian"), &none),
+            RoleClass::Librarian
+        );
+        assert_eq!(
+            RoleClass::resolve(false, Some("implementer"), &none),
+            RoleClass::Worker
+        );
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("Implementer".to_string(), RoleClass::Reviewer);
+        assert_eq!(
+            RoleClass::resolve(false, Some("implementer"), &map),
+            RoleClass::Reviewer
+        );
+    }
+
+    #[test]
+    fn owner_policy_parses_role_mapping() {
+        let t = TrustedPolicy::parse(
+            "[sandbox]\nposture = \"balanced\"\n[sandbox.roles]\nqa-bot = \"reviewer\"\n",
+        )
+        .unwrap();
+        assert_eq!(t.roles.get("qa-bot"), Some(&RoleClass::Reviewer));
+        assert!(TrustedPolicy::parse("[sandbox.roles]\nx = \"root\"\n").is_err());
+    }
+
+    #[test]
+    fn chat_ceiling_strips_every_grant_including_open_network_on_all_platforms() {
+        let trusted = TrustedPolicy {
+            allow_read: vec!["/opt/tools".into()],
+            allow_write: vec!["/opt/out".into()],
+            allow_network: vec!["*".into(), "crates.io".into()],
+            ..Default::default()
+        };
+        let p = SandboxProfile::compile(
+            Some(&trusted),
+            &project_open(),
+            &ctx(RoleClass::Chat, false),
+        );
+        assert!(p.allow_read.is_empty() && p.allow_write.is_empty());
+        assert!(p.allow_network.is_empty(), "no \"*\", no extra hosts");
+        assert!(p.warnings.iter().any(|w| w.contains("network grant")));
+        // With the grant gone, Linux bubblewrap keeps loopback blocked for chat.
+        let mut p = p;
+        p.egress_proxy = true;
+        let caps = provider_capabilities(&SandboxProvider::LinuxBwrap, &p);
+        assert!(caps.contains(&Capability::NetLoopbackBlocked));
+    }
+
+    #[test]
+    fn reviewer_may_read_more_but_never_write_or_reach_more_hosts() {
+        let trusted = TrustedPolicy {
+            allow_read: vec!["/opt/tools".into()],
+            allow_write: vec!["/opt/out".into()],
+            allow_network: vec!["docs.rs".into()],
+            ..Default::default()
+        };
+        let p = SandboxProfile::compile(
+            Some(&trusted),
+            &project_open(),
+            &ctx(RoleClass::Reviewer, true),
+        );
+        assert_eq!(p.allow_read, vec![PathBuf::from("/opt/tools")]);
+        assert!(p.allow_write.is_empty());
+        assert!(p.allow_network.is_empty());
+        let w = SandboxProfile::compile(
+            Some(&trusted),
+            &project_open(),
+            &ctx(RoleClass::Worker, true),
+        );
+        assert_eq!(w.allow_network, vec!["docs.rs".to_string()]);
+        assert_eq!(w.allow_write, vec![PathBuf::from("/opt/out")]);
+        let l = SandboxProfile::compile(
+            Some(&trusted),
+            &project_open(),
+            &ctx(RoleClass::Librarian, true),
+        );
+        assert!(l.allow_write.is_empty());
+        assert_eq!(l.allow_network, vec!["docs.rs".to_string()]);
+    }
+
+    fn persona(pinned: bool) -> PersonaSandbox {
+        PersonaSandbox {
+            name: "analyst".into(),
+            allow_hosts: vec!["pypi.org".into()],
+            allow_read: vec!["/opt/py".into()],
+            file_hash: "h1".into(),
+            pinned,
+        }
+    }
+
+    #[test]
+    fn unpinned_persona_additions_are_ignored_with_a_warning() {
+        let mut c = ctx(RoleClass::Worker, true);
+        c.persona = Some(persona(false));
+        let p = SandboxProfile::compile(None, &project_open(), &c);
+        assert!(p.allow_network.is_empty() && p.allow_read.is_empty());
+        assert!(p.persona_applied.is_none());
+        assert!(p.warnings.iter().any(|w| w.contains("pin-persona")));
+    }
+
+    #[test]
+    fn pinned_persona_additions_apply_within_the_class_ceiling() {
+        let mut c = ctx(RoleClass::Worker, true);
+        c.persona = Some(persona(true));
+        let p = SandboxProfile::compile(None, &project_open(), &c);
+        assert_eq!(p.allow_network, vec!["pypi.org".to_string()]);
+        assert_eq!(p.allow_read, vec![PathBuf::from("/opt/py")]);
+        assert_eq!(p.persona_applied.as_deref(), Some("h1"));
+
+        let mut c = ctx(RoleClass::Chat, false);
+        c.persona = Some(persona(true));
+        let p = SandboxProfile::compile(None, &project_open(), &c);
+        assert!(p.allow_network.is_empty() && p.allow_read.is_empty());
+    }
+
+    #[test]
+    fn persona_read_into_a_protected_path_is_dropped() {
+        let mut c = ctx(RoleClass::Worker, true);
+        let mut per = persona(true);
+        per.allow_read = vec!["/state/projects/p_1/sandbox".into()];
+        c.persona = Some(per);
+        let p = SandboxProfile::compile(None, &project_open(), &c);
+        assert!(p.allow_read.is_empty());
+        assert!(p.warnings.iter().any(|w| w.contains("protected path")));
+    }
+
+    #[test]
+    fn persona_pins_round_trip_and_reject_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_persona_pins(dir.path()).unwrap().is_empty());
+        save_persona_pin(dir.path(), "analyst", "abc").unwrap();
+        save_persona_pin(dir.path(), "chief-of-staff", "def").unwrap();
+        save_persona_pin(dir.path(), "analyst", "abd").unwrap();
+        let pins = load_persona_pins(dir.path()).unwrap();
+        assert_eq!(pins.get("analyst").map(String::as_str), Some("abd"));
+        assert_eq!(pins.len(), 2);
+        std::fs::write(dir.path().join(PERSONA_PINS_FILENAME), "[pins\n").unwrap();
+        assert!(load_persona_pins(dir.path()).is_err());
+    }
+
+    #[test]
+    fn librarian_is_not_an_untrusted_origin_class_but_needs_loopback_closed() {
+        assert!(!RoleClass::Librarian.is_untrusted_origin());
+        assert!(
+            required_capabilities(RoleClass::Librarian).contains(&Capability::NetLoopbackBlocked)
+        );
+    }
+
+    #[test]
+    fn readiness_matrix_lists_every_class_and_refuses_chat_without_a_provider() {
+        let rows = readiness(&SandboxProvider::None);
+        assert_eq!(rows.len(), RoleClass::ALL.len());
+        let chat = rows.iter().find(|r| r.role == RoleClass::Chat).unwrap();
+        assert!(!chat.missing.is_empty());
+        let outcome = |r: &RoleReadiness, p| r.by_posture.iter().find(|(x, _)| *x == p).unwrap().1;
+        assert_eq!(outcome(chat, SandboxPosture::Balanced), Outcome::Refused);
+        assert_eq!(outcome(chat, SandboxPosture::Strict), Outcome::Refused);
+        assert_ne!(outcome(chat, SandboxPosture::Open), Outcome::Refused);
+        let worker = rows.iter().find(|r| r.role == RoleClass::Worker).unwrap();
+        assert_ne!(outcome(worker, SandboxPosture::Balanced), Outcome::Refused);
+    }
+
+    #[test]
+    fn badge_names_the_outcome_and_the_missing_capability() {
+        let p = representative_profile(RoleClass::Chat, SandboxPosture::Balanced);
+        let d = decide(
+            &p,
+            &SandboxProvider::None,
+            true,
+            GatewayPlacement::StdioUnsandboxed,
+        );
+        assert!(d.badge().starts_with("sandbox REFUSED"), "{}", d.badge());
+        assert!(d.badge().contains("fs.deny_ta_tree"));
     }
 }

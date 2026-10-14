@@ -5357,7 +5357,7 @@ Without this file, TA auto-detects your VCS (Git > SVN > Perforce > none) and us
 
 ### Agent Sandboxing (`[sandbox]`)
 
-Restrict the agent's filesystem and network access using OS-level sandboxing. Disabled by default — enable when you want to confine what an agent can read, write, or reach:
+Restrict the agent's filesystem and network access using OS-level sandboxing. Chat and chief-of-staff sessions and team roles are boxed by default (see "Default-On Isolation for Chief of Staff and Team Roles" below). A solo `ta run` worker is not, until you turn it on:
 
 ```toml
 [sandbox]
@@ -5507,6 +5507,71 @@ On Windows the box has two layers, and `ta run` prints which ones it got on the 
 
 **Running the checks yourself.** `TA_REQUIRE_SANDBOX_CONFORMANCE=1 cargo test -p ta-runtime --test windows_conformance -- --nocapture` runs the suite on a Windows machine. It also prints `FINDING` lines saying whether an AppContainer process can see Credential Manager entries and use per-user DPAPI.
 
+### Default-On Isolation for Chief of Staff and Team Roles
+
+Chief-of-staff (CoS) and chat sessions, and every team role, start inside the OS sandbox with no setup. The default posture is `balanced`. A solo `ta run` worker with no team role is still not boxed unless you set `[sandbox] enabled = true` or `[security] level = "mid"`.
+
+**Each launch gets a role class.** The class sets the base box and a ceiling on what anything can add to it:
+
+| Class | Who gets it | Extra reads | Extra writes | Extra network hosts |
+|---|---|---|---|---|
+| `chat` | Chat mode, and any goal with origin `cos` or `chat` | No | No | No |
+| `reviewer` | Team roles named like review, audit, qa or read-only | Yes | No | No |
+| `worker` | Other team roles, and a launch with no role | Yes | Yes | Yes |
+| `librarian` | Wiki roles (librarian, wiki, scribe, archivist) | Yes | No | Yes |
+
+Origins `cos` and `chat` always get the `chat` class, whatever the team role, persona or your mapping says. To pin a team role to a class, add a table to the owner policy (the agent cannot edit it):
+
+```toml
+# <state dir>/sandbox/policy.toml
+[sandbox.roles]
+release_manager = "reviewer"
+docs_writer = "librarian"
+```
+
+A grant above a class's ceiling is stripped with a `[warn] sandbox:` line at launch, and the goal still runs. In particular, a chat or reviewer goal that is given network hosts (by project config, your policy or a persona) is **not refused on any platform**. The hosts are dropped and the goal runs with only the model API reachable. TA strips because refusing would stop the whole session over a setting the agent may have written.
+
+**Persona additions are pinned.** A persona file lives in the project tree, so an earlier goal could have edited it. A persona's `[sandbox]` table counts only while the file's hash matches a pin you made:
+
+```toml
+# .ta/personas/researcher.toml
+[sandbox]
+allow_hosts = ["crates.io", "docs.rs"]
+allow_read = ["/opt/toolchain"]
+```
+
+```bash
+ta sandbox pin-persona researcher     # needs your credential, records the hash in the state dir
+```
+
+Edit the persona file and the pin stops matching, so the additions switch off (with a warning) until you pin again. Even pinned additions stay under the role ceiling and can never reach a protected path. A verified owner rules file (`ta rules`) also tightens the posture for chat and team launches.
+
+**When the box is incomplete.** Under `strict` and `balanced`, a chat or reviewer launch that cannot get a required capability is refused, with the fix printed. Only `open` lets it through. Other classes launch degraded under `balanced` and the draft is labelled (below). To opt out of default-on isolation, set `posture = "open"` in the owner policy.
+
+**See what you have.**
+
+```bash
+ta sandbox explain                  # role x posture table for this machine
+ta sandbox explain chat             # one role: required and missing capabilities, ceiling, preview
+ta sandbox explain <goal-id>        # the recorded decision and any denials for a goal
+ta sandbox test --role chat         # run harmless probes inside the real box
+ta doctor                           # includes the same capability table; fails if chat would be refused
+ta status                           # a badge under each active agent, e.g. "sandbox enforced (chat, balanced)"
+```
+
+`ta sandbox test` writes inside a scratch staging directory (should work), outside it (should be denied) and reads a file standing in for the trusted policy (should be denied). It exits non-zero if the box does not behave as its profile says. On Windows it points you at the conformance suite instead.
+
+**Review labels.** A draft built from a goal whose launch was degraded or unsandboxed begins with `SANDBOX: built without sandbox capability <names>` in `ta draft view`. `ta sandbox explain <goal-id>` shows the full recorded decision.
+
+**Honest limits per platform.**
+
+- An empty denial list from `ta sandbox explain <goal-id>` on macOS is **not** proof that nothing was denied. The Seatbelt profile refuses the operation every time, but the report comes through the macOS unified log, which drops entries on some runs. The command says so whenever it prints an empty list on macOS.
+- macOS confines writes by allowlist and reads by denylist. Files in your home directory that are not on the deny list remain readable.
+- There are no per-class allowlists of programs the agent may run. Every class can run anything it can read.
+- A reviewer's staging copy is still writable. The reviewer class gets no extra writes, but TA does not yet mount its staging directory read-only, so a reviewer can change files in its own copy (its draft shows them).
+- Linux without bubblewrap uses Landlock and seccomp only: no private process list, and the network is limited only on kernels with Landlock ABI 4 (Linux 6.7 or later).
+- Windows: AppContainer has no host loopback, so the agent's network goes through a named pipe and a relay inside the container. The relay needs loopback to work inside one container, and the Windows conformance suite checks that on every run. TA's own secrets are kept out of the container's reach by the file grants and by the key living in the host user's Credential Manager, which an AppContainer process cannot see. Windows DPAPI is not a boundary here (a container process can use it for the same user), so TA never relies on a DPAPI-wrapped file to hide a secret from the agent.
+
 ### How the Sandbox Is Switched On, and What Happens When the Box Is Incomplete
 
 **Where the settings come from.** `ta run` reads `[sandbox]` and `[security] level` from your real project's `.ta/workflow.toml`, not from the agent's staging copy. The owner can also keep a policy the agent can never edit, in the TA state directory (the same place as your other control-plane secrets):
@@ -5543,7 +5608,7 @@ A refused launch prints what is missing and how to fix it (install a provider, d
 
 **Seeing what was refused.** On macOS the sandbox refuses the read, write or connection every time, and each refusal is tagged with the goal and, when the system log delivers it, recorded as a `sandbox_violation` event (printed as `[sandbox] denied: ...` during the run). Delivery through the macOS unified log is best-effort: an empty list does not prove nothing was denied. The egress proxy also writes every blocked connection to its own audit log and reports it as the same event on every platform. `ta events` lists them. The conformance suite that proves the refusals is `cargo test -p ta-runtime --test seatbelt_conformance` (it drives `ta-sandbox-probe` inside the generated profile); it runs in macOS CI.
 
-Two honest limits for now. On Linux with bubblewrap, a goal that is not granted unrestricted network (`*`) runs in its own network namespace and reaches the network only through TA's egress proxy, so loopback on the host is not reachable. In the Landlock-only fallback (bubblewrap unavailable) the network is limited only when the kernel has Landlock ABI 4 (Linux 6.7 or later); see "Sandboxing on Linux". Whether a chat or reviewer goal that grants network is still refused under `balanced` and `strict` on Linux is decided by the default-on isolation work (v0.17.12.10), not by this paragraph. And the process-inspection and sandbox-escape capabilities are enforced on macOS and Windows AppContainer, and on Linux through the seccomp deny list (ptrace, process_vm, bpf, keyctl, io_uring and nested user namespaces).
+Two things to know about the network. On Linux with bubblewrap, a goal that is not granted unrestricted network (`*`) runs in its own network namespace and reaches the network only through TA's egress proxy, so loopback on the host is not reachable. In the Landlock-only fallback (bubblewrap unavailable) the network is limited only when the kernel has Landlock ABI 4 (Linux 6.7 or later); see "Sandboxing on Linux". A chat or reviewer goal that is given network hosts has them stripped on every platform (see "Default-On Isolation" above). The process-inspection and sandbox-escape capabilities are enforced on macOS and Windows AppContainer, and on Linux through the seccomp deny list (ptrace, process_vm, bpf, keyctl, io_uring and nested user namespaces).
 
 ### Authentication (`[auth]` in `daemon.toml`)
 
