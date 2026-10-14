@@ -11290,7 +11290,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.20`
 
 ### v0.17.12.21 - Swappable Optimizer Slots and Optimizer Spawn Safety
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.20
 
 **Goal**: Input, context and output optimization sit behind one abstraction so an open-source tool (RTK, headroom) can be started with and replaced later. Owner condition: no repeated shell windows. Spec: same file, section 5.
