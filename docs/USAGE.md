@@ -5430,7 +5430,7 @@ enabled = true
 allow_network = ["api.anthropic.com", "api.github.com"]
 ```
 
-The sandbox feature is experimental and must be opted-in via `[experimental] sandbox = true` in `daemon.toml`. Without this flag, `sandbox.enabled = true` logs a warning and runs without sandboxing.
+The sandbox needs no experimental flag. It is switched on by `[sandbox] enabled = true`, by `[security] level = "mid"` or `"high"`, or by the owner's sandbox policy (see below). `ta run` prints a `[sandbox]` line for every launch saying whether the box was enforced, degraded, refused or not requested.
 
 **`ta doctor` sandbox check**
 
@@ -5455,11 +5455,45 @@ If AppContainer is unavailable (e.g., TA is nested inside a restricted Job Objec
 
 **What is always allowed** (regardless of `allow_read`):
 - The staging workspace (agent's working directory)
-- OS system libraries (`/usr`, `/System`, `/Library`, `/nix`, `/lib`)
+- OS system libraries and tools (on macOS reads are broad, with the protected paths below denied)
 - `/tmp` (tmpfs on Linux)
 - `/dev/null`, `/dev/tty`
 
 **Network filtering note**: On macOS, `allow_network` is a declaration (used for auditing) but the sandbox profile currently allows all outbound when any host is listed. Hostname-level network filtering (L7 proxy) is planned for v0.14.1.
+
+### How the Sandbox Is Switched On, and What Happens When the Box Is Incomplete
+
+**Where the settings come from.** `ta run` reads `[sandbox]` and `[security] level` from your real project's `.ta/workflow.toml`, not from the agent's staging copy. The owner can also keep a policy the agent can never edit, in the TA state directory (the same place as your other control-plane secrets):
+
+```toml
+# <state dir>/sandbox/policy.toml   (find the directory with `ta doctor`)
+[sandbox]
+enabled = true            # turn the sandbox on for every goal in this project
+posture = "balanced"      # strict | balanced | open: the floor project config cannot lower
+allow_read = ["/opt/toolchain"]
+allow_write = []
+allow_network = ["api.anthropic.com"]
+```
+
+Project config can only tighten this: the effective posture is the stricter of the policy and the project's `[security] level` (`low` is open, `mid` is balanced, `high` is strict). With no policy and `level = "low"`, nothing changes from before: no sandbox unless you set `[sandbox] enabled = true`.
+
+**Allowances from the project file.** On a solo project, `allow_read`, `allow_write` and `allow_network` in the project's `[sandbox]` still work. For team roles they are ignored with a warning, because an earlier goal could have written them; put team allowances in the owner's policy. An allowance that reaches into a protected path (the project's `.ta/`, the state directory, `.git`, `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gh`, `~/.docker`, `~/.kube`, `~/.netrc`) is dropped with a warning.
+
+**The MCP gateway runs outside the box.** A sandboxed agent cannot read `.ta/`, so `ta run` starts the TA MCP gateway itself on a private per-goal Unix socket, and the agent's MCP config runs `ta mcp-bridge` to reach it. The connection token is passed through the environment and never written to a file. The git credential helper and the `gh` wrapper ask the same gateway for a credential, so they keep working without the agent ever reading the broker key. Windows named pipes are not available yet, so on Windows the gateway capability is reported as missing and the launch follows the table below.
+
+**What the agent can see.** The environment is reduced to an allowlist: `PATH` (without protected directories), locale and terminal settings, model credentials (`ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_*`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`), and what TA sets itself. `SSH_AUTH_SOCK`, `AWS_*`, `GITHUB_TOKEN`, `GH_TOKEN`, `DBUS_*`, `DOCKER_HOST`, `KUBECONFIG` and TA's own control variables are always removed, and `ta run` lists the names it withheld. `HOME` and the temp directories point at a fresh per-goal agent home, with a TA-owned Claude settings file instead of your global one. If you sign in to Claude Code through the macOS Keychain, that login is not available inside the box: set `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in your shell first.
+
+**When a required capability is missing.** Each launch is compiled to a profile and checked against what the provider really enforces today:
+
+| Posture | Chat and reviewer roles | Worker and plugin roles |
+|---|---|---|
+| `strict` | Launch refused | Launch refused |
+| `balanced` | Launch refused | Launches degraded (or unsandboxed if no provider exists) |
+| `open` | Degraded or unsandboxed | Degraded or unsandboxed |
+
+A refused launch prints what is missing and how to fix it (install a provider, drop `allow_network`, or lower the posture in the owner's policy if you accept the risk). A degraded or unsandboxed launch says so on the `[sandbox]` line. Every launch records a `sandbox_decision` event with the posture, role, provider, required and enforced capabilities, and a hash of the compiled profile, so you can answer "what box was this agent in?" afterwards (`ta events` lists it).
+
+Two honest limits for now. Granting `allow_network` on macOS or Linux opens all outbound traffic including loopback until the per-goal egress proxy ships, so a chat or reviewer goal that grants network is refused under `balanced` and `strict`. And the process-inspection and sandbox-escape capabilities are only enforced on Windows AppContainer today.
 
 ### Authentication (`[auth]` in `daemon.toml`)
 

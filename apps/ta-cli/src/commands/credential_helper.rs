@@ -89,6 +89,23 @@ pub fn execute(
     };
     let host = host_without_port(host);
 
+    // Inside a sandbox `.ta/` is unreadable: ask the out-of-sandbox gateway.
+    #[cfg(unix)]
+    if let (Some(endpoint), Some(token)) = (
+        std::env::var_os("TA_CREDENTIAL_ENDPOINT"),
+        std::env::var("TA_MCP_CONNECTION_TOKEN").ok(),
+    ) {
+        match ta_credential_broker::resolve_via_endpoint(Path::new(&endpoint), &token, host) {
+            Ok(Some(r)) => write!(writer, "{}", format_response(&r.connector_id, &r.secret))?,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(host, error = %e, "ta credential-helper: gateway lookup failed");
+                return Err(e.into());
+            }
+        }
+        return Ok(());
+    }
+
     match resolve_for_host(project_root, host, use_keychain) {
         Ok(resolution) => {
             write!(

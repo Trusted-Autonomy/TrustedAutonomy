@@ -1607,6 +1607,9 @@ mod tests {
             allow_read: vec![],
             allow_write: vec![],
             allow_network: vec![],
+            deny_paths: vec![],
+            goal_paths: vec![],
+            unix_sockets: vec![],
         };
 
         let req = SpawnRequest {

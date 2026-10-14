@@ -9,7 +9,10 @@ use rmcp::ServiceExt;
 use ta_mcp_gateway::chat_launch::{ChatLaunch, ENV_CHAT_MODE};
 use ta_mcp_gateway::{GatewayConfig, TaGatewayServer};
 
-pub fn execute(project_root: &Path) -> anyhow::Result<()> {
+/// Build the gateway server this process would serve (plain or chat-locked),
+/// from the environment. Shared by the stdio and the per-goal socket entry
+/// points, so both honor chat-mode and the project-root rules identically.
+pub(crate) fn build_server(project_root: &Path) -> anyhow::Result<TaGatewayServer> {
     // Honor TA_PROJECT_ROOT env var if set (used when launched as MCP server
     // subprocess via .mcp.json). Falls back to --project-root CLI arg.
     let effective_root = std::env::var("TA_PROJECT_ROOT")
@@ -44,7 +47,11 @@ pub fn execute(project_root: &Path) -> anyhow::Result<()> {
         }
         None => TaGatewayServer::new(GatewayConfig::for_project(&effective_root))?,
     };
+    Ok(server)
+}
 
+pub fn execute(project_root: &Path) -> anyhow::Result<()> {
+    let server = build_server(project_root)?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let transport = rmcp::transport::stdio();

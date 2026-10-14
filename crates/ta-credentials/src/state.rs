@@ -406,6 +406,19 @@ impl ProjectState {
     pub fn rules_dir(&self) -> PathBuf {
         self.dir.join("rules")
     }
+    /// Trusted sandbox policy (v0.17.12.6): the owner's `policy.toml` that
+    /// the launcher compiles the sandbox profile from. Outside the project
+    /// tree and every staging workspace, so an agent cannot edit the box it
+    /// is launched into; project config may only tighten it.
+    pub fn sandbox_dir(&self) -> PathBuf {
+        self.dir.join("sandbox")
+    }
+    /// Per-goal agent homes (v0.17.12.6): `<dir>/<goal-id>/` is the only
+    /// state-dir path a sandboxed agent may write, and nothing in it
+    /// outlives the goal.
+    pub fn agent_homes_dir(&self) -> PathBuf {
+        self.dir.join("agent-homes")
+    }
 }
 
 fn human_write(path: &Path, contents: &str) -> Result<(), StateError> {

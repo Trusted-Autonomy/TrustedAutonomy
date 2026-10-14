@@ -59,6 +59,21 @@ pub struct SandboxPolicy {
     /// If empty, all outbound network is blocked.
     /// If contains "*", all outbound network is allowed.
     pub allow_network: Vec<String>,
+
+    /// Paths that are denied for read and write even when an allow rule
+    /// covers a parent (the project `.ta/` tree, the TA state directory,
+    /// credential stores). Emitted after the broad allows so deny wins
+    /// (v0.17.12.6). Bubblewrap never mounts these, so it needs no rule.
+    pub deny_paths: Vec<PathBuf>,
+
+    /// Per-goal read-write paths granted after `deny_paths` (the goal's
+    /// staging dir sits inside the denied `.ta/` tree, and the per-goal agent
+    /// home sits inside the denied state dir).
+    pub goal_paths: Vec<PathBuf>,
+
+    /// Unix socket files the agent may connect to (the per-goal mediation
+    /// endpoint). The only IPC channel into the control plane.
+    pub unix_sockets: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +109,9 @@ impl SandboxPolicy {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             allow_network: Vec::new(),
+            deny_paths: Vec::new(),
+            goal_paths: Vec::new(),
+            unix_sockets: Vec::new(),
         }
     }
 
@@ -269,13 +287,16 @@ impl SandboxPolicy {
             // Deny everything by default.
             "(version 1)".to_string(),
             "(deny default)".to_string(),
-            // Allow reading system libraries and tools.
-            r#"(allow file-read* (subpath "/usr"))"#.to_string(),
-            r#"(allow file-read* (subpath "/System"))"#.to_string(),
-            r#"(allow file-read* (subpath "/Library/Frameworks"))"#.to_string(),
-            r#"(allow file-read* (subpath "/private/etc"))"#.to_string(),
-            // Allow reading the home directory's nix profile (for Nix devShell tools).
-            r#"(allow file-read* (subpath "/nix"))"#.to_string(),
+            // Reads are allowed broadly, then protected paths are denied after
+            // every allow below (SBPL takes the last matching rule). A
+            // deny-default read set cannot work on current macOS: even
+            // `/usr/bin/true` aborts without `file-read-metadata`, and agent
+            // runtimes live in too many places (Homebrew, nvm, Nix, ~/.local)
+            // to enumerate. Secrets are protected by `deny_paths`; the
+            // targeted-deny profile is refined in v0.17.12.7.
+            "(allow file-read*)".to_string(),
+            "(allow file-read-metadata)".to_string(),
+            "(allow sysctl-read)".to_string(),
             // Process and signal operations the agent needs.
             r#"(allow process-exec*)"#.to_string(),
             r#"(allow process-fork)"#.to_string(),
@@ -312,6 +333,42 @@ impl SandboxPolicy {
             let p = path.to_string_lossy();
             lines.push(format!(
                 r#"(allow file-read* file-write* (subpath "{}"))"#,
+                sandbox_escape(&p)
+            ));
+        }
+
+        // Deny wins over every allow above, then the goal's own paths are
+        // re-granted after it: staging lives inside the denied `.ta/` tree and
+        // the agent home inside the denied state dir. SBPL takes the last
+        // matching rule.
+        if !self.deny_paths.is_empty() {
+            for path in &self.deny_paths {
+                let p = path.to_string_lossy();
+                lines.push(format!(
+                    r#"(deny file-read* file-write* (subpath "{}"))"#,
+                    sandbox_escape(&p)
+                ));
+            }
+            lines.push(format!(
+                r#"(allow file-read* file-write* (subpath "{}"))"#,
+                sandbox_escape(&workspace)
+            ));
+        }
+        for path in &self.goal_paths {
+            let p = path.to_string_lossy();
+            lines.push(format!(
+                r#"(allow file-read* file-write* (subpath "{}"))"#,
+                sandbox_escape(&p)
+            ));
+        }
+        for sock in &self.unix_sockets {
+            let p = sock.to_string_lossy();
+            lines.push(format!(
+                r#"(allow file-read* (literal "{}"))"#,
+                sandbox_escape(&p)
+            ));
+            lines.push(format!(
+                r#"(allow network-outbound (literal "{}"))"#,
                 sandbox_escape(&p)
             ));
         }
@@ -385,6 +442,25 @@ impl SandboxPolicy {
         // Proc filesystem (required by many tools).
         bwrap_args.push("--proc".to_string());
         bwrap_args.push("/proc".to_string());
+
+        // Mounted after the /tmp tmpfs so a socket directory under /tmp survives it.
+        // Per-goal paths (agent home, scratch) are read-write. Everything in
+        // `deny_paths` is simply never mounted, which is stronger than a rule.
+        for path in &self.goal_paths {
+            let p = path.to_string_lossy().to_string();
+            bwrap_args.push("--bind".to_string());
+            bwrap_args.push(p.clone());
+            bwrap_args.push(p);
+        }
+        // The mediation socket's directory, so the bridge can connect to it.
+        for sock in &self.unix_sockets {
+            if let Some(dir) = sock.parent() {
+                let p = dir.to_string_lossy().to_string();
+                bwrap_args.push("--bind".to_string());
+                bwrap_args.push(p.clone());
+                bwrap_args.push(p);
+            }
+        }
 
         // Network: unshare unless allow_network is non-empty.
         if self.allow_network.is_empty() {
@@ -473,6 +549,9 @@ mod tests {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             allow_network: Vec::new(),
+            deny_paths: Vec::new(),
+            goal_paths: Vec::new(),
+            unix_sockets: Vec::new(),
         };
         let working_dir = std::path::Path::new("/tmp/ta-staging/abc123");
         let profile = policy.generate_macos_profile(working_dir);
@@ -499,6 +578,9 @@ mod tests {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             allow_network: vec!["api.anthropic.com".to_string()],
+            deny_paths: Vec::new(),
+            goal_paths: Vec::new(),
+            unix_sockets: Vec::new(),
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
         let wrapped = policy.apply(req);
@@ -518,6 +600,9 @@ mod tests {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             allow_network: Vec::new(),
+            deny_paths: Vec::new(),
+            goal_paths: Vec::new(),
+            unix_sockets: Vec::new(),
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
         let wrapped = policy.apply(req.clone());
@@ -569,6 +654,9 @@ mod tests {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             allow_network: Vec::new(),
+            deny_paths: Vec::new(),
+            goal_paths: Vec::new(),
+            unix_sockets: Vec::new(),
         };
         let guard = policy.post_spawn_apply(1234);
         assert!(
@@ -589,6 +677,9 @@ mod tests {
             allow_read: Vec::new(),
             allow_write: Vec::new(),
             allow_network: Vec::new(),
+            deny_paths: Vec::new(),
+            goal_paths: Vec::new(),
+            unix_sockets: Vec::new(),
         };
         // PID 0 / 0xFFFFFFFF are never valid on any platform.
         let guard = policy.post_spawn_apply(0);
