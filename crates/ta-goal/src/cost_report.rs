@@ -123,7 +123,7 @@ pub struct SourceStatus {
 }
 
 /// Rows plus the status of the scan that produced them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Scan {
     pub rows: Vec<CostRow>,
     pub status: SourceStatus,
