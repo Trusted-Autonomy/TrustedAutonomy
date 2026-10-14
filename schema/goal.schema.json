@@ -619,6 +619,13 @@
       "description": "Detailed objective describing what needs to be accomplished.",
       "type": "string"
     },
+    "objective_file_content": {
+      "description": "Contents of the `--objective-file` as read at goal start (the file can\nchange later). Only set when that flag was used.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "origin": {
       "description": "Component that originated this goal (H9), e.g. `\"cos\"` when the\nChief-of-Staff classified and dispatched it, `\"chat\"` for a chat-mode\nsession. Set by `ta run --origin <name>` / `TA_GOAL_ORIGIN`. Goals\nwhose origin is in `crate::origin::NO_AUTO_APPROVE_ORIGINS` are never\nauto-approved by any path. `None` (every pre-existing record) keeps\ntoday's behavior.",
       "type": [
@@ -729,6 +736,24 @@
         "string",
         "null"
       ]
+    },
+    "start_branch": {
+      "description": "Branch checked out at goal start. Absent for a detached `HEAD` or a\nnon-git project.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "start_commit": {
+      "description": "Full SHA of `HEAD` in the source project when the goal started. Absent\nwhen the project is not a git repo (or has no commit yet). Needed to\nreplay the goal against the same code.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "start_dirty": {
+      "description": "`true` when the source project had uncommitted changes to tracked files\nat goal start, so `start_commit` alone does not reproduce the start\nstate. Only meaningful when `start_commit` is set.",
+      "type": "boolean"
     },
     "state": {
       "$ref": "#/$defs/GoalRunState",

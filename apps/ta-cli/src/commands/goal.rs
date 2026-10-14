@@ -1475,6 +1475,25 @@ fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
     Ok(value)
 }
 
+/// Start state lines for `ta goal status` (v0.17.12.17).
+fn print_start_state(g: &ta_goal::GoalRun) {
+    match g.start_commit.as_deref() {
+        Some(commit) => {
+            println!(
+                "Start:    {} on {}",
+                commit,
+                g.start_branch.as_deref().unwrap_or("(detached HEAD)")
+            );
+            if g.start_dirty {
+                println!("          {}", ta_goal::start_state::DIRTY_NOTICE);
+            }
+        }
+        None => println!(
+            "Start:    (not recorded: not a git project, or goal predates start-state capture)"
+        ),
+    }
+}
+
 fn show_status(
     store: &GoalRunStore,
     config: &GatewayConfig,
@@ -1547,6 +1566,7 @@ fn show_status(
             println!("Created:  {}", g.created_at.to_rfc3339());
             println!("Updated:  {}", g.updated_at.to_rfc3339());
             println!("Class:    {}", g.effective_origin_class());
+            print_start_state(&g);
             if g.token_usage().total() > 0 || g.cost_source != ta_goal::CostSource::None {
                 println!(
                     "{}",
@@ -3992,6 +4012,24 @@ pub(crate) fn reconcile_stale_terminal_goals(
 #[cfg(test)]
 mod spend_status_tests {
     use super::*;
+
+    #[test]
+    fn status_json_includes_the_start_state_when_recorded() {
+        let mut g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/tmp/w"),
+            std::path::PathBuf::from("/tmp/s"),
+        );
+        g.start_commit = Some("a".repeat(40));
+        g.start_branch = Some("main".to_string());
+        g.start_dirty = true;
+        let v = status_json(&g).unwrap();
+        assert_eq!(v["start_commit"], "a".repeat(40));
+        assert_eq!(v["start_branch"], "main");
+        assert_eq!(v["start_dirty"], true);
+    }
 
     #[test]
     fn status_json_keeps_the_goal_record_and_adds_the_completion_record() {

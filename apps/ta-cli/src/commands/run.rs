@@ -2156,6 +2156,71 @@ fn build_shadow_experiment_command(
     cmd
 }
 
+/// Record the goal's start state (commit, branch, dirty flag) and the
+/// `--objective-file` contents on the goal. Never fails the launch: a problem
+/// is logged and printed with what to do, and the goal runs without a
+/// recorded start state. Fields already on the record are left alone.
+fn stamp_start_state(
+    goal: &mut ta_goal::GoalRun,
+    root: &Path,
+    objective_file: Option<&Path>,
+    quiet: bool,
+) {
+    if goal.objective_file_content.is_none() {
+        if let Some(path) = objective_file {
+            match std::fs::read_to_string(path) {
+                Ok(text) => goal.objective_file_content = Some(text),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "could not store objective file contents on the goal");
+                    if !quiet {
+                        eprintln!(
+                            "[warn] Could not read --objective-file {} to store its contents on the goal: {}. \
+                             The goal runs, but its prompt cannot be replayed if the file changes.",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if goal.start_commit.is_some() {
+        return;
+    }
+    let detection = ta_submit::detect_vcs(root);
+    if detection.kind != ta_workspace::VcsKind::Git {
+        tracing::info!(goal_id = %goal.goal_run_id, vcs = detection.kind.as_str(), "goal start state not recorded: project is not a git repo");
+        if !quiet {
+            println!(
+                "Start state: not recorded ({} project; only git projects record a start commit).",
+                detection.kind.as_str()
+            );
+        }
+        return;
+    }
+    match ta_goal::start_state::capture_git_start_state(root) {
+        Ok(Some(state)) => {
+            tracing::info!(goal_id = %goal.goal_run_id, commit = ?state.commit, branch = ?state.branch, dirty = state.dirty, "goal start state recorded");
+            if state.dirty && !quiet {
+                println!(
+                    "Start state: uncommitted changes present; {}.",
+                    ta_goal::start_state::DIRTY_NOTICE
+                );
+            }
+            ta_goal::start_state::apply(goal, state);
+        }
+        Ok(None) => {
+            tracing::warn!(root = %root.display(), "git marker found but git reports no work tree; start state not recorded");
+        }
+        Err(e) => {
+            tracing::warn!(root = %root.display(), error = %e, "could not record goal start state");
+            if !quiet {
+                eprintln!("[warn] {}", e);
+            }
+        }
+    }
+}
+
 /// Spawn the shadow goal in the background. Fire-and-forget: the caller does
 /// not wait on the returned `Child`, so the canonical goal's own flow isn't
 /// slowed down by the shadow's agent session running concurrently.
@@ -3295,6 +3360,15 @@ pub fn execute(
         // provenance file or the inherited environment). Accounting data only:
         // nothing below reads it to decide anything. Set once at creation.
         super::spend::stamp_origin_class(&mut updated_goal, quiet)?;
+
+        // v0.17.12.17: record the commit the goal started from and the
+        // objective file's contents, once, at creation. A reused goal
+        // (`--goal-id`) keeps what it recorded.
+        let start_root = updated_goal
+            .source_dir
+            .clone()
+            .unwrap_or_else(|| config.workspace_root.clone());
+        stamp_start_state(&mut updated_goal, &start_root, objective_file, quiet);
 
         // Generic cost-classification tag (v0.17.x cost-experiment
         // framework): `--workflow-tag`, opaque to TA core. Set only when the
@@ -16894,5 +16968,143 @@ mod spend_tests {
             started.elapsed() < std::time::Duration::from_secs(20),
             "the agent was stopped, not waited out"
         );
+    }
+}
+
+#[cfg(test)]
+mod start_state_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn new_goal() -> ta_goal::GoalRun {
+        ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "a",
+            std::path::PathBuf::from("/w"),
+            std::path::PathBuf::from("/s"),
+        )
+    }
+
+    fn git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ] {
+            let st = Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .arg("-C")
+                .arg(dir.path())
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+        dir
+    }
+
+    #[test]
+    fn git_project_start_state_is_stamped_and_objective_file_stored() {
+        let repo = git_repo();
+        let ctx = tempfile::tempdir().unwrap();
+        let obj = ctx.path().join("obj.md");
+        std::fs::write(&obj, "# Do the thing\nbody").unwrap();
+        let mut g = new_goal();
+        stamp_start_state(&mut g, repo.path(), Some(&obj), true);
+        assert_eq!(g.start_commit.as_deref().map(str::len), Some(40));
+        assert_eq!(g.start_branch.as_deref(), Some("main"));
+        assert!(!g.start_dirty);
+        // The file changing later does not change what was stored.
+        std::fs::write(&obj, "changed").unwrap();
+        assert_eq!(
+            g.objective_file_content.as_deref(),
+            Some("# Do the thing\nbody")
+        );
+    }
+
+    #[test]
+    fn dirty_tree_sets_start_dirty() {
+        let repo = git_repo();
+        std::fs::write(repo.path().join("f.txt"), "1").unwrap();
+        for args in [
+            vec!["add", "f.txt"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "f",
+            ],
+        ] {
+            assert!(Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .arg("-C")
+                .arg(repo.path())
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(repo.path().join("f.txt"), "2").unwrap();
+        let mut g = new_goal();
+        stamp_start_state(&mut g, repo.path(), None, true);
+        assert!(g.start_dirty);
+        assert!(g.start_commit.is_some());
+        assert!(g.objective_file_content.is_none());
+    }
+
+    #[test]
+    fn non_git_project_records_nothing_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = new_goal();
+        stamp_start_state(&mut g, dir.path(), None, true);
+        assert!(g.start_commit.is_none());
+        assert!(g.start_branch.is_none());
+        assert!(!g.start_dirty);
+    }
+
+    #[test]
+    fn recorded_start_state_is_not_overwritten_on_goal_reuse() {
+        let repo = git_repo();
+        let mut g = new_goal();
+        g.start_commit = Some("a".repeat(40));
+        stamp_start_state(&mut g, repo.path(), None, true);
+        assert_eq!(g.start_commit, Some("a".repeat(40)));
+    }
+
+    #[test]
+    fn unreadable_objective_file_does_not_fail_the_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = new_goal();
+        stamp_start_state(
+            &mut g,
+            dir.path(),
+            Some(&dir.path().join("missing.md")),
+            true,
+        );
+        assert!(g.objective_file_content.is_none());
     }
 }
