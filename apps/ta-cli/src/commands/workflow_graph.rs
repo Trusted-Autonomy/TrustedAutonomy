@@ -197,6 +197,9 @@ impl ActionNode for AutoApproveAction {
             status: false,
             auto_repair: false,
             skip_plan_merge: false,
+            replay_actions: false,
+            // Auto-approve has no human present, so it never replays external actions.
+            no_replay_actions: true,
         };
         draft::execute(&cmd, &self.config).map_err(|e| GraphError::NodeExecution {
             node_id: "auto_approve".to_string(),

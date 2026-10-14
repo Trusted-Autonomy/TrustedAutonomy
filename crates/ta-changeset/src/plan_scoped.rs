@@ -357,6 +357,41 @@ fn check_line(line: &str) -> Option<String> {
     Some(out)
 }
 
+/// Matching passes, tried in order so the closest pairing wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchPass {
+    ExactSameNumber,
+    Exact,
+    NoteAppended,
+}
+
+/// Whether the draft's item `draft` is the source item `src`.
+///
+/// Exact (whitespace-collapsed) text always matches. In the `NoteAppended` pass, one text may be the
+/// other plus a trailing note: the shorter must be a prefix of the longer, ending on a word
+/// boundary, and the two must carry the same list number. Unnumbered bullets have no number
+/// to confirm the pairing, so they need a prefix of at least 12 characters.
+fn items_match(src: &OwnItem, draft: &OwnItem, pass: MatchPass) -> bool {
+    if src.text == draft.text {
+        return pass != MatchPass::ExactSameNumber || src.number == draft.number;
+    }
+    if pass != MatchPass::NoteAppended || src.number != draft.number {
+        return false;
+    }
+    let (short, long) = if src.text.len() <= draft.text.len() {
+        (&src.text, &draft.text)
+    } else {
+        (&draft.text, &src.text)
+    };
+    if short.is_empty() || (src.number.is_none() && short.chars().count() < 12) {
+        return false;
+    }
+    match long.strip_prefix(short.as_str()) {
+        Some(rest) => rest.chars().next().is_none_or(|c| !c.is_alphanumeric()),
+        None => false,
+    }
+}
+
 /// Carry the draft's item checkmarks for `phase_id` onto `source`, touching nothing else.
 ///
 /// `staging` is the draft's copy of `PLAN.md`. Items are matched by text, so
@@ -395,29 +430,46 @@ pub fn merge_phase_from_staging(source: &str, staging: &str, phase_id: &str) -> 
         }
     };
 
-    // Texts the draft has checked, as a multiset so duplicate item texts pair up in order.
-    let mut draft_checked: Vec<(String, bool, &OwnItem)> = stg_items
+    // Items the draft has checked, as a multiset so duplicate item texts pair up in order.
+    let mut draft_checked: Vec<(bool, &OwnItem)> = stg_items
         .iter()
         .filter(|i| i.checked)
-        .map(|i| (i.text.clone(), false, i))
+        .map(|i| (false, i))
         .collect();
 
+    // Pair each source item with a checked draft item. Exact text wins first; a second pass
+    // pairs an item the agent reworded only by appending (or dropping) a trailing note, which
+    // agents do when they check a box (seen in v0.17.11.27).
+    let mut paired: Vec<bool> = vec![false; src_items.len()];
+    for pass in [
+        MatchPass::ExactSameNumber,
+        MatchPass::Exact,
+        MatchPass::NoteAppended,
+    ] {
+        for (idx, item) in src_items.iter().enumerate() {
+            if paired[idx] {
+                continue;
+            }
+            let slot = draft_checked
+                .iter_mut()
+                .find(|(used, d)| !*used && items_match(item, d, pass));
+            if let Some(slot) = slot {
+                slot.0 = true;
+                paired[idx] = true;
+            }
+        }
+    }
+
     let mut new_lines: Vec<String> = src_lines.iter().map(|l| l.to_string()).collect();
-    for item in &src_items {
+    for (idx, item) in src_items.iter().enumerate() {
         // An item already checked in the source consumes one matching draft checkmark.
-        let slot = draft_checked
-            .iter_mut()
-            .find(|(text, used, _)| !*used && *text == item.text);
-        if let Some(slot) = slot {
-            slot.1 = true;
-            if !item.checked {
-                if let Some(flipped) = check_line(src_lines[item.line]) {
-                    new_lines[item.line] = flipped;
-                    let mut done = item.clone();
-                    done.checked = true;
-                    result.newly_checked.push(done);
-                    continue;
-                }
+        if paired[idx] && !item.checked {
+            if let Some(flipped) = check_line(src_lines[item.line]) {
+                new_lines[item.line] = flipped;
+                let mut done = item.clone();
+                done.checked = true;
+                result.newly_checked.push(done);
+                continue;
             }
         }
         if !item.checked {
@@ -426,8 +478,8 @@ pub fn merge_phase_from_staging(source: &str, staging: &str, phase_id: &str) -> 
     }
     result.unmatched_in_draft = draft_checked
         .into_iter()
-        .filter(|(_, used, _)| !*used)
-        .map(|(_, _, i)| i.clone())
+        .filter(|(used, _)| !*used)
+        .map(|(_, i)| i.clone())
         .collect();
     // The draft's own pending -> in_progress marker is honored. `done` is decided by the
     // status step (only when every own item is checked), never copied from a draft.
@@ -586,7 +638,8 @@ mod tests {
 
     #[test]
     fn reworded_checked_item_is_reported_not_applied() {
-        let staging = DOC.replace("1. [ ] Alpha thing\n2.", "1. [x] Alpha thing, reworded\n2.");
+        // A rewording that changes the item's own words (not just a trailing note).
+        let staging = DOC.replace("1. [ ] Alpha thing\n2.", "1. [x] Alpha widget\n2.");
         let m = merge_phase_from_staging(DOC, &staging, "v0.1.0");
         assert_eq!(m.content, DOC);
         assert_eq!(m.unmatched_in_draft.len(), 1);
@@ -610,5 +663,44 @@ mod tests {
             m.content,
             "### v3.0.0 - Old style\n<!-- status: pending -->\n- [x] a\n- [ ] b\n"
         );
+    }
+    #[test]
+    fn checkmark_with_an_appended_implementation_note_still_counts() {
+        let source =
+            "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [ ] Add the thing\n2. [ ] Other\n";
+        let staging = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] Add the thing (done in apply.rs, 3 tests)\n2. [ ] Other\n";
+        let m = merge_phase_from_staging(source, staging, "v1.0.0");
+        assert_eq!(m.newly_checked.len(), 1, "{m:?}");
+        assert!(m.unmatched_in_draft.is_empty(), "{m:?}");
+        assert_eq!(
+            m.content,
+            "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] Add the thing\n2. [ ] Other\n",
+            "only the box flips; the agent's note is not copied into the source"
+        );
+    }
+
+    #[test]
+    fn appended_note_does_not_match_a_different_item_number_or_word() {
+        // Same prefix but a different number: not the same item.
+        let source = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [ ] Add the thing\n";
+        let staging =
+            "### v1.0.0 - X\n<!-- status: in_progress -->\n2. [x] Add the thing, extended\n";
+        let m = merge_phase_from_staging(source, staging, "v1.0.0");
+        assert!(m.newly_checked.is_empty(), "{m:?}");
+        assert_eq!(m.unmatched_in_draft.len(), 1);
+        // A longer word is not a note.
+        let staging = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] Add the things\n";
+        let m = merge_phase_from_staging(source, staging, "v1.0.0");
+        assert!(m.newly_checked.is_empty(), "{m:?}");
+    }
+
+    #[test]
+    fn exact_match_is_preferred_over_a_prefix_match() {
+        let source = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [ ] Add\n2. [ ] Add\n";
+        let staging = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [ ] Add\n2. [x] Add\n";
+        let m = merge_phase_from_staging(source, staging, "v1.0.0");
+        assert_eq!(m.newly_checked.len(), 1);
+        assert!(m.content.contains("2. [x] Add"), "{}", m.content);
+        assert!(m.content.contains("1. [ ] Add"), "{}", m.content);
     }
 }

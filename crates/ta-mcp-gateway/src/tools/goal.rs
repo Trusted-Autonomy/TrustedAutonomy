@@ -36,6 +36,20 @@ pub fn handle_goal_start(
         ));
     }
 
+    // H9: the goal inherits the caller's origin (`TA_GOAL_ORIGIN`, exported by `ta run
+    // --origin`) at creation, so a goal started by a CoS or chat agent is never
+    // auto-approved. Read before the record exists: an invalid value fails closed
+    // rather than silently creating an origin-less goal.
+    let requested_origin = ta_goal::origin::origin_from_env().map_err(|e| {
+        McpError::invalid_params(
+            format!(
+                "ta_goal_start refused: {e}. Unset TA_GOAL_ORIGIN or set it to a valid origin \
+                 (for example `cos`) and retry."
+            ),
+            None,
+        )
+    })?;
+
     let goal_run = state
         .start_goal(&params.title, &params.objective, &params.agent_id)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -79,6 +93,12 @@ pub fn handle_goal_start(
         g.context_from = context_ids;
         g.thread_id = params.thread_id.clone();
         g.project_name = params.project_name.clone();
+        if let Some(origin) =
+            ta_goal::origin::origin_to_stamp(g.origin.as_deref(), requested_origin.as_deref())
+        {
+            tracing::info!(goal_id = %goal_id, origin = %origin, "goal origin set at creation");
+            g.origin = Some(origin);
+        }
 
         if !context_parts.is_empty() {
             chained_context = Some(format!(
@@ -131,6 +151,7 @@ pub fn handle_goal_start(
         "manifest_id": goal_run.manifest_id.to_string(),
         "launched": launched,
         "phase": params.phase,
+        "origin": requested_origin,
         "chained_context": chained_context,
     });
     Ok(CallToolResult::success(vec![Content::json(response)

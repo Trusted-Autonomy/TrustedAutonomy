@@ -1697,7 +1697,14 @@ fn execute_agent_step(
         // against the staging snapshot is both unnecessary and fragile (the
         // staging may predate recent source changes).
         let apply_status = Command::new(&ta_bin)
-            .args(["draft", "apply", &id_str, "--skip-verify"])
+            .args([
+                "draft",
+                "apply",
+                &id_str,
+                "--skip-verify",
+                "--no-replay-actions",
+            ])
+            .env(super::draft::NO_REPLAY_ACTIONS_ENV, "1")
             .current_dir(&config.workspace_root)
             .status()?;
         if !apply_status.success() {

@@ -1178,7 +1178,9 @@ fn run_session(
                         "apply",
                         draft_id,
                         "--git-commit",
+                        "--no-replay-actions",
                     ])
+                    .env(super::draft::NO_REPLAY_ACTIONS_ENV, "1")
                     .output();
 
                 match apply_result {
