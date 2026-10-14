@@ -212,6 +212,9 @@ fn record_restricted_launch(project_root: &Path, goal_id: uuid::Uuid) -> anyhow:
 /// What `ta session resume` must carry for a goal that launched restricted: `None` when the
 /// goal launched unrestricted, otherwise the system-prompt file that delivered its context
 /// (absent when the launch delivered context another way).
+// Pure filesystem logic, tested on every platform. Its only production caller,
+// `execute_resume`, is unix-only, so on other targets the build would flag it as dead code.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn restricted_launch_state(project_root: &Path, goal_id: uuid::Uuid) -> Option<Option<PathBuf>> {
     let dir = goal_launch_log_dir(project_root, goal_id);
     let prompt = dir.join(SYSTEM_PROMPT_FILE);
