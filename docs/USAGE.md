@@ -5380,7 +5380,7 @@ allow_network = ["api.anthropic.com", "api.github.com"]
 
 | Platform | Provider | What it restricts | Notes |
 |---|---|---|---|
-| **macOS** | `sandbox-exec` (Seatbelt) | Filesystem reads/writes, network | Built-in; no extra software needed |
+| **macOS** | `sandbox-exec` (Seatbelt) | Filesystem writes and sensitive reads, network (via the egress proxy), Keychain and process access | Built-in; no extra software needed |
 | **Linux** | `bwrap` (bubblewrap) | Filesystem namespace, network namespace | Install: `apt install bubblewrap` |
 | **Windows** | AppContainer + Job Objects | Filesystem, network, and process-tree teardown | Built-in; no extra software needed (Windows 8+) |
 
@@ -5456,10 +5456,10 @@ If AppContainer is unavailable (e.g., TA is nested inside a restricted Job Objec
 **What is always allowed** (regardless of `allow_read`):
 - The staging workspace (agent's working directory)
 - OS system libraries and tools (on macOS reads are broad, with the protected paths below denied)
-- `/tmp` (tmpfs on Linux)
+- `/tmp` (tmpfs on Linux; not writable on macOS)
 - `/dev/null`, `/dev/tty`
 
-**Network filtering note**: On macOS, `allow_network` is a declaration (used for auditing) but the sandbox profile currently allows all outbound when any host is listed. Hostname-level network filtering (L7 proxy) is planned for v0.14.1.
+**Network filtering on macOS.** `allow_network` is enforced by a per-goal egress proxy. The sandbox lets the agent reach exactly one loopback port (the proxy's) and the goal's mediation socket; every other address, including `127.0.0.1` (the TA daemon and NATS), is refused. The proxy only tunnels HTTPS (`CONNECT`) to hosts on your list and records every attempt, allowed or denied, in `<state dir>/sandbox/egress/<goal>.jsonl`. Entries are `host`, `*.suffix` (subdomains only, list the apex separately) or either with `:port` (default 443). A name that resolves to a loopback, link-local or unlisted private address is refused even if it is on the list. For Claude Code goals `api.anthropic.com` (and the host of `ANTHROPIC_BASE_URL`) is added automatically. Standard `HTTPS_PROXY` variables point the agent's tools at the proxy; a tool that ignores them gets no network. Setting `allow_network = ["*"]` keeps the old open network, still without loopback, and runs no proxy.
 
 ### How the Sandbox Is Switched On, and What Happens When the Box Is Incomplete
 
@@ -5493,7 +5493,11 @@ Project config can only tighten this: the effective posture is the stricter of t
 
 A refused launch prints what is missing and how to fix it (install a provider, drop `allow_network`, or lower the posture in the owner's policy if you accept the risk). A degraded or unsandboxed launch says so on the `[sandbox]` line. Every launch records a `sandbox_decision` event with the posture, role, provider, required and enforced capabilities, and a hash of the compiled profile, so you can answer "what box was this agent in?" afterwards (`ta events` lists it).
 
-Two honest limits for now. Granting `allow_network` on macOS or Linux opens all outbound traffic including loopback until the per-goal egress proxy ships, so a chat or reviewer goal that grants network is refused under `balanced` and `strict`. And the process-inspection and sandbox-escape capabilities are only enforced on Windows AppContainer today.
+**macOS profile: what is and is not confined.** Writes are deny-by-default: only the goal's staging directory, its agent home and any `allow_write` paths are writable (`/tmp` is not). Reads are NOT confined: the profile allows reads and denies specific locations (the project's `.ta/` content other than the goal's own staging copy, the TA state directory, `~/.ssh`, `~/.gnupg`, `~/.aws`, browser profiles and similar), so other files in your home directory remain readable to the agent. Paths are matched after resolving symlinks and case-insensitively. The profile also refuses Apple events, the Keychain and LaunchServices services, signalling or inspecting other processes, and running `/usr/bin/security` or `ta-daemon`. Known limits: a *copy* of `security` under another name can be exec'd but cannot reach the Keychain (that service is refused); a server the agent starts on loopback inside the box cannot be reached by its own tools; and Rosetta-translated x86_64 binaries are supported.
+
+**Seeing what was refused.** On macOS each refusal by the sandbox is tagged with the goal and recorded as a `sandbox_violation` event (printed as `[sandbox] denied: ...` during the run); the egress proxy records blocked connections as the same event on every platform. `ta events` lists them. The conformance suite that proves these denials is `cargo test -p ta-runtime --test seatbelt_conformance` (it drives `ta-sandbox-probe` inside the generated profile); it runs in macOS CI.
+
+Two honest limits for now. On Linux, granting `allow_network` opens all outbound traffic including loopback until the hardened Linux sandbox ships, so a chat or reviewer goal that grants network there is refused under `balanced` and `strict`. And the process-inspection and sandbox-escape capabilities are enforced on macOS and Windows AppContainer, not yet on Linux.
 
 ### Authentication (`[auth]` in `daemon.toml`)
 

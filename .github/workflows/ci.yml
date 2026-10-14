@@ -158,6 +158,17 @@ jobs:
         run: nix develop --command bash -c "cargo clippy --workspace --all-targets -- -D warnings"
         timeout-minutes: 15
 
+      # macOS Seatbelt conformance (v0.17.12.7): runs `ta-sandbox-probe` inside the
+      # generated profile. The workspace test step above skips this suite on a host
+      # that cannot run sandbox-exec; here a skip is a failure, so a runner image
+      # change cannot silently turn the isolation proof off.
+      - name: Seatbelt conformance (ta-sandbox-probe)
+        if: env.CODE == 'true' && matrix.os == 'macos-latest'
+        env:
+          TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
+        run: nix develop --command bash -c "cargo test -p ta-runtime --test seatbelt_conformance -- --test-threads=1"
+        timeout-minutes: 10
+
       # The three channel plugins each have their own [workspace], so none of
       # the workspace steps above build them. A plugin manifest that cannot
       # parse once shipped because nothing compiled it. Ubuntu is enough: the

@@ -376,6 +376,31 @@ pub enum SessionEvent {
         detail: String,
     },
 
+    /// The sandbox or the egress proxy refused something the agent attempted (v0.17.12.7).
+    ///
+    /// On macOS these come from the unified log (`source: "seatbelt"`); the
+    /// egress proxy reports blocked connections on every platform
+    /// (`source: "egress_proxy"`). Repeated identical denials are collapsed by
+    /// the reporter, with `count` carrying the total.
+    SandboxViolation {
+        /// Goal whose agent triggered the denial.
+        goal_id: Uuid,
+        /// `seatbelt` or `egress_proxy`.
+        source: String,
+        /// Operation denied, e.g. `file-read-data`, `network-outbound`, `mach-lookup`, `connect`.
+        operation: String,
+        /// Path, address, service name or `host:port` that was refused.
+        target: String,
+        /// Process name that attempted it, when known.
+        process: Option<String>,
+        /// Process id that attempted it, when known.
+        pid: Option<u32>,
+        /// Number of occurrences this event stands for.
+        count: u32,
+        /// Why it was denied and what the owner can do about it.
+        detail: String,
+    },
+
     /// A RuntimeAdapter encountered an error spawning or managing an agent (v0.13.3).
     ///
     /// Emitted on spawn failures, unexpected plugin crashes, or transport errors.
@@ -566,6 +591,7 @@ impl SessionEvent {
             Self::AgentExited { .. } => "agent_exited",
             Self::RuntimeError { .. } => "runtime_error",
             Self::SandboxDecision { .. } => "sandbox_decision",
+            Self::SandboxViolation { .. } => "sandbox_violation",
             Self::VcsPrMerged { .. } => "vcs.pr_merged",
             Self::VcsBranchPushed { .. } => "vcs.branch_pushed",
             Self::VcsChangelistSubmitted { .. } => "vcs.changelist_submitted",
@@ -604,6 +630,7 @@ impl SessionEvent {
             }
             Self::RuntimeError { goal_id, .. } => *goal_id,
             Self::SandboxDecision { goal_id, .. } => Some(*goal_id),
+            Self::SandboxViolation { goal_id, .. } => Some(*goal_id),
             Self::PrCheckFailed { goal_id, .. } => Some(*goal_id),
             _ => None,
         }
@@ -1118,6 +1145,16 @@ mod tests {
                 gateway: "out_of_sandbox_socket".into(),
                 detail: "ok".into(),
             },
+            SessionEvent::SandboxViolation {
+                goal_id: gid,
+                source: "seatbelt".into(),
+                operation: "file-read-data".into(),
+                target: "/Users/u/.ssh/id_ed25519".into(),
+                process: Some("cat".into()),
+                pid: Some(4242),
+                count: 1,
+                detail: "denied by the sandbox profile".into(),
+            },
             SessionEvent::VcsPrMerged {
                 repo: "org/repo".into(),
                 branch: "main".into(),
@@ -1154,7 +1191,7 @@ mod tests {
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 34);
+        assert_eq!(events.len(), 35);
     }
 
     #[test]

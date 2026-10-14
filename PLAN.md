@@ -11058,7 +11058,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 1. [ ] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths. Starting point from v0.17.12.6: the profile is now `(allow file-read*)` followed by ordered denies from `protected_paths` (`.ssh`, `.gnupg`, `.aws`, `.config/gh`, `.netrc`, `Library/Keychains`); the earlier explicit allow list could not run `/usr/bin/true`. That is a denylist, so anything not named (browser profiles, `.docker`, `.npmrc`, other projects' source) is readable. This item must widen the deny set and prove it with `ta-sandbox-probe`, and must not describe macOS reads as confined until it does.
 2. [ ] Mach-service allowlist; deny Apple events, process inspection and signalling of others; deny exec of `ta-daemon` and `/usr/bin/security`.
 3. [ ] Per-goal egress proxy with a hostname allowlist and audit log, shared by all platforms; the profile allows only the proxy and the bridge.
-4. [ ] Violation events from the unified log; Rosetta paths; a conformance suite (`ta-sandbox-probe`) in macOS CI.
+4. [x] Violation events from the unified log; Rosetta paths; a conformance suite (`ta-sandbox-probe`) in macOS CI.
 
 **Effort**: M.
 

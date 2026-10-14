@@ -56,11 +56,14 @@ pub mod bare_process;
 pub mod channels;
 pub mod config;
 pub mod credential;
+pub mod egress_proxy;
 pub mod framework;
 pub mod plugin;
 pub mod sandbox;
 pub mod sandbox_launch;
 pub mod sandbox_windows;
+pub mod seatbelt;
+pub mod seatbelt_log;
 
 // Re-export the most commonly used types.
 pub use adapter::{
