@@ -59,6 +59,7 @@ pub mod credential;
 pub mod framework;
 pub mod plugin;
 pub mod sandbox;
+pub mod sandbox_launch;
 pub mod sandbox_windows;
 
 // Re-export the most commonly used types.
@@ -82,4 +83,10 @@ pub use framework::{
     MemoryInjectMode,
 };
 pub use sandbox::{SandboxPolicy, SandboxProvider};
+pub use sandbox_launch::{
+    decide as decide_sandbox, degraded_label, prepare_agent_home, provider_capabilities,
+    required_capabilities, scrub_env, Capability, EnvScrub, GatewayPlacement, LaunchContext,
+    Outcome as SandboxOutcome, ProjectRequest, RoleClass, SandboxDecision, SandboxPosture,
+    SandboxProfile, ScrubbedEnv, TrustedPolicy,
+};
 pub use sandbox_windows::{sandboxed_spawn, WindowsAppContainerGuard, WindowsJobObjectGuard};

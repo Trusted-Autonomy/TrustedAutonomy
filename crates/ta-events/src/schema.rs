@@ -344,6 +344,38 @@ pub enum SessionEvent {
         duration_secs: u64,
     },
 
+    /// The outcome of the sandbox decision made before an agent launch (v0.17.12.6).
+    ///
+    /// Emitted for every launch, including launches where no sandbox was
+    /// requested, so "what box was this agent in?" is always answerable from
+    /// the audit stream. Records the capabilities the compiled profile
+    /// required against those the provider actually enforced.
+    SandboxDecision {
+        /// Goal being launched.
+        goal_id: Uuid,
+        /// Posture that drove the decision: `strict`, `balanced` or `open`.
+        posture: String,
+        /// Role class: `chat`, `reviewer`, `worker` or `plugin`.
+        role_class: String,
+        /// Provider that was (or would have been) used, e.g. `macos_sandbox_exec`.
+        provider: String,
+        /// Outcome: `not_requested`, `enforced`, `degraded`, `unsandboxed` or `refused`.
+        outcome: String,
+        /// Capability names the profile required.
+        required: Vec<String>,
+        /// Capability names the provider enforced.
+        enforced: Vec<String>,
+        /// Required capabilities that were not enforced.
+        missing: Vec<String>,
+        /// Hash of the compiled sandbox profile (hex SHA-256).
+        profile_hash: String,
+        /// Where the MCP gateway runs: `out_of_sandbox_socket`, `stdio_unsandboxed`
+        /// or `stdio_in_sandbox`.
+        gateway: String,
+        /// Human-readable explanation, including the fix when capabilities are missing.
+        detail: String,
+    },
+
     /// A RuntimeAdapter encountered an error spawning or managing an agent (v0.13.3).
     ///
     /// Emitted on spawn failures, unexpected plugin crashes, or transport errors.
@@ -533,6 +565,7 @@ impl SessionEvent {
             Self::AgentSpawned { .. } => "agent_spawned",
             Self::AgentExited { .. } => "agent_exited",
             Self::RuntimeError { .. } => "runtime_error",
+            Self::SandboxDecision { .. } => "sandbox_decision",
             Self::VcsPrMerged { .. } => "vcs.pr_merged",
             Self::VcsBranchPushed { .. } => "vcs.branch_pushed",
             Self::VcsChangelistSubmitted { .. } => "vcs.changelist_submitted",
@@ -570,6 +603,7 @@ impl SessionEvent {
                 Some(*goal_id)
             }
             Self::RuntimeError { goal_id, .. } => *goal_id,
+            Self::SandboxDecision { goal_id, .. } => Some(*goal_id),
             Self::PrCheckFailed { goal_id, .. } => Some(*goal_id),
             _ => None,
         }
@@ -1071,6 +1105,19 @@ mod tests {
                 runtime: "oci".into(),
                 error: "Container failed to start".into(),
             },
+            SessionEvent::SandboxDecision {
+                goal_id: gid,
+                posture: "balanced".into(),
+                role_class: "worker".into(),
+                provider: "macos_sandbox_exec".into(),
+                outcome: "enforced".into(),
+                required: vec!["fs.write_confined".into()],
+                enforced: vec!["fs.write_confined".into()],
+                missing: vec![],
+                profile_hash: "abc".into(),
+                gateway: "out_of_sandbox_socket".into(),
+                detail: "ok".into(),
+            },
             SessionEvent::VcsPrMerged {
                 repo: "org/repo".into(),
                 branch: "main".into(),
@@ -1107,7 +1154,7 @@ mod tests {
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 33);
+        assert_eq!(events.len(), 34);
     }
 
     #[test]

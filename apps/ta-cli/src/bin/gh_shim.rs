@@ -71,9 +71,30 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| cwd.clone());
 
-    let secret = ta_credential_broker::resolve_for_host(&project_root, GH_HOST, true)
-        .map(|resolution| resolution.secret)
-        .ok();
+    // Inside a sandbox `.ta/` is unreadable: ask the out-of-sandbox gateway.
+    #[cfg(unix)]
+    let via_gateway = match (
+        std::env::var_os("TA_CREDENTIAL_ENDPOINT"),
+        std::env::var("TA_MCP_CONNECTION_TOKEN").ok(),
+    ) {
+        (Some(endpoint), Some(token)) => Some(
+            ta_credential_broker::resolve_via_endpoint(Path::new(&endpoint), &token, GH_HOST)
+                .map(|r| r.map(|r| r.secret))
+                .unwrap_or_else(|e| {
+                    eprintln!("ta gh-shim: {e}");
+                    None
+                }),
+        ),
+        _ => None,
+    };
+    #[cfg(not(unix))]
+    let via_gateway: Option<Option<String>> = None;
+    let secret = match via_gateway {
+        Some(secret) => secret,
+        None => ta_credential_broker::resolve_for_host(&project_root, GH_HOST, true)
+            .map(|resolution| resolution.secret)
+            .ok(),
+    };
 
     let mut cmd = std::process::Command::new(&real_gh);
     cmd.args(&args);

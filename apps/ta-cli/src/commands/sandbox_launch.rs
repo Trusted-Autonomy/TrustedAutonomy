@@ -1,0 +1,397 @@
+// sandbox_launch.rs — `ta run` glue for the sandbox launch plumbing
+// (v0.17.12.6).
+//
+// `ta_runtime::sandbox_launch` holds the pure logic (profile, capabilities,
+// decision table, env scrub). This module gathers its inputs from the real
+// project, starts the out-of-sandbox gateway, prepares the per-goal agent
+// home, and reports the decision.
+//
+// The `[sandbox]` section and `[security] level` are read from the REAL
+// project root, never from the staging copy: staging excludes `.ta/`, which
+// is why the sandbox used to be silently off.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use ta_runtime::sandbox_launch::{
+    decide, prepare_agent_home, scrub_env, EnvScrub, GatewayPlacement, LaunchContext,
+    ProjectRequest, RoleClass, SandboxDecision, SandboxPosture, SandboxProfile, TrustedPolicy,
+};
+use ta_runtime::{SandboxPolicy, SandboxProvider};
+
+use super::mediation::{self, GatewayGuard};
+
+/// How long the launcher waits for the gateway socket before giving up.
+pub const GATEWAY_WAIT_SECS: u64 = 10;
+
+/// Everything `launch_agent_via_runtime` needs from the sandbox decision.
+pub struct SandboxPlan {
+    pub profile: SandboxProfile,
+    pub decision: SandboxDecision,
+    pub provider: SandboxProvider,
+    /// The spawn is wrapped by a provider.
+    pub wraps: bool,
+    /// The environment is reduced to the allowlist.
+    pub scrubs_env: bool,
+    pub agent_home: PathBuf,
+    pub claude_config_dir: Option<PathBuf>,
+    /// Per-goal bridged MCP config (claude-code with an out-of-sandbox gateway).
+    pub mcp_config: Option<PathBuf>,
+    pub gateway: Option<GatewayGuard>,
+    pub warnings: Vec<String>,
+}
+
+/// Launch facts the plan is built from.
+pub struct PlanInput<'a> {
+    pub project_root: &'a Path,
+    pub staging: &'a Path,
+    pub goal_id: uuid::Uuid,
+    pub is_claude_code: bool,
+    pub chat: bool,
+    pub team_role: bool,
+    /// The agent's own env map, for chat-mode variables the gateway needs too.
+    pub agent_env: &'a HashMap<String, String>,
+}
+
+/// Map `[sandbox]` and `[security]` from the project's workflow config.
+pub fn project_request(project_root: &Path) -> ProjectRequest {
+    let wf = ta_submit::WorkflowConfig::load_or_default(&project_root.join(".ta/workflow.toml"));
+    let level = wf.security.level;
+    let profile = ta_goal::SecurityProfile::from_level(level, &wf.security.to_overrides());
+    let posture = match level {
+        ta_goal::SecurityLevel::Low => SandboxPosture::Open,
+        ta_goal::SecurityLevel::Mid => SandboxPosture::Balanced,
+        ta_goal::SecurityLevel::High => SandboxPosture::Strict,
+    };
+    ProjectRequest {
+        enabled: wf.sandbox.enabled,
+        posture: Some(posture),
+        security_profile_sandbox: profile.sandbox_enabled,
+        allow_read: wf.sandbox.allow_read.clone(),
+        allow_write: wf.sandbox.allow_write.clone(),
+        allow_network: wf.sandbox.allow_network.clone(),
+    }
+}
+
+/// Build the plan. `Err` is a launch refusal reason that is already
+/// actionable (unreadable trusted policy, refused decision is NOT an error
+/// here: the caller inspects `decision`).
+pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
+    let locator = ta_credentials::state::StateLocator::from_env();
+    let state = ta_credentials::state::ProjectState::locate(input.project_root, &locator)
+        .ok()
+        .flatten();
+    let trusted = match &state {
+        Some(s) => TrustedPolicy::load(&s.sandbox_dir())?,
+        None => None,
+    };
+    let project = project_request(input.project_root);
+    let goal = input.goal_id.to_string();
+
+    let role = if input.chat {
+        RoleClass::Chat
+    } else {
+        RoleClass::Worker
+    };
+    let mut ctx = LaunchContext {
+        goal_id: goal.clone(),
+        role_class: role,
+        team_role: input.team_role,
+        project_root: input.project_root.to_path_buf(),
+        staging: input.staging.to_path_buf(),
+        state_dir: state.as_ref().map(|s| s.dir.clone()),
+        agent_home: PathBuf::new(),
+        user_home: dirs::home_dir(),
+        mediation_socket: None,
+    };
+
+    // First pass: is a sandbox wanted at all?
+    let first = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
+    let provider = SandboxPolicy::detect_provider();
+    let wanted = first.requested;
+
+    // Agent home: under the state dir when there is one, else a temp dir.
+    ctx.agent_home = match (&state, wanted) {
+        (Some(s), _) => s.agent_homes_dir().join(&goal),
+        (None, true) => std::env::temp_dir().join("ta-agent-home").join(&goal),
+        (None, false) => PathBuf::new(),
+    };
+    let mut warnings = Vec::new();
+    let mut claude_config_dir = None;
+    if wanted {
+        match prepare_agent_home(&ctx.agent_home) {
+            Ok(dir) => claude_config_dir = Some(dir),
+            Err(e) => {
+                return Err(format!(
+                    "could not create the agent home {}: {e}. Check that the TA state \
+                     directory is writable.",
+                    ctx.agent_home.display()
+                ))
+            }
+        }
+    }
+
+    // Gateway outside the sandbox, when there is a box to be outside of.
+    let mut gateway = None;
+    let can_bridge = wanted && provider != SandboxProvider::None && input.is_claude_code;
+    if can_bridge {
+        let gateway_env: HashMap<String, String> = input
+            .agent_env
+            .iter()
+            .filter(|(k, _)| k.starts_with("TA_CHAT_"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        match mediation::spawn_gateway(
+            input.staging,
+            input.project_root,
+            &gateway_env,
+            std::time::Duration::from_secs(GATEWAY_WAIT_SECS),
+        ) {
+            Ok(g) => gateway = Some(g),
+            Err(e) => warnings.push(format!(
+                "could not start the out-of-sandbox gateway: {e}. The agent will run its own \
+                 `ta serve` inside the sandbox if the posture allows it."
+            )),
+        }
+    }
+    ctx.mediation_socket = gateway.as_ref().map(|g| g.socket.clone());
+
+    let profile = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
+    let scrubs_env = profile.requested;
+    let wraps = profile.requested && provider != SandboxProvider::None;
+    let placement = if gateway.is_some() {
+        GatewayPlacement::OutOfSandboxSocket
+    } else if wraps {
+        GatewayPlacement::StdioInSandbox
+    } else {
+        GatewayPlacement::StdioUnsandboxed
+    };
+    let decision = decide(&profile, &provider, scrubs_env, placement);
+    warnings.extend(profile.warnings.iter().cloned());
+
+    // Per-goal bridged MCP config for claude-code.
+    let mut mcp_config = None;
+    if let (Some(g), true) = (&gateway, input.is_claude_code) {
+        let base_path = super::chat_launch::agent_mcp_config_path(input.project_root, input.chat);
+        let base = std::fs::read_to_string(&base_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let ta_bin = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "ta".into());
+        let cfg = mediation::bridged_mcp_config(base.as_ref(), &ta_bin, &g.socket);
+        let path = ctx.agent_home.join("mcp-agent.json");
+        match std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+        ) {
+            Ok(()) => mcp_config = Some(path),
+            Err(e) => {
+                return Err(format!(
+                    "could not write the bridged MCP config {}: {e}",
+                    path.display()
+                ))
+            }
+        }
+    }
+
+    Ok(SandboxPlan {
+        profile,
+        decision,
+        provider,
+        wraps,
+        scrubs_env,
+        agent_home: ctx.agent_home,
+        claude_config_dir,
+        mcp_config,
+        gateway,
+        warnings,
+    })
+}
+
+impl SandboxPlan {
+    /// The provider-facing policy for the spawn wrapper.
+    pub fn policy(&self) -> SandboxPolicy {
+        self.profile.to_policy(self.provider.clone())
+    }
+
+    /// Reduce the agent env to the allowlist (no-op unless `scrubs_env`).
+    /// `inherited_is_empty` is true when the spawn already starts from a
+    /// cleared baseline. Returns the names removed.
+    pub fn apply_env(
+        &self,
+        env: &mut HashMap<String, String>,
+        inherited_is_empty: bool,
+        goal_id: &str,
+    ) -> Vec<String> {
+        if !self.scrubs_env {
+            return Vec::new();
+        }
+        let inherited: HashMap<String, String> = if inherited_is_empty {
+            HashMap::new()
+        } else {
+            std::env::vars().collect()
+        };
+        let scrub = EnvScrub {
+            goal_id,
+            agent_home: &self.agent_home,
+            protected: &self.profile.deny_paths,
+            claude_config_dir: self.claude_config_dir.as_deref(),
+            mcp_endpoint: self.gateway.as_ref().map(|g| g.socket.as_path()),
+            connection_token: self.gateway.as_ref().map(|g| g.token.as_str()),
+        };
+        let out = scrub_env(&inherited, env, &scrub);
+        *env = out.env;
+        out.removed
+    }
+
+    /// Re-run the decision after the provider could not be set up, treating the
+    /// launch as having only the Job Object layer. Updates `decision` in place.
+    pub fn downgrade_to_job_object(&mut self, reason: &str) {
+        let placement = self.decision.gateway;
+        self.provider = SandboxProvider::WindowsJobObject;
+        self.decision = decide(&self.profile, &self.provider, self.scrubs_env, placement);
+        self.decision.detail = format!("{reason}. {}", self.decision.detail);
+    }
+
+    /// Print the decision, warnings and the fix to the terminal.
+    pub fn print(
+        &self,
+        removed_env: &[String],
+        needs_model_key: bool,
+        env: &HashMap<String, String>,
+    ) {
+        use ta_runtime::sandbox_launch::Outcome;
+        if self.decision.outcome != Outcome::NotRequested {
+            println!("{}", self.decision.banner());
+        }
+        for w in &self.warnings {
+            eprintln!("[warn] sandbox: {w}");
+        }
+        if !removed_env.is_empty() {
+            tracing::info!(removed = ?removed_env, "scrubbed variables from the agent environment");
+            println!(
+                "[sandbox] environment scrubbed: {} variable(s) withheld from the agent ({})",
+                removed_env.len(),
+                removed_env.join(", ")
+            );
+        }
+        if self.scrubs_env && needs_model_key {
+            let has_key = [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ]
+            .iter()
+            .any(|k| env.contains_key(*k));
+            if !has_key {
+                eprintln!(
+                    "[warn] sandbox: no ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or \
+                     CLAUDE_CODE_OAUTH_TOKEN reaches the agent, and its home is a fresh \
+                     per-goal directory. Set one in your shell before `ta run`, or the agent \
+                     may not be able to authenticate (a login stored in the macOS Keychain is \
+                     not available inside the box)."
+                );
+            }
+        }
+    }
+
+    /// Append the decision to the event store.
+    pub fn emit(&self, events_dir: &Path, goal_id: uuid::Uuid) {
+        use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+        let d = &self.decision;
+        let store = FsEventStore::new(events_dir);
+        if let Err(e) = store.append(&EventEnvelope::new(SessionEvent::SandboxDecision {
+            goal_id,
+            posture: d.posture.name().to_string(),
+            role_class: d.role_class.name().to_string(),
+            provider: d.provider.clone(),
+            outcome: d.outcome.name().to_string(),
+            required: d.required.clone(),
+            enforced: d.enforced.clone(),
+            missing: d.missing.clone(),
+            profile_hash: d.profile_hash.clone(),
+            gateway: d.gateway.name().to_string(),
+            detail: d.detail.clone(),
+        })) {
+            tracing::warn!(
+                events_dir = %events_dir.display(),
+                error = %e,
+                "could not record the sandbox decision in the event store"
+            );
+        }
+    }
+}
+
+/// Point the `--mcp-config` argument at `path`. No-op if absent.
+pub fn override_mcp_config_arg(args: &mut [String], path: &Path) {
+    if let Some(i) = args.iter().position(|a| a == "--mcp-config") {
+        if let Some(v) = args.get_mut(i + 1) {
+            *v = path.display().to_string();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_replaces_only_the_mcp_config_value() {
+        let mut args: Vec<String> = [
+            "--strict-mcp-config",
+            "--mcp-config",
+            "/p/.ta/mcp-agent.json",
+            "-p",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        override_mcp_config_arg(&mut args, Path::new("/h/mcp-agent.json"));
+        assert_eq!(args[2], "/h/mcp-agent.json");
+        assert_eq!(args[3], "-p");
+    }
+
+    /// Regression: the sandbox settings were read from staging, which has no
+    /// `.ta/`. They are read from the project root, and no experimental flag
+    /// in `daemon.toml` gates them.
+    #[test]
+    fn sandbox_setting_comes_from_the_project_root_without_an_experimental_flag() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".ta")).unwrap();
+        std::fs::write(
+            root.path().join(".ta/workflow.toml"),
+            "[sandbox]\nenabled = true\nallow_network = [\"api.example\"]\n",
+        )
+        .unwrap();
+        // No daemon.toml anywhere.
+        let req = project_request(root.path());
+        assert!(req.enabled);
+        assert_eq!(req.allow_network, vec!["api.example".to_string()]);
+
+        let staging = root.path().join(".ta/staging/g1");
+        std::fs::create_dir_all(&staging).unwrap();
+        let from_staging = project_request(&staging);
+        assert!(!from_staging.enabled, "staging has no .ta/workflow.toml");
+    }
+
+    #[test]
+    fn security_level_maps_to_posture_and_sandbox_request() {
+        for (level, posture, sandbox) in [
+            ("low", SandboxPosture::Open, false),
+            ("mid", SandboxPosture::Balanced, true),
+            ("high", SandboxPosture::Strict, true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join(".ta")).unwrap();
+            std::fs::write(
+                root.path().join(".ta/workflow.toml"),
+                format!("[security]\nlevel = \"{level}\"\n"),
+            )
+            .unwrap();
+            let req = project_request(root.path());
+            assert_eq!(req.posture, Some(posture), "{level}");
+            assert_eq!(req.security_profile_sandbox, sandbox, "{level}");
+        }
+    }
+}

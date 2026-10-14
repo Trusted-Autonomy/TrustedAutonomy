@@ -11036,7 +11036,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.5.1`
 
 ### v0.17.12.6 - Sandbox Launch Plumbing: Out-of-Sandbox Gateway, Trusted Policy Source, Capability Reporting
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.1
 
 **Goal**: Make sandboxing actually take effect, and make the mediated path survive it. Found while planning: the `[sandbox]` setting is read from the agent's staging copy of `.ta/workflow.toml`, which staging excludes, and it also needs an experimental flag in `daemon.toml`, so a sandbox is very likely never applied today (verified by reading the code, not by a live run). Plan: `docs/superpowers/specs/2026-10-07-os-sandbox-plan.md` (PR #648).

@@ -158,6 +158,138 @@ pub fn resolve_for_host(
     })
 }
 
+// ── Out-of-sandbox resolution (v0.17.12.6) ─────────────────────────────────
+//
+// A sandboxed agent cannot read `.ta/` (the broker key, the vault, the
+// connector registry), so the shims running inside its box ask the
+// out-of-sandbox gateway socket instead. The wire form is one handshake line
+// `Bearer <token> credential` followed by one `host=<host>` line; the reply is
+// `OK` plus `key=value` lines, `NONE` (no connector for the host), or
+// `ERR <reason>`. Only the shim for that one operation ever sees the secret.
+
+/// Purpose word in the handshake line that selects credential resolution.
+pub const CREDENTIAL_PURPOSE: &str = "credential";
+
+/// Encode the gateway's reply for a resolution outcome.
+pub fn encode_endpoint_reply(result: &Result<ShimResolution, ShimError>) -> String {
+    match result {
+        Ok(r) => format!(
+            "OK\nsecret={}\ncredential_name={}\nconnector_id={}\n",
+            r.secret, r.credential_name, r.connector_id
+        ),
+        Err(ShimError::NoConnector(_)) | Err(ShimError::NoSessionToken { .. }) => {
+            "NONE\n".to_string()
+        }
+        Err(e) => format!("ERR {}\n", e.to_string().replace('\n', " ")),
+    }
+}
+
+/// Parse the gateway's reply. `Ok(None)` means "no connector for this host".
+pub fn parse_endpoint_reply(reply: &str) -> Result<Option<ShimResolution>, ShimError> {
+    let mut lines = reply.lines();
+    match lines.next() {
+        Some("OK") => {
+            let mut secret = None;
+            let mut name = None;
+            let mut id = None;
+            for l in lines {
+                match l.split_once('=') {
+                    Some(("secret", v)) => secret = Some(v.to_string()),
+                    Some(("credential_name", v)) => name = Some(v.to_string()),
+                    Some(("connector_id", v)) => id = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+            match (secret, name, id) {
+                (Some(secret), Some(credential_name), Some(connector_id)) => {
+                    Ok(Some(ShimResolution {
+                        secret,
+                        credential_name,
+                        connector_id,
+                    }))
+                }
+                _ => Err(ShimError::CredentialLookupFailed {
+                    connector_id: "(gateway)".into(),
+                    reason: "the TA gateway returned an incomplete credential reply".into(),
+                }),
+            }
+        }
+        Some("NONE") => Ok(None),
+        Some(other) => Err(ShimError::CredentialLookupFailed {
+            connector_id: "(gateway)".into(),
+            reason: other.strip_prefix("ERR ").unwrap_or(other).to_string(),
+        }),
+        None => Err(ShimError::CredentialLookupFailed {
+            connector_id: "(gateway)".into(),
+            reason: "the TA gateway closed the connection without replying; is the goal's \
+                     gateway still running?"
+                .into(),
+        }),
+    }
+}
+
+/// Ask the out-of-sandbox gateway at `endpoint` for the secret backing `host`.
+#[cfg(unix)]
+pub fn resolve_via_endpoint(
+    endpoint: &Path,
+    token: &str,
+    host: &str,
+) -> Result<Option<ShimResolution>, ShimError> {
+    use std::io::{Read, Write};
+    let fail = |reason: String| ShimError::CredentialLookupFailed {
+        connector_id: "(gateway)".into(),
+        reason: format!(
+            "{reason} (endpoint {}). The goal's gateway may have exited; re-run the goal",
+            endpoint.display()
+        ),
+    };
+    let mut stream = std::os::unix::net::UnixStream::connect(endpoint)
+        .map_err(|e| fail(format!("could not connect: {e}")))?;
+    let timeout = Some(std::time::Duration::from_secs(30));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    stream
+        .write_all(format!("Bearer {token} {CREDENTIAL_PURPOSE}\nhost={host}\n").as_bytes())
+        .map_err(|e| fail(format!("could not send the request: {e}")))?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut reply = String::new();
+    stream
+        .read_to_string(&mut reply)
+        .map_err(|e| fail(format!("could not read the reply: {e}")))?;
+    parse_endpoint_reply(&reply)
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn reply_roundtrips_and_none_is_silent() {
+        let ok = Ok(ShimResolution {
+            secret: "s3".into(),
+            credential_name: "gh".into(),
+            connector_id: "github".into(),
+        });
+        let parsed = parse_endpoint_reply(&encode_endpoint_reply(&ok)).unwrap();
+        assert_eq!(parsed.unwrap().secret, "s3");
+        let none = Err(ShimError::NoConnector("x".into()));
+        assert_eq!(
+            parse_endpoint_reply(&encode_endpoint_reply(&none)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn errors_and_empty_replies_are_actionable() {
+        let e = parse_endpoint_reply("ERR vault locked\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("vault locked"), "{e}");
+        let e = parse_endpoint_reply("").unwrap_err().to_string();
+        assert!(e.contains("still running"), "{e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
