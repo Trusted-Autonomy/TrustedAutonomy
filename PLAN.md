@@ -11239,7 +11239,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.17`
 
 ### v0.17.12.18 - `ta cost report`: Spend Across Goals and Interactive Sessions
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.15
 
 **Goal**: `/api/spend` only sees TA goals. Measured on 2026-10-13, the expensive workload is long interactive Claude Code and OMP sessions (one session: 64% cache read, 31% cache write, 5% output, average context 491k tokens), which TA cannot see. Add one command that reports spend across goals and interactive sessions, with the context-size breakdown that exposed the cost driver. Spec: same file, section 3.
