@@ -47,6 +47,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "memory.rvf",
     // Runtime directories
     "staging/",
+    "golden/", // golden-set entries and replays (v0.17.12.20): hold project prompts, diffs and per-machine spend, tied to local commits
     "store/",
     "goals/",
     "events/",

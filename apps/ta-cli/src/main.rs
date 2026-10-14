@@ -1111,6 +1111,15 @@ enum Commands {
         command: commands::cost::CostCommands,
     },
 
+    /// Golden set: capture a completed goal, replay it with an override, compare.
+    ///
+    /// `ta golden capture|list|replay|report`. Replays run in a scratch git
+    /// worktree and are never applied automatically.
+    Golden {
+        #[command(subcommand)]
+        command: commands::golden::GoldenCommands,
+    },
+
     /// Effort and KPI analytics via Meridian (v0.17.0.12).
     ///
     /// Delegates to the `meridian` binary on PATH. TA emits token counts and
@@ -2254,6 +2263,7 @@ fn dispatch_raw(
         }
         Commands::Stats { command } => commands::stats::execute(command, config),
         Commands::Cost { command } => commands::cost::execute(command, config),
+        Commands::Golden { command } => commands::golden::execute(command, config),
         Commands::Experiment { command } => commands::experiment::execute(command, config),
         Commands::Community { command } => {
             if warn_legacy {

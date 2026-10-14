@@ -26,6 +26,7 @@ pub mod error;
 pub mod events;
 pub mod experiment;
 pub mod goal_run;
+pub mod golden;
 pub mod history;
 pub mod human_review;
 pub mod messaging_audit;

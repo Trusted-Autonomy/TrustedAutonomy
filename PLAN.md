@@ -11274,16 +11274,16 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.19`
 
 ### v0.17.12.20 - Golden Set: Capture and Replay Goals
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.17, v0.17.12.18
 
 **Goal**: Test a cost optimization on identical work without a large multi-arm grid. A golden entry is a completed goal captured as (git commit, prompt, baseline result); replay runs the same prompt from the same commit with an override and compares cost and outcome. Reuses the existing `experiment_id`, `experiment_arm` and `experiment_overrides` on `GoalRun`; no parallel mechanism. Spec: same file, section 4.
 
-1. [ ] **`ta golden capture <goal-id> [--check "<cmd>"]`** stores `.ta/golden/<id>/entry.json`, `prompt.md` and `baseline.diff` from a completed goal, with its baseline cost, tokens, turns, outcome and diff hash. Refuses a goal with `start_dirty` unless `--allow-dirty`.
-2. [ ] **`ta golden list`** shows entries with baseline cost and age.
-3. [ ] **`ta golden replay <id> [--set key=value ...] [--tag <label>]`** makes a clean checkout of `start_commit` in a scratch worktree (never the user's tree), launches a normal `ta run` with the stored prompt tagged `experiment_id = golden:<id>`, `experiment_arm = <tag>`, applies `--set` through `experiment_overrides`, prints a cost estimate first, and respects `--max-usd`.
-4. [ ] **`ta golden report [<id>...]`** compares each replay to its baseline: cost, tokens, turns, outcome, whether `--check` passes, and a normalized diff comparison. Verdict is `equivalent`, `differs` or `failed`; anything not `equivalent` is listed for human review and never auto-accepted. A single replay is labelled as one sample.
-5. [ ] Tests with a tempdir git repo: capture refuses dirty, replay checks out the right commit and leaves the user's tree untouched, verdict logic, `experiment_*` fields set. `docs/USAGE.md` how-to.
+1. [x] **`ta golden capture <goal-id> [--check "<cmd>"]`** stores `.ta/golden/<id>/entry.json`, `prompt.md` and `baseline.diff` from a completed goal, with its baseline cost, tokens, turns, outcome and diff hash. Refuses a goal with `start_dirty` unless `--allow-dirty`.
+2. [x] **`ta golden list`** shows entries with baseline cost and age.
+3. [x] **`ta golden replay <id> [--set key=value ...] [--tag <label>]`** makes a clean checkout of `start_commit` in a scratch worktree (never the user's tree), launches a normal `ta run` with the stored prompt tagged `experiment_id = golden:<id>`, `experiment_arm = <tag>`, applies `--set` through `experiment_overrides`, prints a cost estimate first, and respects `--max-usd`.
+4. [x] **`ta golden report [<id>...]`** compares each replay to its baseline: cost, tokens, turns, outcome, whether `--check` passes, and a normalized diff comparison. Verdict is `equivalent`, `differs` or `failed`; anything not `equivalent` is listed for human review and never auto-accepted. A single replay is labelled as one sample.
+5. [x] Tests with a tempdir git repo: capture refuses dirty, replay checks out the right commit and leaves the user's tree untouched, verdict logic, `experiment_*` fields set. `docs/USAGE.md` how-to.
 
 **Effort**: M.
 
