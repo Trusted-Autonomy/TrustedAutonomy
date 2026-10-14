@@ -11078,7 +11078,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.8`
 
 ### v0.17.12.9 - Windows AppContainer Parity
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
 
 **Goal**: Windows gets the same isolation as macOS and Linux in the same release. All platforms launch at once.
@@ -11087,8 +11087,10 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [x] Staging ACL set before population; toolchain read grants with teardown and a `ta doctor --fix` sweep.
 3. [x] ProjFS provider refuses infrastructure directories case-insensitively; alternate-stream, short-name and device-name rejection.
 4. [x] Job Object process limits; the AppContainer-to-Job-Object fallback becomes a posture decision, never silent.
-5. [ ] Open questions from the sandbox plan resolved by testing on Windows CI: whether an AppContainer process can read Credential Manager, and how the secrets move in v0.17.12.1 maps to DPAPI or Credential Manager.
-6. [ ] Conformance suite on Windows CI; default-on for team roles on Windows (v0.17.12.10).
+5. [x] Open questions from the sandbox plan resolved by testing on Windows CI. Measured on a GitHub `windows-latest` runner (`windows_conformance`, FINDING lines in the `windows-sandbox-findings` artifact): an AppContainer process can NOT see the host user's Credential Manager entries (checked with a host-side control so the probe is known to work), and it CAN use CurrentUser DPAPI. So Credential Manager is a sound home for broker secrets, and a DPAPI-protected blob is not a boundary against the agent. How the v0.17.12.1 secrets map onto it is a design choice carried into v0.17.12.10 item 1.
+6. [x] Conformance suite on Windows CI (`AppContainer conformance and Credential Manager probe` step in the Windows job, `TA_REQUIRE_SANDBOX_CONFORMANCE=1`, so a runner that cannot create a profile fails instead of skipping). Green on the merge run: staging writable and the rest of the machine not, no host loopback reachable without an exemption, Credential Manager and DPAPI findings recorded. Default-on for team roles on Windows belongs to v0.17.12.10.
+
+Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `sandbox_windows.rs`) could not be type-checked on the development host (the macOS cross target lacks a Windows C toolchain for `ring`) and were verified by Windows CI only. The in-container loopback relay (an AppContainer listening on its own 127.0.0.1) has no dedicated conformance test yet; v0.17.12.10 should add one before default-on. Two first-run test defects were fixed on the PR branch: a `\\?\` canonical path that PowerShell rejects, and a `cmdkey` probe that matched its own header and so falsely reported the credential as visible.
 
 **Effort**: M.
 
@@ -11102,6 +11104,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 2. [ ] On by default under `balanced` on macOS, Linux and Windows; CoS and chat refuse to launch without the required capabilities in every posture except `open`.
 3. [ ] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor`; badges in Studio and `ta status`; drafts built without a required capability are labelled in review. Also owns making macOS violation events dependable (from v0.17.12.7 item 4): unified-log delivery of tagged denials is best-effort today (about 1 run in 6 to 1 in 4 delivers none, cause unexplained), so `ta sandbox explain` must not present an empty violation list as proof of no denials until delivery is fixed or sourced from another channel.
 4. [ ] USAGE.md sandbox section rewritten as how-to with honest per-platform limits.
+5. [ ] Carried from v0.17.12.9: (a) a conformance test for the in-container loopback relay on Windows (an AppContainer listening on its own 127.0.0.1), required before default-on there; (b) the mapping of the v0.17.12.1 secrets onto Credential Manager, given the measured result that an AppContainer process cannot see the host user's Credential Manager entries but can use CurrentUser DPAPI (so DPAPI-wrapped blobs are not a boundary); (c) decide and enforce whether a chat or reviewer goal that grants network is refused on Linux, since no Linux-specific rule exists today and the USAGE.md limits paragraph defers to this phase.
 
 **Effort**: M.
 
