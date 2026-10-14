@@ -11261,7 +11261,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: The cost report must also land in Meridian so cost can be analysed against KPIs. Meridian's generic JSONL loader reads `id`, `title`, `timestamp`, `tokens_input`, `tokens_output`, `source`, `phase` and keeps string-valued extras as metadata.
 
-1. [ ] **`ta cost report --meridian <file.jsonl>`** writes one record per session or goal in that shape, with string metadata `cost_usd`, `cost_exact`, `model`, `cache_read_tokens`, `cache_write_tokens`, `context_peak`, `workload`. The write is atomic (temp file then rename), idempotent by record `id`, and prints the path, record count and the exact Meridian command to read it.
+1. [x] **`ta cost report --meridian <file.jsonl>`** writes one record per session or goal in that shape, with string metadata `cost_usd`, `cost_exact`, `model`, `cache_read_tokens`, `cache_write_tokens`, `context_peak`, `workload`. The write is atomic (temp file then rename), idempotent by record `id`, and prints the path, record count and the exact Meridian command to read it.
 2. [ ] **Meridian ingester fixes (Meridian repo, separate PR).** Its `claude_code` ingester sums every assistant row without deduplicating by `message.id`: measured 2.49x input and 2.69x output overcount on a real session. It also drops `cache_read_input_tokens`, which is 64% of interactive cost. Dedupe by message id and carry cache-read as separate metadata. Needs the owner's approval because it changes Meridian's numbers for past data.
 3. [ ] Tests: output parses with Meridian's own loader (path dependency or fixture round trip), re-running does not duplicate records, a session with repeated ids exports once. `docs/USAGE.md` how-to.
 

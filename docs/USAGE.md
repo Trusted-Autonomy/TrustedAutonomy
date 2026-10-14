@@ -14837,6 +14837,21 @@ How the numbers are made:
 - OMP's own per-message cost is used and marked **exact**. Claude Code costs are **estimated** from the price table (`.ta/pricing.toml`, then the built-in table); where a transcript splits cache writes by lifetime, the 1 hour part is priced at twice the input rate. A model with no price row is **unpriced**: its tokens are counted, its cost is 0 and nothing is invented. Add a row to `.ta/pricing.toml` to price it.
 - The context-size table groups turns by prompt size (input plus cache-read plus cache-creation tokens): 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k. A long session that keeps re-reading a large context shows up as most of its cost in the top rows. TA goals are many turns each and are not in this table.
 
+### Exporting the cost report to Meridian
+
+To analyse cost against your KPIs, write the same data to a file [Meridian](#effort--kpi-analytics-meridian) can read:
+
+```bash
+ta cost report --since 2026-10-01 --meridian cost.jsonl
+meridian analyze --source jsonl --path cost.jsonl
+```
+
+`--meridian <file.jsonl>` writes one record per TA goal or interactive session, using the same sources, filters and de-duplication as the report (a session whose transcript repeats a message counts once). After the report it prints the path, how many records were written and the exact `meridian` command to read the file.
+
+Each record carries `id`, `title`, `timestamp`, `tokens_input` (uncached input only), `tokens_output`, `source` and, for goals, `phase`. Meridian keeps these string fields as metadata: `cost_usd`, `cost_exact` (`true` only when every turn's cost was reported rather than estimated), `model` (the model with the most tokens), `cache_read_tokens`, `cache_write_tokens`, `context_peak` (largest prompt in the session; `n/a` for goals) and `workload` (`goal` or `interactive`). Cache reads are kept out of `tokens_input` on purpose: they are most of an interactive session's cost, and folding them in would swamp the effort score.
+
+Re-running is safe. Records are matched by `id` (`<source>:<session or goal id>`), so a second run updates them in place instead of adding copies, and any other lines already in the file are kept. The file is written to a temporary file and renamed into place, so an interrupted run cannot leave it half-written. If the existing file has a line that is not valid JSON, nothing is changed and the error names the line. With `--json`, the confirmation goes to stderr so stdout stays valid JSON.
+
 ### Viewing aggregate stats
 
 ```bash

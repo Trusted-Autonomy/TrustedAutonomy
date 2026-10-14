@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Subcommand;
+use ta_goal::cost_export::{meridian_command, meridian_records, write_jsonl};
 use ta_goal::cost_report::{
-    build_report, parse_cost_group_by, scan_claude, scan_omp, CostFilter, CostGroupRow, CostReport,
-    CostTotals, Scan,
+    build_report, goal_rows, parse_cost_group_by, scan_claude, scan_omp, CostFilter, CostGroup,
+    CostGroupRow, CostReport, CostRow, CostTotals, Scan,
 };
 use ta_goal::spend::parse_time_bound;
-use ta_goal::{GoalRunStore, PriceTable};
+use ta_goal::{GoalRun, GoalRunStore, PriceTable};
 use ta_mcp_gateway::GatewayConfig;
 
 #[derive(Debug, Subcommand)]
@@ -49,6 +50,10 @@ pub enum CostCommands {
         /// OMP sessions directory (default: ~/.omp/agent/sessions).
         #[arg(long, value_name = "DIR")]
         omp_dir: Option<PathBuf>,
+        /// Also write one record per goal or session to this Meridian JSONL
+        /// file. Re-running updates records by id and never duplicates them.
+        #[arg(long, value_name = "FILE.jsonl")]
+        meridian: Option<PathBuf>,
     },
 }
 
@@ -62,6 +67,7 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
             json,
             claude_dir,
             omp_dir,
+            meridian,
         } => {
             let home = dirs::home_dir();
             let claude = claude_dir
@@ -75,7 +81,7 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
                         .map(|h| h.join(".omp").join("agent").join("sessions"))
                 })
                 .unwrap_or_else(|| PathBuf::from(".omp/agent/sessions"));
-            let report = run_report(
+            let inputs = gather(
                 config,
                 since.as_deref(),
                 until.as_deref(),
@@ -84,18 +90,87 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
                 &claude,
                 &omp,
             )?;
+            // Export first from the same rows the report is built from, so the
+            // file and the table cannot disagree.
+            let exported = meridian
+                .as_ref()
+                .map(|path| export_meridian(&inputs, path))
+                .transpose()?;
+            let report = inputs.into_report();
             if *json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", render(&report));
+            }
+            if let Some(msg) = exported {
+                // stderr under --json keeps stdout parseable.
+                if *json {
+                    eprintln!("{msg}");
+                } else {
+                    println!("{msg}");
+                }
             }
             Ok(())
         }
     }
 }
 
+/// Validated flags and everything read from the sources.
+struct Inputs {
+    goals: Option<Vec<(String, GoalRun)>>,
+    scans: Vec<Scan>,
+    group_by: Vec<CostGroup>,
+    filter: CostFilter,
+}
+
+impl Inputs {
+    fn into_report(self) -> CostReport {
+        build_report(
+            self.goals.as_deref(),
+            self.scans,
+            &self.group_by,
+            &self.filter,
+        )
+    }
+}
+
+/// Write the Meridian file and return the confirmation text.
+fn export_meridian(inputs: &Inputs, path: &Path) -> anyhow::Result<String> {
+    let mut rows: Vec<CostRow> = inputs.goals.as_deref().map(goal_rows).unwrap_or_default();
+    for scan in &inputs.scans {
+        rows.extend(scan.rows.iter().cloned());
+    }
+    let kept: Vec<&CostRow> = rows.iter().filter(|r| inputs.filter.matches(r)).collect();
+    let goals = inputs.goals.as_deref().unwrap_or(&[]);
+    let records = meridian_records(&kept, goals);
+    let out = write_jsonl(path, &records)?;
+    tracing::info!(
+        path = %path.display(),
+        exported = out.exported,
+        replaced = out.replaced,
+        kept = out.kept,
+        "cost report exported to Meridian"
+    );
+    let mut msg = format!(
+        "Meridian export: wrote {} record(s) to {} ({} updated in place, {} other record(s) kept)",
+        out.exported,
+        path.display(),
+        out.replaced,
+        out.kept
+    );
+    if out.exported == 0 {
+        msg.push_str(
+            "\nNo goals or sessions matched, so nothing new was exported. Widen --since/--until \
+             or --project, or check the sources listed above.",
+        );
+    }
+    msg.push_str(&format!("\nRead it with: {}", meridian_command(path)));
+    Ok(msg)
+}
+
 /// Validate the flags, read every source and build the report.
-pub fn run_report(
+#[cfg(test)]
+fn run_report(
     config: &GatewayConfig,
     since: Option<&str>,
     until: Option<&str>,
@@ -104,6 +179,18 @@ pub fn run_report(
     claude_dir: &Path,
     omp_dir: &Path,
 ) -> anyhow::Result<CostReport> {
+    Ok(gather(config, since, until, group_by, project, claude_dir, omp_dir)?.into_report())
+}
+
+fn gather(
+    config: &GatewayConfig,
+    since: Option<&str>,
+    until: Option<&str>,
+    group_by: &str,
+    project: Option<&str>,
+    claude_dir: &Path,
+    omp_dir: &Path,
+) -> anyhow::Result<Inputs> {
     let group_by = parse_cost_group_by(group_by).map_err(anyhow::Error::msg)?;
     let bound = |name: &str, v: Option<&str>| -> anyhow::Result<_> {
         v.map(|s| parse_time_bound(s).map_err(|e| anyhow::anyhow!("--{name}: {e}")))
@@ -148,7 +235,12 @@ pub fn run_report(
         None
     };
     let scans: Vec<Scan> = vec![scan_claude(claude_dir, &table), scan_omp(omp_dir, &table)];
-    Ok(build_report(goals.as_deref(), scans, &group_by, &filter))
+    Ok(Inputs {
+        goals,
+        scans,
+        group_by,
+        filter,
+    })
 }
 
 fn tok(n: u64) -> String {
@@ -400,5 +492,37 @@ mod tests {
         let back: CostReport = serde_json::from_str(&serde_json::to_string(&rep).unwrap()).unwrap();
         assert_eq!(back.totals, rep.totals);
         assert_eq!(back.groups[0].group["day"], "2026-10-10");
+    }
+
+    #[test]
+    fn meridian_export_dedupes_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, omp) = fixture(dir.path());
+        let out = dir.path().join("cost.jsonl");
+        let inputs = gather(&cfg(dir.path()), None, None, "source", None, &claude, &omp).unwrap();
+        let msg = export_meridian(&inputs, &out).unwrap();
+        assert!(msg.contains("2 record(s)"), "{msg}");
+        assert!(
+            msg.contains("meridian analyze --source jsonl --path"),
+            "{msg}"
+        );
+
+        // The Claude session repeats message id m1; it counts once (5+... last row wins).
+        let text = fs::read_to_string(&out).unwrap();
+        let recs: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let claude_rec = recs.iter().find(|r| r["source"] == "claude_code").unwrap();
+        assert_eq!(claude_rec["tokens_output"], 50 + 7);
+        let omp_rec = recs.iter().find(|r| r["source"] == "omp").unwrap();
+        assert_eq!(omp_rec["cost_exact"], "true");
+        assert_eq!(omp_rec["cost_usd"], "0.5000");
+
+        // Re-running leaves the file byte-identical.
+        let again = gather(&cfg(dir.path()), None, None, "source", None, &claude, &omp).unwrap();
+        let msg = export_meridian(&again, &out).unwrap();
+        assert!(msg.contains("2 updated in place"), "{msg}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), text);
     }
 }
