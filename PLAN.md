@@ -11306,16 +11306,16 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.21`
 
 ### v0.17.12.22 - Apply After an Interrupted Apply Must Not Commit a Half-Bumped Version
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.5
 
 **Goal**: Found 2026-10-14 on PR #678 (v0.17.12.5): all three CI platforms failed at `Build all crates` with `failed to select a version for the requirement ta-changeset = "^0.17.12-alpha.5"`. Cause: earlier `ta draft apply` attempts were killed mid-run and left the version bump to `0.17.12-alpha.5` in 30 manifests in the working tree. The next apply logged `[recover] ... Rolled it back` and `uncommitted changes` warnings for every manifest, then `bump_workspace_version` found most files already current and returned only the two it changed, so only those two were staged (`[version] bumped crates/ta-data-spec/Cargo.toml + crates/ta-workspace/Cargo.toml`). The committed tree had workspace `alpha.4` but two crates requiring siblings at `alpha.5`. The `Version consistency` job did not catch it because it compares only `Cargo.toml` and `CLAUDE.md`. The fix was a manual follow-up commit of the other 30 files.
 
-1. [ ] **Stage the whole bump, not the delta.** After a bump (including `AlreadyCurrent` results), stage every version file that differs from `HEAD` and is a version file by pattern (`Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `.release.toml`), so a bump left by an interrupted run is committed with the rest.
-2. [ ] **Refuse an inconsistent tree before committing.** Before the commit, resolve the workspace (`cargo metadata --locked --offline` or the equivalent) and fail with a clear message listing the crates whose version disagrees with the workspace version, instead of committing a tree that cannot build.
-3. [ ] **Say what it found.** When apply starts with a dirty tree it lists the files by category (version files, plan files, other) and states which it will include and which it will leave, rather than 30 identical warnings.
-4. [ ] **Extend `Version consistency` CI** to run the same resolve check, so the next occurrence fails in seconds with the reason.
-5. [ ] Tests: a tempdir workspace left half-bumped by a simulated interrupted apply is fully staged by the next apply; an inconsistent tree is refused with the crate list; a clean apply is unchanged. `docs/USAGE.md` note on recovery after an interrupted apply.
+1. [x] **Stage the whole bump, not the delta.** After a bump (including `AlreadyCurrent` results), stage every version file that differs from `HEAD` and is a version file by pattern (`Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `.release.toml`), so a bump left by an interrupted run is committed with the rest.
+2. [x] **Refuse an inconsistent tree before committing.** Before the commit, resolve the workspace (`cargo metadata --locked --offline` or the equivalent) and fail with a clear message listing the crates whose version disagrees with the workspace version, instead of committing a tree that cannot build.
+3. [x] **Say what it found.** When apply starts with a dirty tree it lists the files by category (version files, plan files, other) and states which it will include and which it will leave, rather than 30 identical warnings.
+4. [x] **Extend `Version consistency` CI** to run the same resolve check, so the next occurrence fails in seconds with the reason.
+5. [x] Tests: a tempdir workspace left half-bumped by a simulated interrupted apply is fully staged by the next apply; an inconsistent tree is refused with the crate list; a clean apply is unchanged. `docs/USAGE.md` note on recovery after an interrupted apply.
 
 **Effort**: S.
 

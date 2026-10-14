@@ -1876,6 +1876,11 @@ fn check_and_clean_working_tree(target_dir: &std::path::Path) {
         return; // Working tree already clean — nothing to do.
     }
 
+    // One categorized summary instead of a warning per file (v0.17.12.22).
+    if let Some(summary) = super::draft_version::summarize_dirty(&status_output) {
+        eprint!("{summary}");
+    }
+
     let mut other_modified: Vec<String> = Vec::new();
 
     for line in status_output.lines() {
@@ -1950,11 +1955,11 @@ fn check_and_clean_working_tree(target_dir: &std::path::Path) {
         }
     }
 
-    for f in &other_modified {
-        eprintln!(
-            "[apply] Warning: working tree has uncommitted changes to '{}'. \
-             Consider committing or stashing before continuing.",
-            f
+    // The per-file detail is in the summary above; log it structurally for diagnosis.
+    if !other_modified.is_empty() {
+        tracing::warn!(
+            files = ?other_modified,
+            "working tree has uncommitted changes to tracked files; commit or stash them if unintended"
         );
     }
 
@@ -8761,6 +8766,19 @@ fn apply_package(
                 super::plan::warn_unparseable_phase_id_for_bump(&last_phase_id);
             }
 
+            // v0.17.12.22: stage a bump left by an interrupted run and flag disagreement
+            // (no commit happens on this path, so warn rather than refuse).
+            match super::draft_version::stage_version_files(&target_dir) {
+                Ok(staged) if !staged.is_empty() => {
+                    println!("[version] staged {} version file(s)", staged.len());
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("[version] Warning: {e}"),
+            }
+            if let Err(e) = super::draft_version::verify_version_consistency(&target_dir) {
+                eprintln!("[version] Warning: {e}");
+            }
+
             // v0.12.5: Write plan phase completion into memory for future context injection.
             for phase in &phase_ids {
                 let phase_title = super::plan::parse_plan(&content)
@@ -9042,6 +9060,18 @@ fn apply_package(
                         } else {
                             super::plan::warn_unparseable_phase_id_for_bump(&last_phase_id);
                         }
+
+                        // v0.17.12.22: stage the WHOLE bump (including files an interrupted
+                        // apply already changed), then refuse to commit a tree whose
+                        // manifests disagree about the workspace version.
+                        let staged = super::draft_version::stage_version_files(&target_dir)?;
+                        if !staged.is_empty() {
+                            println!(
+                                "[version] staged {} version file(s) for the commit",
+                                staged.len()
+                            );
+                        }
+                        super::draft_version::verify_version_consistency(&target_dir)?;
 
                         for phase in &phase_ids {
                             let phase_title = super::plan::parse_plan(&content)
