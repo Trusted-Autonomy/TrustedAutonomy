@@ -23,6 +23,9 @@ The schemas are generated directly from the real, already-`serde`-annotated Rust
 | `TriggerEvent` | `TriggerEvent` | `ta-intake` | `schema/trigger_event.schema.json` |
 | `RoutingDecision` | `RoutingDecision` | `ta-brain` | `schema/routing_decision.schema.json` |
 | `Persona` | `PersonaConfig` | `ta-goal` | `schema/persona.schema.json` |
+| `VcsDetection` | `VcsDetection` | `ta-workspace` | `schema/vcs_detection.schema.json` |
+| `VcsSetupReport` | `VcsSetupReport` | `ta-workspace` | `schema/vcs_setup_report.schema.json` (`ta setup vcs --json`) |
+| `InitReport` | `InitReport` | `ta-workspace` | `schema/init_report.schema.json` (`ta init --json`) |
 
 Each schema file carries:
 - `$id` — a stable, versioned URL (`https://trustedautonomy.dev/schema/<name>.v<version>.schema.json`).

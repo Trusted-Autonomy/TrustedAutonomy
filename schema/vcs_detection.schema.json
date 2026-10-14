@@ -1,0 +1,115 @@
+{
+  "$defs": {
+    "VcsEvidence": {
+      "description": "One marker or file that supports a VCS kind.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/VcsKind",
+          "description": "The kind this marker points to."
+        },
+        "marker": {
+          "description": "What was looked for, e.g. `.git`, `.p4config`, `P4PORT`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Where it was found: project-relative with forward slashes, an absolute\nforward-slash path for an enclosing directory, or `env:<NAME>`.",
+          "type": "string"
+        },
+        "plugin": {
+          "description": "Plugin name when `kind` is `plugin`, otherwise null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Human-readable reason this marker counts.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "marker",
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "VcsKind": {
+      "description": "Kind of version control the project is under.",
+      "oneOf": [
+        {
+          "enum": [
+            "git",
+            "svn",
+            "perforce"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No VCS marker found.",
+          "type": "string"
+        },
+        {
+          "const": "plugin",
+          "description": "A VCS adapter plugin claimed the project through its declared markers.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/vcs_detection.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Result of VCS detection: the chosen kind and the evidence behind it.",
+  "properties": {
+    "checked": {
+      "description": "Every marker that was probed, so `none` can say what was checked.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "evidence": {
+      "description": "Markers and files that led to the chosen kind (empty for `none`).",
+      "items": {
+        "$ref": "#/$defs/VcsEvidence"
+      },
+      "type": "array"
+    },
+    "ignored_evidence": {
+      "description": "Markers found for other kinds that lost to the chosen one.",
+      "items": {
+        "$ref": "#/$defs/VcsEvidence"
+      },
+      "type": "array"
+    },
+    "kind": {
+      "$ref": "#/$defs/VcsKind",
+      "description": "The chosen kind."
+    },
+    "plugin": {
+      "description": "Plugin name when `kind` is `plugin`, otherwise null.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "description": "JSON shape version (`VCS_DETECTION_SCHEMA_VERSION`).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "evidence",
+    "ignored_evidence",
+    "checked"
+  ],
+  "title": "VcsDetection",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

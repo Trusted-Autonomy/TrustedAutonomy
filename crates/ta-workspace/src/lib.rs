@@ -32,6 +32,8 @@ pub mod projfs_strategy;
 pub mod shared_files;
 pub mod staging;
 pub mod store;
+pub mod vcs_detect;
+pub mod vcs_report;
 pub mod windows_features;
 
 pub use advisor_patch::AdvisorPatch;
@@ -47,10 +49,16 @@ pub use overlay::{
     verify_staging_isolation, ExcludePatterns, OverlayStagingMode, OverlayWorkspace,
 };
 pub use partitioning::{
-    git_is_ignored, gitignore_block, p4_is_ignored, p4ignore_block, update_gitignore,
-    update_p4ignore, VcsBackend, GITIGNORE_MARKER, LOCAL_TA_PATHS, P4IGNORE_MARKER,
-    SHARED_TA_PATHS,
+    git_is_ignored, gitignore_block, merge_svn_ignore, p4_is_ignored, p4ignore_block,
+    svn_ignore_patterns, svn_is_ignored, update_gitignore, update_gitignore_detailed,
+    update_p4ignore, update_p4ignore_detailed, IgnoreUpdate, VcsBackend, GITIGNORE_MARKER,
+    LOCAL_TA_PATHS, P4IGNORE_MARKER, SHARED_TA_PATHS,
 };
 pub use shared_files::{is_shared_file, SharedFileBase};
 pub use staging::StagingWorkspace;
 pub use store::{ChangeStore, JsonFileStore};
+pub use vcs_detect::{
+    detect_vcs, detect_vcs_with, DetectContext, PluginMarkers, VcsDetection, VcsEvidence, VcsKind,
+    VCS_DETECTION_SCHEMA_VERSION,
+};
+pub use vcs_report::{IgnoreAction, IgnoreReport, InitReport, VcsSetupReport};

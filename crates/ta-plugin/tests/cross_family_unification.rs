@@ -41,6 +41,7 @@ fn synthetic_plugin_works_identically_via_vcs_and_runtime_integrations() {
         min_daemon_version: None,
         source_url: None,
         staging_env: Default::default(),
+        detect: Default::default(),
     };
     let vcs_adapter = ta_submit::external_vcs_adapter::ExternalVcsAdapter::new(
         &vcs_manifest,

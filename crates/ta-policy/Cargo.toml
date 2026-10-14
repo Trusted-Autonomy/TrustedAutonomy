@@ -18,7 +18,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 glob = { workspace = true }
 tracing = { workspace = true }
-ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.4" }
+ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.5" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

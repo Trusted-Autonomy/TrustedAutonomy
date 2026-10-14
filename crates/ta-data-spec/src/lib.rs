@@ -74,6 +74,24 @@ pub const SPECS: &[SpecEntry] = &[
         file: "persona.schema.json",
         generate: persona_schema,
     },
+    SpecEntry {
+        name: "vcs_detection",
+        version: 1,
+        file: "vcs_detection.schema.json",
+        generate: vcs_detection_schema,
+    },
+    SpecEntry {
+        name: "vcs_setup_report",
+        version: 1,
+        file: "vcs_setup_report.schema.json",
+        generate: vcs_setup_report_schema,
+    },
+    SpecEntry {
+        name: "init_report",
+        version: 1,
+        file: "init_report.schema.json",
+        generate: init_report_schema,
+    },
 ];
 
 /// The `Goal` spec — `ta_goal::GoalRun`, the execution-lifecycle unit.
@@ -108,6 +126,21 @@ pub fn routing_decision_schema() -> Schema {
 /// The `Persona` spec — `ta_goal::PersonaConfig`, the full `.ta/personas/<name>.toml` shape.
 pub fn persona_schema() -> Schema {
     schemars::schema_for!(ta_goal::PersonaConfig)
+}
+
+/// The `VcsDetection` spec: the chosen VCS kind plus the evidence list.
+pub fn vcs_detection_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::VcsDetection)
+}
+
+/// The `VcsSetupReport` spec: `ta setup vcs --json` / `--dry-run --json`.
+pub fn vcs_setup_report_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::VcsSetupReport)
+}
+
+/// The `InitReport` spec: `ta init --json`.
+pub fn init_report_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::InitReport)
 }
 
 /// Looks up a published spec's current version by name (e.g. `"draft"`,

@@ -880,6 +880,10 @@ enum Commands {
     Init {
         #[command(subcommand)]
         command: Option<commands::init::InitCommands>,
+        /// Print one JSON document (project, created files, VCS detection with
+        /// evidence) instead of text. Bare `ta init` only.
+        #[arg(long)]
+        json: bool,
     },
     /// Create a new project through conversational bootstrapping.
     ///
@@ -2135,7 +2139,9 @@ fn dispatch_raw(
         Commands::Adapter { command } => commands::adapter::execute(command, project_root),
         Commands::Install => commands::install::execute(project_root),
         Commands::Setup { command } => commands::setup::execute(command, config),
-        Commands::Init { command } => commands::init::execute(command.as_ref(), config),
+        Commands::Init { command, json } => {
+            commands::init::execute(command.as_ref(), *json, config)
+        }
         Commands::New { command } => commands::new::execute(command, config),
         Commands::Release { command } => commands::release::execute(command, config),
         Commands::Shell {
@@ -2413,22 +2419,90 @@ mod verb_dispatch_tests {
             .expect("command-build thread panicked")
     }
 
+    /// Every `--flag` that a hint or help text names after `ta doctor` must be
+    /// a real `ta doctor` flag (or a global one). A hint once told users to run
+    /// a flag that did not exist; following it failed.
+    #[test]
+    fn every_flag_named_in_a_doctor_hint_exists_in_the_cli() {
+        let cmd = build_command();
+        let doctor = cmd
+            .find_subcommand("doctor")
+            .expect("`ta doctor` subcommand must exist");
+        let mut known: std::collections::HashSet<String> =
+            ["help", "version"].iter().map(|s| s.to_string()).collect();
+        for a in doctor.get_arguments().chain(cmd.get_arguments()) {
+            if let Some(l) = a.get_long() {
+                known.insert(l.to_string());
+            }
+        }
+
+        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    collect(&p, out);
+                } else if p.extension().is_some_and(|e| e == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        collect(&manifest.join("src"), &mut files);
+        files.push(manifest.join("../../docs/USAGE.md"));
+
+        let flag = regex::Regex::new(r"--([a-z][a-z0-9-]*)").unwrap();
+        let next_cmd = regex::Regex::new(r"\bta\s+[a-z]").unwrap();
+        let mut bad = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let mut rest = line;
+                while let Some(pos) = rest.find("ta doctor") {
+                    let after = &rest[pos + "ta doctor".len()..];
+                    // The hint ends where another command starts.
+                    let end = next_cmd.find(after).map_or(after.len(), |m| m.start());
+                    for cap in flag.captures_iter(&after[..end]) {
+                        if !known.contains(&cap[1]) {
+                            bad.push(format!("{}:{}: --{}", file.display(), n + 1, &cap[1]));
+                        }
+                    }
+                    rest = &after[end..];
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "doctor hints name flags that `ta doctor` does not have (known: {:?}):\n{}",
+            known,
+            bad.join("\n")
+        );
+    }
+
     /// v0.17.9: bare `ta init` (no subcommand) must parse successfully with
     /// `command: None` — this is the one-command onboarding entry point.
     /// `ta init run --template ...` must still work unchanged.
     #[test]
     fn bare_init_parses_with_no_subcommand() {
-        assert!(matches!(parse(&["init"]), Commands::Init { command: None }));
+        assert!(matches!(
+            parse(&["init"]),
+            Commands::Init {
+                command: None,
+                json: false
+            }
+        ));
         assert!(matches!(
             parse(&["init", "run", "--template", "rust-workspace"]),
             Commands::Init {
-                command: Some(commands::init::InitCommands::Run { .. })
+                command: Some(commands::init::InitCommands::Run { .. }),
+                ..
             }
         ));
         assert!(matches!(
             parse(&["init", "templates"]),
             Commands::Init {
-                command: Some(commands::init::InitCommands::Templates)
+                command: Some(commands::init::InitCommands::Templates),
+                ..
             }
         ));
     }

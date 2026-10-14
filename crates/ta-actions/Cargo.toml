@@ -17,10 +17,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
-ta-plugin = { path = "../ta-plugin", version = "0.17.12-alpha.4" }
-ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.4" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.12-alpha.4" }
-ta-audit = { path = "../ta-audit", version = "0.17.12-alpha.4" }
+ta-plugin = { path = "../ta-plugin", version = "0.17.12-alpha.5" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.5" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.12-alpha.5" }
+ta-audit = { path = "../ta-audit", version = "0.17.12-alpha.5" }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }

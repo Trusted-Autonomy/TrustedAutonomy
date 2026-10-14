@@ -1,0 +1,263 @@
+{
+  "$defs": {
+    "IgnoreAction": {
+      "description": "What happened (or would happen) to the ignore target.",
+      "oneOf": [
+        {
+          "const": "created",
+          "description": "The ignore file did not exist and was written.",
+          "type": "string"
+        },
+        {
+          "const": "updated",
+          "description": "The TA block was added or refreshed.",
+          "type": "string"
+        },
+        {
+          "const": "unchanged",
+          "description": "The TA block was already complete; nothing changed.",
+          "type": "string"
+        },
+        {
+          "const": "would_create",
+          "description": "Dry run: the file would be created.",
+          "type": "string"
+        },
+        {
+          "const": "would_update",
+          "description": "Dry run: the TA block would be added or refreshed.",
+          "type": "string"
+        },
+        {
+          "const": "skipped",
+          "description": "Nothing was written; see `note` for why and what to do.",
+          "type": "string"
+        }
+      ]
+    },
+    "IgnoreReport": {
+      "description": "Result for the VCS ignore target (`.gitignore`, `.p4ignore`, or the\n`svn:ignore` property on `.ta`).",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/IgnoreAction"
+        },
+        "added_entries": {
+          "description": "Entries the TA block gained (all of them when it is new).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "note": {
+          "description": "Why nothing was written, or what to do next.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preserved_unrecognized": {
+          "description": "`.ta/` lines in the existing block that TA does not recognize. They are\npreserved, never removed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "target": {
+          "description": "Where the rules go: `.gitignore`, `.p4ignore`, or `svn:ignore on .ta`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "action",
+        "added_entries",
+        "preserved_unrecognized"
+      ],
+      "type": "object"
+    },
+    "VcsDetection": {
+      "description": "Result of VCS detection: the chosen kind and the evidence behind it.",
+      "properties": {
+        "checked": {
+          "description": "Every marker that was probed, so `none` can say what was checked.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "description": "Markers and files that led to the chosen kind (empty for `none`).",
+          "items": {
+            "$ref": "#/$defs/VcsEvidence"
+          },
+          "type": "array"
+        },
+        "ignored_evidence": {
+          "description": "Markers found for other kinds that lost to the chosen one.",
+          "items": {
+            "$ref": "#/$defs/VcsEvidence"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/VcsKind",
+          "description": "The chosen kind."
+        },
+        "plugin": {
+          "description": "Plugin name when `kind` is `plugin`, otherwise null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "description": "JSON shape version (`VCS_DETECTION_SCHEMA_VERSION`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "evidence",
+        "ignored_evidence",
+        "checked"
+      ],
+      "type": "object"
+    },
+    "VcsEvidence": {
+      "description": "One marker or file that supports a VCS kind.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/VcsKind",
+          "description": "The kind this marker points to."
+        },
+        "marker": {
+          "description": "What was looked for, e.g. `.git`, `.p4config`, `P4PORT`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Where it was found: project-relative with forward slashes, an absolute\nforward-slash path for an enclosing directory, or `env:<NAME>`.",
+          "type": "string"
+        },
+        "plugin": {
+          "description": "Plugin name when `kind` is `plugin`, otherwise null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Human-readable reason this marker counts.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "marker",
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "VcsKind": {
+      "description": "Kind of version control the project is under.",
+      "oneOf": [
+        {
+          "enum": [
+            "git",
+            "svn",
+            "perforce"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No VCS marker found.",
+          "type": "string"
+        },
+        {
+          "const": "plugin",
+          "description": "A VCS adapter plugin claimed the project through its declared markers.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/vcs_setup_report.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Full report for one `ta setup vcs` run.",
+  "properties": {
+    "detection": {
+      "$ref": "#/$defs/VcsDetection",
+      "description": "What the detector found and why, regardless of any override."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "forced": {
+      "description": "`--force` was given.",
+      "type": "boolean"
+    },
+    "ignore": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IgnoreReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Ignore-file result; null for `none` and `plugin`."
+    },
+    "kind": {
+      "$ref": "#/$defs/VcsKind",
+      "description": "The VCS setup acted on (equals `detection.kind` unless overridden)."
+    },
+    "notes": {
+      "description": "Warnings and next steps.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "plugin": {
+      "description": "Plugin name when `kind` is `plugin`, otherwise null.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "description": "JSON shape version (`VCS_DETECTION_SCHEMA_VERSION`).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "source": {
+      "description": "`detected` or `override` (`--vcs` was given).",
+      "type": "string"
+    },
+    "workflow_changes": {
+      "description": "Changes (or would-be changes) to `.ta/workflow.toml`.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dry_run",
+    "forced",
+    "source",
+    "kind",
+    "detection",
+    "workflow_changes",
+    "notes"
+  ],
+  "title": "VcsSetupReport",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

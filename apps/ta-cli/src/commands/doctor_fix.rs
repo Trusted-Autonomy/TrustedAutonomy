@@ -191,11 +191,11 @@ fn collect(config: &GatewayConfig) -> (Vec<Finding>, Vec<ManualFinding>) {
     // Missing ignore entries rewrite the VCS ignore file.
     let gaps = doctor::vcs_gitignore_gaps(config);
     if !gaps.is_empty() {
-        let ignore_file =
-            match ta_workspace::partitioning::VcsBackend::detect(&config.workspace_root) {
-                ta_workspace::partitioning::VcsBackend::Perforce => ".p4ignore",
-                _ => ".gitignore",
-            };
+        let ignore_file = match ta_submit::detect_vcs(&config.workspace_root).backend() {
+            ta_workspace::partitioning::VcsBackend::Perforce => ".p4ignore",
+            ta_workspace::partitioning::VcsBackend::Svn => ".ta (svn:ignore property)",
+            _ => ".gitignore",
+        };
         findings.push(Finding {
             id: "vcs-gitignore".into(),
             label: "[warn]",
@@ -204,7 +204,7 @@ fn collect(config: &GatewayConfig) -> (Vec<Finding>, Vec<ManualFinding>) {
                 gaps.len()
             ),
             detail: gaps.iter().map(|g| format!(".ta/{g}")).collect(),
-            fix: format!("ta setup vcs --force (rewrites the TA block of {ignore_file})"),
+            fix: format!("ta setup vcs (refreshes the TA block of {ignore_file} in place)"),
             destructive: false,
             rewrites: vec![ignore_file.into()],
             action: FixAction::VcsGitignore,
@@ -320,8 +320,8 @@ fn apply(config: &GatewayConfig, f: &Finding) -> anyhow::Result<String> {
         FixAction::Signal(signal) => doctor::apply_fix(config, signal),
         FixAction::Orphan(o) => doctor::fix_orphaned_claim(config, o),
         FixAction::VcsGitignore => {
-            super::setup::run_vcs_setup(config, true, false, None, None)?;
-            Ok("ran ta setup vcs --force; the ignore block is updated".to_string())
+            super::setup::run_vcs_setup(config, false, false, None, None)?;
+            Ok("ran ta setup vcs; the ignore block is updated".to_string())
         }
         FixAction::VscodeExcludes => {
             crate::commands::init::write_vscode_settings_excludes(&config.workspace_root)?;

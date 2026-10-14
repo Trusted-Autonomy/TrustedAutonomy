@@ -43,9 +43,19 @@ pub enum InitCommands {
     Templates,
 }
 
-pub fn execute(command: Option<&InitCommands>, config: &GatewayConfig) -> anyhow::Result<()> {
+pub fn execute(
+    command: Option<&InitCommands>,
+    json: bool,
+    config: &GatewayConfig,
+) -> anyhow::Result<()> {
+    if json && command.is_some() {
+        anyhow::bail!(
+            "--json is only supported for bare `ta init`. Run `ta init --json` without a \
+             subcommand, or `ta setup vcs --json` for VCS detection alone"
+        );
+    }
     match command {
-        None => run_onboard(config),
+        None => run_onboard(config, json),
         Some(InitCommands::Run {
             template,
             detect: _,
@@ -67,6 +77,26 @@ pub fn execute(command: Option<&InitCommands>, config: &GatewayConfig) -> anyhow
     }
 }
 
+/// Assemble the `ta init --json` document (shape: `schema/init_report.schema.json`).
+fn build_init_report(
+    name: &str,
+    outcome: &ta_init::InitOutcome,
+    vcs: anyhow::Result<ta_workspace::VcsSetupReport>,
+) -> ta_workspace::InitReport {
+    ta_workspace::InitReport {
+        schema_version: ta_workspace::VCS_DETECTION_SCHEMA_VERSION,
+        project: name.to_string(),
+        already_initialized: outcome.already_initialized,
+        created: outcome.created.clone(),
+        skipped: outcome.skipped.clone(),
+        vcs_error: vcs
+            .as_ref()
+            .err()
+            .map(|e| format!("{e}. Run `ta setup vcs` manually to retry")),
+        vcs: vcs.ok(),
+    }
+}
+
 /// Bare `ta init` — one-command onboarding (v0.17.9).
 ///
 /// Calls the shared `ta_init::init_project` function (also used by Studio's
@@ -78,7 +108,7 @@ pub fn execute(command: Option<&InitCommands>, config: &GatewayConfig) -> anyhow
 ///
 /// For language-aware templates (Rust/TypeScript/Python/Go/game-engine),
 /// use `ta init run --template <name>` instead.
-fn run_onboard(config: &GatewayConfig) -> anyhow::Result<()> {
+fn run_onboard(config: &GatewayConfig, json: bool) -> anyhow::Result<()> {
     let project_root = &config.workspace_root;
     let name = ta_init::default_project_name(project_root);
 
@@ -88,6 +118,17 @@ fn run_onboard(config: &GatewayConfig) -> anyhow::Result<()> {
     };
     let outcome = ta_init::init_project(&opts)?;
 
+    // VCS setup runs on every invocation, first run or re-run, so a project
+    // whose ignore block predates a newer TA runtime path gets it refreshed.
+    // Best-effort: a failure is reported (never silent) and does not abort.
+    let vcs = super::setup::compute_vcs_setup(config, false, false, None, None);
+
+    if json {
+        let report = build_init_report(&name, &outcome, vcs);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
     if outcome.already_initialized {
         println!("Project '{}' is already initialized for TA.", name);
         if !outcome.created.is_empty() {
@@ -95,41 +136,44 @@ fn run_onboard(config: &GatewayConfig) -> anyhow::Result<()> {
             for f in &outcome.created {
                 println!("  {}", f);
             }
-        } else {
-            println!("Nothing to do — run `ta status` to see current state.");
         }
-        return Ok(());
-    }
-
-    println!("Initializing TA project: {}", name);
-    println!();
-    println!("Created:");
-    for f in &outcome.created {
-        println!("  {}", f);
-    }
-    if !outcome.skipped.is_empty() {
-        println!("Already present (left untouched):");
-        for f in &outcome.skipped {
+    } else {
+        println!("Initializing TA project: {}", name);
+        println!();
+        println!("Created:");
+        for f in &outcome.created {
             println!("  {}", f);
         }
+        if !outcome.skipped.is_empty() {
+            println!("Already present (left untouched):");
+            for f in &outcome.skipped {
+                println!("  {}", f);
+            }
+        }
     }
 
-    // Run VCS setup (best-effort — logs a warning and continues on failure,
-    // per the Observability Mandate: never fail silently, always say what to
-    // do next).
-    {
-        use super::setup::{execute as setup_execute, SetupCommands};
-        let vcs_cmd = SetupCommands::Vcs {
-            force: false,
-            dry_run: false,
-            vcs: None,
-            project_type: None,
-        };
-        if let Err(e) = setup_execute(&vcs_cmd, config) {
-            println!();
+    println!();
+    match &vcs {
+        Ok(report) => super::setup::print_vcs_setup(config, report, false),
+        Err(e) => {
             println!("  Warning: VCS setup encountered an issue: {}", e);
             println!("  Run `ta setup vcs` manually to retry.");
         }
+    }
+
+    if outcome.already_initialized {
+        let vcs_changed = vcs.as_ref().is_ok_and(|r| {
+            r.ignore.as_ref().is_some_and(|i| {
+                !matches!(
+                    i.action,
+                    ta_workspace::IgnoreAction::Unchanged | ta_workspace::IgnoreAction::Skipped
+                )
+            }) || !r.workflow_changes.is_empty()
+        });
+        if outcome.created.is_empty() && !vcs_changed {
+            println!("Nothing to do. Run `ta status` to see current state.");
+        }
+        return Ok(());
     }
 
     println!();
@@ -265,6 +309,15 @@ fn run_init(
                 println!("Project already has TA configuration in .ta/");
                 println!("Use `ta setup refine <topic>` to update specific config.");
             }
+            // Re-run: refresh the VCS ignore rules and say what changed.
+            println!();
+            match super::setup::compute_vcs_setup(config, false, false, vcs_override, None) {
+                Ok(report) => super::setup::print_vcs_setup(config, &report, false),
+                Err(e) => {
+                    println!("  Warning: VCS setup encountered an issue: {}", e);
+                    println!("  Run `ta setup vcs` manually to retry.");
+                }
+            }
             return Ok(());
         }
     }
@@ -314,19 +367,11 @@ fn run_init(
     let effective_vcs: Option<String> = if let Some(v) = vcs_override {
         Some(v.to_string())
     } else if interactive {
-        let has_git = project_root.join(".git").exists();
-        let has_p4 = project_root.join(".p4config").exists();
-        let has_svn = project_root.join(".svn").exists();
-        let detected = if has_git {
-            "git"
-        } else if has_p4 {
-            "perforce"
-        } else if has_svn {
-            "svn"
-        } else {
-            "none"
-        };
-        let vcs_ans = prompt("VCS backend (git/perforce/none)", detected);
+        // Same detector as `ta setup vcs`; show why before asking.
+        let detection = ta_submit::detect_vcs(project_root);
+        println!("  Detected VCS: {}", detection.summary());
+        let detected = detection.backend().as_str().to_string();
+        let vcs_ans = prompt("VCS backend (git/svn/perforce/none)", &detected);
         Some(vcs_ans)
     } else {
         None
@@ -449,15 +494,10 @@ fn run_init(
 
     // Run VCS setup automatically.
     {
-        use super::setup::{execute as setup_execute, SetupCommands};
-        let vcs_cmd = SetupCommands::Vcs {
-            force: false,
-            dry_run: false,
-            vcs: effective_vcs,
-            project_type: None,
-        };
         // Best-effort: log failure but don't abort init.
-        if let Err(e) = setup_execute(&vcs_cmd, config) {
+        if let Err(e) =
+            super::setup::run_vcs_setup(config, false, false, effective_vcs.as_deref(), None)
+        {
             println!("  Warning: VCS setup encountered an issue: {}", e);
             println!("  Run `ta setup vcs` manually to retry.");
         }
@@ -2297,7 +2337,7 @@ members = [
     fn bare_init_onboards_a_fresh_directory() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        execute(None, &config).unwrap();
+        execute(None, false, &config).unwrap();
 
         assert!(dir.path().join(".ta/workflow.toml").exists());
         assert!(dir.path().join("PLAN.md").exists());
@@ -2311,7 +2351,7 @@ members = [
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let config = test_config(&dir);
-        execute(None, &config).unwrap();
+        execute(None, false, &config).unwrap();
 
         assert!(dir.path().join(".ta/workflow.toml").exists());
         assert!(dir.path().join("CLAUDE.md").exists());
@@ -2326,9 +2366,9 @@ members = [
     fn bare_init_is_idempotent_and_reports_already_initialized() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        execute(None, &config).unwrap();
+        execute(None, false, &config).unwrap();
         // Second call must not error and must not clobber anything.
-        execute(None, &config).unwrap();
+        execute(None, false, &config).unwrap();
         let claude_md = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         assert!(claude_md.contains("TODO"));
     }
@@ -2337,9 +2377,9 @@ members = [
     fn bare_init_never_overwrites_edited_claude_md() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        execute(None, &config).unwrap();
+        execute(None, false, &config).unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "# hand-edited\n").unwrap();
-        execute(None, &config).unwrap();
+        execute(None, false, &config).unwrap();
         let claude_md = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         assert_eq!(claude_md, "# hand-edited\n");
     }
@@ -2721,5 +2761,55 @@ members = [
             parse_template_name("pragma-kotlin").unwrap(),
             ProjectType::PragmaKotlin
         ));
+    }
+
+    // --- v0.17.12.5: VCS detection on init and re-run ---
+
+    #[test]
+    fn init_rerun_refreshes_a_stale_ignore_block() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let config = test_config(&dir);
+        execute(None, false, &config).unwrap();
+        let gi = dir.path().join(".gitignore");
+        let full = std::fs::read_to_string(&gi).unwrap();
+        assert!(full.contains(".ta/setup-progress.json"));
+
+        // Simulate a project initialized by an older TA.
+        std::fs::write(&gi, full.replace(".ta/setup-progress.json\n", "")).unwrap();
+        execute(None, false, &config).unwrap();
+        let healed = std::fs::read_to_string(&gi).unwrap();
+        assert!(healed.contains(".ta/setup-progress.json"), "{healed}");
+        assert_eq!(healed.matches("# Trusted Autonomy").count(), 1);
+    }
+
+    #[test]
+    fn init_report_json_includes_vcs_evidence() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let config = test_config(&dir);
+        let opts = ta_init::ProjectInitOptions {
+            project_root: dir.path(),
+            name: "demo",
+        };
+        let outcome = ta_init::init_project(&opts).unwrap();
+        let vcs = crate::commands::setup::compute_vcs_setup(&config, false, false, None, None);
+        let report = build_init_report("demo", &outcome, vcs);
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["project"], "demo");
+        assert_eq!(v["already_initialized"], false);
+        assert!(v["vcs_error"].is_null());
+        assert_eq!(v["vcs"]["kind"], "git");
+        assert_eq!(v["vcs"]["detection"]["evidence"][0]["marker"], ".git");
+        assert_eq!(v["vcs"]["detection"]["evidence"][0]["path"], ".git");
+    }
+
+    #[test]
+    fn init_json_rejects_subcommands() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let err = execute(Some(&InitCommands::Templates), true, &config).unwrap_err();
+        assert!(err.to_string().contains("bare `ta init`"));
     }
 }

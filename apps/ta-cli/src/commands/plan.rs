@@ -3256,7 +3256,7 @@ fn plan_shared(config: &GatewayConfig) -> anyhow::Result<()> {
 
     let project_root = &config.workspace_root;
     let ta_dir = project_root.join(".ta");
-    let vcs = VcsBackend::detect(project_root);
+    let vcs = ta_submit::detect_vcs(project_root).backend();
 
     println!("TA file partitioning — VCS: {}", vcs.as_str());
     println!("{}", "─".repeat(48));

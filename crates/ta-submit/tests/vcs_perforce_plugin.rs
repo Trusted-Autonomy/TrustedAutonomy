@@ -132,6 +132,7 @@ fn mock_manifest() -> VcsPluginManifest {
         min_daemon_version: None,
         source_url: None,
         staging_env: std::collections::HashMap::new(),
+        detect: Default::default(),
     }
 }
 
