@@ -11078,7 +11078,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.8`
 
 ### v0.17.12.9 - Windows AppContainer Parity
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
 
 **Goal**: Windows gets the same isolation as macOS and Linux in the same release. All platforms launch at once.
