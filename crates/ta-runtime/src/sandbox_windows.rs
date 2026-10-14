@@ -1611,6 +1611,7 @@ mod tests {
             goal_paths: vec![],
             unix_sockets: vec![],
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         };
 

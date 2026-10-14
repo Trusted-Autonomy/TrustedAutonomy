@@ -164,20 +164,21 @@ impl Capability {
     pub fn fix_hint(self) -> &'static str {
         match self {
             Capability::FsDenyTaTree | Capability::FsWriteConfined => {
-                "install an OS sandbox provider (macOS: built in; Linux: install bubblewrap; \
-                 Windows: AppContainer)"
+                "install an OS sandbox provider (macOS: built in; Linux: install bubblewrap or \
+                 use a kernel with Landlock (5.13+); Windows: AppContainer)"
             }
             Capability::NetLoopbackBlocked => {
-                "remove allow_network entries (on this platform a granted network opens loopback \
-                 to the daemon; macOS blocks loopback even with a network grant)"
+                "remove the \"*\" network grant; on Linux without bubblewrap also needs Landlock \
+                 ABI 4 (kernel 6.7+), otherwise install bubblewrap"
             }
-            Capability::NetEgressAllowlist => "needs the TA egress proxy with a provider that confines the network (macOS today); \
-                 remove the \"*\" grant and list the hosts instead",
+            Capability::NetEgressAllowlist => "needs the TA egress proxy with a provider that confines the network (macOS, or Linux \
+                 with bubblewrap or Landlock ABI 4+); remove the \"*\" grant and list the hosts instead",
             Capability::ProcNoPtraceOut | Capability::ProcNoUnsandboxedSpawn => {
-                "needs the hardened provider profile (not yet shipped for this platform)"
+                "needs the hardened provider profile (Linux: bubblewrap with the ta-sandbox-exec \
+                 helper; Windows: AppContainer)"
             }
             Capability::EnvScrubbed => "launch through `ta run` so the environment is scrubbed",
-            Capability::IpcNoDaemonSocket => "needs a network namespace or AppContainer",
+            Capability::IpcNoDaemonSocket => "needs a network namespace (Linux: bubblewrap) or AppContainer",
             Capability::GatewayOutside => {
                 "the out-of-sandbox gateway needs a Unix socket (macOS and Linux); \
                  Windows named-pipe support is not yet shipped"
@@ -218,7 +219,6 @@ pub fn provider_capabilities(
     profile: &SandboxProfile,
 ) -> BTreeSet<Capability> {
     use Capability::*;
-    let no_network_granted = profile.allow_network.is_empty();
     let mut caps = BTreeSet::new();
     match provider {
         SandboxProvider::None | SandboxProvider::WindowsJobObject => {}
@@ -233,13 +233,39 @@ pub fn provider_capabilities(
                 caps.insert(NetEgressAllowlist);
             }
         }
-        // bwrap v1: loopback is closed only while no network is granted (a
-        // granted network opens all outbound including loopback until v0.17.12.8).
+        // bubblewrap + Landlock + seccomp (v0.17.12.8). The network namespace is
+        // kept unless the network is fully open ("*"), so loopback (daemon, NATS)
+        // is unreachable and the only way out is the bind-mounted egress relay.
+        // seccomp denies ptrace and process_vm, the pid namespace hides everything
+        // else, and nested user namespaces are denied, so no unsandboxed spawn.
         SandboxProvider::LinuxBwrap => {
             caps.insert(FsDenyTaTree);
             caps.insert(FsWriteConfined);
-            if no_network_granted {
+            caps.insert(ProcNoPtraceOut);
+            caps.insert(ProcNoUnsandboxedSpawn);
+            let open_network = profile.allow_network.iter().any(|h| h == "*");
+            if !open_network {
                 caps.insert(NetLoopbackBlocked);
+                caps.insert(IpcNoDaemonSocket);
+                if profile.egress_proxy {
+                    caps.insert(NetEgressAllowlist);
+                }
+            }
+        }
+        // Landlock-only: filesystem confinement and the seccomp deny list, but no
+        // network namespace. TCP is limited by Landlock only from ABI 4 (Linux
+        // 6.7). Pathname Unix sockets are not Landlock-controlled, so the daemon
+        // socket stays reachable and there is no pid namespace.
+        SandboxProvider::LinuxLandlock => {
+            caps.insert(FsDenyTaTree);
+            caps.insert(FsWriteConfined);
+            caps.insert(ProcNoPtraceOut);
+            let open_network = profile.allow_network.iter().any(|h| h == "*");
+            if !open_network && host_landlock_abi().is_some_and(|abi| abi >= 4) {
+                caps.insert(NetLoopbackBlocked);
+                if profile.egress_proxy {
+                    caps.insert(NetEgressAllowlist);
+                }
             }
         }
         // AppContainer: no ACE outside staging, loopback blocked by default,
@@ -256,11 +282,24 @@ pub fn provider_capabilities(
     caps
 }
 
+/// The Landlock ABI of the running kernel (None off Linux or when unavailable).
+fn host_landlock_abi() -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_probe::cached().landlock.abi()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 pub fn provider_name(provider: &SandboxProvider) -> &'static str {
     match provider {
         SandboxProvider::None => "none",
         SandboxProvider::MacosSandboxExec => "macos_sandbox_exec",
         SandboxProvider::LinuxBwrap => "linux_bwrap",
+        SandboxProvider::LinuxLandlock => "linux_landlock",
         SandboxProvider::WindowsJobObject => "windows_job_object",
         SandboxProvider::WindowsAppContainer => "windows_appcontainer",
     }
@@ -512,6 +551,7 @@ impl SandboxProfile {
             goal_paths: vec![self.agent_home.clone()],
             unix_sockets: self.unix_sockets.clone(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: Some(crate::seatbelt::violation_tag(&self.goal_id)),
         }
     }
@@ -1245,7 +1285,44 @@ mod tests {
     }
 
     #[test]
-    fn granted_network_means_loopback_is_not_counted_as_blocked() {
+    fn open_network_grant_means_loopback_is_not_counted_as_blocked_on_linux() {
+        let make = |hosts: &[&str]| {
+            let trusted = TrustedPolicy {
+                enabled: Some(true),
+                posture: Some(SandboxPosture::Balanced),
+                allow_network: hosts.iter().map(|h| h.to_string()).collect(),
+                ..Default::default()
+            };
+            SandboxProfile::compile(Some(&trusted), &project_open(), &ctx(RoleClass::Chat, true))
+        };
+        // Named hosts: the network namespace stays, the egress relay is the only way out.
+        let named = make(&["api.anthropic.com"]);
+        let caps = provider_capabilities(&SandboxProvider::LinuxBwrap, &named);
+        assert!(caps.contains(&Capability::NetLoopbackBlocked));
+        assert!(caps.contains(&Capability::IpcNoDaemonSocket));
+        assert!(caps.contains(&Capability::ProcNoPtraceOut));
+        assert!(caps.contains(&Capability::ProcNoUnsandboxedSpawn));
+        assert!(
+            provider_capabilities(&SandboxProvider::MacosSandboxExec, &named)
+                .contains(&Capability::NetLoopbackBlocked)
+        );
+        // "*": the host network namespace is shared, so loopback is open.
+        let open = make(&["*"]);
+        let caps = provider_capabilities(&SandboxProvider::LinuxBwrap, &open);
+        assert!(!caps.contains(&Capability::NetLoopbackBlocked));
+        assert!(!caps.contains(&Capability::NetEgressAllowlist));
+        let d = decide(
+            &open,
+            &SandboxProvider::LinuxBwrap,
+            true,
+            GatewayPlacement::OutOfSandboxSocket,
+        );
+        assert_eq!(d.outcome, Outcome::Refused);
+        assert!(d.missing.contains(&"net.loopback_blocked".to_string()));
+    }
+
+    #[test]
+    fn landlock_only_never_claims_namespace_properties() {
         let trusted = TrustedPolicy {
             enabled: Some(true),
             posture: Some(SandboxPosture::Balanced),
@@ -1254,18 +1331,17 @@ mod tests {
         };
         let p =
             SandboxProfile::compile(Some(&trusted), &project_open(), &ctx(RoleClass::Chat, true));
-        let caps = provider_capabilities(&SandboxProvider::LinuxBwrap, &p);
-        assert!(!caps.contains(&Capability::NetLoopbackBlocked));
-        let mac = provider_capabilities(&SandboxProvider::MacosSandboxExec, &p);
-        assert!(mac.contains(&Capability::NetLoopbackBlocked));
-        let d = decide(
-            &p,
-            &SandboxProvider::LinuxBwrap,
-            true,
-            GatewayPlacement::OutOfSandboxSocket,
+        let caps = provider_capabilities(&SandboxProvider::LinuxLandlock, &p);
+        assert!(caps.contains(&Capability::FsDenyTaTree));
+        assert!(caps.contains(&Capability::FsWriteConfined));
+        assert!(caps.contains(&Capability::ProcNoPtraceOut));
+        // No pid namespace, and pathname Unix sockets are outside Landlock.
+        assert!(!caps.contains(&Capability::ProcNoUnsandboxedSpawn));
+        assert!(!caps.contains(&Capability::IpcNoDaemonSocket));
+        assert_eq!(
+            provider_name(&SandboxProvider::LinuxLandlock),
+            "linux_landlock"
         );
-        assert_eq!(d.outcome, Outcome::Refused);
-        assert!(d.missing.contains(&"net.loopback_blocked".to_string()));
     }
 
     #[test]

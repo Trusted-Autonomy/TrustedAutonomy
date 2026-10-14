@@ -226,6 +226,64 @@ jobs:
           ./scripts/ci-leftover-processes.sh
         timeout-minutes: 5
 
+  # Linux sandbox conformance (v0.17.12.8). The full bubblewrap + Landlock +
+  # seccomp suite runs on the runner itself; the container steps remove one
+  # layer at a time (no user namespaces, no Landlock) and check TA reports it.
+  # A skipped test is a failure here, so a runner image change cannot quietly
+  # turn the isolation proof off.
+  linux-sandbox-conformance:
+    name: Linux Sandbox Conformance
+    needs: version-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CODE: ${{ needs.version-check.outputs.code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        timeout-minutes: 5
+
+      - name: Install Nix
+        if: env.CODE == 'true'
+        uses: cachix/install-nix-action@v31
+        timeout-minutes: 10
+
+      - name: Install bubblewrap and allow user namespaces
+        if: env.CODE == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor.
+          # TA's probe reports this exact case; the suite needs it off here.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+        timeout-minutes: 5
+
+      - name: Cache cargo registry and target
+        if: env.CODE == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: linux-sandbox
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+        timeout-minutes: 15
+
+      - name: Host conformance (bubblewrap, Landlock, seccomp, relay)
+        if: env.CODE == 'true'
+        env:
+          TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
+        run: nix develop --command bash -c "cargo test -p ta-runtime --test linux_conformance -- --test-threads=1"
+        timeout-minutes: 30
+
+      - name: Probe and unit tests for the Linux layers
+        if: env.CODE == 'true'
+        run: nix develop --command bash -c "cargo test -p ta-runtime linux_"
+        timeout-minutes: 15
+
+      - name: Degraded containers (no user namespaces, no Landlock)
+        if: env.CODE == 'true'
+        run: scripts/ci-linux-sandbox-containers.sh all
+        timeout-minutes: 30
+
   # Windows build verification (v0.9.1)
   windows-build:
     name: Windows Build

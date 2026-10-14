@@ -81,6 +81,12 @@ pub struct SandboxPolicy {
     /// lives in the proxy.
     pub egress_proxy_port: Option<u16>,
 
+    /// Linux only (v0.17.12.8): the Unix socket a host-side relay listens on and
+    /// forwards to the egress proxy. The network namespace has no route to host
+    /// loopback, so this bind-mounted socket is the only way out; an
+    /// in-namespace relay serves `egress_proxy_port` and forwards to it.
+    pub egress_unix_socket: Option<PathBuf>,
+
     /// Tag the macOS profile appends to every denial in the unified log, so
     /// violations can be attributed to this goal.
     pub violation_tag: Option<String>,
@@ -92,8 +98,13 @@ pub enum SandboxProvider {
     None,
     /// macOS sandbox-exec (Seatbelt).
     MacosSandboxExec,
-    /// Linux bubblewrap (bwrap).
+    /// Linux bubblewrap namespaces plus Landlock and seccomp applied by the
+    /// `ta-sandbox-exec` helper inside them.
     LinuxBwrap,
+    /// Linux without usable namespaces: Landlock and seccomp only. Filesystem
+    /// confinement holds; there is no network namespace, so TCP is limited by
+    /// Landlock ABI 4+ where the kernel has it.
+    LinuxLandlock,
     /// Windows Job Objects — process-tree teardown on TA exit.
     ///
     /// Does not restrict filesystem access (AppContainer handles that).
@@ -123,6 +134,7 @@ impl SandboxPolicy {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         }
     }
@@ -130,7 +142,8 @@ impl SandboxPolicy {
     /// Detect which provider is available on the current platform.
     ///
     /// On macOS: always use sandbox-exec (built-in).
-    /// On Linux: use bwrap if available on PATH.
+    /// On Linux: bubblewrap when it works here, else Landlock-only, else none
+    /// (see `linux_probe`).
     /// On Windows: always use Job Objects (built-in; no external tool needed).
     /// Elsewhere: no sandboxing.
     pub fn detect_provider() -> SandboxProvider {
@@ -140,10 +153,10 @@ impl SandboxPolicy {
         }
         #[cfg(target_os = "linux")]
         {
-            if which_bwrap() {
-                SandboxProvider::LinuxBwrap
-            } else {
-                SandboxProvider::None
+            match crate::linux_probe::cached().selection() {
+                crate::linux_probe::Selection::Bwrap => SandboxProvider::LinuxBwrap,
+                crate::linux_probe::Selection::LandlockOnly => SandboxProvider::LinuxLandlock,
+                crate::linux_probe::Selection::None => SandboxProvider::None,
             }
         }
         #[cfg(target_os = "windows")]
@@ -177,7 +190,26 @@ impl SandboxPolicy {
 
         match self.provider {
             SandboxProvider::MacosSandboxExec => self.apply_macos(request),
-            SandboxProvider::LinuxBwrap => self.apply_linux_bwrap(request),
+            SandboxProvider::LinuxBwrap | SandboxProvider::LinuxLandlock => {
+                match self.try_apply_linux(request.clone()) {
+                    Ok(r) => r,
+                    Err(msg) => {
+                        // Fail closed: never hand back the unwrapped request. A
+                        // command that cannot start is visible; an unsandboxed
+                        // agent that looks sandboxed is not.
+                        tracing::error!(error = %msg, "Linux sandbox could not be applied");
+                        let mut r = request;
+                        r.args = vec![
+                            "-c".into(),
+                            "echo \"ta: $1\" >&2; exit 126".into(),
+                            "ta".into(),
+                            msg,
+                        ];
+                        r.command = "/bin/sh".into();
+                        r
+                    }
+                }
+            }
             // Job Objects are applied post-spawn; the SpawnRequest is unchanged.
             SandboxProvider::WindowsJobObject => request,
             // AppContainer is applied pre-spawn via pre_spawn_appcontainer(); unchanged here.
@@ -298,103 +330,65 @@ impl SandboxPolicy {
         crate::seatbelt::generate(self, working_dir)
     }
 
-    /// Wrap the request in `bwrap` with filesystem namespacing.
+    /// Apply this policy, reporting why when a Linux provider cannot be applied.
+    /// Callers that can surface an error (`ta run`) use this instead of `apply`.
+    pub fn try_apply(&self, request: SpawnRequest) -> Result<SpawnRequest, String> {
+        if self.enabled
+            && matches!(
+                self.provider,
+                SandboxProvider::LinuxBwrap | SandboxProvider::LinuxLandlock
+            )
+        {
+            return self.try_apply_linux(request);
+        }
+        Ok(self.apply(request))
+    }
+
+    /// Wrap the request for the Linux providers, or say exactly why not.
+    ///
+    /// Never falls back to running the agent unwrapped: the error names the
+    /// missing piece and what to do about it.
     #[cfg(target_os = "linux")]
-    fn apply_linux_bwrap(&self, mut request: SpawnRequest) -> SpawnRequest {
-        let mut bwrap_args: Vec<String> = Vec::new();
-
-        // Bind-mount essential system paths as read-only.
-        for ro_path in &["/usr", "/lib", "/lib64", "/etc/ssl", "/etc/resolv.conf"] {
-            if std::path::Path::new(ro_path).exists() {
-                bwrap_args.push("--ro-bind".to_string());
-                bwrap_args.push(ro_path.to_string());
-                bwrap_args.push(ro_path.to_string());
+    pub fn try_apply_linux(&self, request: SpawnRequest) -> Result<SpawnRequest, String> {
+        let probe = crate::linux_probe::cached();
+        let helper = crate::linux_probe::find_helper().ok_or_else(|| {
+            format!(
+                "the sandbox helper `{}` was not found next to this executable and `ta` is not \
+                 the running binary. Reinstall TA, or set {} to the helper path.",
+                crate::linux_probe::HELPER_BIN_NAME,
+                crate::linux_probe::HELPER_ENV
+            )
+        })?;
+        match self.provider {
+            SandboxProvider::LinuxBwrap => match &probe.bwrap {
+                crate::linux_probe::BwrapStatus::Usable { path, .. } => {
+                    Ok(crate::linux_bwrap::wrap_bwrap(request, self, path, &helper))
+                }
+                _ => Err(format!(
+                    "bubblewrap was selected but is not usable. {}",
+                    probe.findings().join(" ")
+                )),
+            },
+            SandboxProvider::LinuxLandlock => {
+                if probe.landlock.abi().is_none() {
+                    return Err(format!(
+                        "Landlock was selected but is not available: {}",
+                        probe.findings().join(" ")
+                    ));
+                }
+                Ok(crate::linux_bwrap::wrap_landlock_only(
+                    request, self, &helper,
+                ))
             }
+            _ => Ok(request),
         }
-        // /nix (for Nix devShell environments).
-        if std::path::Path::new("/nix").exists() {
-            bwrap_args.push("--ro-bind".to_string());
-            bwrap_args.push("/nix".to_string());
-            bwrap_args.push("/nix".to_string());
-        }
-
-        // Bind-mount the workspace as read-write.
-        let workspace = request.working_dir.to_string_lossy().to_string();
-        bwrap_args.push("--bind".to_string());
-        bwrap_args.push(workspace.clone());
-        bwrap_args.push(workspace);
-
-        // Additional allowed read paths.
-        for path in &self.allow_read {
-            let p = path.to_string_lossy().to_string();
-            bwrap_args.push("--ro-bind".to_string());
-            bwrap_args.push(p.clone());
-            bwrap_args.push(p);
-        }
-
-        // Additional writable paths.
-        for path in &self.allow_write {
-            let p = path.to_string_lossy().to_string();
-            bwrap_args.push("--bind".to_string());
-            bwrap_args.push(p.clone());
-            bwrap_args.push(p);
-        }
-
-        // Tmpfs for /tmp.
-        bwrap_args.push("--tmpfs".to_string());
-        bwrap_args.push("/tmp".to_string());
-
-        // Proc filesystem (required by many tools).
-        bwrap_args.push("--proc".to_string());
-        bwrap_args.push("/proc".to_string());
-
-        // Mounted after the /tmp tmpfs so a socket directory under /tmp survives it.
-        // Per-goal paths (agent home, scratch) are read-write. Everything in
-        // `deny_paths` is simply never mounted, which is stronger than a rule.
-        for path in &self.goal_paths {
-            let p = path.to_string_lossy().to_string();
-            bwrap_args.push("--bind".to_string());
-            bwrap_args.push(p.clone());
-            bwrap_args.push(p);
-        }
-        // The mediation socket's directory, so the bridge can connect to it.
-        for sock in &self.unix_sockets {
-            if let Some(dir) = sock.parent() {
-                let p = dir.to_string_lossy().to_string();
-                bwrap_args.push("--bind".to_string());
-                bwrap_args.push(p.clone());
-                bwrap_args.push(p);
-            }
-        }
-
-        // Network: unshare unless allow_network is non-empty.
-        if self.allow_network.is_empty() {
-            bwrap_args.push("--unshare-net".to_string());
-        }
-
-        // Terminate bwrap args, then original command.
-        bwrap_args.push("--".to_string());
-        bwrap_args.push(request.command.clone());
-        bwrap_args.extend(request.args.iter().cloned());
-
-        request.command = "bwrap".to_string();
-        request.args = bwrap_args;
-        request
     }
 
+    /// Non-Linux hosts have no Linux provider.
     #[cfg(not(target_os = "linux"))]
-    fn apply_linux_bwrap(&self, request: SpawnRequest) -> SpawnRequest {
-        request
+    pub fn try_apply_linux(&self, _request: SpawnRequest) -> Result<SpawnRequest, String> {
+        Err("the Linux sandbox providers run on Linux only".to_string())
     }
-}
-
-#[cfg(target_os = "linux")]
-fn which_bwrap() -> bool {
-    std::process::Command::new("bwrap")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -437,6 +431,7 @@ mod tests {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         };
         let working_dir = std::path::Path::new("/tmp/ta-staging/abc123");
@@ -468,6 +463,7 @@ mod tests {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
@@ -492,6 +488,7 @@ mod tests {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
@@ -548,6 +545,7 @@ mod tests {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         };
         let guard = policy.post_spawn_apply(1234);
@@ -573,6 +571,7 @@ mod tests {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         };
         // PID 0 / 0xFFFFFFFF are never valid on any platform.

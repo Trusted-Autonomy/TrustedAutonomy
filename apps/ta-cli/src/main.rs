@@ -1511,6 +1511,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run() -> anyhow::Result<()> {
+    // The Linux sandbox helper runs inside bubblewrap in place of the agent. It
+    // must not touch config, terms or the daemon, so it is handled before any
+    // of that. `ta-sandbox-exec` is the same entry point as a separate binary.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).map(String::as_str) == Some(ta_runtime::linux_probe::HELPER_SUBCOMMAND) {
+            std::process::exit(ta_runtime::linux_confine::run_helper(&argv[2..]));
+        }
+    }
     let startup_begin = std::time::Instant::now();
     // One enforcement point for plan-phase claims: GoalRunStore calls this
     // whenever a goal stops holding its phase, whichever command saved it.

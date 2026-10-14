@@ -58,6 +58,11 @@ pub mod config;
 pub mod credential;
 pub mod egress_proxy;
 pub mod framework;
+pub mod linux_bwrap;
+pub mod linux_confine;
+pub mod linux_probe;
+#[cfg(unix)]
+pub mod linux_relay;
 pub mod plugin;
 pub mod sandbox;
 pub mod sandbox_launch;
