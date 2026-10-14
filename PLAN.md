@@ -11065,7 +11065,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.7`
 
 ### v0.17.12.8 - Linux Hardened Sandbox: bubblewrap, Landlock, seccomp
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.6, v0.17.12.7 (egress proxy)
 
 1. [ ] bubblewrap with user, pid, ipc, uts and network namespaces, a constructed root without `.ta`, private `/proc`, tmpfs `/tmp`, die-with-parent.
