@@ -46,6 +46,10 @@ pub struct SandboxPlan {
     pub egress: Option<EgressProxy>,
     /// The allowlist the proxy enforces, as written, for the banner.
     pub egress_hosts: Vec<String>,
+    /// Linux bubblewrap: carries the egress proxy across the network namespace.
+    /// Stops (and removes its socket) on drop.
+    #[cfg(unix)]
+    pub egress_relay: Option<ta_runtime::linux_relay::HostRelay>,
     pub warnings: Vec<String>,
 }
 
@@ -172,7 +176,13 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
     // network (still without loopback) and runs no proxy.
     let mut egress = None;
     let mut egress_hosts = Vec::new();
-    let sandbox_will_wrap = first.requested && provider == SandboxProvider::MacosSandboxExec;
+    let sandbox_will_wrap = first.requested
+        && matches!(
+            provider,
+            SandboxProvider::MacosSandboxExec
+                | SandboxProvider::LinuxBwrap
+                | SandboxProvider::LinuxLandlock
+        );
     let open_network = first.allow_network.iter().any(|h| h == "*");
     if sandbox_will_wrap && !open_network {
         let mut hosts = first.allow_network.clone();
@@ -195,6 +205,30 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
             Err(e) => warnings.push(format!(
                 "could not start the egress proxy: {e}. The agent will have no network access."
             )),
+        }
+    }
+    // Linux bubblewrap has no route to host loopback: a Unix socket in a
+    // bind-mounted directory carries the proxy across the namespace boundary.
+    #[cfg(unix)]
+    let mut egress_relay = None;
+    #[cfg(unix)]
+    if let (Some(p), SandboxProvider::LinuxBwrap) = (&egress, &provider) {
+        // Kept short: Unix socket paths are limited to about 100 bytes.
+        let short: String = goal.chars().take(8).collect();
+        let dir = std::env::temp_dir().join(format!("ta-eg-{short}"));
+        match ta_runtime::linux_relay::HostRelay::start(&dir, p.port()) {
+            Ok(r) => egress_relay = Some(r),
+            Err(e) => warnings.push(format!(
+                "could not start the egress relay: {e}. The agent will have no network access."
+            )),
+        }
+    }
+    if let Some(note) = ta_runtime::linux_probe::provider_note() {
+        if matches!(
+            provider,
+            SandboxProvider::LinuxBwrap | SandboxProvider::LinuxLandlock | SandboxProvider::None
+        ) {
+            warnings.push(note);
         }
     }
     ctx.egress_proxy = egress.is_some();
@@ -250,6 +284,8 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         gateway,
         egress,
         egress_hosts,
+        #[cfg(unix)]
+        egress_relay,
         warnings,
     })
 }
@@ -343,6 +379,13 @@ impl SandboxPlan {
     pub fn policy(&self) -> SandboxPolicy {
         let mut policy = self.profile.to_policy(self.provider.clone());
         policy.egress_proxy_port = self.egress.as_ref().map(|p| p.port());
+        #[cfg(unix)]
+        {
+            policy.egress_unix_socket = self
+                .egress_relay
+                .as_ref()
+                .map(|r| r.socket_path().to_path_buf());
+        }
         policy
     }
 

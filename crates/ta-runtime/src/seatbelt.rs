@@ -307,6 +307,7 @@ mod tests {
             goal_paths: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
+            egress_unix_socket: None,
             violation_tag: None,
         }
     }

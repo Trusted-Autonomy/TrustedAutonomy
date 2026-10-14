@@ -20,6 +20,18 @@
 //   pidinfo <pid>          proc_pidpath(pid) (macOS)
 //   signal-child           spawn a sleeper, signal and reap it
 //   rosetta                run /usr/bin/true as x86_64 via arch (macOS)
+//
+// Linux actions (v0.17.12.8). A raw syscall "succeeds" unless the kernel or a
+// seccomp filter answered EPERM, because a denied call fails with EPERM:
+//   syscall <bpf|keyctl|io_uring_setup|process_vm_readv>
+//   ptrace                 PTRACE_ATTACH to a child of ours
+//   unshare-user           unshare(CLONE_NEWUSER)
+//   tiocsti                ioctl(TIOCSTI) on /dev/null (never a real tty)
+//   clone3-enosys          succeeds only if clone3 answers ENOSYS
+//   countpids              print the number of pids visible in /proc
+//   netdevs                print the network interface names
+//   listen <port>          bind 127.0.0.1:<port> and accept one connection
+//   echo-proxy <host:port> send a line to a TCP service and expect it back
 
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
@@ -46,6 +58,180 @@ mod mach {
         // SAFETY: `name` is a valid NUL-terminated string and `port` a valid out-pointer;
         // `bootstrap_port` is initialized by libSystem before main.
         unsafe { bootstrap_look_up(bootstrap_port, name.as_ptr(), &mut port) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::fail;
+    use std::process::ExitCode;
+
+    pub fn handles(act: &str) -> bool {
+        matches!(
+            act,
+            "syscall"
+                | "ptrace"
+                | "unshare-user"
+                | "tiocsti"
+                | "clone3-enosys"
+                | "countpids"
+                | "netdevs"
+                | "listen"
+                | "echo-proxy"
+        )
+    }
+
+    /// Succeeds unless the call failed with EPERM.
+    fn not_eperm(name: &str, rc: libc::c_long) -> ExitCode {
+        if rc >= 0 {
+            return ExitCode::SUCCESS;
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EPERM) {
+            fail(format!("{name}: EPERM (denied)"))
+        } else {
+            eprintln!("{name}: {e} (not a permission denial)");
+            ExitCode::SUCCESS
+        }
+    }
+
+    pub fn run(act: &str, arg: Option<&str>) -> ExitCode {
+        // SAFETY (all raw syscalls below): arguments are null or zero, which every
+        // call here rejects with EFAULT or EINVAL at worst; nothing is written.
+        match act {
+            "syscall" => {
+                let rc = match arg {
+                    Some("bpf") => unsafe { libc::syscall(libc::SYS_bpf, 0, 0usize, 0u32) },
+                    Some("keyctl") => unsafe { libc::syscall(libc::SYS_keyctl, 0, 0, 0, 0, 0) },
+                    Some("io_uring_setup") => unsafe {
+                        libc::syscall(libc::SYS_io_uring_setup, 0u32, 0usize)
+                    },
+                    Some("process_vm_readv") => unsafe {
+                        libc::syscall(
+                            libc::SYS_process_vm_readv,
+                            libc::getpid(),
+                            0usize,
+                            0usize,
+                            0usize,
+                            0usize,
+                            0usize,
+                        )
+                    },
+                    _ => return ExitCode::from(2),
+                };
+                not_eperm(arg.unwrap_or("syscall"), rc)
+            }
+            "ptrace" => {
+                let mut child = match std::process::Command::new("sleep").arg("30").spawn() {
+                    Ok(c) => c,
+                    Err(e) => return fail(format!("spawn sleep: {e}")),
+                };
+                // SAFETY: attaching to our own live child.
+                let rc = unsafe {
+                    libc::ptrace(
+                        libc::PTRACE_ATTACH,
+                        child.id() as libc::pid_t,
+                        0usize,
+                        0usize,
+                    )
+                };
+                let out = not_eperm("ptrace", rc);
+                let _ = child.kill();
+                let _ = child.wait();
+                out
+            }
+            "unshare-user" => {
+                // SAFETY: unshare only changes this process's own namespaces.
+                let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
+                if rc == 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    fail(format!(
+                        "unshare(CLONE_NEWUSER): {}",
+                        std::io::Error::last_os_error()
+                    ))
+                }
+            }
+            "tiocsti" => {
+                use std::os::fd::AsRawFd;
+                let f = match std::fs::File::open("/dev/null") {
+                    Ok(f) => f,
+                    Err(e) => return fail(format!("open /dev/null: {e}")),
+                };
+                let c = b'x';
+                // SAFETY: /dev/null is not a terminal, so this never injects input.
+                let rc = unsafe { libc::ioctl(f.as_raw_fd(), 0x5412, &c as *const u8) };
+                not_eperm("ioctl(TIOCSTI)", rc as libc::c_long)
+            }
+            "clone3-enosys" => {
+                // SAFETY: a null clone_args pointer with size 0 is rejected by the kernel.
+                let rc = unsafe { libc::syscall(libc::SYS_clone3, 0usize, 0usize) };
+                if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) {
+                    ExitCode::SUCCESS
+                } else {
+                    fail("clone3 did not answer ENOSYS")
+                }
+            }
+            "countpids" => {
+                let n = std::fs::read_dir("/proc")
+                    .map(|d| {
+                        d.flatten()
+                            .filter(|e| {
+                                e.file_name()
+                                    .to_string_lossy()
+                                    .chars()
+                                    .all(|c| c.is_ascii_digit())
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                println!("{n}");
+                ExitCode::SUCCESS
+            }
+            "netdevs" => match std::fs::read_to_string("/proc/net/dev") {
+                Ok(t) => {
+                    let names: Vec<&str> = t
+                        .lines()
+                        .skip(2)
+                        .filter_map(|l| l.split(':').next())
+                        .map(str::trim)
+                        .collect();
+                    println!("{}", names.join(" "));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(format!("read /proc/net/dev: {e}")),
+            },
+            "listen" => {
+                let Some(port) = arg.and_then(|p| p.parse::<u16>().ok()) else {
+                    return ExitCode::from(2);
+                };
+                match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(_) => ExitCode::SUCCESS,
+                    Err(e) => fail(format!("bind 127.0.0.1:{port}: {e}")),
+                }
+            }
+            "echo-proxy" => {
+                use std::io::{Read, Write};
+                let Some(addr) = arg else {
+                    return ExitCode::from(2);
+                };
+                let mut s = match std::net::TcpStream::connect(addr) {
+                    Ok(s) => s,
+                    Err(e) => return fail(format!("connect {addr}: {e}")),
+                };
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                if s.write_all(b"ping").is_err() {
+                    return fail("write failed");
+                }
+                let mut buf = [0u8; 4];
+                match s.read_exact(&mut buf) {
+                    Ok(()) if &buf == b"ping" => ExitCode::SUCCESS,
+                    Ok(()) => fail("unexpected reply"),
+                    Err(e) => fail(format!("read reply: {e}")),
+                }
+            }
+            _ => ExitCode::from(2),
+        }
     }
 }
 
@@ -146,8 +332,10 @@ fn main() -> ExitCode {
             Ok(s) => fail(format!("arch -x86_64 /usr/bin/true: {s}")),
             Err(e) => fail(format!("arch: {e}")),
         },
+        #[cfg(target_os = "linux")]
+        (Some(act), arg) if linux::handles(act) => linux::run(act, arg),
         _ => {
-            eprintln!("usage: ta-sandbox-probe <read|write|connect|unix|exec|mach|signal|pidinfo|signal-child|rosetta> [arg...]");
+            eprintln!("usage: ta-sandbox-probe <read|write|connect|unix|exec|mach|signal|pidinfo|signal-child|rosetta|syscall|ptrace|unshare-user|tiocsti|clone3-enosys|countpids|netdevs|listen|echo-proxy> [arg...]");
             ExitCode::from(2)
         }
     }

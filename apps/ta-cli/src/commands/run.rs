@@ -6807,7 +6807,14 @@ fn launch_agent_via_runtime(
                 provider = ?policy.provider,
                 "Applying sandbox policy to agent process"
             );
-            policy.apply(raw_request)
+            match policy.try_apply(raw_request) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "the sandbox could not be applied: {e} The agent was not started."
+                    )));
+                }
+            }
         }
         None => raw_request,
     };

@@ -5381,7 +5381,7 @@ allow_network = ["api.anthropic.com", "api.github.com"]
 | Platform | Provider | What it restricts | Notes |
 |---|---|---|---|
 | **macOS** | `sandbox-exec` (Seatbelt) | Filesystem writes and sensitive reads, network (via the egress proxy), Keychain and process access | Built-in; no extra software needed |
-| **Linux** | `bwrap` (bubblewrap) | Filesystem namespace, network namespace | Install: `apt install bubblewrap` |
+| **Linux** | `bwrap` (bubblewrap) + Landlock + seccomp | Constructed root filesystem (no `.ta`), user, pid, ipc, uts and network namespaces, system-call deny list | Install: `apt install bubblewrap` (see "Sandboxing on Linux") |
 | **Windows** | AppContainer + Job Objects | Filesystem, network, and process-tree teardown | Built-in; no extra software needed (Windows 8+) |
 
 **Windows — AppContainer + Job Objects (two-layer containment)**
@@ -5460,6 +5460,31 @@ If AppContainer is unavailable (e.g., TA is nested inside a restricted Job Objec
 - `/dev/null`, `/dev/tty`
 
 **Network filtering on macOS.** `allow_network` is enforced by a per-goal egress proxy. The sandbox lets the agent reach exactly one loopback port (the proxy's) and the goal's mediation socket; every other address, including `127.0.0.1` (the TA daemon and NATS), is refused. The proxy only tunnels HTTPS (`CONNECT`) to hosts on your list and records every attempt, allowed or denied, in `<state dir>/sandbox/egress/<goal>.jsonl`. Entries are `host`, `*.suffix` (subdomains only, list the apex separately) or either with `:port` (default 443). A name that resolves to a loopback, link-local or unlisted private address is refused even if it is on the list. For Claude Code goals `api.anthropic.com` (and the host of `ANTHROPIC_BASE_URL`) is added automatically. Standard `HTTPS_PROXY` variables point the agent's tools at the proxy; a tool that ignores them gets no network. Setting `allow_network = ["*"]` keeps the old open network, still without loopback, and runs no proxy.
+
+### Sandboxing on Linux
+
+On Linux the box has three layers, and `ta run` prints which ones it got on the `[sandbox]` line.
+
+1. **bubblewrap** builds a new root with only what the agent may use: the system directories read-only, your project's allowed paths, the goal's staging directory and agent home. The project's `.ta/` directory and the state directory are not in it. The agent gets its own process list, a private `/proc`, an empty `/tmp`, and no network devices. It is killed if `ta` exits.
+2. **Landlock** is applied by a small helper (`ta-sandbox-exec`, or `ta sandbox-exec-helper`) just before your agent starts, so the kernel itself refuses file access outside the same list. It is never best-effort: if Landlock is required and the kernel does not have it, the agent does not start.
+3. **seccomp** removes system calls an agent has no business making: `ptrace`, `process_vm_readv/writev`, `bpf`, `keyctl`, `io_uring`, `kexec`, mounting, and creating nested user namespaces. They fail with `EPERM`. Set `TA_SANDBOX_SECCOMP_LOG=1` to log instead of block while you find out whether a tool needs one.
+
+**Network.** The agent has no network of its own. Outbound HTTPS goes through a relay: the agent's `HTTPS_PROXY` points at `127.0.0.1:<port>` inside the box, which forwards over a private Unix socket to the per-goal egress proxy, which applies your `allow_network` list and writes the audit log. Plain UDP (including DNS to the outside) does not leave the box.
+
+**Checking your machine.** When a layer is missing, the `[sandbox]` launch line prints what is wrong and how to fix it:
+
+| Finding | What to do |
+|---|---|
+| `bwrap` not found | `apt install bubblewrap` (or your distribution's package) |
+| AppArmor blocks user namespaces (Ubuntu 23.10 and later) | Allow `bwrap` with an AppArmor profile, or `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` |
+| User namespaces disabled | Set `kernel.unprivileged_userns_clone=1` and a non-zero `user.max_user_namespaces` |
+| Running in a container | Run the container with user namespaces allowed (a custom seccomp profile), or accept the Landlock-only mode below |
+| WSL2 | Use WSL2 with a recent kernel. WSL1 has neither namespaces nor Landlock |
+| Nix | Install `bubblewrap` in the same profile as `ta` so the helper is found; set `TA_SANDBOX_EXEC` to the helper path if it lives elsewhere |
+
+**Landlock-only mode.** When bubblewrap cannot run but the kernel has Landlock (Linux 5.13 or later), TA uses Landlock and seccomp alone. The filesystem is still confined, but there is no private process list, no private `/tmp`, and the network is limited only when the kernel has Landlock ABI 4 (Linux 6.7 or later), in which case the agent can connect to the egress proxy port and nothing else. A path you deny inside the goal's staging directory stays reachable in this mode, because Landlock cannot hide a child of a directory it grants whole. The launch line and the `sandbox_decision` event say which capabilities were not enforced, and your posture decides whether the launch proceeds (see the table below). With neither bubblewrap nor Landlock the launch is unsandboxed or refused, never silently weaker.
+
+**Running the checks yourself.** `TA_REQUIRE_SANDBOX_CONFORMANCE=1 cargo test -p ta-runtime --test linux_conformance` runs the Linux suite (it skips layers the machine lacks unless that variable is set). `scripts/ci-linux-sandbox-containers.sh` repeats it inside containers with user namespaces or Landlock removed, which is what CI does.
 
 ### How the Sandbox Is Switched On, and What Happens When the Box Is Incomplete
 
