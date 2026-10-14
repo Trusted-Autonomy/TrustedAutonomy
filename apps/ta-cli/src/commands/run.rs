@@ -6651,7 +6651,8 @@ fn launch_agent_via_runtime(
     // this a real replacement rather than an addition on top of full
     // inheritance. `None` (the flag was never passed) keeps the historical
     // behavior of full environment inheritance, unchanged.
-    let clear_env = credential_scopes.is_some();
+    let mut clear_env = credential_scopes.is_some();
+    let baseline_is_cleared = clear_env;
     let mut env: std::collections::HashMap<String, String> = match credential_scopes {
         Some(scopes) => {
             let project_root = project_root_from_staging(staging_path);
@@ -6682,22 +6683,94 @@ fn launch_agent_via_runtime(
     // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
     inject_compression_url(&mut env, config, staging_path);
 
+    // Sandbox plan (v0.17.12.6). Settings come from the REAL project root (staging
+    // has no `.ta/`), the trusted policy from the daemon-only state dir. A
+    // refused decision stops the launch before anything is spawned.
+    let project_root_opt = project_root_from_staging(staging_path);
+    let mut sandbox_plan = None;
+    if let Some(root) = project_root_opt.as_deref() {
+        let chat = config.chat_mode || super::chat_launch::env_requests_chat_mode(&env);
+        let team_role = std::env::var("TA_WHITEBOARD_TEAM_SESSION")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let input = super::sandbox_launch::PlanInput {
+            project_root: root,
+            staging: staging_path,
+            goal_id,
+            is_claude_code: is_claude_code_launch(config),
+            chat,
+            team_role,
+            agent_env: &env,
+        };
+        match super::sandbox_launch::plan(&input) {
+            Ok(plan) => sandbox_plan = Some(plan),
+            Err(msg) => {
+                let event_store = FsEventStore::new(events_dir);
+                let _ = event_store.append(&EventEnvelope::new(SessionEvent::RuntimeError {
+                    goal_id: Some(goal_id),
+                    runtime: config.runtime.name.clone(),
+                    error: format!("Sandbox setup failed before launch: {msg}"),
+                }));
+                return Err(std::io::Error::other(format!(
+                    "Sandbox setup failed (goal {goal_id}): {msg}"
+                )));
+            }
+        }
+    }
+    if let Some(plan) = &sandbox_plan {
+        plan.emit(events_dir, goal_id);
+        if plan.decision.is_refused() {
+            println!("{}", plan.decision.banner());
+            for w in &plan.warnings {
+                eprintln!("[warn] sandbox: {w}");
+            }
+            return Err(std::io::Error::other(format!(
+                "Launch refused by the sandbox policy (goal {goal_id}): {}",
+                plan.decision.detail
+            )));
+        }
+    }
+
     // Stage 7 shell/CLI credential shims (v0.17.6.7): TA_PROJECT_ROOT lets
     // `ta credential-helper` / the `gh` wrapper find `.ta/` regardless of the
     // agent's own working directory (which is `staging_path`, not
     // necessarily where `.ta/` lives), the same convention `ta serve`
     // already uses. `install_credential_shims` is itself a no-op unless a
     // broker-mediated connector declares `hosts` in `.ta/connectors.toml`.
-    if let Some(project_root) = project_root_from_staging(staging_path) {
-        env.insert(
-            "TA_PROJECT_ROOT".to_string(),
-            project_root.display().to_string(),
-        );
+    // A sandboxed agent cannot read `.ta/`, so it gets no TA_PROJECT_ROOT, the
+    // `gh` wrapper is staged in its agent home, and both shims ask the
+    // out-of-sandbox gateway for the secret instead.
+    if let Some(project_root) = project_root_opt.as_deref() {
         let registry = ta_credentials::ConnectorRegistry::load(&project_root.join(".ta"));
-        install_credential_shims(&mut env, &project_root, staging_path, &registry);
+        match sandbox_plan.as_ref().filter(|p| p.scrubs_env) {
+            Some(plan) => {
+                install_credential_shims(&mut env, &plan.agent_home, staging_path, &registry)
+            }
+            None => {
+                env.insert(
+                    "TA_PROJECT_ROOT".to_string(),
+                    project_root.display().to_string(),
+                );
+                install_credential_shims(&mut env, project_root, staging_path, &registry);
+            }
+        }
     }
 
-    let args = build_runtime_agent_args(config, staging_path, prompt, headless, &env)?;
+    // Environment scrub allowlist (v0.17.12.6): the agent starts from a cleared
+    // environment plus only what it needs.
+    let mut removed_env = Vec::new();
+    if let Some(plan) = sandbox_plan.as_ref().filter(|p| p.scrubs_env) {
+        removed_env = plan.apply_env(&mut env, baseline_is_cleared, &goal_id.to_string());
+        clear_env = true;
+    }
+    if let Some(plan) = &sandbox_plan {
+        plan.print(&removed_env, is_claude_code_launch(config), &env);
+    }
+
+    let mut args = build_runtime_agent_args(config, staging_path, prompt, headless, &env)?;
+    if let Some(mcp) = sandbox_plan.as_ref().and_then(|p| p.mcp_config.as_deref()) {
+        super::sandbox_launch::override_mcp_config_arg(&mut args, mcp);
+    }
 
     let stdin_mode = if headless {
         StdinMode::Null
@@ -6720,78 +6793,22 @@ fn launch_agent_via_runtime(
         clear_env,
     };
 
-    // Apply sandbox policy from workflow.toml [sandbox] section (v0.14.0).
-    // The policy wraps the spawn request in sandbox-exec (macOS) or bwrap (Linux)
-    // when `sandbox.enabled = true`. On Windows, Job Objects are applied post-spawn
-    // via `sandbox_policy.post_spawn_apply()` (v0.16.4). Disabled by default.
-    let sandbox_policy: Option<ta_runtime::SandboxPolicy>;
-    let request = {
-        use ta_runtime::{SandboxPolicy, SandboxProvider};
-        let wf_toml = staging_path.join(".ta/workflow.toml");
-        let wf = ta_submit::WorkflowConfig::load_or_default(&wf_toml);
-        if wf.sandbox.enabled {
-            // Check experimental.sandbox flag (v0.13.17).
-            // If not enabled in [experimental], print a warning and skip sandboxing.
-            let daemon_toml = staging_path.join(".ta").join("daemon.toml");
-            let sandbox_experimental = if daemon_toml.exists() {
-                std::fs::read_to_string(&daemon_toml)
-                    .ok()
-                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-                    .and_then(|v| v.get("experimental")?.get("sandbox")?.as_bool())
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-            if !sandbox_experimental {
-                println!(
-                    "Warning: Sandbox is experimental — set [experimental]\nsandbox = true \
-                     in .ta/daemon.toml to enable. Running without sandbox."
-                );
-                tracing::warn!(
-                    "sandbox.enabled=true but experimental.sandbox=false — skipping sandbox"
-                );
-                sandbox_policy = None;
-                raw_request
-            } else {
-                let provider = SandboxPolicy::detect_provider();
-                if provider == SandboxProvider::None {
-                    tracing::warn!(
-                    "sandbox.enabled=true but no sandbox provider available on this platform — \
-                     running agent without sandboxing"
-                );
-                    sandbox_policy = None;
-                    raw_request
-                } else {
-                    let policy = SandboxPolicy {
-                        enabled: true,
-                        provider,
-                        allow_read: wf
-                            .sandbox
-                            .allow_read
-                            .iter()
-                            .map(std::path::PathBuf::from)
-                            .collect(),
-                        allow_write: wf
-                            .sandbox
-                            .allow_write
-                            .iter()
-                            .map(std::path::PathBuf::from)
-                            .collect(),
-                        allow_network: wf.sandbox.allow_network.clone(),
-                    };
-                    tracing::info!(
-                        provider = ?policy.provider,
-                        "Applying sandbox policy to agent process"
-                    );
-                    let applied = policy.apply(raw_request);
-                    sandbox_policy = Some(policy);
-                    applied
-                }
-            } // end sandbox_experimental else
-        } else {
-            sandbox_policy = None;
-            raw_request
+    // Apply the sandbox policy compiled above (v0.17.12.6): the provider wraps
+    // the spawn in sandbox-exec (macOS) or bwrap (Linux); on Windows, Job Objects
+    // are applied post-spawn via `sandbox_policy.post_spawn_apply()` (v0.16.4).
+    let sandbox_policy: Option<ta_runtime::SandboxPolicy> = sandbox_plan
+        .as_ref()
+        .filter(|p| p.wraps)
+        .map(|p| p.policy());
+    let request = match &sandbox_policy {
+        Some(policy) => {
+            tracing::info!(
+                provider = ?policy.provider,
+                "Applying sandbox policy to agent process"
+            );
+            policy.apply(raw_request)
         }
+        None => raw_request,
     };
 
     // Resolve the runtime (default: "process").
@@ -6823,16 +6840,33 @@ fn launch_agent_via_runtime(
     // Creates an AppContainer profile and grants the container SID access to the
     // staging workspace.  On non-Windows or when the provider is not AppContainer,
     // pre_spawn_appcontainer returns None (no-op).
-    let _appcontainer_guard = sandbox_policy.as_ref().and_then(|p| {
-        p.pre_spawn_appcontainer(staging_path, &goal_id.to_string())
-            .unwrap_or_else(|e| {
+    let _appcontainer_guard = match sandbox_policy.as_ref() {
+        Some(p) => match p.pre_spawn_appcontainer(staging_path, &goal_id.to_string()) {
+            Ok(guard) => guard,
+            Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "AppContainer pre-spawn setup failed — falling back to Job Object isolation"
+                    "AppContainer pre-spawn setup failed; re-evaluating the launch with the \
+                     capabilities that remain"
                 );
+                // The profile requires filesystem confinement that AppContainer would have
+                // provided: run the degraded-mode table again, never fall back silently.
+                if let Some(plan) = sandbox_plan.as_mut() {
+                    plan.downgrade_to_job_object(&format!("AppContainer setup failed: {e}"));
+                    plan.emit(events_dir, goal_id);
+                    println!("{}", plan.decision.banner());
+                    if plan.decision.is_refused() {
+                        return Err(std::io::Error::other(format!(
+                            "Launch refused by the sandbox policy (goal {goal_id}): {}",
+                            plan.decision.detail
+                        )));
+                    }
+                }
                 None
-            })
-    });
+            }
+        },
+        None => None,
+    };
 
     // Spawn the agent.  On Windows with an AppContainer guard, uses CreateProcessW
     // with STARTUPINFOEXW for filesystem/network isolation (v0.16.4.2).

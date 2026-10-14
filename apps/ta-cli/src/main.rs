@@ -1203,7 +1203,24 @@ enum Commands {
     },
     /// Start the MCP server on stdio.
     #[command(hide = true)]
-    Serve,
+    Serve {
+        /// Serve MCP on this Unix socket instead of stdio. `ta run` starts the
+        /// gateway this way, outside the sandbox, so a sandboxed agent reaches
+        /// it through `ta mcp-bridge`.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+        /// Project root whose `.ta/` backs credential lookups on the socket.
+        #[arg(long, requires = "socket")]
+        credential_root: Option<std::path::PathBuf>,
+    },
+    /// Relay stdio to a goal's out-of-sandbox gateway socket. Not meant to be
+    /// invoked directly: `ta run` points a sandboxed agent's MCP config here.
+    #[command(hide = true)]
+    McpBridge {
+        /// Gateway socket path (also in `TA_MCP_ENDPOINT`).
+        #[arg(long)]
+        endpoint: std::path::PathBuf,
+    },
     /// git `credential.helper` backend for broker-mediated connectors
     /// (v0.17.6.7). Not meant to be invoked directly — `ta run` points a
     /// git repo's `credential.helper` config at this subcommand when a
@@ -2278,7 +2295,12 @@ fn dispatch_raw(
         Commands::Webhook { command } => commands::webhook::execute(command, config),
         Commands::Meridian { command } => commands::meridian::execute(command, config),
         Commands::Tools { command } => commands::tools::execute(command),
-        Commands::Serve => {
+        Commands::McpBridge { endpoint } => commands::mediation::bridge(endpoint),
+        Commands::Serve {
+            socket: Some(socket),
+            credential_root,
+        } => commands::mediation::serve_socket(project_root, socket, credential_root.as_deref()),
+        Commands::Serve { .. } => {
             // First-run gate: warn if provider is not yet configured.
             // TA_SKIP_ONBOARD_CHECK=1 bypasses in CI.
             let skip = std::env::var("TA_SKIP_ONBOARD_CHECK").is_ok_and(|v| v == "1");

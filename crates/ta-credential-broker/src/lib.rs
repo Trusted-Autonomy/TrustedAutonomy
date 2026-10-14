@@ -12,4 +12,9 @@ pub mod shim;
 
 pub use broker::{CredentialBroker, GrantedToken, VerifiedGrant};
 pub use error::BrokerError;
-pub use shim::{resolve_for_host, ShimError, ShimResolution};
+#[cfg(unix)]
+pub use shim::resolve_via_endpoint;
+pub use shim::{
+    encode_endpoint_reply, parse_endpoint_reply, resolve_for_host, ShimError, ShimResolution,
+    CREDENTIAL_PURPOSE,
+};
