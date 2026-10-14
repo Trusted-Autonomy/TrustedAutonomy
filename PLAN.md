@@ -11224,7 +11224,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.16`
 
 ### v0.17.12.17 - Goal Start State Capture
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.15
 
 **Goal**: A goal cannot be reproduced today. `GoalRun` records the objective and a per-file content-hash `source_snapshot` (for conflict detection) but not the git commit it started from, so there is no way to replay a goal against a candidate cost optimization. Spec: `docs/superpowers/specs/2026-10-13-token-cost-optimization-and-ab-harness.md` section 4.1.
