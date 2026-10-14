@@ -429,7 +429,10 @@ mod tests {
                 escape(&ta_dir.to_string_lossy())
             ),
         );
-        let ssh = pos(&out, &format!(r#"(subpath "{}")"#, ssh_path.display()));
+        let ssh = pos(
+            &out,
+            &format!(r#"(subpath "{}")"#, escape(&ssh_path.to_string_lossy())),
+        );
         let grant = pos(
             &out,
             &format!(
