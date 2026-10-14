@@ -18,13 +18,21 @@ set -euo pipefail
 IMAGE="${TA_CI_RUST_IMAGE:-rust:1-bookworm}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# The build cache lives in a Docker named volume, not a bind mount: the container
+# runs as root, so a bind-mounted target dir leaves root-owned files on the runner
+# that `rm -rf "$WORK"` cannot delete, which turned a passing run into exit 1.
+VOLUME="ta-sandbox-conformance-$$"
+cleanup() {
+  docker volume rm -f "$VOLUME" >/dev/null 2>&1 || echo "[ci] warning: could not remove docker volume $VOLUME"
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 run() {
   local name="$1"; shift
   echo "::group::linux sandbox conformance: $name"
-  echo "[ci] image: $IMAGE; repeat with: docker run --rm $* -v $ROOT:/src:ro -w /src $IMAGE cargo test -p ta-runtime --test linux_conformance"
-  if ! docker run --rm "$@" -v "$ROOT":/src:ro -v "$WORK/target:/tgt" -e CARGO_TARGET_DIR=/tgt \
+  echo "[ci] image: $IMAGE; repeat with: docker run --rm $* -v $ROOT:/src:ro -v ta-sandbox-conformance-manual:/tgt -e CARGO_TARGET_DIR=/tgt -e TA_REQUIRE_SANDBOX_CONFORMANCE=1 -w /src $IMAGE cargo test -p ta-runtime --test linux_conformance -- --test-threads=1"
+  if ! docker run --rm "$@" -v "$ROOT":/src:ro -v "$VOLUME:/tgt" -e CARGO_TARGET_DIR=/tgt \
       -e TA_REQUIRE_SANDBOX_CONFORMANCE=1 -w /src "$IMAGE" \
       cargo test -p ta-runtime --test linux_conformance -- --test-threads=1; then
     echo "::endgroup::"
