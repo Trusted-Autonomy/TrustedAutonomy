@@ -11111,7 +11111,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.10`
 
 ### v0.17.12.11 - Remaining Red-Team High Findings
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.4
 
 **Goal**: Close the red-team High findings that are fully fixable inside this repository and independently testable: CR-07 (automated applies and `--chain` replay external actions with no human), the origin stamp for `ta_goal_start`, the resume restriction loss, and the two plan-merge defects. Scoped 2026-10-15 against current code (the 2026-10-07 report is partly stale: the daemon now passes `--origin` to team roles and the wake listener already fences intake). The remaining items need a design decision or another repository and moved to v0.17.12.23.
