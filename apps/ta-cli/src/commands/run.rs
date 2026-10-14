@@ -6701,6 +6701,7 @@ fn launch_agent_via_runtime(
             chat,
             team_role,
             agent_env: &env,
+            events_dir,
         };
         match super::sandbox_launch::plan(&input) {
             Ok(plan) => sandbox_plan = Some(plan),
@@ -6835,6 +6836,12 @@ fn launch_agent_via_runtime(
     };
 
     let agent_start = std::time::Instant::now();
+
+    // Seatbelt denials from the unified log (v0.17.12.7). Started before the
+    // spawn because `log stream` needs a moment to attach; dropped with this scope.
+    let _violation_tail = sandbox_plan
+        .as_ref()
+        .and_then(|p| p.start_violation_tail(events_dir, goal_id));
 
     // Pre-spawn AppContainer setup (v0.16.4.2) — Windows only.
     // Creates an AppContainer profile and grants the container SID access to the

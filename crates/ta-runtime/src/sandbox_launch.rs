@@ -168,10 +168,11 @@ impl Capability {
                  Windows: AppContainer)"
             }
             Capability::NetLoopbackBlocked => {
-                "remove allow_network entries (a granted network opens loopback to the daemon \
-                 until the egress proxy ships)"
+                "remove allow_network entries (on this platform a granted network opens loopback \
+                 to the daemon; macOS blocks loopback even with a network grant)"
             }
-            Capability::NetEgressAllowlist => "needs the TA egress proxy (not yet shipped)",
+            Capability::NetEgressAllowlist => "needs the TA egress proxy with a provider that confines the network (macOS today); \
+                 remove the \"*\" grant and list the hosts instead",
             Capability::ProcNoPtraceOut | Capability::ProcNoUnsandboxedSpawn => {
                 "needs the hardened provider profile (not yet shipped for this platform)"
             }
@@ -221,10 +222,20 @@ pub fn provider_capabilities(
     let mut caps = BTreeSet::new();
     match provider {
         SandboxProvider::None | SandboxProvider::WindowsJobObject => {}
-        // Seatbelt v1 and bwrap v1: filesystem confinement, and loopback is
-        // closed only while no network is granted (a granted network opens
-        // all outbound including loopback until the egress proxy ships).
-        SandboxProvider::MacosSandboxExec | SandboxProvider::LinuxBwrap => {
+        // Seatbelt v2: loopback is always denied (even under a "*" grant), and
+        // the hostname allowlist holds when the egress proxy is the only way out.
+        SandboxProvider::MacosSandboxExec => {
+            caps.insert(FsDenyTaTree);
+            caps.insert(FsWriteConfined);
+            caps.insert(NetLoopbackBlocked);
+            let open_network = profile.allow_network.iter().any(|h| h == "*");
+            if profile.egress_proxy && !open_network {
+                caps.insert(NetEgressAllowlist);
+            }
+        }
+        // bwrap v1: loopback is closed only while no network is granted (a
+        // granted network opens all outbound including loopback until v0.17.12.8).
+        SandboxProvider::LinuxBwrap => {
             caps.insert(FsDenyTaTree);
             caps.insert(FsWriteConfined);
             if no_network_granted {
@@ -341,6 +352,9 @@ pub struct LaunchContext {
     pub user_home: Option<PathBuf>,
     /// Per-goal mediation socket, when the gateway runs outside the sandbox.
     pub mediation_socket: Option<PathBuf>,
+    /// The launcher runs the per-goal egress proxy for this goal, so hostname
+    /// allowlisting is enforceable where the provider can confine the network.
+    pub egress_proxy: bool,
 }
 
 // ── Profile ────────────────────────────────────────────────────────────────
@@ -361,6 +375,8 @@ pub struct SandboxProfile {
     pub allow_network: Vec<String>,
     pub deny_paths: Vec<PathBuf>,
     pub unix_sockets: Vec<PathBuf>,
+    /// The per-goal egress proxy is available to this launch.
+    pub egress_proxy: bool,
     /// Entries dropped or ignored while compiling, each with the reason.
     pub warnings: Vec<String>,
 }
@@ -472,6 +488,7 @@ impl SandboxProfile {
             allow_network,
             deny_paths,
             unix_sockets,
+            egress_proxy: ctx.egress_proxy,
             warnings,
         }
     }
@@ -494,9 +511,59 @@ impl SandboxProfile {
             deny_paths: self.deny_paths.clone(),
             goal_paths: vec![self.agent_home.clone()],
             unix_sockets: self.unix_sockets.clone(),
+            egress_proxy_port: None,
+            violation_tag: Some(crate::seatbelt::violation_tag(&self.goal_id)),
         }
     }
 }
+
+/// Credential stores, browser profiles and shell history under `$HOME` that
+/// no agent needs. This is still a denylist: anything not named here (another
+/// project's source tree, for instance) stays readable on macOS, so reads are
+/// not described as confined there.
+pub const HOME_PROTECTED: &[&str] = &[
+    // Keys, tokens and cloud credentials.
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".config/gh",
+    ".config/git/credentials",
+    ".git-credentials",
+    ".docker",
+    ".kube",
+    ".netrc",
+    ".npmrc",
+    ".yarnrc",
+    ".pypirc",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".terraform.d/credentials.tfrc.json",
+    ".local/share/keyrings",
+    ".password-store",
+    // macOS stores.
+    "Library/Keychains",
+    "Library/Cookies",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Application Support/Google/Chrome",
+    "Library/Application Support/Firefox",
+    "Library/Application Support/BraveSoftware",
+    "Library/Application Support/Microsoft Edge",
+    "Library/Application Support/Arc",
+    "Library/Application Support/1Password",
+    "Library/Group Containers/group.com.apple.notes",
+    // Linux browser profiles and shell history.
+    ".config/google-chrome",
+    ".config/chromium",
+    ".mozilla",
+    ".bash_history",
+    ".zsh_history",
+    ".python_history",
+    ".node_repl_history",
+];
 
 /// Paths denied for read and write regardless of any allowance.
 pub fn protected_paths(ctx: &LaunchContext) -> Vec<PathBuf> {
@@ -505,17 +572,7 @@ pub fn protected_paths(ctx: &LaunchContext) -> Vec<PathBuf> {
         out.push(state.clone());
     }
     if let Some(home) = &ctx.user_home {
-        for rel in [
-            ".ssh",
-            ".gnupg",
-            ".aws",
-            ".config/gh",
-            ".docker",
-            ".kube",
-            ".netrc",
-            "Library/Keychains",
-            ".local/share/keyrings",
-        ] {
+        for rel in HOME_PROTECTED {
             out.push(home.join(rel));
         }
     }
@@ -956,6 +1013,7 @@ mod tests {
             agent_home: PathBuf::from("/state/projects/p_1/agent-homes/g1"),
             user_home: Some(PathBuf::from("/home/u")),
             mediation_socket: None,
+            egress_proxy: false,
         }
     }
 
@@ -1196,16 +1254,50 @@ mod tests {
         };
         let p =
             SandboxProfile::compile(Some(&trusted), &project_open(), &ctx(RoleClass::Chat, true));
-        let caps = provider_capabilities(&SandboxProvider::MacosSandboxExec, &p);
+        let caps = provider_capabilities(&SandboxProvider::LinuxBwrap, &p);
         assert!(!caps.contains(&Capability::NetLoopbackBlocked));
+        let mac = provider_capabilities(&SandboxProvider::MacosSandboxExec, &p);
+        assert!(mac.contains(&Capability::NetLoopbackBlocked));
         let d = decide(
             &p,
-            &SandboxProvider::MacosSandboxExec,
+            &SandboxProvider::LinuxBwrap,
             true,
             GatewayPlacement::OutOfSandboxSocket,
         );
         assert_eq!(d.outcome, Outcome::Refused);
         assert!(d.missing.contains(&"net.loopback_blocked".to_string()));
+    }
+
+    #[test]
+    fn macos_reports_egress_allowlist_only_with_a_proxy_and_no_star() {
+        let trusted = |hosts: &[&str]| TrustedPolicy {
+            enabled: Some(true),
+            posture: Some(SandboxPosture::Balanced),
+            allow_network: hosts.iter().map(|h| h.to_string()).collect(),
+            ..Default::default()
+        };
+        let mac = SandboxProvider::MacosSandboxExec;
+        let mut with_proxy = ctx(RoleClass::Worker, true);
+        with_proxy.egress_proxy = true;
+
+        let listed = SandboxProfile::compile(
+            Some(&trusted(&["api.anthropic.com"])),
+            &project_open(),
+            &with_proxy,
+        );
+        assert!(provider_capabilities(&mac, &listed).contains(&Capability::NetEgressAllowlist));
+
+        let star = SandboxProfile::compile(Some(&trusted(&["*"])), &project_open(), &with_proxy);
+        let caps = provider_capabilities(&mac, &star);
+        assert!(!caps.contains(&Capability::NetEgressAllowlist));
+        assert!(caps.contains(&Capability::NetLoopbackBlocked));
+
+        let no_proxy = SandboxProfile::compile(
+            Some(&trusted(&["api.anthropic.com"])),
+            &project_open(),
+            &ctx(RoleClass::Worker, true),
+        );
+        assert!(!provider_capabilities(&mac, &no_proxy).contains(&Capability::NetEgressAllowlist));
     }
 
     #[test]
@@ -1448,6 +1540,7 @@ mod tests {
             agent_home: home.clone(),
             user_home: None,
             mediation_socket: Some(sock.clone()),
+            egress_proxy: false,
         };
         let project_req = ProjectRequest {
             enabled: true,

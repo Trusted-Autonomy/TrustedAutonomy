@@ -13,10 +13,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ta_runtime::egress_proxy::{
+    proxy_env, EgressAllowlist, EgressProxy, EgressProxyConfig, EgressRecord, MODEL_API_HOSTS,
+};
 use ta_runtime::sandbox_launch::{
     decide, prepare_agent_home, scrub_env, EnvScrub, GatewayPlacement, LaunchContext,
     ProjectRequest, RoleClass, SandboxDecision, SandboxPosture, SandboxProfile, TrustedPolicy,
 };
+use ta_runtime::seatbelt_log::{Violation, ViolationTail};
 use ta_runtime::{SandboxPolicy, SandboxProvider};
 
 use super::mediation::{self, GatewayGuard};
@@ -38,6 +42,10 @@ pub struct SandboxPlan {
     /// Per-goal bridged MCP config (claude-code with an out-of-sandbox gateway).
     pub mcp_config: Option<PathBuf>,
     pub gateway: Option<GatewayGuard>,
+    /// Per-goal egress proxy (hostname allowlist + audit log). Stops on drop.
+    pub egress: Option<EgressProxy>,
+    /// The allowlist the proxy enforces, as written, for the banner.
+    pub egress_hosts: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -51,6 +59,8 @@ pub struct PlanInput<'a> {
     pub team_role: bool,
     /// The agent's own env map, for chat-mode variables the gateway needs too.
     pub agent_env: &'a HashMap<String, String>,
+    /// Where denial events are appended (egress proxy denials are reported live).
+    pub events_dir: &'a Path,
 }
 
 /// Map `[sandbox]` and `[security]` from the project's workflow config.
@@ -103,6 +113,7 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         agent_home: PathBuf::new(),
         user_home: dirs::home_dir(),
         mediation_socket: None,
+        egress_proxy: false,
     };
 
     // First pass: is a sandbox wanted at all?
@@ -156,6 +167,38 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
     }
     ctx.mediation_socket = gateway.as_ref().map(|g| g.socket.clone());
 
+    // Egress proxy: the Seatbelt profile lets the agent reach only this loopback
+    // port, so hostname policy lives here. An explicit "*" grant keeps the open
+    // network (still without loopback) and runs no proxy.
+    let mut egress = None;
+    let mut egress_hosts = Vec::new();
+    let sandbox_will_wrap = first.requested && provider == SandboxProvider::MacosSandboxExec;
+    let open_network = first.allow_network.iter().any(|h| h == "*");
+    if sandbox_will_wrap && !open_network {
+        let mut hosts = first.allow_network.clone();
+        if input.is_claude_code {
+            hosts.extend(model_api_hosts(input.agent_env));
+        }
+        hosts.sort();
+        hosts.dedup();
+        match start_egress_proxy(
+            &goal,
+            &hosts,
+            state.as_ref().map(|s| s.sandbox_dir()),
+            input.events_dir,
+            input.goal_id,
+        ) {
+            Ok(p) => {
+                egress_hosts = hosts;
+                egress = Some(p);
+            }
+            Err(e) => warnings.push(format!(
+                "could not start the egress proxy: {e}. The agent will have no network access."
+            )),
+        }
+    }
+    ctx.egress_proxy = egress.is_some();
+
     let profile = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
     let scrubs_env = profile.requested;
     let wraps = profile.requested && provider != SandboxProvider::None;
@@ -205,14 +248,149 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         claude_config_dir,
         mcp_config,
         gateway,
+        egress,
+        egress_hosts,
         warnings,
     })
+}
+
+/// Hosts a sandboxed Claude Code agent needs to reach its model: the public
+/// API plus the host of `ANTHROPIC_BASE_URL` when the owner points it elsewhere.
+fn model_api_hosts(agent_env: &HashMap<String, String>) -> Vec<String> {
+    let mut hosts: Vec<String> = MODEL_API_HOSTS.iter().map(|h| h.to_string()).collect();
+    let base = agent_env
+        .get("ANTHROPIC_BASE_URL")
+        .cloned()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok());
+    if let Some(url) = base {
+        if let Some(rest) = url.split("://").nth(1) {
+            let authority = rest.split('/').next().unwrap_or("");
+            let authority = authority.rsplit('@').next().unwrap_or("");
+            if !authority.is_empty() {
+                // `host:port` is kept as written; a bare host means 443.
+                hosts.push(authority.to_string());
+            }
+        }
+    }
+    hosts
+}
+
+fn start_egress_proxy(
+    goal: &str,
+    hosts: &[String],
+    state_sandbox_dir: Option<PathBuf>,
+    events_dir: &Path,
+    goal_id: uuid::Uuid,
+) -> Result<EgressProxy, String> {
+    let allowlist = EgressAllowlist::parse(hosts)?;
+    let audit_dir = match state_sandbox_dir {
+        Some(d) => d.join("egress"),
+        None => std::env::temp_dir().join("ta-egress"),
+    };
+    let mut cfg = EgressProxyConfig::new(goal, allowlist);
+    cfg.audit_path = Some(audit_dir.join(format!("{goal}.jsonl")));
+    let events_dir = events_dir.to_path_buf();
+    cfg.on_deny = Some(std::sync::Arc::new(move |r: &EgressRecord| {
+        emit_violation(
+            &events_dir,
+            goal_id,
+            "egress_proxy",
+            "connect",
+            &format!("{}:{}", r.host, r.port),
+            None,
+            None,
+            1,
+            &r.reason,
+        )
+    }));
+    EgressProxy::start(cfg).map_err(|e| e.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_violation(
+    events_dir: &Path,
+    goal_id: uuid::Uuid,
+    source: &str,
+    operation: &str,
+    target: &str,
+    process: Option<String>,
+    pid: Option<u32>,
+    count: u32,
+    detail: &str,
+) {
+    use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+    let store = FsEventStore::new(events_dir);
+    if let Err(e) = store.append(&EventEnvelope::new(SessionEvent::SandboxViolation {
+        goal_id,
+        source: source.to_string(),
+        operation: operation.to_string(),
+        target: target.to_string(),
+        process,
+        pid,
+        count,
+        detail: detail.to_string(),
+    })) {
+        tracing::warn!(
+            events_dir = %events_dir.display(),
+            error = %e,
+            "could not record a sandbox violation in the event store"
+        );
+    }
 }
 
 impl SandboxPlan {
     /// The provider-facing policy for the spawn wrapper.
     pub fn policy(&self) -> SandboxPolicy {
-        self.profile.to_policy(self.provider.clone())
+        let mut policy = self.profile.to_policy(self.provider.clone());
+        policy.egress_proxy_port = self.egress.as_ref().map(|p| p.port());
+        policy
+    }
+
+    /// Watch the unified log for this goal's Seatbelt denials and record each
+    /// as a `SandboxViolation` event. macOS only; `None` elsewhere or if the
+    /// `log` tool cannot start (the sandbox still enforces). Start it BEFORE the
+    /// spawn: `log stream` needs a moment before it sees events. Repeats of the
+    /// same denial are reported once.
+    pub fn start_violation_tail(
+        &self,
+        events_dir: &Path,
+        goal_id: uuid::Uuid,
+    ) -> Option<ViolationTail> {
+        if !self.wraps || self.provider != SandboxProvider::MacosSandboxExec {
+            return None;
+        }
+        let tag = ta_runtime::seatbelt::violation_tag(&goal_id.to_string());
+        let events_dir = events_dir.to_path_buf();
+        let seen = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+        let report = move |v: Violation| {
+            let key = format!("{}|{}|{}", v.process, v.operation, v.target);
+            if !seen.lock().map(|mut s| s.insert(key)).unwrap_or(true) {
+                return;
+            }
+            eprintln!(
+                "[sandbox] denied: {} {} ({}[{}])",
+                v.operation, v.target, v.process, v.pid
+            );
+            emit_violation(
+                &events_dir,
+                goal_id,
+                "seatbelt",
+                &v.operation,
+                &v.target,
+                Some(v.process.clone()),
+                Some(v.pid),
+                v.count,
+                &v.explain(),
+            );
+        };
+        match ViolationTail::start(tag, std::sync::Arc::new(report)) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!(error = %e, "sandbox denial events are unavailable");
+                eprintln!("[warn] sandbox: {e}");
+                None
+            }
+        }
     }
 
     /// Reduce the agent env to the allowlist (no-op unless `scrubs_env`).
@@ -242,6 +420,9 @@ impl SandboxPlan {
         };
         let out = scrub_env(&inherited, env, &scrub);
         *env = out.env;
+        if let Some(p) = &self.egress {
+            env.extend(proxy_env(&p.url()));
+        }
         out.removed
     }
 
@@ -267,6 +448,21 @@ impl SandboxPlan {
         }
         for w in &self.warnings {
             eprintln!("[warn] sandbox: {w}");
+        }
+        if let Some(p) = &self.egress {
+            println!(
+                "[sandbox] egress proxy on 127.0.0.1:{} allows {} ({} host rule(s)); audit log: {}",
+                p.port(),
+                if self.egress_hosts.is_empty() {
+                    "no hosts".to_string()
+                } else {
+                    self.egress_hosts.join(", ")
+                },
+                self.egress_hosts.len(),
+                p.audit_path()
+                    .map(|a| a.display().to_string())
+                    .unwrap_or_else(|| "(none)".into())
+            );
         }
         if !removed_env.is_empty() {
             tracing::info!(removed = ?removed_env, "scrubbed variables from the agent environment");

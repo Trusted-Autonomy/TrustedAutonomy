@@ -1610,6 +1610,8 @@ mod tests {
             deny_paths: vec![],
             goal_paths: vec![],
             unix_sockets: vec![],
+            egress_proxy_port: None,
+            violation_tag: None,
         };
 
         let req = SpawnRequest {
