@@ -11224,15 +11224,15 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.16`
 
 ### v0.17.12.17 - Goal Start State Capture
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.15
 
 **Goal**: A goal cannot be reproduced today. `GoalRun` records the objective and a per-file content-hash `source_snapshot` (for conflict detection) but not the git commit it started from, so there is no way to replay a goal against a candidate cost optimization. Spec: `docs/superpowers/specs/2026-10-13-token-cost-optimization-and-ab-harness.md` section 4.1.
 
-1. [ ] **Start state on `GoalRun`.** Add `start_commit` (full SHA of `HEAD` at goal start, absent when the project is not a git repo), `start_dirty` (true when the working tree had uncommitted changes), `start_branch`. All `#[serde(default)]`, so existing goal records still load. Recorded for git projects at goal start; other VCS kinds record nothing and say so (no error).
-2. [ ] **Prompt preserved.** When `--objective-file` is used, store the file's contents on the goal (the file can change later), alongside the existing `objective`. Never record environment values or secrets.
-3. [ ] **Visible.** `ta goal status` and `--json` show the start state and print a plain line when `start_dirty` is true ("this goal started from uncommitted changes and cannot be replayed exactly").
-4. [ ] Tests: start state recorded for a real git repo in a tempdir (clean and dirty), absent for a non-git directory, old records without the fields load, objective-file contents stored, no env values recorded. Observability Mandate for every error. `docs/USAGE.md` how-to.
+1. [x] **Start state on `GoalRun`.** Add `start_commit` (full SHA of `HEAD` at goal start, absent when the project is not a git repo), `start_dirty` (true when the working tree had uncommitted changes), `start_branch`. All `#[serde(default)]`, so existing goal records still load. Recorded for git projects at goal start; other VCS kinds record nothing and say so (no error).
+2. [x] **Prompt preserved.** When `--objective-file` is used, store the file's contents on the goal (the file can change later), alongside the existing `objective`. Never record environment values or secrets.
+3. [x] **Visible.** `ta goal status` and `--json` show the start state and print a plain line when `start_dirty` is true ("this goal started from uncommitted changes and cannot be replayed exactly").
+4. [x] Tests: start state recorded for a real git repo in a tempdir (clean and dirty), absent for a non-git directory, old records without the fields load, objective-file contents stored, no env values recorded. Observability Mandate for every error. `docs/USAGE.md` how-to.
 
 **Effort**: S.
 

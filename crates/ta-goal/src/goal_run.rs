@@ -542,6 +542,29 @@ pub struct GoalRun {
     /// `--max-usd`. The draft built from the partial work is marked incomplete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_abort: Option<BudgetAbort>,
+
+    // ── Start state (v0.17.12.17) ────────────────────────────────────
+    /// Full SHA of `HEAD` in the source project when the goal started. Absent
+    /// when the project is not a git repo (or has no commit yet). Needed to
+    /// replay the goal against the same code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_commit: Option<String>,
+
+    /// `true` when the source project had uncommitted changes to tracked files
+    /// at goal start, so `start_commit` alone does not reproduce the start
+    /// state. Only meaningful when `start_commit` is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_dirty: bool,
+
+    /// Branch checked out at goal start. Absent for a detached `HEAD` or a
+    /// non-git project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_branch: Option<String>,
+
+    /// Contents of the `--objective-file` as read at goal start (the file can
+    /// change later). Only set when that flag was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_file_content: Option<String>,
 }
 
 fn is_zero_f64(v: &f64) -> bool {
@@ -748,6 +771,10 @@ impl GoalRun {
             cost_source: crate::token_cost::CostSource::None,
             origin_class: None,
             budget_abort: None,
+            start_commit: None,
+            start_dirty: false,
+            start_branch: None,
+            objective_file_content: None,
             agent_model: String::new(),
         }
     }

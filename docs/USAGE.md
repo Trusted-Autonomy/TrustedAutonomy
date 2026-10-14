@@ -4712,6 +4712,24 @@ Override the auto-generated tag with `--tag`:
 ta run "Fix the auth bug" --tag fix-auth
 ```
 
+### Goal Start State
+
+For a git project, every goal records the commit it started from, so you can tell exactly what code the agent saw:
+
+```bash
+ta goal status fix-auth-01
+#  ...
+#  Start:    3f9c2a1d5b7e8c0a4d6f1b2e9a7c3d5e8f0a1b2c on main
+
+ta goal status fix-auth-01 --json | jq '{start_commit, start_branch, start_dirty}'
+```
+
+- `start_commit` is the full SHA of `HEAD`, `start_branch` the checked-out branch (absent on a detached `HEAD`).
+- If tracked files had uncommitted changes when the goal started, `ta goal status` adds a line: "this goal started from uncommitted changes and cannot be replayed exactly". Untracked files do not count. Commit or stash first when you want a replayable goal.
+- Projects that are not git (Perforce, SVN, no VCS) record nothing, and `ta run` prints a one-line note saying so. Goals created before this existed show "not recorded".
+- When you launch with `--objective-file`, the file's contents are stored on the goal (`objective_file_content` in `--json`), so the original prompt survives later edits to the file.
+- Only repository facts are recorded. Environment variables and secrets never are.
+
 ### VCS Post-Apply Tracking
 
 After `ta draft apply --git-commit --push --review`, TA tracks the PR lifecycle:
