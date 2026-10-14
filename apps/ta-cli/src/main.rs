@@ -1093,6 +1093,15 @@ enum Commands {
         command: commands::experiment::ExperimentCommands,
     },
 
+    /// Spend across TA goals and interactive Claude Code / OMP sessions.
+    ///
+    /// `ta cost report` totals tokens and USD by day, source, model, project,
+    /// context size or origin class, and shows where the money goes by prompt size.
+    Cost {
+        #[command(subcommand)]
+        command: commands::cost::CostCommands,
+    },
+
     /// Effort and KPI analytics via Meridian (v0.17.0.12).
     ///
     /// Delegates to the `meridian` binary on PATH. TA emits token counts and
@@ -2208,6 +2217,7 @@ fn dispatch_raw(
             commands::workflow::execute(command, config)
         }
         Commands::Stats { command } => commands::stats::execute(command, config),
+        Commands::Cost { command } => commands::cost::execute(command, config),
         Commands::Experiment { command } => commands::experiment::execute(command, config),
         Commands::Community { command } => {
             if warn_legacy {
