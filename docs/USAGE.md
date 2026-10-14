@@ -18192,6 +18192,53 @@ Active Prompt-Optimizer Plugin  (built-in headroom default)
     health_endpoint = "http://127.0.0.1:8787/health"
 ```
 
+### Choosing and swapping optimizers
+
+Optimizers sit in three slots, each with the same contract: a name, a kind, a licence, a cheap availability check, and a metrics record for every reduction. `none` is always valid and is the baseline for comparisons.
+
+| Slot | Acts on | Choices |
+|---|---|---|
+| `input` | command output, files and logs before they enter context | `none`, `headroom`, `proxy` (`rtk` is registered but not yet selectable) |
+| `context` | the accumulated conversation | `none`, `agent-native` |
+| `output` | what the model writes | `none` |
+
+`headroom` and `proxy` are the proxy kind: they run the process from `[compression.plugin]` (headroom by default). `rtk` is a hook that would be installed into the agent. TA has no integration for it yet, so it is registered only so its licence is on record: selecting it is refused (`ta golden replay --set optimizers.input.use=rtk` fails before anything launches, and a goal whose config names it prints a warning and runs with no input optimization). Refusing is deliberate: running it as a silent no-op would report the same numbers as `none` and make an A/B comparison conclude it saves nothing.
+
+Pick one per slot in `.ta/daemon.toml`:
+
+```toml
+[optimizers.input]
+use = "headroom"
+```
+
+When the input slot is not chosen, `[compression] enabled` decides as before. `ta compression status` shows each slot with its kind and licence.
+
+To compare optimizers on identical work, override the slot for one golden replay:
+
+```bash
+ta golden replay fix-the-thing-98a823ac --set optimizers.input.use=none --tag no-optimizer
+ta golden replay fix-the-thing-98a823ac --set optimizers.input.use=headroom --tag headroom
+ta golden report fix-the-thing-98a823ac
+```
+
+A name TA does not know is refused before the replay starts, with the list of valid names.
+
+Licences recorded per optimizer: `none` Apache-2.0; `rtk` Apache-2.0 for the open-source core (the full `rtk` and `rtk-proxy` add BUSL-1.1 parts: free for production use, not for resale as a service); `headroom` Apache-2.0; `proxy` is whatever you configure.
+
+Any reduction is reversible. The full original is kept under `.ta/compression/originals/<sha256>`, and the metrics record's `original_ref` is that name.
+
+### When an optimizer keeps failing
+
+On Windows the optimizer process is started with no console window, so a failing optimizer never flashes shell windows. After 5 failures in 5 minutes it is disabled for the session with a single message, and agents run without it. `ta compression status` shows the restart count and the last failure:
+
+```
+  Process:        suspended
+  Restarts:       5
+  Last failure:   health check failed at http://127.0.0.1:8787/health (2026-10-15T09:12:44Z)
+```
+
+Fix the cause, then run `ta compression enable` to resume.
+
 ### Windows installer
 
 The Windows `.msi` installer includes an optional "Enable context compression (headroom)" checkbox that runs `pip install headroom-ai[all]` during setup. The checkbox is checked by default.

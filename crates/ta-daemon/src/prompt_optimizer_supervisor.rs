@@ -7,8 +7,15 @@
 // ## Lifecycle
 //   1. Spawns `plugin.command` with `plugin.args`, merging `plugin.env` into env.
 //   2. Polls `plugin.health_endpoint` every 10s; restarts on failure.
-//   3. Exponential backoff (1→60 s cap); suspends after 5 failures in 5 min.
-//   4. Writes status to `.ta/compression/status.json`.
+//   3. Exponential backoff (1→60 s cap); after 5 failures in 5 min the optimizer is
+//      disabled for the session with one user-visible message (flap guard), never
+//      restarted forever. `ta compression enable` clears it.
+//   4. Writes status to `.ta/compression/status.json`, including restart count and
+//      the last failure.
+//
+// ## No visible windows (v0.17.12.21)
+// Every optimizer process is built by `build_command`, which sets `CREATE_NO_WINDOW`
+// on Windows so a console child never opens (or repeatedly re-opens) a shell window.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +23,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+
+use ta_context_opt::OptimizersConfig;
 
 use crate::config::{CompressionConfig, PromptOptimizerPluginConfig};
 
@@ -27,20 +36,57 @@ const SUSPEND_WINDOW_SECS: u64 = 300;
 const MAX_BACKOFF_SECS: u64 = 60;
 const RESTART_SIGNAL_POLL_SECS: u64 = 5;
 
+/// Win32 `CREATE_NO_WINDOW`: the child gets no console window.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Process-creation flags applied to every optimizer spawn.
+///
+/// Only meaningful on Windows; kept as a constant on every platform so a test
+/// can assert it without a Windows host.
+pub const OPTIMIZER_CREATION_FLAGS: u32 = CREATE_NO_WINDOW;
+
+/// Build the command that runs an optimizer plugin, with stdio detached and
+/// the platform's window-suppression flag set. The only place an optimizer
+/// process is constructed.
+pub fn build_command(plugin: &PromptOptimizerPluginConfig) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(&plugin.command);
+    cmd.args(&plugin.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    for (k, v) in &plugin.env {
+        cmd.env(k, v);
+    }
+    #[cfg(windows)]
+    cmd.creation_flags(OPTIMIZER_CREATION_FLAGS);
+    cmd
+}
+
 // ─── Public surface ───────────────────────────────────────────────────────────
 
 /// Start the prompt-optimizer supervisor if compression is enabled.
 ///
 /// Returns immediately; the supervisor loop runs in a background task.
 /// If the plugin binary is not found or compression is disabled, this is a no-op.
-pub fn start(project_root: PathBuf, config: CompressionConfig, shutdown: Arc<Notify>) {
-    if !config.enabled {
+pub fn start(
+    project_root: PathBuf,
+    config: CompressionConfig,
+    optimizers: OptimizersConfig,
+    shutdown: Arc<Notify>,
+) {
+    // `[optimizers.input] use = "none"|"rtk"` means no proxy-kind optimizer runs.
+    let input_forbids_proxy = optimizers.input_wants_proxy() == Some(false);
+    if !config.enabled || input_forbids_proxy {
         // Write a "disabled" status file so the CLI always reads an authoritative state
         // and stale "running" entries from before `ta compression disable` are overwritten.
         let status_dir = project_root.join(".ta").join("compression");
         std::fs::create_dir_all(&status_dir).ok();
         write_status(&status_dir, "disabled", None, 0, None);
-        tracing::debug!("PromptOptimizerSupervisor: compression disabled — wrote disabled status");
+        tracing::debug!(
+            input_slot = ?optimizers.input.use_,
+            "PromptOptimizerSupervisor: proxy optimizer not selected — wrote disabled status"
+        );
         return;
     }
 
@@ -111,6 +157,42 @@ pub struct OptimizerStatus {
     /// None in legacy files (before v0.17.0.10.1) and when compression is disabled.
     #[serde(default)]
     pub plugin_name: Option<String>,
+    /// Why the optimizer last stopped (spawn error, exit code, failed health
+    /// check). Cleared when the supervisor starts with the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
+    /// RFC 3339 time of `last_failure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_at: Option<String>,
+    /// One-line, user-facing explanation when the flap guard disabled the optimizer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+// ─── Flap guard ───────────────────────────────────────────────────────────────
+
+/// Counts failures in a sliding window; trips after `SUSPEND_FAILURE_COUNT`.
+#[derive(Debug, Default)]
+pub struct FlapGuard {
+    recent: Vec<Instant>,
+}
+
+impl FlapGuard {
+    /// Record a failure at `now`; true when the optimizer must be disabled.
+    pub fn record(&mut self, now: Instant) -> bool {
+        self.recent.push(now);
+        let window = Duration::from_secs(SUSPEND_WINDOW_SECS);
+        self.recent.retain(|t| now.duration_since(*t) < window);
+        self.recent.len() as u32 >= SUSPEND_FAILURE_COUNT
+    }
+
+    pub fn failures(&self) -> usize {
+        self.recent.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.recent.clear();
+    }
 }
 
 // ─── Supervisor loop ──────────────────────────────────────────────────────────
@@ -121,11 +203,14 @@ async fn run_supervisor(
     shutdown: Arc<Notify>,
 ) {
     std::fs::create_dir_all(&status_dir).ok();
+    // A new supervisor run starts with a clean failure history, matching its
+    // restart count of zero.
+    std::fs::remove_file(status_dir.join("status.json")).ok();
     write_status(&status_dir, "starting", None, 0, Some(&plugin.name));
 
     let mut restart_count: u32 = 0;
     let mut suspended = false;
-    let mut recent_failure_times: Vec<Instant> = Vec::new();
+    let mut flap_guard = FlapGuard::default();
 
     loop {
         // ── Suspended: poll for a restart signal ─────────────────────────
@@ -134,7 +219,7 @@ async fn run_supervisor(
             if signal_path.exists() {
                 std::fs::remove_file(&signal_path).ok();
                 suspended = false;
-                recent_failure_times.clear();
+                flap_guard.clear();
                 tracing::info!(
                     plugin = %plugin.name,
                     "PromptOptimizerSupervisor: restart signal received — clearing suspended state"
@@ -167,15 +252,7 @@ async fn run_supervisor(
             Some(&plugin.name),
         );
 
-        let mut cmd = tokio::process::Command::new(&plugin.command);
-        cmd.args(&plugin.args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        for (k, v) in &plugin.env {
-            cmd.env(k, v);
-        }
+        let mut cmd = build_command(&plugin);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -196,9 +273,10 @@ async fn run_supervisor(
                 handle_failure(
                     &status_dir,
                     &plugin.name,
+                    &format!("could not spawn `{}`: {e}", plugin.command),
                     &mut restart_count,
                     &mut suspended,
-                    &mut recent_failure_times,
+                    &mut flap_guard,
                     &shutdown,
                 )
                 .await;
@@ -257,6 +335,7 @@ async fn run_supervisor(
             Some(&plugin.name),
         );
 
+        let failure_reason = exit_reason.describe(&plugin.health_endpoint);
         match exit_reason {
             ExitReason::Shutdown => {
                 tracing::info!(
@@ -289,9 +368,10 @@ async fn run_supervisor(
         handle_failure(
             &status_dir,
             &plugin.name,
+            &failure_reason,
             &mut restart_count,
             &mut suspended,
-            &mut recent_failure_times,
+            &mut flap_guard,
             &shutdown,
         )
         .await;
@@ -306,6 +386,19 @@ enum ExitReason {
     Clean,
     Crash(Option<i32>),
     HealthFailed,
+}
+
+impl ExitReason {
+    /// One-line reason stored as the status file's `last_failure`.
+    fn describe(&self, health_url: &str) -> String {
+        match self {
+            ExitReason::Shutdown => "daemon shutdown".to_string(),
+            ExitReason::Clean => "process exited with code 0 unexpectedly".to_string(),
+            ExitReason::Crash(Some(code)) => format!("process exited with code {code}"),
+            ExitReason::Crash(None) => "process was terminated by a signal".to_string(),
+            ExitReason::HealthFailed => format!("health check failed at {health_url}"),
+        }
+    }
 }
 
 // ─── Monitor loop ─────────────────────────────────────────────────────────────
@@ -360,26 +453,31 @@ async fn monitor(
 async fn handle_failure(
     status_dir: &Path,
     plugin_name: &str,
+    reason: &str,
     restart_count: &mut u32,
     suspended: &mut bool,
-    recent_failure_times: &mut Vec<Instant>,
+    flap_guard: &mut FlapGuard,
     shutdown: &Arc<Notify>,
 ) {
     *restart_count = restart_count.saturating_add(1);
+    record_failure(status_dir, reason);
 
-    let now = Instant::now();
-    recent_failure_times.push(now);
-    let window = Duration::from_secs(SUSPEND_WINDOW_SECS);
-    recent_failure_times.retain(|t| now.duration_since(*t) < window);
-
-    if recent_failure_times.len() as u32 >= SUSPEND_FAILURE_COUNT {
+    if flap_guard.record(Instant::now()) {
+        let notice = format!(
+            "The {plugin_name} optimizer failed {SUSPEND_FAILURE_COUNT} times in \
+             {} minutes (last: {reason}) and is disabled for this session. \
+             Agents run without it. Fix the cause, then run `ta compression enable` to resume.",
+            SUSPEND_WINDOW_SECS / 60,
+        );
+        // The one user-visible message. The supervisor will not restart again
+        // until a restart signal arrives.
+        eprintln!("Warning: {notice}");
         tracing::error!(
             plugin = %plugin_name,
-            failures = recent_failure_times.len(),
-            "PromptOptimizerSupervisor: suspended after {} failures in {}s \
-             — run `ta compression enable` to resume",
-            SUSPEND_FAILURE_COUNT,
-            SUSPEND_WINDOW_SECS,
+            failures = flap_guard.failures(),
+            restart_count = *restart_count,
+            last_failure = %reason,
+            "PromptOptimizerSupervisor: disabled for the session after repeated failures"
         );
         *suspended = true;
         write_status(
@@ -389,6 +487,7 @@ async fn handle_failure(
             *restart_count,
             Some(plugin_name),
         );
+        set_notice(status_dir, &notice);
         return;
     }
 
@@ -400,6 +499,7 @@ async fn handle_failure(
         plugin = %plugin_name,
         restart_count = *restart_count,
         backoff_secs,
+        last_failure = %reason,
         "PromptOptimizerSupervisor: will restart in {}s",
         backoff_secs,
     );
@@ -421,15 +521,53 @@ fn write_status(
     restart_count: u32,
     plugin_name: Option<&str>,
 ) {
-    let record = OptimizerStatus {
-        schema_version: 1,
-        status: status.to_string(),
-        pid,
-        restart_count,
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        plugin_name: plugin_name.map(|s| s.to_string()),
+    // Keep the failure history across state changes within one supervisor run.
+    let previous = read_status_file(dir);
+    let notice = if status == "suspended" {
+        previous.as_ref().and_then(|p| p.notice.clone())
+    } else {
+        None
     };
-    if let Ok(json) = serde_json::to_string_pretty(&record) {
+    write_record(
+        dir,
+        &OptimizerStatus {
+            schema_version: 1,
+            status: status.to_string(),
+            pid,
+            restart_count,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            plugin_name: plugin_name.map(|s| s.to_string()),
+            last_failure: previous.as_ref().and_then(|p| p.last_failure.clone()),
+            last_failure_at: previous.as_ref().and_then(|p| p.last_failure_at.clone()),
+            notice,
+        },
+    );
+}
+
+/// Store why the optimizer last stopped.
+fn record_failure(dir: &Path, reason: &str) {
+    if let Some(mut rec) = read_status_file(dir) {
+        rec.last_failure = Some(reason.to_string());
+        rec.last_failure_at = Some(chrono::Utc::now().to_rfc3339());
+        rec.updated_at = chrono::Utc::now().to_rfc3339();
+        write_record(dir, &rec);
+    }
+}
+
+/// Attach the flap-guard message to the current status.
+fn set_notice(dir: &Path, notice: &str) {
+    if let Some(mut rec) = read_status_file(dir) {
+        rec.notice = Some(notice.to_string());
+        write_record(dir, &rec);
+    }
+}
+
+fn read_status_file(dir: &Path) -> Option<OptimizerStatus> {
+    serde_json::from_str(&std::fs::read_to_string(dir.join("status.json")).ok()?).ok()
+}
+
+fn write_record(dir: &Path, record: &OptimizerStatus) {
+    if let Ok(json) = serde_json::to_string_pretty(record) {
         let path = dir.join("status.json");
         if let Err(e) = std::fs::write(&path, json) {
             tracing::warn!(
@@ -491,7 +629,12 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let shutdown = Arc::new(Notify::new());
-        start(dir.path().to_path_buf(), cfg, shutdown);
+        start(
+            dir.path().to_path_buf(),
+            cfg,
+            OptimizersConfig::default(),
+            shutdown,
+        );
         let status = read_status(dir.path()).unwrap();
         assert_eq!(status.status, "disabled");
         assert_eq!(status.pid, None);
@@ -513,7 +656,12 @@ mod tests {
             ..Default::default()
         };
         let shutdown = Arc::new(Notify::new());
-        start(dir.path().to_path_buf(), cfg, shutdown);
+        start(
+            dir.path().to_path_buf(),
+            cfg,
+            OptimizersConfig::default(),
+            shutdown,
+        );
 
         let status = read_status(dir.path()).unwrap();
         assert_eq!(status.status, "disabled");
@@ -557,6 +705,9 @@ mod tests {
             restart_count: 7,
             updated_at: "2026-06-22T00:00:00Z".to_string(),
             plugin_name: Some("my-proxy".to_string()),
+            last_failure: None,
+            last_failure_at: None,
+            notice: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: OptimizerStatus = serde_json::from_str(&json).unwrap();
@@ -565,5 +716,134 @@ mod tests {
         assert_eq!(back.restart_count, 7);
         assert!(back.pid.is_none());
         assert_eq!(back.plugin_name, Some("my-proxy".to_string()));
+    }
+
+    #[test]
+    fn optimizer_creation_flags_include_create_no_window() {
+        // Covers the flag value only. Whether a Windows child really opens no console cannot be
+        // observed from a unit test (`std::process::Command` does not expose its creation flags),
+        // so the real check is the manual Windows smoke test in docs/RELEASING.md, tracked by
+        // PLAN v0.17.12.24 item 2. `build_command` is the one place an optimizer is spawned.
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
+        assert_eq!(
+            OPTIMIZER_CREATION_FLAGS & CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW
+        );
+    }
+
+    #[test]
+    fn build_command_carries_args_and_env() {
+        let plugin = PromptOptimizerPluginConfig {
+            command: "my-opt".to_string(),
+            args: vec!["serve".to_string()],
+            ..Default::default()
+        };
+        let cmd = build_command(&plugin);
+        let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program(), "my-opt");
+        assert_eq!(std_cmd.get_args().collect::<Vec<_>>(), vec!["serve"]);
+        assert!(std_cmd
+            .get_envs()
+            .any(|(k, v)| k == "HEADROOM_LEARN" && v.is_some()));
+    }
+
+    #[test]
+    fn flap_guard_trips_on_fifth_failure_in_window() {
+        let mut g = FlapGuard::default();
+        let t0 = Instant::now();
+        for i in 0..4 {
+            assert!(!g.record(t0 + Duration::from_secs(i * 10)), "failure {i}");
+        }
+        assert!(g.record(t0 + Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn flap_guard_forgets_failures_outside_the_window() {
+        let mut g = FlapGuard::default();
+        let t0 = Instant::now();
+        for i in 0..4 {
+            g.record(t0 + Duration::from_secs(i));
+        }
+        // Long after: the earlier four have aged out, so this is failure one.
+        assert!(!g.record(t0 + Duration::from_secs(SUSPEND_WINDOW_SECS + 60)));
+        assert_eq!(g.failures(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_suspend_once_and_record_last_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        write_status(dir.path(), "running", Some(1), 0, Some("headroom"));
+        let shutdown = Arc::new(Notify::new());
+        // Wake any backoff sleep immediately so the test does not wait.
+        shutdown.notify_one();
+        let (mut count, mut suspended, mut guard) = (0u32, false, FlapGuard::default());
+        for i in 0..SUSPEND_FAILURE_COUNT {
+            assert!(!suspended, "suspended too early at failure {i}");
+            shutdown.notify_one();
+            handle_failure(
+                dir.path(),
+                "headroom",
+                "process exited with code 3",
+                &mut count,
+                &mut suspended,
+                &mut guard,
+                &shutdown,
+            )
+            .await;
+        }
+        assert!(suspended);
+        assert_eq!(count, SUSPEND_FAILURE_COUNT);
+        let st = read_status_file(dir.path()).unwrap();
+        assert_eq!(st.status, "suspended");
+        assert_eq!(st.restart_count, SUSPEND_FAILURE_COUNT);
+        assert_eq!(
+            st.last_failure.as_deref(),
+            Some("process exited with code 3")
+        );
+        assert!(st.last_failure_at.is_some());
+        let notice = st.notice.unwrap();
+        assert!(notice.contains("ta compression enable"), "{notice}");
+    }
+
+    #[test]
+    fn failure_history_survives_status_changes_but_notice_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        write_status(dir.path(), "running", Some(1), 0, Some("headroom"));
+        record_failure(dir.path(), "health check failed at http://x/health");
+        set_notice(dir.path(), "disabled");
+        write_status(dir.path(), "suspended", None, 5, Some("headroom"));
+        assert!(read_status_file(dir.path()).unwrap().notice.is_some());
+        write_status(dir.path(), "starting", None, 5, Some("headroom"));
+        let st = read_status_file(dir.path()).unwrap();
+        assert_eq!(
+            st.last_failure.as_deref(),
+            Some("health check failed at http://x/health")
+        );
+        assert!(
+            st.notice.is_none(),
+            "notice clears once the optimizer restarts"
+        );
+    }
+
+    #[test]
+    fn input_slot_none_writes_disabled_status_even_when_compression_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opt = OptimizersConfig::default();
+        opt.input.use_ = Some("none".to_string());
+        start(
+            dir.path().to_path_buf(),
+            CompressionConfig::default(),
+            opt,
+            Arc::new(Notify::new()),
+        );
+        assert_eq!(read_status(dir.path()).unwrap().status, "disabled");
+    }
+
+    #[test]
+    fn legacy_status_without_failure_fields_still_parses() {
+        let json =
+            r#"{"schema_version":1,"status":"running","pid":1,"restart_count":2,"updated_at":"x"}"#;
+        let s: OptimizerStatus = serde_json::from_str(json).unwrap();
+        assert!(s.last_failure.is_none() && s.notice.is_none());
     }
 }

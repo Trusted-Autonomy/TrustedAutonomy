@@ -85,6 +85,7 @@ fn show_status(workspace_root: &Path) -> Result<()> {
         "  Enabled:        {}",
         if cfg.enabled { "yes" } else { "no" }
     );
+    print_optimizer_slots(&load_optimizers(workspace_root));
     println!("  Plugin:         {}", plugin.name);
     println!("  Proxy URL:      {}", plugin.proxy_base_url);
     println!(
@@ -109,12 +110,19 @@ fn show_status(workspace_root: &Path) -> Result<()> {
         let display_name = status.plugin_name.unwrap_or_else(|| plugin.name.clone());
         println!("  Process:        {} (PID {})", status.status, pid_str);
         println!("  Restarts:       {}", status.restart_count);
+        match (&status.last_failure, &status.last_failure_at) {
+            (Some(reason), Some(at)) => println!("  Last failure:   {} ({})", reason, at),
+            (Some(reason), None) => println!("  Last failure:   {}", reason),
+            _ => println!("  Last failure:   none this session"),
+        }
         if status.status == "suspended" {
-            println!(
-                "\n  ⚠ {} supervisor is suspended after repeated failures.\n  \
-                 To resume:  ta compression enable",
-                display_name
-            );
+            let detail = status.notice.clone().unwrap_or_else(|| {
+                format!(
+                    "{} supervisor is disabled for this session after repeated failures.",
+                    display_name
+                )
+            });
+            println!("\n  ⚠ {}\n  To resume:  ta compression enable", detail);
         }
     } else if cfg.enabled {
         println!("  Process:        not started (daemon not running or proxy not yet spawned)");
@@ -182,6 +190,37 @@ fn show_status(workspace_root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print each slot's selection with its kind and recorded licence.
+fn print_optimizer_slots(optimizers: &ta_context_opt::OptimizersConfig) {
+    use ta_context_opt::{Registry, Slot};
+    let registry = Registry::builtin();
+    for (slot, chosen) in [
+        (Slot::Input, &optimizers.input),
+        (Slot::Context, &optimizers.context),
+        (Slot::Output, &optimizers.output),
+    ] {
+        let label = format!("{} slot:", slot.name());
+        match chosen.use_.as_deref() {
+            None => println!(
+                "  {:<15} not chosen (input: follows [compression] enabled; others: none)",
+                label
+            ),
+            Some(name) => match registry.infos(slot).into_iter().find(|i| i.name == name) {
+                Some(info) => println!(
+                    "  {:<15} {} ({:?}, licence: {})",
+                    label, info.name, info.kind, info.licence
+                ),
+                None => println!(
+                    "  {:<15} {} (unknown; available: {})",
+                    label,
+                    name,
+                    registry.names(slot).join(", ")
+                ),
+            },
+        }
+    }
 }
 
 // ─── plugin show ─────────────────────────────────────────────────────────────
@@ -427,6 +466,15 @@ impl CompressionConfig {
 #[serde(default)]
 struct DaemonTomlCompression {
     compression: CompressionConfig,
+    optimizers: ta_context_opt::OptimizersConfig,
+}
+
+fn load_optimizers(workspace_root: &Path) -> ta_context_opt::OptimizersConfig {
+    std::fs::read_to_string(workspace_root.join(".ta").join("daemon.toml"))
+        .ok()
+        .and_then(|c| toml::from_str::<DaemonTomlCompression>(&c).ok())
+        .map(|p| p.optimizers)
+        .unwrap_or_default()
 }
 
 fn load_config(workspace_root: &Path) -> CompressionConfig {
@@ -460,6 +508,12 @@ struct OptimizerStatusFile {
     pub restart_count: u32,
     #[serde(default)]
     pub plugin_name: Option<String>,
+    #[serde(default)]
+    pub last_failure: Option<String>,
+    #[serde(default)]
+    pub last_failure_at: Option<String>,
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 fn read_optimizer_status(workspace_root: &Path) -> Option<OptimizerStatusFile> {

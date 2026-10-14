@@ -139,6 +139,14 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub compression: CompressionConfig,
 
+    /// Swappable optimizer slots (v0.17.12.21): `[optimizers.input] use = "rtk"`.
+    ///
+    /// `use` is `none`, `rtk`, `headroom` or `proxy` for the input slot.
+    /// `[compression.plugin]` is the `proxy` kind of the input slot. When the
+    /// input slot is not chosen, `[compression] enabled` decides as before.
+    #[serde(default)]
+    pub optimizers: ta_context_opt::OptimizersConfig,
+
     /// Meridian analytics integration (v0.17.0.12.1).
     ///
     /// Set `binary` when `meridian` is installed outside your PATH, or to pin

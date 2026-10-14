@@ -1,0 +1,20 @@
+[package]
+name = "ta-context-opt"
+version.workspace = true
+edition = "2021"
+description = "Trusted Autonomy swappable optimizer slots: input, context and output optimizers behind one contract"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "tokens", "compression", "optimizer"]
+categories = ["development-tools"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+which = "7"
+
+[dev-dependencies]
+tempfile = { workspace = true }

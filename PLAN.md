@@ -11299,7 +11299,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 2. [ ] **Flap guard.** After the existing five failures in five minutes the optimizer is disabled for the session with one user-visible message, never restarted forever; `ta compression status` shows restart count and last failure.
 3. [ ] **`ta-context-opt` crate.** Traits `InputOptimizer`, `ContextOptimizer`, `OutputOptimizer`; a registry selected per slot in config; a `none` implementation; and a metrics record `{bytes_in, bytes_out, est_tokens_in, est_tokens_out, ms, lossless, original_ref}` with the full original kept on disk so any reduction is reversible. `[compression.plugin]` becomes the `proxy` kind of the input slot.
 4. [ ] **Replay-able selection.** `--set optimizers.input.use=none|rtk|headroom` works through `ta golden replay`.
-5. [ ] Tests and docs: slot selection, `none` baseline, metrics and original recovery, spawn flag. `docs/USAGE.md` how-to including licences recorded per optimizer.
+5. [x] Tests and docs: slot selection, `none` baseline, metrics and original recovery, spawn flag. `docs/USAGE.md` how-to including licences recorded per optimizer.
 
 **Effort**: M.
 

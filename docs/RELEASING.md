@@ -61,6 +61,14 @@ curl -fsSL https://github.com/trustedautonomy/ta/releases/latest/download/ta-v0.
 cargo install ta-cli
 ```
 
+### Windows smoke check: optimizer windows
+
+CI cannot observe a console window, so check this by hand on a Windows build before publishing:
+
+1. Install headroom (`pip install headroom-ai[all]`) and run `ta daemon restart`.
+2. Confirm no console window opens for the optimizer process, and `ta compression status` shows `running`.
+3. Break the optimizer (set `command` in `[compression.plugin]` to a script that exits 1) and restart the daemon. Confirm no window flashes, and that after 5 failures `ta compression status` shows `suspended` with a last failure.
+
 ---
 
 ## Versioning
