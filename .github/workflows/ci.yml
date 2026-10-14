@@ -94,6 +94,10 @@ jobs:
           fi
           echo "OK: versions consistent ($CARGO_VER)"
 
+      - name: Verify every crate manifest agrees with the workspace version
+        timeout-minutes: 5
+        run: ./scripts/check-version-consistency.sh
+
       - name: Secret scan (real-shaped secrets outside the allowlist)
         timeout-minutes: 5
         run: |

@@ -25,6 +25,7 @@ pub mod doctor_fix;
 pub mod draft;
 pub mod draft_plan;
 pub mod draft_task_replay;
+pub mod draft_version;
 #[cfg(windows)]
 pub mod egress_pipe;
 pub mod email_manager;

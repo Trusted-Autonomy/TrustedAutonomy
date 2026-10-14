@@ -7781,6 +7781,16 @@ ta draft apply <id>
 
 If an apply was interrupted you will see a line starting `[recover]` the next time you apply, or in the daemon log. It says whether the apply was finished or rolled back and what to do next. Nothing needs to be done by hand unless the message says recovery could not finish.
 
+#### Recovering after an interrupted apply
+
+An apply that is killed part-way can leave a version bump in your working tree. The next `ta draft apply` handles it:
+
+- It lists the dirty files once, grouped as version files, plan files and other files, and says which it will include in the commit and which it leaves alone.
+- Every version file that differs from `HEAD` (`Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `.release.toml`) is staged, including ones a previous run already changed.
+- Before committing, it checks that every crate manifest agrees with the workspace version. If not, apply stops and lists the crates, for example `crates/ta-data-spec/Cargo.toml: requires ta-changeset ^0.17.12-alpha.5`.
+
+If apply refuses, run `./scripts/bump-version.sh <workspace version>` to align the manifests, then apply again. The same check runs in CI as `./scripts/check-version-consistency.sh`, so you can run it locally at any time.
+
 #### Watching and managing outside actions
 
 ```bash
