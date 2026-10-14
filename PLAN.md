@@ -11036,16 +11036,16 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 #### Version: `0.17.12-alpha.5.1`
 
 ### v0.17.12.6 - Sandbox Launch Plumbing: Out-of-Sandbox Gateway, Trusted Policy Source, Capability Reporting
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.12.1
 
 **Goal**: Make sandboxing actually take effect, and make the mediated path survive it. Found while planning: the `[sandbox]` setting is read from the agent's staging copy of `.ta/workflow.toml`, which staging excludes, and it also needs an experimental flag in `daemon.toml`, so a sandbox is very likely never applied today (verified by reading the code, not by a live run). Plan: `docs/superpowers/specs/2026-10-07-os-sandbox-plan.md` (PR #648).
 
-1. [ ] Regression test and fix for the `[sandbox]` config source; remove the experimental gate; connect posture and `security.level` to real enforcement.
-2. [ ] Start `ta serve` outside the sandbox on a per-goal Unix socket or named pipe, with a small `ta mcp-bridge` relay inside; the agent's MCP config points at the bridge.
-3. [ ] The git and `gh` credential helpers become clients of the gateway (today they open the broker key from inside the agent's tree).
-4. [ ] Platform-neutral `SandboxProfile` compiled from the hash-pinned persona and rules, from a source the agent cannot edit; project config may only tighten.
-5. [ ] Environment scrub allowlist, per-goal agent home, and a `SandboxDecision` audit event with required versus enforced capabilities and the posture-based degraded-mode table.
+1. [x] Regression test and fix for the `[sandbox]` config source; remove the experimental gate; connect posture and `security.level` to real enforcement. Done: `[sandbox]` is read from the real project root; the experimental gate is gone; posture (`policy.toml` + `security.level`) drives enforcement.
+2. [x] Start `ta serve` outside the sandbox on a per-goal Unix socket, with a small `ta mcp-bridge` relay inside; the agent's MCP config points at the bridge. Done for Unix (per-goal socket 0600 in a 0700 dir, constant-time token check). Windows named pipes are not implemented: Windows reports `mediation.gateway_outside` as missing and follows the degraded-mode table. Named-pipe transport moved to v0.17.12.9 item 1.
+3. [x] The git and `gh` credential helpers become clients of the gateway (today they open the broker key from inside the agent's tree). Done: broker lookups go over the gateway socket (`credential` purpose) when `TA_CREDENTIAL_ENDPOINT` is set.
+4. [x] Platform-neutral `SandboxProfile` compiled from a source the agent cannot edit; project config may only tighten. Done: profile compiled from the daemon-only `<state>/sandbox/policy.toml` plus tighten-only project config; profile hash is recorded. Hash-pinned persona and rules as profile inputs moved to v0.17.12.10 item 1 (the rules engine from v0.17.12.4 is not an input yet).
+5. [x] Environment scrub allowlist, per-goal agent home, and a `SandboxDecision` audit event with required versus enforced capabilities and the posture-based degraded-mode table. Done. The "built without sandbox capability X" draft label exists as `degraded_label()` and is surfaced in the event and launch banner; showing it in draft review moved to v0.17.12.10 item 3.
 
 **Effort**: L.
 
@@ -11055,7 +11055,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 <!-- status: pending -->
 **Depends on**: v0.17.12.6
 
-1. [ ] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths.
+1. [ ] Rewrite the Seatbelt profile generator: read-allow with targeted denies (other `.ta` content, the state directory, `~/.ssh` and similar), deny-default writes, canonical case-folded paths. Starting point from v0.17.12.6: the profile is now `(allow file-read*)` followed by ordered denies from `protected_paths` (`.ssh`, `.gnupg`, `.aws`, `.config/gh`, `.netrc`, `Library/Keychains`); the earlier explicit allow list could not run `/usr/bin/true`. That is a denylist, so anything not named (browser profiles, `.docker`, `.npmrc`, other projects' source) is readable. This item must widen the deny set and prove it with `ta-sandbox-probe`, and must not describe macOS reads as confined until it does.
 2. [ ] Mach-service allowlist; deny Apple events, process inspection and signalling of others; deny exec of `ta-daemon` and `/usr/bin/security`.
 3. [ ] Per-goal egress proxy with a hostname allowlist and audit log, shared by all platforms; the profile allows only the proxy and the bridge.
 4. [ ] Violation events from the unified log; Rosetta paths; a conformance suite (`ta-sandbox-probe`) in macOS CI.
