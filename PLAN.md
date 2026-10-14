@@ -11102,7 +11102,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 1. [x] Per-role profiles (CoS chat strictest, reviewer, worker, librarian) from role class intersected with persona and rules; origins `cos` and `chat` force the CoS class. `RoleClass` gained `Librarian` and per-class ceilings; the class resolves from origin (chat forces `chat`), then the owner's `[sandbox.roles]` map in the state-dir policy, then built-in names. Persona `[sandbox]` additions (`allow_hosts`, `allow_read`) count only while the persona file's hash matches an owner pin in `<state>/sandbox/persona-pins.toml` (`ta sandbox pin-persona`); an unreadable pins file fails the launch rather than counting as pinned, and the hash comes from the same read as the content. Anything above the class ceiling is stripped with a warning.
 2. [x] On by default under `balanced` on macOS, Linux and Windows; CoS and chat refuse to launch without the required capabilities in every posture except `open`. Chat and team-role launches floor at `balanced`; the team session passes `TA_WHITEBOARD_TEAM_ROLE` so the role class reaches `ta run`. Solo workers stay off by default.
-3. [x] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor` (a `Sandbox` check); `sandbox_badge` in `/api/status` and `ta status`; drafts built without a required capability print a `SANDBOX:` line in `ta draft view`. On macOS, `explain` prints an explicit "not proof" caveat whenever the violation list is empty, because unified-log delivery of tagged denials is still best-effort. Making that delivery dependable was NOT done: it is open as v0.17.12.11 item 18, so this tick covers the commands and surfaces only.
+3. [x] `ta sandbox explain` and `ta sandbox test`; capability matrix in `ta doctor` (a `Sandbox` check); `sandbox_badge` in `/api/status` and `ta status`; drafts built without a required capability print a `SANDBOX:` line in `ta draft view`. On macOS, `explain` prints an explicit "not proof" caveat whenever the violation list is empty, because unified-log delivery of tagged denials is still best-effort. Making that delivery dependable was NOT done: it is open as v0.17.12.23 item 6, so this tick covers the commands and surfaces only.
 4. [x] USAGE.md sandbox section rewritten as how-to with honest per-platform limits ("Default-On Isolation for Chief of Staff and Team Roles").
 5. [x] Carried from v0.17.12.9, all three resolved. (a) `loopback_relay_inside_container` in `windows_conformance.rs`; measured green on a Windows runner: an AppContainer process CAN reach its own loopback listener, and host loopback stays unreachable, so the in-container egress relay premise holds. (b) The vault key stays in the host user's Credential Manager via the keyring path in `ta-credentials`, which an AppContainer process cannot see (measured); the ciphertext stays in the state directory outside every container grant; DPAPI is never treated as a boundary (measured: usable from inside the container). No code change was needed beyond documentation. (c) Decided: a chat or reviewer goal that is given network hosts is not refused on any platform; the hosts are stripped to the class ceiling with a warning (tested), since refusing would stop a session over a setting an agent may have written.
 
@@ -11114,12 +11114,12 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 <!-- status: pending -->
 **Depends on**: v0.17.12.4
 
-**Goal**: Work through the other High findings in the red-team report that are not covered above. Scoped when scheduled.
+**Goal**: Close the red-team High findings that are fully fixable inside this repository and independently testable: CR-07 (automated applies and `--chain` replay external actions with no human), the origin stamp for `ta_goal_start`, the resume restriction loss, and the two plan-merge defects. Scoped 2026-10-15 against current code (the 2026-10-07 report is partly stale: the daemon now passes `--origin` to team roles and the wake listener already fences intake). The remaining items need a design decision or another repository and moved to v0.17.12.23.
 
-1. [ ] Wiki writes go through draft review, with a non-admin credential for the CoS path (the CoS holds none).
-2. [ ] Untrusted text in prompts: fence and label task titles, wiki pages and chat text before they reach an agent.
-3. [ ] Discord channel access control actually invoked; plugin and channel trust boundaries per the sandbox plan's plugin phase.
-4. [ ] Auto-apply and `--chain` paths: dry-run honored everywhere, no external actions without a human.
+1. [x] Moved to v0.17.12.23 (Wiki writes through draft review; needs a Wayfinder credential split).
+2. [x] Moved to v0.17.12.23 (Untrusted text fencing beyond the wake listener).
+3. [x] Moved to v0.17.12.23 (Discord channel access control; spans the plugin repo).
+4. [ ] **CR-07: no external actions without a human in automated applies.** Verified open: `apply_chain` (`apps/ta-cli/src/commands/draft.rs`) hard-codes `dry_run` false and replay on and is entered before `--dry-run` or `--no-replay-actions` are read, so `ta draft apply X --chain --dry-run` performs a real apply and replays every unapplied ancestor's external actions; the session `Auto` gate (`session.rs`, around line 1175) and the release pipeline (`release.rs`, around line 1700) spawn `ta draft apply` with replay on and no human. Thread `dry_run` and `replay_actions` through `apply_chain`; make replay opt-in for non-interactive callers (replay only with a TTY or an explicit `--replay-actions`, and set `TA_NO_REPLAY_ACTIONS` on the two automated spawns); add a test that enumerates every `draft apply` spawn site in the CLI so a new one cannot silently skip the gate. Tests: `--chain --dry-run` changes nothing and replays nothing; a non-TTY apply does not replay without the flag; an explicit flag does.
 5. [ ] Make `ta_goal_start` stamp origin at creation (today only `ta run --goal-id` does).
 6. [ ] `ta session resume` (`execute_resume`) rebuilds its launch config with `restricted_tool_surface` false, so a resumed persona-restricted interactive session relaunches without the restriction flags (`--setting-sources local`, `--permission-mode dontAsk`, the system-prompt file). Carry the restriction and the delivered context through resume, or refuse to resume restricted goals (chat mode already refuses). If a restricted conversation is ever resumed with changed context, pass `--system-prompt-snapshot off` so the new text is used.
 7. [x] Moved to v0.17.11.29 (Draft Apply Fidelity).
@@ -11129,11 +11129,11 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 11. [ ] The phase-scoped plan merge matches a checked item by its full text, so an agent that appends implementation notes to an item when it checks it (seen in v0.17.11.27) gets the checkmark refused and the phase left not done. Match by item number plus a stable prefix, or tell agents to flip the box only; add a test with an item that gained a trailing note.
 12. [x] Moved to v0.17.12.14 (Multi-Project Daemon Safety).
 13. [x] Moved to v0.17.12.13 (CI Reliability).
-14. [ ] **Goal build artifacts need a disk budget.** The per-goal `CARGO_TARGET_DIR` inside staging (v0.17.11.29) fixed baked staging paths but each goal now builds a full debug tree: 38 GB for the CR-02 goal on a machine with 4.5 GB free, and the staging cap warning ("staging exceeds 5.0 GB cap (currently 50.9 GB)") fires on every run. Cut it: build goal targets with `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0` (as CI does), or share one cache for registry dependencies across goals (workspace crates still rebuild per staging path), enforce a configurable per-goal and total budget with a clear message, and delete a goal's target directory as soon as its draft is built. Also report staging size per goal in `ta doctor`.
+14. [x] Moved to v0.17.12.23 (Goal build artifacts disk budget).
 15. [x] Moved to v0.17.12.13 (CI Reliability).
 16. [x] Moved to v0.17.12.13 (CI Reliability).
-17. [ ] **Rerouted user-targeted items verify under the escalated claim.** Implement rule 7 of the attention contract for viewer reroutes: for `type=user` items accept `claims.escalated: true` with a `role` at or above the key's `escalation_min_role` (new `ta keys add --escalation-min-role`, default `member`), only for approve, deny and answer, audit the original assignee, and refuse when the role claim is absent. Tests for accept, refuse (role too low, claim absent, wrong action) and the audit record.
-18. [ ] **Make macOS sandbox violation delivery dependable** (carried from v0.17.12.7 item 4 and v0.17.12.10 item 3). Tagged `(deny ... (with message ...))` denials reach the unified log only about 3 runs in 4 (cause unexplained; enforcement always holds). Find the cause or source denials from another channel (for example `sandbox-exec` trace output or an Endpoint Security client), so `ta sandbox explain` can drop its "not proof" caveat on macOS. Until then an empty violation list must never be presented as proof that nothing was denied.
+17. [x] Moved to v0.17.12.23 (Escalated-claim verification; spans the Wayfinder-facing key model).
+18. [x] Moved to v0.17.12.23 (macOS sandbox violation delivery; needs a root-cause investigation).
 
 **Effort**: M.
 
@@ -11320,6 +11320,23 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 **Effort**: S.
 
 #### Version: `0.17.12-alpha.22`
+
+### v0.17.12.23 - Red-Team Remainders Needing a Design Decision or Another Repository
+<!-- status: pending -->
+**Depends on**: v0.17.12.11
+
+**Goal**: The red-team items split out of v0.17.12.11 on 2026-10-15 because each needs a design decision, a credential split with Wayfinder, a change in another repository, or a root-cause investigation. Each item below must be re-checked against current code before work starts, since the 2026-10-07 report predates several phases.
+
+1. [ ] **Wiki writes go through draft review (CR-10).** `ta_wiki_create` and `ta_wiki_update` (`crates/ta-mcp-gateway/src/tools/wiki.rs`) call Wayfinder live with an admin-rank token and no length, charset or tag validation. Capture them as pending actions reviewed in the draft, with a non-admin credential on the CoS path (the CoS holds none). Needs a Wayfinder-side credential split (project-scoped, wiki-write for the librarian only).
+2. [ ] **Untrusted text fencing beyond the wake listener (CR-14).** The wake listener already fences intake. Still raw: prior-role stdout in `team_session.rs`, Wayfinder task titles and descriptions from the poller, VCS connector file names, wiki pages and chat text. Fence each in a nonce-delimited block with a provenance header, strip bidi and zero-width characters, cap lengths, and add a standing line to each role prompt that fenced content is data. The poller lives in ta-virtual-team.
+3. [ ] **Discord channel access control (CR-09).** `ChannelAccessControl::permits` has no production caller. Each channel plugin authenticates to the daemon with a scoped token and passes the platform author id; the daemon enforces `permits()` and records the sender. Spans the plugin repository.
+4. [ ] **Goal build artifacts need a disk budget.** Moved from v0.17.12.11 item 14: build goal targets with `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`, or share one dependency cache across goals, enforce a configurable per-goal and total budget with a clear message, delete a goal's target directory once its draft is built, and report staging size per goal in `ta doctor`. Measured 2026-10-14: one machine reached 100% disk during an unattended run.
+5. [ ] **Rerouted user-targeted items verify under the escalated claim.** Moved from v0.17.12.11 item 17: rule 7 of the attention contract for viewer reroutes (`claims.escalated: true` with a `role` at or above the key's `escalation_min_role`, new `ta keys add --escalation-min-role`, default `member`; approve, deny and answer only; audit the original assignee; refuse when the role claim is absent). Tests for accept, role too low, claim absent, wrong action, and the audit record.
+6. [ ] **Make macOS sandbox violation delivery dependable.** Moved from v0.17.12.11 item 18 (carried from v0.17.12.7 item 4 and v0.17.12.10 item 3): tagged `(deny ... (with message ...))` denials reach the unified log only about 3 runs in 4 (cause unexplained; enforcement always holds). Find the cause or source denials from another channel so `ta sandbox explain` can drop its "not proof" caveat on macOS.
+
+**Effort**: L.
+
+#### Version: `0.17.12-alpha.23`
 
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
