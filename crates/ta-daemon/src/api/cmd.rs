@@ -15,9 +15,19 @@ use serde::{Deserialize, Serialize};
 use crate::api::auth::{require_write, CallerIdentity};
 use crate::api::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct CmdRequest {
     pub command: String,
+    /// Channel plugin that forwarded the command (e.g. `"discord"`). Absent for
+    /// CLI and web UI callers, which are not subject to channel access control.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Platform user id of the person who sent the command in `channel`.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Platform roles of the sender, where the platform provides them.
+    #[serde(default)]
+    pub sender_roles: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +55,12 @@ pub async fn execute_command(
             Json(serde_json::json!({"error": "command is required"})),
         )
             .into_response();
+    }
+
+    // Channel access control runs first: a denied sender must not reach the
+    // command filter, write-scope check or any execution path (CR-09).
+    if let Err(resp) = enforce_channel_access(&state, &body, command_str) {
+        return *resp;
     }
 
     // Check if command is allowed (deny takes precedence over allow).
@@ -739,6 +755,150 @@ async fn run_command(
             background_key: None,
         }),
         Err(e) => Err(format!("Command wait error: {}", e)),
+    }
+}
+
+/// Channels already reported as unrestricted since the daemon started.
+fn unrestricted_warned() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    WARNED.get_or_init(Default::default)
+}
+
+/// Enforce `[channels.access_control]` for a command forwarded by a channel
+/// plugin (CR-09). The plugin only reports the sender; the decision is made here.
+///
+/// - No `channel` and no `sender_id`: not a channel caller, unaffected.
+/// - Channel with no access control configured: allowed (warned once per start).
+/// - Restricted channel with no `sender_id`: refused (fail closed).
+/// - Otherwise `permits(sender_id, roles)` decides, and the outcome is audited.
+fn enforce_channel_access(
+    state: &AppState,
+    body: &CmdRequest,
+    command: &str,
+) -> Result<(), Box<axum::response::Response>> {
+    let sender = body
+        .sender_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let channel = body
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if channel.is_none() && sender.is_none() {
+        return Ok(());
+    }
+    let channel = channel.unwrap_or("unknown").to_ascii_lowercase();
+    let acl = state.daemon_config.channels.access_control_for(&channel);
+
+    if acl.is_unrestricted() {
+        let first = unrestricted_warned()
+            .lock()
+            .map(|mut set| set.insert(channel.clone()))
+            .unwrap_or(false);
+        if first {
+            tracing::warn!(
+                channel = %channel,
+                "channel access control is not configured; every user who can post in this \
+                 channel can run permitted commands. Set allowed_users in [channels.access_control] \
+                 in daemon.toml to restrict it"
+            );
+        }
+        return Ok(());
+    }
+
+    let (allowed, reason) = match sender {
+        None => (
+            false,
+            format!(
+                "channel '{channel}' has access control configured but the request carried no \
+                 sender_id, so the sender cannot be verified. Update the channel plugin to send \
+                 sender_id"
+            ),
+        ),
+        Some(id) => {
+            if acl.permits(id, &body.sender_roles) {
+                (true, String::new())
+            } else {
+                (
+                    false,
+                    format!(
+                        "sender '{id}' is not permitted to run commands from channel '{channel}'. \
+                         To allow them, add their id to allowed_users in [channels.access_control] \
+                         in daemon.toml (and remove it from denied_users)"
+                    ),
+                )
+            }
+        }
+    };
+
+    write_channel_audit(
+        state,
+        &channel,
+        sender,
+        &body.sender_roles,
+        command,
+        allowed,
+    );
+
+    if allowed {
+        return Ok(());
+    }
+    tracing::warn!(
+        channel = %channel,
+        sender_id = sender.unwrap_or(""),
+        roles = ?body.sender_roles,
+        command = %command,
+        "channel command denied by access control"
+    );
+    Err(Box::new(
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": reason,
+                "channel": channel,
+                "sender_id": sender,
+            })),
+        )
+            .into_response(),
+    ))
+}
+
+/// Record a channel command decision in `.ta/audit.jsonl`. A failed write is
+/// logged and never changes the decision.
+fn write_channel_audit(
+    state: &AppState,
+    channel: &str,
+    sender: Option<&str>,
+    roles: &[String],
+    command: &str,
+    allowed: bool,
+) {
+    let path = state.project_root.join(".ta").join("audit.jsonl");
+    let decision = if allowed { "allowed" } else { "denied" };
+    let agent = format!("{channel}:{}", sender.unwrap_or("unknown"));
+    let mut event = ta_audit::AuditEvent::new(agent, ta_audit::AuditAction::PolicyDecision)
+        .with_target(format!("channel://{channel}"))
+        .with_caller_mode("channel")
+        .with_metadata(serde_json::json!({
+            "kind": "channel_access",
+            "channel": channel,
+            "sender_id": sender,
+            "sender_roles": roles,
+            "command": command,
+            "decision": decision,
+        }));
+    match ta_audit::AuditLog::open(&path) {
+        Ok(mut log) => {
+            if let Err(e) = log.append(&mut event) {
+                tracing::warn!(path = %path.display(), channel, decision, error = %e,
+                    "could not append the channel access audit event");
+            }
+        }
+        Err(e) => tracing::warn!(path = %path.display(), channel, decision, error = %e,
+            "could not open the audit log to record a channel access decision"),
     }
 }
 
@@ -1466,6 +1626,190 @@ mod tests {
         let filter = config.access_filter();
         assert!(filter.permits("ta status"));
         assert!(filter.permits("anything"));
+    }
+
+    // ── Channel access control (CR-09) ──────────────────────────────
+
+    use crate::config::{ChannelAccessControl, DaemonConfig};
+
+    /// Harmless background command: the pattern makes it take the background
+    /// branch, which registers an output channel keyed `cr09marker` before
+    /// spawning. That registration is the observable "the command ran".
+    const PROBE: &str = "ta probe-cr09 cr09marker";
+
+    fn acl_state(project: &std::path::Path, acl: ChannelAccessControl) -> Arc<AppState> {
+        let mut cfg = DaemonConfig::default();
+        cfg.commands.long_running = vec!["ta probe-cr09 *".to_string()];
+        cfg.channels.access_control = acl;
+        Arc::new(AppState::new(project.to_path_buf(), cfg))
+    }
+
+    fn admin() -> CallerIdentity {
+        CallerIdentity {
+            scope: crate::config::TokenScope::Admin,
+            label: None,
+            is_local: true,
+        }
+    }
+
+    fn channel_req(sender: Option<&str>, roles: &[&str]) -> CmdRequest {
+        CmdRequest {
+            command: PROBE.to_string(),
+            channel: Some("discord".to_string()),
+            sender_id: sender.map(str::to_string),
+            sender_roles: roles.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    async fn call(state: &Arc<AppState>, req: CmdRequest) -> (StatusCode, serde_json::Value) {
+        let resp = execute_command(State(state.clone()), Extension(admin()), Json(req))
+            .await
+            .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn allow_only(users: &[&str]) -> ChannelAccessControl {
+        ChannelAccessControl {
+            allowed_users: users.iter().map(|u| u.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn audit_decisions(project: &std::path::Path) -> Vec<serde_json::Value> {
+        ta_audit::AuditLog::read_all(project.join(".ta/audit.jsonl"))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.metadata)
+            .filter(|m| m["kind"] == "channel_access")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn channel_permitted_sender_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), allow_only(&["111"]));
+        let (status, _) = call(&state, channel_req(Some("111"), &[])).await;
+        assert_ne!(status, StatusCode::FORBIDDEN);
+        assert!(status.is_success(), "got {status}");
+    }
+
+    #[tokio::test]
+    async fn channel_denied_sender_gets_403_and_command_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), allow_only(&["111"]));
+        let (status, body) = call(&state, channel_req(Some("999"), &[])).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let msg = body["error"].as_str().unwrap();
+        assert!(msg.contains("999") && msg.contains("discord"), "{msg}");
+        assert!(msg.contains("allowed_users"), "{msg}");
+        // No side effect: the background branch never registered its channel.
+        assert!(state.goal_output.active_goals().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_denied_users_wins_over_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let acl = ChannelAccessControl {
+            allowed_users: vec!["111".into()],
+            denied_users: vec!["111".into()],
+            ..Default::default()
+        };
+        let state = acl_state(dir.path(), acl);
+        let (status, _) = call(&state, channel_req(Some("111"), &[])).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(state.goal_output.active_goals().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_allowed_roles_use_sender_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let acl = ChannelAccessControl {
+            allowed_roles: vec!["reviewer".into()],
+            ..Default::default()
+        };
+        let state = acl_state(dir.path(), acl);
+        let (ok, _) = call(&state, channel_req(Some("1"), &["reviewer"])).await;
+        assert!(ok.is_success(), "got {ok}");
+        let (no, _) = call(&state, channel_req(Some("2"), &["guest"])).await;
+        assert_eq!(no, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn restricted_channel_without_sender_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), allow_only(&["111"]));
+        let (status, body) = call(&state, channel_req(None, &[])).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["error"].as_str().unwrap().contains("sender_id"));
+        // An empty sender id is the same as none.
+        let (status, _) = call(&state, channel_req(Some("  "), &[])).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(state.goal_output.active_goals().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unrestricted_channel_without_sender_works_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), ChannelAccessControl::default());
+        let (status, _) = call(&state, channel_req(None, &[])).await;
+        assert!(status.is_success(), "got {status}");
+    }
+
+    #[tokio::test]
+    async fn non_channel_caller_is_unaffected_by_access_control() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), allow_only(&["111"]));
+        let req = CmdRequest {
+            command: PROBE.to_string(),
+            channel: None,
+            sender_id: None,
+            sender_roles: vec![],
+        };
+        let (status, _) = call(&state, req).await;
+        assert!(status.is_success(), "got {status}");
+        assert!(audit_decisions(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_channel_override_beats_global_access_control() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = DaemonConfig::default();
+        cfg.commands.long_running = vec!["ta probe-cr09 *".to_string()];
+        cfg.channels.access_control = allow_only(&["111"]);
+        cfg.channels.external.push(
+            toml::from_str::<crate::config::ExternalChannelEntry>(
+                "name = \"discord\"\n[access_control]\nallowed_users = [\"222\"]\n",
+            )
+            .unwrap(),
+        );
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), cfg));
+        let (ok, _) = call(&state, channel_req(Some("222"), &[])).await;
+        assert!(ok.is_success(), "got {ok}");
+        let (no, _) = call(&state, channel_req(Some("111"), &[])).await;
+        assert_eq!(no, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn both_outcomes_are_audited_with_sender_channel_and_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), allow_only(&["111"]));
+        call(&state, channel_req(Some("111"), &["r"])).await;
+        call(&state, channel_req(Some("999"), &[])).await;
+        let rows = audit_decisions(dir.path());
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["decision"], "allowed");
+        assert_eq!(rows[0]["sender_id"], "111");
+        assert_eq!(rows[0]["channel"], "discord");
+        assert_eq!(rows[0]["command"], PROBE);
+        assert_eq!(rows[1]["decision"], "denied");
+        assert_eq!(rows[1]["sender_id"], "999");
     }
 
     /// Helper to unwrap a Parsed result for simple assertions.

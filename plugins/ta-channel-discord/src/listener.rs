@@ -47,7 +47,6 @@ const INTERACTION_RESPONSE_DEFERRED: u64 = 5;
 /// 4 = CHANNEL_MESSAGE_WITH_SOURCE
 const INTERACTION_RESPONSE_CHANNEL_MESSAGE: u64 = 4;
 
-
 /// Per-user rate limit: max commands in window.
 const RATE_LIMIT_MAX: u32 = 10;
 /// Per-user rate limit window in seconds.
@@ -448,6 +447,7 @@ async fn run_session(
 // Message handling
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_message_create(
     d: &serde_json::Value,
     channel_id: &str,
@@ -465,6 +465,7 @@ async fn handle_message_create(
     let author_bot = d["author"]["bot"].as_bool().unwrap_or(false);
     let author_name = d["author"]["username"].as_str().unwrap_or("?");
     let msg_id = d["id"].as_str().unwrap_or("");
+    let sender = Sender::from_message(d);
 
     // Skip: wrong channel, bots, our own messages.
     if msg_channel != channel_id {
@@ -547,7 +548,16 @@ async fn handle_message_create(
         author_name, command
     );
 
-    execute_command_with_status(http_client, cmd_url, token, channel_id, msg_id, command).await;
+    execute_command_with_status(
+        http_client,
+        cmd_url,
+        token,
+        channel_id,
+        msg_id,
+        command,
+        &sender,
+    )
+    .await;
 }
 
 /// POST `{ "input": text }` to a goal input URL and return a Discord reply string.
@@ -576,6 +586,7 @@ async fn forward_goal_input(client: &reqwest::Client, url: &str, text: &str) -> 
 // Interaction handling (slash commands + button clicks)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_interaction_create(
     d: &serde_json::Value,
     channel_id: &str,
@@ -660,7 +671,8 @@ async fn handle_interaction_create(
                 format!("ta {}", command)
             };
 
-            let result = forward_command(http_client, cmd_url, &full_command).await;
+            let sender = Sender::from_interaction(d);
+            let result = forward_command(http_client, cmd_url, &full_command, &sender).await;
             let reply = format_reply(&result);
 
             let _ = edit_interaction_followup(http_client, interaction_token, token, &reply).await;
@@ -676,9 +688,8 @@ async fn handle_interaction_create(
                 username, custom_id
             );
 
-            if custom_id.starts_with("draft_") {
+            if let Some(without_prefix) = custom_id.strip_prefix("draft_") {
                 // Draft approve/deny: custom_id = "draft_{uuid}_{approve|deny}"
-                let without_prefix = &custom_id["draft_".len()..];
                 // UUID is 36 chars, followed by _approve or _deny.
                 if without_prefix.len() > 37 && without_prefix.as_bytes()[36] == b'_' {
                     let draft_id = &without_prefix[..36];
@@ -705,12 +716,18 @@ async fn handle_interaction_create(
                                 "[discord-listener] Draft {} {}d via button.",
                                 draft_id, action
                             );
-                            format!(":white_check_mark: Draft **{}d** (`{}`)", action, &draft_id[..8])
+                            format!(
+                                ":white_check_mark: Draft **{}d** (`{}`)",
+                                action,
+                                &draft_id[..8]
+                            )
                         }
                         Ok(resp) => {
                             eprintln!(
                                 "[discord-listener] Draft {} {} failed: HTTP {}",
-                                draft_id, action, resp.status()
+                                draft_id,
+                                action,
+                                resp.status()
                             );
                             format!(":x: Failed to {} draft: HTTP {}", action, resp.status())
                         }
@@ -730,7 +747,10 @@ async fn handle_interaction_create(
                     )
                     .await;
                 } else {
-                    eprintln!("[discord-listener] Malformed draft button custom_id: {}", custom_id);
+                    eprintln!(
+                        "[discord-listener] Malformed draft button custom_id: {}",
+                        custom_id
+                    );
                 }
                 return;
             }
@@ -835,6 +855,7 @@ async fn execute_command_with_status(
     channel_id: &str,
     msg_id: &str,
     command: &str,
+    sender: &Sender,
 ) {
     let full_command = if command.starts_with("ta ") {
         command.to_string()
@@ -853,7 +874,7 @@ async fn execute_command_with_status(
     .await
     .ok();
 
-    let result = forward_command(http_client, cmd_url, &full_command).await;
+    let result = forward_command(http_client, cmd_url, &full_command, sender).await;
     let reply = format_reply(&result);
 
     // Edit the placeholder if we have it, otherwise post a new thread reply.
@@ -874,14 +895,69 @@ async fn execute_command_with_status(
 // Forward command to daemon
 // ---------------------------------------------------------------------------
 
+/// Who sent a command, as reported by Discord. The plugin only reports this;
+/// the daemon decides whether the sender may run commands (`permits()` in
+/// `[channels.access_control]`).
+#[derive(Debug, Default, PartialEq)]
+struct Sender {
+    id: Option<String>,
+    roles: Vec<String>,
+}
+
+impl Sender {
+    /// From a MESSAGE_CREATE payload: `author.id` and guild `member.roles`.
+    fn from_message(d: &serde_json::Value) -> Self {
+        Self::from_parts(d["author"]["id"].as_str(), &d["member"]["roles"])
+    }
+
+    /// From an INTERACTION_CREATE payload: guild `member.user.id` or DM `user.id`.
+    fn from_interaction(d: &serde_json::Value) -> Self {
+        Self::from_parts(
+            d["member"]["user"]["id"]
+                .as_str()
+                .or_else(|| d["user"]["id"].as_str()),
+            &d["member"]["roles"],
+        )
+    }
+
+    fn from_parts(id: Option<&str>, roles: &serde_json::Value) -> Self {
+        Self {
+            id: id.filter(|s| !s.is_empty()).map(str::to_string),
+            roles: roles
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// JSON body for `POST /api/cmd`. `sender_id` is omitted (not sent as an empty
+/// string) when Discord gave none, so the daemon can refuse it on a restricted channel.
+fn command_body(full_command: &str, sender: &Sender) -> serde_json::Value {
+    let mut body = json!({
+        "command": full_command,
+        "channel": "discord",
+        "sender_roles": sender.roles,
+    });
+    if let Some(id) = &sender.id {
+        body["sender_id"] = json!(id);
+    }
+    body
+}
+
 async fn forward_command(
     client: &reqwest::Client,
     cmd_url: &str,
     full_command: &str,
+    sender: &Sender,
 ) -> CommandResult {
     match client
         .post(cmd_url)
-        .json(&json!({ "command": full_command }))
+        .json(&command_body(full_command, sender))
         .timeout(Duration::from_secs(300))
         .send()
         .await
@@ -1116,6 +1192,34 @@ async fn post_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_body_carries_author_id_channel_and_roles() {
+        let d = json!({
+            "author": {"id": "1234567890"},
+            "member": {"roles": ["r1", "r2"]},
+        });
+        let body = command_body("ta status", &Sender::from_message(&d));
+        assert_eq!(body["command"], "ta status");
+        assert_eq!(body["channel"], "discord");
+        assert_eq!(body["sender_id"], "1234567890");
+        assert_eq!(body["sender_roles"], json!(["r1", "r2"]));
+    }
+
+    #[test]
+    fn command_body_omits_sender_id_when_unknown() {
+        let body = command_body("ta status", &Sender::from_message(&json!({})));
+        assert!(body.get("sender_id").is_none());
+        assert_eq!(body["sender_roles"], json!([]));
+    }
+
+    #[test]
+    fn interaction_sender_prefers_member_then_dm_user() {
+        let guild = json!({"member": {"user": {"id": "7"}, "roles": ["a"]}});
+        assert_eq!(Sender::from_interaction(&guild).id.as_deref(), Some("7"));
+        let dm = json!({"user": {"id": "8"}});
+        assert_eq!(Sender::from_interaction(&dm).id.as_deref(), Some("8"));
+    }
 
     #[test]
     fn format_reply_success_with_output() {

@@ -1780,6 +1780,21 @@ impl ChannelAccessControl {
     }
 }
 
+impl ChannelsConfig {
+    /// The access control that applies to commands arriving from `channel`.
+    ///
+    /// A per-channel `[[channels.external]] access_control` wins when the entry's
+    /// name matches `channel` (case-insensitive). Otherwise the global
+    /// `[channels.access_control]` applies, including for channels with no entry.
+    pub fn access_control_for(&self, channel: &str) -> &ChannelAccessControl {
+        self.external
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(channel))
+            .and_then(|e| e.access_control.as_ref())
+            .unwrap_or(&self.access_control)
+    }
+}
+
 /// Agent-level tool access control (v0.10.16, item 13).
 ///
 /// Configures which MCP tools an agent is allowed or denied from using.
