@@ -24,6 +24,11 @@
 //!   and printed with a next step.
 //! - A project with no `[plan] backend = "wayfinder"` is skipped with a log
 //!   line, never an error: the rest of the draft has already applied.
+//!
+//! Reviewed wiki writes (`ta_wiki_create` / `ta_wiki_update`, see
+//! `ta_mcp_gateway::tools::wiki`) take this same path, with the same
+//! gating, reviewer dispositions and ledger. They use the wiki write
+//! credential, resolved here at apply time only.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -31,6 +36,7 @@ use std::path::Path;
 
 use ta_changeset::draft_package::{ArtifactDisposition, DraftPackage, DraftStatus, PendingAction};
 use ta_mcp_gateway::tools::wayfinder_task::ProposeKind;
+use ta_mcp_gateway::tools::wiki;
 use ta_mcp_gateway::GatewayConfig;
 use ta_plan_wayfinder::{
     CreateTaskRequest, WayfinderClient, STATUS_DONE, STATUS_ON_HOLD, STATUS_OPEN,
@@ -71,6 +77,12 @@ pub(crate) fn is_replayable(status: &DraftStatus) -> bool {
 /// Replays every `ta_propose_task_*` action in `actions`. Actions of other
 /// tools are ignored (they are not this module's to replay).
 pub(crate) fn replay_actions(config: &GatewayConfig, actions: &[PendingAction]) -> ReplaySummary {
+    let mut summary = replay_task_actions(config, actions);
+    replay_wiki_actions(config, actions, &mut summary);
+    summary
+}
+
+fn replay_task_actions(config: &GatewayConfig, actions: &[PendingAction]) -> ReplaySummary {
     let mut summary = ReplaySummary::default();
     let mut ours: Vec<(ProposeKind, &PendingAction)> = Vec::new();
     for action in actions {
@@ -164,6 +176,94 @@ pub(crate) fn replay_actions(config: &GatewayConfig, actions: &[PendingAction]) 
         );
     }
     summary
+}
+
+/// Replays every approved `ta_wiki_create` / `ta_wiki_update` action in
+/// `actions`, adding to `summary`. Uses the same ledger as task proposals.
+fn replay_wiki_actions(
+    config: &GatewayConfig,
+    actions: &[PendingAction],
+    summary: &mut ReplaySummary,
+) {
+    let ledger_path = config.workspace_root.join(".ta").join(LEDGER_FILE);
+    let mut done = read_ledger(&ledger_path);
+    let (mut replayed, mut failed, mut already) = (0usize, 0usize, 0usize);
+
+    for action in actions
+        .iter()
+        .filter(|a| wiki::is_wiki_write_tool(&a.tool_name))
+    {
+        if matches!(
+            action.disposition,
+            ArtifactDisposition::Rejected | ArtifactDisposition::Discuss
+        ) {
+            tracing::info!(
+                action_id = %action.action_id,
+                tool_name = %action.tool_name,
+                disposition = %action.disposition,
+                "not applying wiki write: reviewer did not approve this action"
+            );
+            summary.skipped_by_reviewer += 1;
+            continue;
+        }
+        if done.contains(&action.action_id.to_string()) {
+            tracing::info!(
+                action_id = %action.action_id,
+                tool_name = %action.tool_name,
+                "skipping wiki write: already applied (ledger hit)"
+            );
+            already += 1;
+            continue;
+        }
+        match wiki::apply_wiki_action(
+            &config.workspace_root,
+            config.credential_vault_use_keychain,
+            &action.tool_name,
+            &action.parameters,
+        ) {
+            Ok(what) => {
+                println!("  [applied] Wayfinder wiki: {what}");
+                replayed += 1;
+                if let Err(e) = append_ledger(&ledger_path, &action.action_id.to_string()) {
+                    tracing::warn!(
+                        action_id = %action.action_id,
+                        tool_name = %action.tool_name,
+                        path = %ledger_path.display(),
+                        error = %e,
+                        "applied wiki write but could not record it in the replay ledger; \
+                         a later re-apply may repeat it (a create would add a second page)"
+                    );
+                }
+                done.insert(action.action_id.to_string());
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    action_id = %action.action_id,
+                    tool_name = %action.tool_name,
+                    error = %e,
+                    "failed to apply approved wiki write against Wayfinder"
+                );
+                eprintln!(
+                    "  [failed] Wayfinder {} (action {}): {e}\n           \
+                     The rest of the draft is applied. Fix the cause above (a rejected `if_sha` \
+                     means the page changed since it was read: re-read it and propose again), \
+                     then re-run `ta draft apply` for this draft, or make the change in Wayfinder \
+                     by hand.",
+                    action.tool_name, action.action_id,
+                );
+            }
+        }
+    }
+
+    summary.replayed += replayed;
+    summary.failed += failed;
+    summary.already_replayed += already;
+    if replayed + failed > 0 {
+        println!(
+            "  Wayfinder wiki writes: {replayed} applied, {failed} failed, {already} already applied earlier"
+        );
+    }
 }
 
 /// Loads the project's Wayfinder client, or logs why it can't and returns
@@ -825,5 +925,59 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with(&format!("ta-proposal:{goal}:")));
+    }
+
+    fn wiki_action(tool: &str, disposition: ArtifactDisposition) -> PendingAction {
+        PendingAction {
+            action_id: Uuid::new_v4(),
+            tool_name: tool.to_string(),
+            parameters: serde_json::json!({
+                "scope": "project", "id": "proj-1", "title": "T", "body": "b",
+                "type": null, "tags": [],
+            }),
+            kind: ActionKind::StateChanging,
+            intercepted_at: Utc::now(),
+            description: "test wiki write".to_string(),
+            target_uri: None,
+            disposition,
+        }
+    }
+
+    #[test]
+    fn reviewer_rejected_wiki_writes_are_not_applied() {
+        let (_dir, config) = project();
+        let actions = [
+            wiki_action("ta_wiki_create", ArtifactDisposition::Rejected),
+            wiki_action("ta_wiki_update", ArtifactDisposition::Discuss),
+        ];
+        let s = replay_actions(&config, &actions);
+        assert_eq!(s.skipped_by_reviewer, 2);
+        assert_eq!((s.replayed, s.failed), (0, 0));
+    }
+
+    #[test]
+    fn a_failed_wiki_write_is_counted_and_not_ledgered() {
+        // No `.ta/wiki-resources.toml`: the write cannot be sent, and a
+        // later re-apply must be able to retry it.
+        let (_dir, config) = project();
+        let a = wiki_action("ta_wiki_create", ArtifactDisposition::Approved);
+        let s = replay_actions(&config, std::slice::from_ref(&a));
+        assert_eq!(s.failed, 1);
+        let ledger = read_ledger(&config.workspace_root.join(".ta").join(LEDGER_FILE));
+        assert!(!ledger.contains(&a.action_id.to_string()));
+    }
+
+    #[test]
+    fn a_ledgered_wiki_write_is_not_applied_again() {
+        let (_dir, config) = project();
+        let a = wiki_action("ta_wiki_update", ArtifactDisposition::Approved);
+        append_ledger(
+            &config.workspace_root.join(".ta").join(LEDGER_FILE),
+            &a.action_id.to_string(),
+        )
+        .unwrap();
+        let s = replay_actions(&config, std::slice::from_ref(&a));
+        assert_eq!(s.already_replayed, 1);
+        assert_eq!((s.replayed, s.failed), (0, 0));
     }
 }

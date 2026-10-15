@@ -389,4 +389,18 @@ mod tests {
         );
         assert!(mutating_mcp_deny_patterns().contains(&"mcp__ta__ta_propose_*".to_string()));
     }
+
+    #[test]
+    fn wiki_writes_stay_mutating_and_denied_to_read_only_roles() {
+        for t in ["ta_wiki_create", "ta_wiki_update"] {
+            assert_eq!(classify_mcp_tool(t), Some(ToolEffect::Mutating), "{t}");
+            assert!(
+                mutating_mcp_deny_patterns().contains(&format!("mcp__ta__{t}")),
+                "{t} must be in the read-only deny list"
+            );
+        }
+        for t in ["ta_wiki_search", "ta_wiki_get", "ta_wiki_types"] {
+            assert_eq!(classify_mcp_tool(t), Some(ToolEffect::ReadOnly), "{t}");
+        }
+    }
 }
