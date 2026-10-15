@@ -62,6 +62,7 @@ pub async fn handle_input(
             // Dispatch to command execution.
             let cmd_req = super::cmd::CmdRequest {
                 command: cmd.clone(),
+                ..Default::default()
             };
             let cmd_state = State(state.clone());
             let cmd_identity = Extension(identity);
