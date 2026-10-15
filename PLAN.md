@@ -11339,7 +11339,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.23`
 
 ### v0.17.12.24 - Optimizer Integrations: RTK Adapter, Windows Smoke Check, First-Party Minimizers
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.21
 
 **Goal**: The parts of the optimizer-slot work (v0.17.12.21) that need a real binary, a Windows host, or consumers that do not exist yet. They are separate because ticking them in v0.17.12.21 would have claimed behaviour that was never run. Spec: `docs/superpowers/specs/2026-10-13-token-cost-optimization-and-ab-harness.md` section 5 (items S5c, S5d).
