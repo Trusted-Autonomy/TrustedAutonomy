@@ -11322,7 +11322,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.22`
 
 ### v0.17.12.23 - Red-Team Remainders Needing a Design Decision or Another Repository
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Depends on**: v0.17.12.11
 
 **Goal**: The red-team items split out of v0.17.12.11 on 2026-10-15 because each needs a design decision, a credential split with Wayfinder, a change in another repository, or a root-cause investigation. Each item below must be re-checked against current code before work starts, since the 2026-10-07 report predates several phases.
