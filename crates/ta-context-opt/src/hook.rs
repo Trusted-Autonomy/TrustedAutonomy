@@ -994,9 +994,24 @@ esac
 "#
         );
         let p = dir.join("rtk");
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_exec(&p, &body);
         p
+    }
+
+    /// Write an executable script so it can be run at once. Writing in place and then
+    /// exec'ing can fail with ETXTBSY ("Text file busy") on Linux while the write handle is
+    /// still open; writing a sibling file, closing it, and renaming it over the target means
+    /// the final inode never has a writer.
+    fn write_exec(path: &Path, body: &str) {
+        use std::io::Write;
+        let tmp = path.with_extension("tmp-write");
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
     }
 
     /// Command-path spec: the fake's `init` verb installs the hook.
@@ -1093,8 +1108,7 @@ esac
         let mut spec = spec_for(&bin);
         // A binary whose install runs but whose `init --show` reports the hook inactive.
         let verify_bin = f.bin_dir.join("verifyfail");
-        std::fs::write(&verify_bin, "#!/bin/sh\ncase \"$1\" in --version) echo 'rtk 0.23.1';; --help) echo 'init';; init) shift; case \"$1\" in --show) exit 1;; *) mkdir -p .claude/hooks; echo x > .claude/hooks/rtk.sh;; esac;; esac\n").unwrap();
-        std::fs::set_permissions(&verify_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_exec(&verify_bin, "#!/bin/sh\ncase \"$1\" in --version) echo 'rtk 0.23.1';; --help) echo 'init';; init) shift; case \"$1\" in --show) exit 1;; *) mkdir -p .claude/hooks; echo x > .claude/hooks/rtk.sh;; esac;; esac\n");
         spec.binary = verify_bin.display().to_string();
         spec.verify = vec!["init".into(), "--show".into()];
         let g = HookInstaller {
@@ -1147,7 +1161,7 @@ esac
             spec: &spec,
         }
         .install(&f.root, &f.staging, "g1");
-        assert!(g.active());
+        assert!(g.active(), "{}", g.record.summary);
         std::fs::remove_file(f.staging.join("seen_home")).unwrap();
         std::mem::forget(g); // SIGKILL / crash: Drop never runs
         assert!(f.staging.join(".claude/hooks/rtk.sh").exists());
@@ -1180,7 +1194,7 @@ esac
             spec: &spec,
         }
         .install(&f.root, &f.staging, "g1");
-        assert!(g.active());
+        assert!(g.active(), "{}", g.record.summary);
         std::fs::write(f.staging.join("CLAUDE.md"), "# agent rewrote this\n").unwrap();
         g.cleanup();
         assert_eq!(
@@ -1211,7 +1225,7 @@ esac
             spec: &spec,
         }
         .install(&f.root, &f.staging, "g1");
-        assert!(g.active());
+        assert!(g.active(), "{}", g.record.summary);
         assert!(g.record.allow_busl);
         assert_eq!(g.record.edition, Some(Edition::Full));
     }
