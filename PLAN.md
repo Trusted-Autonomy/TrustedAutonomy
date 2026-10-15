@@ -11354,7 +11354,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.24`
 
 ### v0.17.12.25 - TA Defects Found During the Autonomous Run
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.12.22
 
 **Goal**: Fix the defects in TA itself found while running phases .5 to .22 unattended on 2026-10-14 and 2026-10-15. Each item states the evidence and a check, so it can be reproduced before and confirmed after. Where an item says "cause unconfirmed", the first step is to find the cause, not to guess a fix.
