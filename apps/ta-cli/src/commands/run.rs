@@ -17602,14 +17602,23 @@ mod input_hook_tests {
         } else {
             "exit 1"
         };
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in --version) echo 'rtk 0.23.0';; --help) echo 'init gain';; hook) case \"$2\" in check) {check};; esac;; esac\n"
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Write a sibling, close it, then rename over the target: exec'ing a file that still
+        // has a write handle open fails with ETXTBSY ("Text file busy") on Linux.
+        let tmp = t.path().join("rtk.tmp-write");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in --version) echo 'rtk 0.23.0';; --help) echo 'init gain';; hook) case \"$2\" in check) {check};; esac;; esac\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, &bin).unwrap();
         let use_line = if select { "use = \"rtk\"\n" } else { "" };
         std::fs::write(
             root.join(".ta/daemon.toml"),
