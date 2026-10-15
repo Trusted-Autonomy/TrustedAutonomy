@@ -14941,6 +14941,8 @@ cache_write = 0.0
 
 All four rates are required. An optional `cache_write_1h = <USD per million>` sets the 1 hour cache-write rate, which otherwise defaults to twice `input`. A malformed file is reported in the log and the built-in table is used.
 
+This repository commits a `.ta/pricing.toml` with the published Claude API list prices (source and date are in its header), including the Claude 5 models that the built-in table prices provisionally or not at all (`claude-sonnet-5`, `claude-opus-5`, `claude-haiku-5-5`). These are API list prices, not what a subscription plan costs. Re-check the pricing page before relying on a report, and note that `claude-haiku-5-5` is priced at its under-100k-prompt rate, so a Haiku 5.5 turn with a longer prompt is understated.
+
 **Capping a goal.** `--max-tokens` and `--max-usd` stop the agent when the goal reaches the ceiling; `[budget] max_tokens` and `max_usd` in `.ta/workflow.toml` set project defaults that the flags override:
 
 ```bash
