@@ -382,7 +382,18 @@ fn staging_rules_delete_keep_and_orphan() {
 
 fn filetime_old(p: &Path) {
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
-    let f = std::fs::File::open(p).unwrap();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    // Windows opens a directory only with FILE_FLAG_BACKUP_SEMANTICS (0x0200_0000), and
+    // `set_modified` needs write access; Unix needs neither (so keep the plain open there).
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(0x0200_0000);
+    }
+    #[cfg(not(windows))]
+    opts.write(false).read(true);
+    let f = opts.open(p).unwrap();
     f.set_modified(old).unwrap();
 }
 
