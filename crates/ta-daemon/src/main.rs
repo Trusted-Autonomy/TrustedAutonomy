@@ -39,6 +39,7 @@ pub mod assertion;
 pub mod attention;
 pub mod channel_dispatcher;
 pub mod channel_listener_manager;
+pub mod cleanup_pass;
 mod config;
 pub mod config_watcher;
 pub mod connector_supervisor;
@@ -565,6 +566,12 @@ async fn main() -> Result<()> {
                                 freed,
                             );
                         }
+                        // Ground-truth cleanup, only when `[cleanup] auto = "safe"`.
+                        let root = gc_project_root.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            cleanup_pass::run_if_enabled(&root)
+                        })
+                        .await;
                     }
                 });
             }

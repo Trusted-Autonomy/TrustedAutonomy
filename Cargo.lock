@@ -5245,6 +5245,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-cleanup"
+version = "0.17.12-alpha.5"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ta-audit",
+ "ta-changeset",
+ "ta-goal",
+ "ta-lifecycle",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ta-cli"
 version = "0.17.12-alpha.5"
 dependencies = [
@@ -5276,6 +5295,7 @@ dependencies = [
  "ta-brain",
  "ta-build",
  "ta-changeset",
+ "ta-cleanup",
  "ta-connector-comfyui",
  "ta-connector-fs",
  "ta-connector-unity",
@@ -5518,6 +5538,7 @@ dependencies = [
  "ta-agent-whiteboard",
  "ta-audit",
  "ta-changeset",
+ "ta-cleanup",
  "ta-connector-email",
  "ta-connector-slack",
  "ta-context-opt",
@@ -5537,6 +5558,7 @@ dependencies = [
  "ta-policy",
  "ta-runtime",
  "ta-session",
+ "ta-submit",
  "ta-workspace",
  "tempfile",
  "tokio",
