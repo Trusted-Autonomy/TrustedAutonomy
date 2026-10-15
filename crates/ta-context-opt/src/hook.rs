@@ -277,7 +277,20 @@ fn run_capture(
             .env("XDG_CONFIG_HOME", h.join(".config"))
             .env("APPDATA", h.join("AppData"));
     }
-    let out = cmd.output()?;
+    // ETXTBSY ("Text file busy", os error 26) is transient on Linux when the binary was just
+    // written or replaced (an upgrade, or a parallel fork still holding the old write handle).
+    // Same bounded backoff as `ta-plugin`'s spawn; any other error returns at once.
+    let mut out = cmd.output();
+    for delay_ms in [20u64, 80, 200, 500] {
+        match &out {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                out = cmd.output();
+            }
+            _ => break,
+        }
+    }
+    let out = out?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     Ok((out.status.success(), text))
@@ -1182,6 +1195,29 @@ esac
         assert_eq!(swept[0].goal_id, "g1");
         assert_eq!(tree(&f.staging), before);
         assert!(!f.root.join(INSTALLS_DIR).join("g1").exists());
+    }
+
+    /// Linux returns ETXTBSY when exec'ing a file that still has a writer. A real `rtk` being
+    /// upgraded mid-goal does exactly this, so the probe must wait it out instead of reporting
+    /// the hook as unverifiable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_binary_that_is_briefly_busy_is_retried_not_refused() {
+        use std::io::Write;
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("rtk");
+        let mut w = std::fs::File::create(&p).unwrap();
+        w.write_all(b"#!/bin/sh\necho rtk 0.23.1\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // `w` is still open for writing here, so exec fails with ETXTBSY until it is dropped.
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            drop(w);
+        });
+        let (ok, text) = run_capture(&p, &["--version".into()], None, None).unwrap();
+        release.join().unwrap();
+        assert!(ok, "{text}");
+        assert!(text.contains("rtk 0.23.1"), "{text}");
     }
 
     #[test]
