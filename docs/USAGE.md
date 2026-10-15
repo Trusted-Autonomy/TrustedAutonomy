@@ -18257,11 +18257,11 @@ Optimizers sit in three slots, each with the same contract: a name, a kind, a li
 
 | Slot | Acts on | Choices |
 |---|---|---|
-| `input` | command output, files and logs before they enter context | `none`, `headroom`, `proxy` (`rtk` is registered but not yet selectable) |
+| `input` | command output, files and logs before they enter context | `none`, `headroom`, `proxy`, `rtk` (a hook; usable only once `rtk-oss` is installed, see below) |
 | `context` | the accumulated conversation | `none`, `agent-native` |
 | `output` | what the model writes | `none` |
 
-`headroom` and `proxy` are the proxy kind: they run the process from `[compression.plugin]` (headroom by default). `rtk` is a hook that would be installed into the agent. TA has no integration for it yet, so it is registered only so its licence is on record: selecting it is refused (`ta golden replay --set optimizers.input.use=rtk` fails before anything launches, and a goal whose config names it prints a warning and runs with no input optimization). Refusing is deliberate: running it as a silent no-op would report the same numbers as `none` and make an A/B comparison conclude it saves nothing.
+`headroom` and `proxy` are the proxy kind: they run the process from `[compression.plugin]` (headroom by default). `rtk` is the hook kind: TA installs a hook into the goal's own working copy for the length of the goal. It is selectable only when `rtk-oss` is installed on your machine (see "Using rtk-oss" below). If it is selected but cannot be used, `ta golden replay --set optimizers.input.use=rtk` fails before anything launches, and a goal whose config names it runs with no input optimization and says so. Refusing is deliberate: a silent no-op would report the same numbers as `none` and make an A/B comparison conclude it saves nothing.
 
 Pick one per slot in `.ta/daemon.toml`:
 
@@ -18285,6 +18285,56 @@ A name TA does not know is refused before the replay starts, with the list of va
 Licences recorded per optimizer: `none` Apache-2.0; `rtk` Apache-2.0 for the open-source core (the full `rtk` and `rtk-proxy` add BUSL-1.1 parts: free for production use, not for resale as a service); `headroom` Apache-2.0; `proxy` is whatever you configure.
 
 Any reduction is reversible. The full original is kept under `.ta/compression/originals/<sha256>`, and the metrics record's `original_ref` is that name.
+
+### Using rtk-oss
+
+`rtk-oss` shortens the output of shell commands the agent runs, so the model reads fewer tokens. TA only detects and configures it; it never downloads or installs RTK.
+
+```bash
+brew install rtk-ai/tap/rtk-oss        # install it yourself (Apache-2.0 edition)
+rtk --version                          # needs 0.23.0 or newer
+```
+
+Select it in `.ta/daemon.toml` (or for one replay with `--set optimizers.input.use=rtk`):
+
+```toml
+[optimizers.input]
+use = "rtk"
+```
+
+Check it is ready:
+
+```bash
+ta compression status      # the input slot shows "ready" or "NOT READY: <what is missing>"
+```
+
+What TA does for each goal that selects it: writes the one documented RTK hook entry (a `PreToolUse` hook on the `Bash` tool that runs `rtk hook claude`) into that goal's staging copy at `.claude/settings.json`, keeping any hooks you already have there; checks it with `rtk hook check "git status"`; runs the agent; then restores the staging copy exactly, even when the goal fails or is killed. TA never runs `rtk init`: with a project scope it does not install the hook, and `rtk init -g` writes into your own `~/.claude`. If TA itself dies mid-goal, the next goal start removes the leftover install. Your own agent config is not touched. The outcome for each goal is written to `.ta/compression/hook-<goal-id>.json` (version, edition, licence, whether it was active).
+
+If the hook cannot be installed or verified, the goal runs with no optimizer and the goal output says `optimizer: none (rtk hook not verified: <reason>)`. No RTK numbers are reported for that goal.
+
+Licence guard: TA accepts only the `rtk-oss` edition (Apache-2.0). The full `rtk` edition (Apache-2.0 plus BUSL-1.1) is refused with the install command. For a local experiment only, set `allow_busl = true` under `[optimizers.input.rtk]`; the record notes the opt-in. If TA cannot tell which edition a binary is, it refuses.
+
+To change what TA does, override any field under `[optimizers.input.rtk]`; fields you leave out keep their defaults. These are the defaults:
+
+```toml
+[optimizers.input.rtk]
+binary      = "rtk"
+min_version = "0.23.0"
+edition     = "oss"
+verify      = ["hook", "check", "git status"]   # must exit 0 for the hook to count as active
+touches     = [".claude"]                       # staging paths the install may change; restored afterwards
+agents      = ["claude-code"]                   # other agents run unoptimised
+
+[optimizers.input.rtk.settings_hook]
+file    = ".claude/settings.json"
+event   = "PreToolUse"
+matcher = "Bash"
+command = "rtk hook claude"
+```
+
+On the Claude Code agent RTK's own name for it is `claude` (`claude-code` is rejected by RTK); TA's `agents` list uses TA's agent names, and the hook command above already says `claude`.
+
+To turn it off, remove `use = "rtk"` (or set `use = "none"`). Any other hook optimizer can be configured the same way with its own `[optimizers.input.<name>]` table once it is registered.
 
 ### When an optimizer keeps failing
 

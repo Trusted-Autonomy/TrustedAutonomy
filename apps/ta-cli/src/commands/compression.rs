@@ -195,7 +195,12 @@ fn show_status(workspace_root: &Path) -> Result<()> {
 /// Print each slot's selection with its kind and recorded licence.
 fn print_optimizer_slots(optimizers: &ta_context_opt::OptimizersConfig) {
     use ta_context_opt::{Registry, Slot};
-    let registry = Registry::builtin();
+    let registry = Registry::builtin()
+        .with_config(optimizers)
+        .unwrap_or_else(|e| {
+            println!("  [warn] {e}");
+            Registry::builtin()
+        });
     for (slot, chosen) in [
         (Slot::Input, &optimizers.input),
         (Slot::Context, &optimizers.context),
@@ -208,10 +213,21 @@ fn print_optimizer_slots(optimizers: &ta_context_opt::OptimizersConfig) {
                 label
             ),
             Some(name) => match registry.infos(slot).into_iter().find(|i| i.name == name) {
-                Some(info) => println!(
-                    "  {:<15} {} ({:?}, licence: {})",
-                    label, info.name, info.kind, info.licence
-                ),
+                Some(info) => {
+                    println!(
+                        "  {:<15} {} ({:?}, licence: {})",
+                        label, info.name, info.kind, info.licence
+                    );
+                    // A hook kind is usable only when its spec, binary, version and edition pass.
+                    if info.kind == ta_context_opt::OptimizerKind::Hook {
+                        match registry.ensure_wired(slot, name) {
+                            Ok(()) => {
+                                println!("  {:<15} ready: binary, version and edition verified", "")
+                            }
+                            Err(e) => println!("  {:<15} NOT READY: {e}", ""),
+                        }
+                    }
+                }
                 None => println!(
                     "  {:<15} {} (unknown; available: {})",
                     label,
@@ -469,7 +485,7 @@ struct DaemonTomlCompression {
     optimizers: ta_context_opt::OptimizersConfig,
 }
 
-fn load_optimizers(workspace_root: &Path) -> ta_context_opt::OptimizersConfig {
+pub(crate) fn load_optimizers(workspace_root: &Path) -> ta_context_opt::OptimizersConfig {
     std::fs::read_to_string(workspace_root.join(".ta").join("daemon.toml"))
         .ok()
         .and_then(|c| toml::from_str::<DaemonTomlCompression>(&c).ok())

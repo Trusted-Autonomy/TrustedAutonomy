@@ -13,6 +13,25 @@ pub struct SlotSelection {
     /// behaviour (for input, whatever `[compression]` says).
     #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
     pub use_: Option<String>,
+    /// Per-optimizer tables, e.g. `[optimizers.input.rtk]`. Kept raw so a malformed table is
+    /// reported by [`SlotSelection::hook_override`] instead of silently dropping the whole file.
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl SlotSelection {
+    /// The `[optimizers.<slot>.<name>]` table as a hook spec override, if present.
+    pub fn hook_override(&self, name: &str) -> Result<Option<crate::HookSpec>, OptError> {
+        match self.extra.get(name) {
+            None => Ok(None),
+            Some(v) => serde_json::from_value(v.clone())
+                .map(Some)
+                .map_err(|e| OptError::BadSpec {
+                    name: name.to_string(),
+                    detail: e.to_string(),
+                }),
+        }
+    }
 }
 
 /// `[optimizers.*]` from daemon.toml.
