@@ -3901,17 +3901,66 @@ ta goal purge --state applied,denied,closed --older-than 30d
 ta goal purge --id <goal-id>
 ```
 
-Configure thresholds:
+Configure the threshold:
 
 ```toml
 # .ta/workflow.toml
 [gc]
-stale_threshold_days = 7    # When --stale filter shows drafts (default: 7 days)
-stale_hint_days = 3         # When startup hint fires (default: 3 days, informational)
+stale_threshold_days = 7    # One setting for drafts, goals and staging (default: 7 days)
 health_check = true         # One-line warning on startup if stale drafts exist
 ```
 
-`stale_hint_days` and `stale_threshold_days` serve different purposes: the startup hint fires early (e.g., after a weekend) without `ta draft list --stale` showing anything yet. `stale_hint_days` controls when the ambient reminder appears; `stale_threshold_days` controls what `--stale` and `close --stale` act on. Set `stale_hint_days = 5` to reduce noise if you find the Monday-morning reminder too aggressive.
+The startup warning, the doctor check and its fix, the stale-draft listing and `ta cleanup` all read `stale_threshold_days`, so a warning can always be cleared by its own fix.
+
+#### `deny` or `close`?
+
+- `ta draft deny <id> --reason "..."` rejects a draft at review time. It only works on a draft that is waiting for review.
+- `ta draft close <id> --reason "..."` abandons a draft, or records that its change already landed. Use it for an approved draft you no longer want, and add `--applied-externally <ref>` (for example `PR #701`) when the change shipped another way.
+
+Running `deny` or `approve` on a draft in any other state tells you its state and which command to use instead.
+
+### Cleaning up (`ta cleanup`)
+
+`ta cleanup` is the one command that tidies drafts, goals, staging copies, locks and old records. It decides from facts it can check (goal state, whether the plan phase is done, whether the pull request is merged, whether the staging copy matches your project) and asks you when those facts do not settle it. `ta doctor --fix` and the daemon's periodic cleanup use the same engine.
+
+```bash
+ta cleanup --dry-run                 # Show every finding, its evidence and what would happen. Changes nothing.
+ta cleanup                           # Do the safe things, confirm the likely ones once, ask about the rest
+ta cleanup --yes                     # Accept the batch of likely-right proposals without asking
+ta cleanup --only drafts,staging     # Limit to: drafts, staging, goals, locks, archive
+ta cleanup --explain draft:025f676e  # Evidence and reasoning for one finding
+```
+
+Each finding gets one of four verdicts:
+
+| Verdict | Meaning |
+|---------|---------|
+| `auto_safe` | The facts are unambiguous and nothing is lost (for example a draft whose pull request is merged). Done without asking. |
+| `propose` | Probably right but rests on indirect evidence. One confirmation covers the batch. |
+| `ask` | The facts conflict or are missing. You get one question with a recommended answer and the evidence. |
+| `skip` | Kept on purpose, with the reason shown. |
+
+Cleanup never deletes the only copy of unapplied work. A staging copy is removed only when its goal is finished and its draft is applied, closed, denied or superseded, or when no goal record owns it. A copy whose draft is unreviewed or approved but not applied is kept. A missing or failing GitHub/VCS adapter counts as "unknown", never as an answer.
+
+What it looks at:
+
+- Drafts stuck in approved or pending review, with the cause (already landed, superseded because the phase is done, abandoned, or unknown).
+- Stale `PR #N (open)` labels, refreshed from the real pull request state.
+- Goals stuck in a state that no longer matches their draft.
+- Staging directories (with the bytes reclaimed), orphan `target/` directories, stale pid files, a dead-process `.ta/apply.lock`, a leftover `.ta-decisions.json` in the project root, and daemon phase claims whose goal is gone.
+- Old finished records, which are archived to a compressed bundle under `.ta/archive/` (with an index) and never silently deleted.
+
+When there is no terminal (a script, CI, the daemon), cleanup does not guess and does not block. It writes the open questions to `.ta/cleanup/questions.jsonl` and `.ta/interactions/pending/`, then exits 0. Answer them by running `ta cleanup` interactively. Your answers are remembered in `.ta/cleanup/decisions.jsonl`; when the same situation comes back, the earlier answer is pre-selected and the output says so, but a question is still a question and is never answered for you. Every action is logged to `.ta/audit.jsonl` with the finding, its evidence, the verdict and who decided (`rule`, `human`, `human-remembered`, or `model-suggested+human`).
+
+```toml
+# .ta/workflow.toml
+[cleanup]
+auto = "off"          # "safe": the daemon's periodic cleanup runs auto_safe findings only
+retention_days = 90   # Finished records older than this are archived
+archive = true        # Archive instead of removing old records
+model_assist = false  # true: a configured assistant may suggest an answer; it only pre-selects and is recorded, never executed
+# assistant_command = "my-suggester"   # program that reads a finding on stdin and prints a suggestion
+```
 
 ### Unified Garbage Collection (`ta gc`)
 

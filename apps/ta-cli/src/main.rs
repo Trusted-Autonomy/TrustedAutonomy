@@ -671,6 +671,34 @@ enum Commands {
         #[command(subcommand)]
         gc_subcommand: Option<GcSubcommand>,
     },
+    /// Clean up stuck drafts, stale goals, leftover staging, dead locks and old records.
+    ///
+    /// One engine decides each finding from ground truth (goal state, PLAN.md, the PR
+    /// state from your VCS, the files themselves). Safe fixes run and are logged; probable
+    /// ones are proposed as one batch; anything uncertain is asked, one question each.
+    /// With no terminal, questions are saved to `.ta/cleanup/questions.jsonl` and the
+    /// command still exits 0.
+    ///
+    /// Examples:
+    ///   ta cleanup --dry-run               # show findings and reasons, change nothing
+    ///   ta cleanup                         # act on safe findings, ask about the rest
+    ///   ta cleanup --yes                   # also accept every proposal (never answers questions)
+    ///   ta cleanup --only drafts,staging   # limit to drafts|staging|goals|locks|archive
+    ///   ta cleanup --explain 025f676e      # full evidence for one finding
+    Cleanup {
+        /// Show findings and what would happen; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Accept every proposal without asking. Questions are still asked.
+        #[arg(long)]
+        yes: bool,
+        /// Limit to these groups: drafts, staging, goals, locks, archive (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// Print the evidence and reasoning for one finding id (e.g. 025f676e or draft:025f676e).
+        #[arg(long, value_name = "ID")]
+        explain: Option<String>,
+    },
     /// System-wide health check: runtime chain, auth validation, agent binaries, daemon, VCS.
     ///
     /// Validates the full TA runtime and reports the active authentication mode for the
@@ -2359,6 +2387,12 @@ fn dispatch_raw(
         },
         Commands::Verify { goal_id } => commands::verify::execute(config, goal_id.as_deref()),
         Commands::Analysis { command } => commands::analysis::execute(command, config),
+        Commands::Cleanup {
+            dry_run,
+            yes,
+            only,
+            explain,
+        } => commands::cleanup::execute(config, *dry_run, *yes, only, explain.as_deref()),
         Commands::Doctor {
             json,
             fix_denied,

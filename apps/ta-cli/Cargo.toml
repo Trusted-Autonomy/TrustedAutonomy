@@ -75,6 +75,7 @@ ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag =
 ta-lifecycle = { path = "../../crates/ta-lifecycle", version = "0.17.12-alpha.5" }
 ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.12-alpha.5" }
 ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.12-alpha.5" }
+ta-cleanup = { path = "../../crates/ta-cleanup", version = "0.17.12-alpha.5" }
 ta-plan = { path = "../../crates/ta-plan", version = "0.17.12-alpha.5" }
 ta-plan-wayfinder = { path = "../../crates/ta-plan-wayfinder", version = "0.17.12-alpha.5" }
 ta-build = { path = "../../crates/ta-build", version = "0.17.12-alpha.5" }

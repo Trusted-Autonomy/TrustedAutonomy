@@ -676,67 +676,70 @@ fn check_vcs(config: &GatewayConfig) -> Vec<CheckResult> {
 }
 
 fn check_gc(config: &GatewayConfig) -> Vec<CheckResult> {
-    use ta_goal::{GoalRunState, GoalRunStore};
     let mut results = Vec::new();
 
-    // Stale staging dirs.
-    let staging_dir = config.workspace_root.join(".ta").join("staging");
-    if staging_dir.exists() {
-        let seven_days_secs: u64 = 7 * 24 * 3600;
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let active_staging: std::collections::HashSet<std::path::PathBuf> =
-            match GoalRunStore::new(&config.goals_dir) {
-                Ok(gs) => gs
-                    .list()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|g| {
-                        matches!(
-                            g.state,
-                            GoalRunState::Running
-                                | GoalRunState::Configured
-                                | GoalRunState::PrReady
-                                | GoalRunState::UnderReview
-                                | GoalRunState::Finalizing { .. }
-                        )
-                    })
-                    .map(|g| g.workspace_path)
-                    .collect(),
-                Err(_) => std::collections::HashSet::new(),
-            };
-
-        let stale_count = std::fs::read_dir(&staging_dir)
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .filter(|e| !active_staging.contains(&e.path()))
-                    .filter(|e| {
-                        e.metadata()
-                            .and_then(|m| m.modified())
-                            .and_then(|t| {
-                                t.duration_since(std::time::UNIX_EPOCH)
-                                    .map_err(|_| std::io::Error::other("time error"))
-                            })
-                            .map(|t| now_secs.saturating_sub(t.as_secs()) > seven_days_secs)
-                            .unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-
-        if stale_count > 0 {
-            results.push(CheckResult::warn(
+    // Staging and stuck drafts both come from the `ta cleanup` engine, so the
+    // warning, the fix and `ta cleanup` can never disagree, and one setting
+    // (`[gc] stale_threshold_days`) is the only threshold.
+    if config.workspace_root.join(".ta").join("staging").exists() {
+        match super::cleanup::findings(config, &[ta_cleanup::Category::Staging], false) {
+            Ok(found) => {
+                let stale = super::cleanup::actionable(found, &[ta_cleanup::Kind::Staging]);
+                if stale.is_empty() {
+                    results.push(CheckResult::ok("GC staging", "no stale dirs".to_string()));
+                } else {
+                    let bytes: u64 = stale.iter().map(|f| f.bytes).sum();
+                    let lines: Vec<String> = stale
+                        .iter()
+                        .flat_map(super::cleanup::explain_lines)
+                        .collect();
+                    results.push(CheckResult::warn(
+                        "GC staging",
+                        format!(
+                            "{} staging dir(s) can be cleaned ({})\n{}",
+                            stale.len(),
+                            ta_cleanup::scan::human_bytes(bytes),
+                            lines.join("\n")
+                        ),
+                        "Run: ta cleanup --only staging --dry-run, then ta cleanup --only staging",
+                    ));
+                }
+            }
+            Err(e) => results.push(CheckResult::warn(
                 "GC staging",
-                format!("{} stale dir(s) older than 7 days", stale_count),
-                "Run: ta gc",
-            ));
-        } else {
-            results.push(CheckResult::ok("GC staging", "no stale dirs".to_string()));
+                format!("could not scan staging: {e}"),
+                "Run: ta cleanup --only staging",
+            )),
+        }
+    }
+
+    if config.pr_packages_dir.exists() {
+        match super::cleanup::findings(config, &[ta_cleanup::Category::Drafts], true) {
+            Ok(found) => {
+                let stuck = super::cleanup::actionable(found, &[ta_cleanup::Kind::StuckDraft]);
+                if stuck.is_empty() {
+                    results.push(CheckResult::ok("Stale drafts", "none stuck".to_string()));
+                } else {
+                    let lines: Vec<String> = stuck
+                        .iter()
+                        .flat_map(super::cleanup::explain_lines)
+                        .collect();
+                    results.push(CheckResult::warn(
+                        "Stale drafts",
+                        format!(
+                            "{} draft(s) approved or pending but not applied\n{}",
+                            stuck.len(),
+                            lines.join("\n")
+                        ),
+                        "Run: ta cleanup (or the exact command shown for each draft)",
+                    ));
+                }
+            }
+            Err(e) => results.push(CheckResult::warn(
+                "Stale drafts",
+                format!("could not scan drafts: {e}"),
+                "Run: ta cleanup --only drafts",
+            )),
         }
     }
 
@@ -1061,50 +1064,35 @@ pub(super) fn apply_fix(
 ) -> anyhow::Result<String> {
     match signal.kind.as_str() {
         "disk_staging" | "orphan_staging" => {
-            // Run GC to reclaim staging space.
-            super::gc::execute(
-                config, false, // dry_run
-                7,     // threshold_days
-                false, // all
-                false, // archive
-                false, // include_events
-                false, // compact
-                30,    // compact_after_days
-                false, // force
-                false, // status
-                true,  // delete_stale
-            )?;
-            Ok("Ran gc to reclaim staging space".to_string())
+            // The person already named this destructive fix, so proposals in
+            // the staging category are accepted; only ground-truth-safe
+            // removals are proposed (unreviewed or approved work is kept).
+            let r = super::cleanup::run_accepting(config, vec![ta_cleanup::Category::Staging])?;
+            Ok(format!(
+                "Cleaned {} staging item(s), reclaimed {}",
+                r.done.len(),
+                ta_cleanup::scan::human_bytes(r.bytes_reclaimed)
+            ))
         }
-        "stale_drafts" => {
-            // Invoke the same library call `ta draft close --stale` uses
-            // directly (not a subprocess). The outer `execute_fix` loop has
-            // already gated this on confirm/--yes before calling `apply_fix`,
-            // so `skip_confirm: true` here avoids double-prompting — it does
-            // not bypass the doctor's own fix confirmation. Only drafts
-            // already in a non-terminal review state (Approved/PendingReview)
-            // and older than the configured threshold are closed; drafts
-            // still awaiting a first review response are left alone.
-            let closed = super::draft::close_stale_drafts(
+        "stale_drafts" | "stale_terminal_goals" => {
+            // Only what ground truth makes safe is done here. Anything
+            // uncertain is reported with the exact command, never guessed.
+            let r = super::cleanup::run_auto_safe(
                 config,
-                None, // use configured gc.stale_threshold_days
-                Some("stale — closed by ta doctor --fix"),
-                "ta-doctor",
-                true, // outer confirm/--yes prompt already happened
+                vec![ta_cleanup::Category::Drafts, ta_cleanup::Category::Goals],
             )?;
-            Ok(format!("Closed {} stale draft(s)", closed))
-        }
-        "stale_terminal_goals" => {
-            // v0.17.6.3.2: reconcile goals whose real-world outcome is
-            // already settled (draft applied/closed, or plan phase
-            // completed by a different goal) but whose own GoalRunState
-            // never followed — a goal stuck at pr_ready/under_review/
-            // approved forever otherwise.
-            let fixed = super::goal::reconcile_stale_terminal_goals(config)?;
-            for line in &fixed {
-                println!("  {}", line);
+            for d in &r.done {
+                println!("  {}", d.summary);
             }
-            Ok(format!("Reconciled {} stale goal(s)", fixed.len()))
+            let open = r.proposals_open.len() + r.questions_open.len();
+            let tail = if open > 0 {
+                format!(
+                    "; {open} need a decision: run `ta cleanup` (or `ta cleanup --explain <id>`)"
+                )
+            } else {
+                String::new()
+            };
+            Ok(format!("Cleaned {} item(s){tail}", r.done.len()))
         }
         "stale_failed_goals" | "stale_pr_ready" => {
             // Run GC for stale goals.
@@ -3037,7 +3025,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_fix_stale_drafts_closes_stale_draft_via_library_call() {
+    fn doctor_fix_stale_drafts_leaves_live_goal_draft_open_and_says_why() {
         // Regression test for v0.17.0.12.30 item 2: `ta doctor --fix`'s
         // "stale_drafts" handler must actually close stale drafts (the same
         // library call `ta draft close --stale` uses), not just print a
@@ -3094,18 +3082,32 @@ mod tests {
             message: "1 draft(s) approved/pending but not applied for 3+ days".to_string(),
             action: "ta doctor --fix".to_string(),
         };
+        // The goal is still live and the change is not in the source, so
+        // closing this draft could destroy the only copy of the work. The fix
+        // must leave it open and say a decision is needed.
         let result = apply_fix(&config, &signal);
         assert!(result.is_ok(), "apply_fix should not error: {:?}", result);
+        let msg = result.unwrap();
         assert!(
-            result.unwrap().contains("Closed 1"),
-            "apply_fix result should report the closed draft"
+            msg.contains("need a decision") && msg.contains("ta cleanup"),
+            "apply_fix should hand the open draft to the person: {msg}"
         );
 
         let reloaded = load_all_packages(&config).unwrap();
         assert!(
-            matches!(reloaded[0].status, DraftStatus::Closed { .. }),
-            "draft should be Closed after ta doctor --fix, got: {:?}",
+            matches!(reloaded[0].status, DraftStatus::PendingReview),
+            "draft must stay open, got: {:?}",
             reloaded[0].status
+        );
+
+        // Doctor's own output names the evidence and the exact command.
+        let results = check_gc(&config);
+        let stale = results.iter().find(|r| r.name == "Stale drafts").unwrap();
+        let text = format!("{} {}", stale.detail, stale.fix);
+        assert!(text.contains("goal"), "evidence missing: {text}");
+        assert!(
+            text.contains("ta draft close"),
+            "exact command missing: {text}"
         );
     }
 

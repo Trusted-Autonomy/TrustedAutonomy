@@ -3907,8 +3907,11 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
 ///    after a phantom-in-progress recovery relaunch), but this goal's own
 ///    draft was never closed at all, so nothing ever prompted a transition.
 ///
-/// Called from `ta doctor --fix` (see `doctor.rs`'s `"stale_terminal_goals"`
-/// arm). Returns one human-readable line per goal reconciled.
+/// `ta doctor --fix` and `ta cleanup` now do this through the cleanup engine
+/// (ground-truth evidence, asks when unsure). This older path is kept only as
+/// a regression oracle for the cases the engine must also handle.
+/// Returns one human-readable line per goal reconciled.
+#[cfg(test)]
 pub(crate) fn reconcile_stale_terminal_goals(
     config: &GatewayConfig,
 ) -> anyhow::Result<Vec<String>> {
@@ -3989,6 +3992,39 @@ pub(crate) fn reconcile_stale_terminal_goals(
                 .iter()
                 .any(|id| super::plan::phase_ids_match(id, phase_id));
             if phase_done {
+                // A draft still waiting for review is closed with its goal:
+                // closing only the goal left it Approved forever (the case
+                // `ta cleanup` now decides from ground truth). The phase is
+                // done, so the close carries a reference and leaves it alone.
+                if let Some(pkg_id) = goal.pr_package_id {
+                    let live = super::draft::load_package(config, pkg_id).is_ok_and(|p| {
+                        matches!(
+                            p.status,
+                            ta_changeset::draft_package::DraftStatus::Approved { .. }
+                                | ta_changeset::draft_package::DraftStatus::PendingReview
+                        )
+                    });
+                    if live
+                        && super::draft::close_package(
+                            config,
+                            &pkg_id.to_string(),
+                            Some(&format!(
+                                "phase {phase_id} already completed by a different goal; \
+                                 closed with its goal by ta doctor --fix"
+                            )),
+                            "ta-doctor",
+                            Some(&format!("phase-{phase_id}-done")),
+                        )
+                        .is_ok()
+                    {
+                        fixed.push(format!(
+                            "{}: phase {} already done via another goal; closed the goal and its unreviewed draft",
+                            goal.display_tag(),
+                            phase_id
+                        ));
+                        continue;
+                    }
+                }
                 let new_state = GoalRunState::Closed {
                     reason: Some(format!(
                         "phase {} already completed by a different goal — \

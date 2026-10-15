@@ -308,50 +308,41 @@ fn check_stale_staging_dirs(config: &GatewayConfig, signals: &mut Vec<HealthSign
 }
 
 fn check_stale_drafts_signal(config: &GatewayConfig, signals: &mut Vec<HealthSignal>) {
-    use chrono::Duration;
-    use ta_changeset::draft_package::DraftStatus;
-
     if !config.pr_packages_dir.exists() {
         return;
     }
-
-    let stale_days = 3i64;
-    let now = Utc::now();
-    let cutoff = now - Duration::days(stale_days);
-
-    let stale_count = match std::fs::read_dir(&config.pr_packages_dir) {
-        Ok(entries) => entries
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .filter(|e| {
-                std::fs::read_to_string(e.path())
-                    .ok()
-                    .and_then(|c| {
-                        serde_json::from_str::<ta_changeset::draft_package::DraftPackage>(&c).ok()
-                    })
-                    .map(|pkg| {
-                        matches!(
-                            pkg.status,
-                            DraftStatus::Approved { .. } | DraftStatus::PendingReview
-                        ) && pkg.created_at < cutoff
-                    })
-                    .unwrap_or(false)
-            })
-            .count(),
-        Err(_) => return,
+    // The same engine as `ta cleanup`, offline (a startup hint must be fast):
+    // one threshold (`[gc] stale_threshold_days`) for the hint and the fix.
+    let Ok(found) = super::cleanup::findings(config, &[ta_cleanup::Category::Drafts], false) else {
+        return;
     };
-
-    if stale_count > 0 {
-        signals.push(HealthSignal::new(
-            "stale_drafts",
-            SignalSeverity::Warn,
-            format!(
-                "{} draft(s) approved/pending but not applied for {}+ days",
-                stale_count, stale_days
-            ),
-            "run `ta doctor --fix` to close them automatically, or `ta draft list --stale` to review first".to_string(),
-        ));
-    }
+    let stuck = super::cleanup::actionable(found, &[ta_cleanup::Kind::StuckDraft]);
+    let Some(first) = stuck.first() else { return };
+    let days = ta_submit::WorkflowConfig::load_or_default(
+        &config.workspace_root.join(".ta/workflow.toml"),
+    )
+    .gc
+    .stale_threshold_days;
+    let more = if stuck.len() > 1 {
+        format!(" (+{} more)", stuck.len() - 1)
+    } else {
+        String::new()
+    };
+    signals.push(HealthSignal::new(
+        "stale_drafts",
+        SignalSeverity::Warn,
+        format!(
+            "{} draft(s) approved/pending but not applied for {}+ days: {}{}",
+            stuck.len(),
+            days,
+            first.title,
+            more
+        ),
+        format!(
+            "{} Run `ta cleanup --dry-run` for the evidence, then `ta cleanup`.",
+            first.reason
+        ),
+    ));
 }
 
 /// v0.17.6.3.2: goals stuck at `PrReady`/`UnderReview`/`Approved` whose
@@ -360,7 +351,7 @@ fn check_stale_drafts_signal(config: &GatewayConfig, signals: &mut Vec<HealthSig
 /// forward `close_package`/`apply_package` transition the goal in the same
 /// operation), or their plan phase is already `done` via a different goal
 /// (superseded without ever being closed). Read-only detection; the actual
-/// fix is `goal::reconcile_stale_terminal_goals`, invoked from
+/// fix is the `ta cleanup` engine, invoked from
 /// `ta doctor --fix`.
 fn check_stale_terminal_goals_signal(config: &GatewayConfig, signals: &mut Vec<HealthSignal>) {
     use ta_changeset::draft_package::DraftStatus;

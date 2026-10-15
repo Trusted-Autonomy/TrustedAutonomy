@@ -1006,6 +1006,45 @@ pub async fn release_phase(
         .into_response()
 }
 
+/// Whether a daemon phase claim has no live goal behind it: the goal record is
+/// gone, the goal reached a state that ends its claim, or (for a claim made
+/// before its goal existed) no live goal is linked to the phase. An unreadable
+/// goal store is never evidence of staleness.
+pub(crate) fn claim_is_stale(
+    goals_dir: &std::path::Path,
+    phase_id: &str,
+    claimed_goal: Option<&str>,
+) -> bool {
+    let Ok(store) = ta_goal::GoalRunStore::new(goals_dir) else {
+        return false;
+    };
+    if let Some(id) = claimed_goal {
+        return match uuid::Uuid::parse_str(id).ok().map(|u| store.get(u)) {
+            Some(Ok(Some(g))) => ta_goal::phase_release::state_ends_claim(&g.state),
+            Some(Ok(None)) | None => true,
+            Some(Err(_)) => false,
+        };
+    }
+    find_claim_holder(goals_dir, phase_id, None).is_none()
+}
+
+/// `GET /api/plan/phase/claims`: every in-memory phase claim, flagged `stale`
+/// when no live goal holds it. `ta cleanup` releases the stale ones through
+/// `POST /api/plan/phase/release`; PLAN.md stays the authoritative gate.
+pub async fn list_phase_claims(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut claims: Vec<serde_json::Value> = state
+        .phase_claims
+        .snapshot()
+        .into_iter()
+        .map(|(phase_id, goal_id)| {
+            let stale = claim_is_stale(&state.goals_dir, &phase_id, goal_id.as_deref());
+            serde_json::json!({ "phase_id": phase_id, "goal_id": goal_id, "stale": stale })
+        })
+        .collect();
+    claims.sort_by_key(|c| c["phase_id"].as_str().unwrap_or_default().to_string());
+    Json(serde_json::json!({ "claims": claims }))
+}
+
 // ── Goal start ─────────────────────────────────────────────────
 
 /// Request body for `POST /api/goal/start`.
@@ -2035,6 +2074,32 @@ Future work.
         g.state = ta_goal::GoalRunState::Completed;
         store.save(&g).unwrap();
         assert_eq!(find_claim_holder(&goals_dir, "v1.2.3", None), None);
+    }
+
+    #[test]
+    fn claim_staleness_follows_the_holders_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        let store = ta_goal::GoalRunStore::new(&goals_dir).unwrap();
+        let mut g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "a",
+            dir.path().join("ws"),
+            dir.path().join("store"),
+        );
+        g.plan_phase = Some("v1.2.3".into());
+        g.state = ta_goal::GoalRunState::Running;
+        store.save(&g).unwrap();
+        let id = g.goal_run_id.to_string();
+        assert!(!super::claim_is_stale(&goals_dir, "v1.2.3", Some(&id)));
+        assert!(!super::claim_is_stale(&goals_dir, "v1.2.3", None));
+        let ghost = uuid::Uuid::new_v4().to_string();
+        assert!(super::claim_is_stale(&goals_dir, "v1.2.3", Some(&ghost)));
+        g.state = ta_goal::GoalRunState::Completed;
+        store.save(&g).unwrap();
+        assert!(super::claim_is_stale(&goals_dir, "v1.2.3", Some(&id)));
+        assert!(super::claim_is_stale(&goals_dir, "v1.2.3", None));
     }
 }
 

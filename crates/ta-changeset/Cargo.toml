@@ -9,6 +9,10 @@ homepage = "https://github.com/trustedautonomy/ta"
 keywords = ["ai", "agent", "autonomy", "review", "diff"]
 categories = ["development-tools"]
 
+[features]
+# Exposes `draft_package::make_test_pkg` to other crates' tests.
+test-support = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

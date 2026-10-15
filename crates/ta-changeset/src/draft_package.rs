@@ -1082,7 +1082,7 @@ pub fn is_draft_denied(dir: &std::path::Path, id: Uuid) -> bool {
 ///
 /// Only available in test builds. Used by `draft_resolver` unit tests and
 /// any other test that needs a lightweight package fixture.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
     DraftPackage {
         package_version: "1.0.0".to_string(),

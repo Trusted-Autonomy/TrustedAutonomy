@@ -544,14 +544,17 @@ pub fn check_stale_drafts(config: &GatewayConfig) {
         .count();
 
     if hint_count > 0 {
+        // `ta cleanup` is the one tool that says why each draft is stuck and what to do; the
+        // hint threshold (`gc.stale_hint_days`) is an early heads-up, the action threshold is
+        // `gc.stale_threshold_days`.
         if stale_command_count > 0 {
             eprintln!(
-                "hint: {} draft(s) approved/pending but not applied for {}+ days — run `ta draft list --stale`",
+                "hint: {} draft(s) approved/pending but not applied for {}+ days: run `ta cleanup --dry-run` to see why and what to do",
                 hint_count, hint_days
             );
         } else {
             eprintln!(
-                "hint: {} draft(s) approved/pending but not applied for {}+ days — run `ta draft list` to review",
+                "hint: {} draft(s) approved/pending but not applied for {}+ days: run `ta cleanup --dry-run` to see whether they are stuck",
                 hint_count, hint_days
             );
         }
@@ -4757,6 +4760,37 @@ fn view_package(
     Ok(())
 }
 
+/// Error text for `approve`/`deny` on a draft that is not awaiting review.
+/// Says what state it is in, what that means, and the command that does work.
+pub(crate) fn wrong_state_message(verb: &str, id: uuid::Uuid, status: &DraftStatus) -> String {
+    let sh = &id.to_string()[..8];
+    let close_hint = format!(
+        "To abandon it run `ta draft close {sh} --reason \"...\"` \
+         (or `ta draft close {sh} --applied-externally <ref>` if its change already landed)."
+    );
+    match status {
+        DraftStatus::Approved { .. } => format!(
+            "Cannot {verb} draft {sh}: it was already approved. `deny` rejects a draft at review time and this one is past review. {close_hint} To land it run `ta draft apply {sh}`."
+        ),
+        DraftStatus::Applied { .. } => format!(
+            "Cannot {verb} draft {sh}: it is already applied, which is final (its changes are in your project). Nothing to {verb}."
+        ),
+        DraftStatus::Denied { .. } => format!(
+            "Cannot {verb} draft {sh}: it was already denied, which is final (rejected at review, never applied). Nothing to {verb}."
+        ),
+        DraftStatus::Closed { .. } => format!(
+            "Cannot {verb} draft {sh}: it is already closed, which is final (abandoned, or its change landed outside TA). Nothing to {verb}."
+        ),
+        DraftStatus::Superseded { .. } => format!(
+            "Cannot {verb} draft {sh}: it was superseded by a newer draft, which is final. Nothing to {verb}."
+        ),
+        DraftStatus::Draft => format!(
+            "Cannot {verb} draft {sh}: it is still a draft that was never submitted for review. {close_hint}"
+        ),
+        DraftStatus::PendingReview => format!("Cannot {verb} draft {sh}."),
+    }
+}
+
 fn approve_package(
     config: &GatewayConfig,
     id: &str,
@@ -4768,8 +4802,8 @@ fn approve_package(
 
     if !matches!(pkg.status, DraftStatus::PendingReview) {
         anyhow::bail!(
-            "Cannot approve package in {:?} state (must be PendingReview)",
-            pkg.status
+            "{}",
+            wrong_state_message("approve", package_id, &pkg.status)
         );
     }
 
@@ -4952,10 +4986,7 @@ fn deny_package(
     let mut pkg = load_package(config, package_id)?;
 
     if !matches!(pkg.status, DraftStatus::PendingReview) {
-        anyhow::bail!(
-            "Cannot deny package in {:?} state (must be PendingReview)",
-            pkg.status
-        );
+        anyhow::bail!("{}", wrong_state_message("deny", package_id, &pkg.status));
     }
 
     pkg.status = DraftStatus::Denied {
@@ -10766,7 +10797,7 @@ fn run_apply_safety_checks(
 /// TA never applied itself, and must NOT reset the phase — the phase's `done`
 /// status (if the external merge already landed and was synced) reflects
 /// reality and reverting it would be the exact bug this phase fixes.
-fn close_package(
+pub(crate) fn close_package(
     config: &GatewayConfig,
     id: &str,
     reason: Option<&str>,
@@ -13456,6 +13487,46 @@ mod replay_gate_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deny_and_approve_errors_are_state_specific() {
+        let id = uuid::Uuid::new_v4();
+        let sh = &id.to_string()[..8];
+        let approved = ta_changeset::draft_package::DraftStatus::Approved {
+            approved_by: "me".into(),
+            approved_at: chrono::Utc::now(),
+        };
+        let m = super::wrong_state_message("deny", id, &approved);
+        assert!(m.contains("already approved"), "{m}");
+        assert!(m.contains(&format!("ta draft close {sh} --reason")), "{m}");
+        assert!(m.contains("--applied-externally"), "{m}");
+        assert!(!m.contains("PendingReview"), "{m}");
+
+        let applied = ta_changeset::draft_package::DraftStatus::Applied {
+            applied_at: chrono::Utc::now(),
+            applied_via: Default::default(),
+        };
+        assert!(super::wrong_state_message("deny", id, &applied)
+            .contains("already applied, which is final"));
+        let denied = ta_changeset::draft_package::DraftStatus::Denied {
+            reason: "x".into(),
+            denied_by: "me".into(),
+        };
+        assert!(super::wrong_state_message("approve", id, &denied)
+            .contains("already denied, which is final"));
+        let closed = ta_changeset::draft_package::DraftStatus::Closed {
+            closed_at: chrono::Utc::now(),
+            reason: None,
+            closed_by: "me".into(),
+            applied_externally_ref: None,
+        };
+        assert!(super::wrong_state_message("deny", id, &closed)
+            .contains("already closed, which is final"));
+        let sup = ta_changeset::draft_package::DraftStatus::Superseded {
+            superseded_by: uuid::Uuid::new_v4(),
+        };
+        assert!(super::wrong_state_message("deny", id, &sup).contains("superseded"));
+    }
+
     use super::*;
     use tempfile::TempDir;
 

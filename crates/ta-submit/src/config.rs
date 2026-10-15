@@ -32,6 +32,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub gc: GcConfig,
 
+    /// `ta cleanup` / `ta doctor --fix` / daemon gc behavior
+    #[serde(default)]
+    pub cleanup: CleanupConfig,
+
     /// Follow-up goal behavior configuration
     #[serde(default)]
     pub follow_up: FollowUpConfig,
@@ -1676,6 +1680,69 @@ impl Default for GcConfig {
     }
 }
 
+/// `[cleanup]` section of `.ta/workflow.toml`.
+///
+/// Staleness itself is not configured here: drafts, goals and staging all use
+/// `[gc] stale_threshold_days`, so the doctor warning and the fix agree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupConfig {
+    /// `"off"` (default): the daemon never cleans up by itself.
+    /// `"safe"`: the daemon's periodic gc runs only the actions the rules mark
+    /// safe. Proposals and questions are never answered unattended.
+    #[serde(default = "default_cleanup_auto")]
+    pub auto: String,
+
+    /// Finished goal and draft records older than this many days are moved to a
+    /// compressed bundle under `.ta/archive/`. Default: 90.
+    #[serde(default = "default_cleanup_retention_days")]
+    pub retention_days: u64,
+
+    /// Let a model pre-select an answer for questions. Default: false. A
+    /// suggestion is recorded and shown but never executes by itself.
+    #[serde(default)]
+    pub model_assist: bool,
+
+    /// Archive old records instead of leaving them in place. Default: true.
+    #[serde(default = "default_cleanup_archive")]
+    pub archive: bool,
+
+    /// Command run for model assistance when `model_assist = true`. It reads one
+    /// JSON finding on stdin and prints `{"option": "...", "confidence": 0.0-1.0}`.
+    #[serde(default)]
+    pub assistant_command: Option<String>,
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self {
+            auto: default_cleanup_auto(),
+            retention_days: default_cleanup_retention_days(),
+            model_assist: false,
+            archive: default_cleanup_archive(),
+            assistant_command: None,
+        }
+    }
+}
+
+impl CleanupConfig {
+    /// True when the daemon may run safe actions on its own.
+    pub fn auto_safe(&self) -> bool {
+        self.auto.trim().eq_ignore_ascii_case("safe")
+    }
+}
+
+fn default_cleanup_auto() -> String {
+    "off".to_string()
+}
+
+fn default_cleanup_retention_days() -> u64 {
+    90
+}
+
+fn default_cleanup_archive() -> bool {
+    true
+}
+
 fn default_stale_threshold_days() -> u64 {
     7
 }
@@ -2193,6 +2260,26 @@ fn merge_toml_values(base: &mut toml::Value, overrides: toml::Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cleanup_defaults_are_conservative() {
+        let c = WorkflowConfig::default().cleanup;
+        assert_eq!(c.auto, "off");
+        assert!(!c.auto_safe());
+        assert_eq!(c.retention_days, 90);
+        assert!(c.archive);
+        assert!(!c.model_assist);
+    }
+
+    #[test]
+    fn cleanup_section_parses() {
+        let c: WorkflowConfig =
+            toml::from_str("[cleanup]\nauto = \"safe\"\nretention_days = 30\nmodel_assist = true\narchive = false\n").unwrap();
+        assert!(c.cleanup.auto_safe());
+        assert_eq!(c.cleanup.retention_days, 30);
+        assert!(c.cleanup.model_assist);
+        assert!(!c.cleanup.archive);
+    }
+
     use super::*;
 
     #[test]
