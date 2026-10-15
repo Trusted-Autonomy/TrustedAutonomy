@@ -247,15 +247,13 @@ fn version_at_least(found: &[u64], min: &[u64]) -> bool {
 
 /// A command that never opens a console window on Windows.
 fn quiet_command(program: &Path) -> Command {
-    let cmd = Command::new(program);
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let mut cmd = cmd;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        return cmd;
     }
-    #[cfg(not(windows))]
     cmd
 }
 
