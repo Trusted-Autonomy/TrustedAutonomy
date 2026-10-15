@@ -4693,6 +4693,21 @@ fn view_package(
                 if let Some(uri) = &action.target_uri {
                     println!("     URI: {}", uri);
                 }
+            } else if ta_mcp_gateway::tools::wiki::is_wiki_write_tool(&action.tool_name) {
+                // Wiki writes are held for review and sent to Wayfinder only on apply.
+                println!(
+                    "  {}. [{}] {} ({})",
+                    i + 1,
+                    action.disposition,
+                    action.description,
+                    action.kind,
+                );
+                for line in
+                    ta_mcp_gateway::tools::wiki::review_lines(&action.tool_name, &action.parameters)
+                {
+                    println!("     {line}");
+                }
+                println!("     Written to Wayfinder only when this draft is approved and applied.");
             } else {
                 println!(
                     "  {}. [{}] {} ({})",

@@ -1628,13 +1628,13 @@ impl TaGatewayServer {
     }
 
     #[tool(
-        description = "Create a new wiki page in the given scope (\"project\" or \"org\"). Uses an elevated, write-specific credential distinct from the one ta_wiki_search/ta_wiki_get use."
+        description = "Propose a new wiki page in the given scope (\"project\" or \"org\"). Nothing is written now: the page is queued for human review in this goal's draft (`ta draft view`) and created only if the draft is approved and applied. Limits: title 1-200 chars, body at most 100000 bytes, at most 20 tags of at most 64 chars, type at most 64 chars; control, bidi and zero-width characters are rejected. goal_run_id is the UUID of your goal run."
     )]
     fn ta_wiki_create(
         &self,
         Parameters(params): Parameters<tools::wiki::WikiCreateParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.audit("ta_wiki_create", None, None);
+        self.audit("ta_wiki_create", None, params.goal_run_id.parse().ok());
         if let Ok(state) = self.state.lock() {
             if state
                 .experiment_override("wiki.disabled")
@@ -1650,13 +1650,13 @@ impl TaGatewayServer {
     }
 
     #[tool(
-        description = "Update an existing wiki page. Pass if_sha (the sha last read) to reject the write on a conflicting concurrent edit instead of silently overwriting it; omit it to accept last-write-wins."
+        description = "Propose an update to an existing wiki page. Nothing is written now: the change is queued for human review in this goal's draft (`ta draft view`) and applied only if the draft is approved and applied. Pass if_sha (the sha last read) so a conflicting concurrent edit is rejected at apply time instead of overwritten; omit it to accept last-write-wins. Same limits as ta_wiki_create. goal_run_id is the UUID of your goal run."
     )]
     fn ta_wiki_update(
         &self,
         Parameters(params): Parameters<tools::wiki::WikiUpdateParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.audit("ta_wiki_update", None, None);
+        self.audit("ta_wiki_update", None, params.goal_run_id.parse().ok());
         if let Ok(state) = self.state.lock() {
             if state
                 .experiment_override("wiki.disabled")

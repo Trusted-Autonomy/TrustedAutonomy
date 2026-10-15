@@ -317,6 +317,40 @@ For a read-only persona, `ta run --persona <name>`:
 - explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
 - refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
 
+### Wiki Writes Are Reviewed
+
+`ta_wiki_create` and `ta_wiki_update` do not write to the wiki when an agent calls them. They check the input and queue the change in the goal's draft. Nothing reaches Wayfinder until you approve and apply that draft. `ta_wiki_search`, `ta_wiki_get` and `ta_wiki_types` are unchanged and read live.
+
+Both tools take the `goal_run_id` of the calling goal. Each call returns `captured_for_review`; calling again with identical input returns the same `action_id` instead of queuing a duplicate.
+
+Review the queued writes with the rest of the draft:
+
+```bash
+ta draft view <draft-id>
+```
+
+Each wiki write is listed under Pending Actions with its scope, org or project id, page id (updates), title, type, tags, body size and the first 200 characters of the body. Approve, reject or mark each one for discussion like any other pending action. Then apply. Writes are sent when a person is present (an interactive terminal) or when you pass `--replay-actions`; a non-interactive apply leaves them for you to run later:
+
+```bash
+ta draft apply <draft-id> --replay-actions
+```
+
+Apply sends each approved write once, using the wiki write credential (`wayfinder-wiki-writer`). The agent never holds that credential. If an update carried an `if_sha` and the page changed since it was read, Wayfinder rejects the write and `ta draft apply` prints the failure. Re-read the page and propose the update again. A write that failed can be retried by re-running `ta draft apply`; writes that already succeeded are recorded and are not repeated.
+
+Input limits, checked when the tool is called and again at apply time:
+
+| Field | Limit |
+|-------|-------|
+| `title` | 1 to 200 characters |
+| `body` | at most 100000 bytes |
+| `tags` | at most 20 tags, each 1 to 64 characters |
+| `type` | at most 64 characters |
+| `page_id`, `if_sha` | at most 128 characters |
+
+Control characters and bidirectional or zero-width characters (U+200B to U+200F, U+202A to U+202E, U+2066 to U+2069, U+FEFF) are rejected in the title, tags and type. The body also rejects them, plus NUL and other control characters; newlines and tabs are fine. A rejected call names the field and the limit so the agent can fix it.
+
+Read-only personas still cannot call either write tool.
+
 ### Goal Origin and Auto-Approve
 
 `ta run --origin <name>` records which component asked for a goal (for example `--origin cos` when the Chief-of-Staff dispatched it). `TA_GOAL_ORIGIN` is used when the flag is absent. Names are 1-32 characters of lowercase letters, digits, `-` and `_`.
