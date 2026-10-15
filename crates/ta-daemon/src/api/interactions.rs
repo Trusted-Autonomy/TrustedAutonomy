@@ -26,6 +26,9 @@ use crate::question_registry::HumanAnswer;
 #[derive(Debug, Deserialize)]
 pub struct RespondRequest {
     pub answer: String,
+    /// Set by channel plugins; checked against `[channels.access_control]`.
+    #[serde(flatten)]
+    pub sender: crate::api::cmd::ChannelSender,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +70,17 @@ pub async fn respond(
                 .into_response();
         }
     };
+
+    // Channel access control (CR-09): a barred sender must not answer. A request
+    // with no channel fields (CLI, web UI) is unaffected.
+    if let Err(resp) = crate::api::cmd::enforce_channel_access_for(
+        &state,
+        &body.sender,
+        &format!("answer interaction {id}"),
+        "POST /api/interactions/{id}/respond",
+    ) {
+        return *resp;
+    }
 
     deliver_answer(&state, &state.project_root, id, body.answer, &responder).await;
     tracing::info!(
@@ -248,5 +262,145 @@ mod tests {
         let ids: Vec<Uuid> = pending.iter().map(|q| q.interaction_id).collect();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    // ── Channel access control (CR-09) ──────────────────────────────
+
+    use std::sync::Arc;
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+
+    use super::{respond, RespondRequest};
+    use crate::api::cmd::ChannelSender;
+    use crate::api::AppState;
+    use crate::config::{ChannelAccessControl, DaemonConfig};
+
+    fn acl_state(root: &std::path::Path, acl: ChannelAccessControl) -> Arc<AppState> {
+        let mut cfg = DaemonConfig::default();
+        cfg.channels.access_control = acl;
+        Arc::new(AppState::new(root.to_path_buf(), cfg))
+    }
+
+    fn only(users: &[&str]) -> ChannelAccessControl {
+        ChannelAccessControl {
+            allowed_users: users.iter().map(|u| u.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn answer_from(channel: Option<&str>, sender: Option<&str>) -> RespondRequest {
+        RespondRequest {
+            answer: "yes".into(),
+            sender: ChannelSender {
+                channel: channel.map(str::to_string),
+                sender_id: sender.map(str::to_string),
+                sender_roles: vec![],
+            },
+        }
+    }
+
+    async fn answer(
+        state: &Arc<AppState>,
+        id: Uuid,
+        body: RespondRequest,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = respond(State(state.clone()), Path(id.to_string()), None, Json(body))
+            .await
+            .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn answer_file(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
+        root.join(".ta/interactions/answers")
+            .join(format!("{id}.json"))
+    }
+
+    #[tokio::test]
+    async fn channel_permitted_sender_can_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), only(&["111"]));
+        let id = Uuid::new_v4();
+        let (st, _) = answer(&state, id, answer_from(Some("discord"), Some("111"))).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(answer_file(dir.path(), id).exists());
+    }
+
+    #[tokio::test]
+    async fn channel_denied_sender_gets_403_and_question_stays_unanswered() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), only(&["111"]));
+        let id = Uuid::new_v4();
+        let mut rx = state.question_registry.register(make_question(id)).await;
+        let (st, body) = answer(&state, id, answer_from(Some("discord"), Some("999"))).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let msg = body["error"].as_str().unwrap();
+        assert!(msg.contains("999") && msg.contains("discord"), "{msg}");
+        assert!(
+            msg.contains("allowed_users") && msg.contains("daemon.toml"),
+            "{msg}"
+        );
+        assert!(!answer_file(dir.path(), id).exists());
+        assert!(
+            rx.try_recv().is_err(),
+            "the waiting caller must not be answered"
+        );
+        assert_eq!(state.question_registry.list_pending().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restricted_channel_without_sender_cannot_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), only(&["111"]));
+        let id = Uuid::new_v4();
+        let (st, body) = answer(&state, id, answer_from(Some("discord"), None)).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(body["error"].as_str().unwrap().contains("sender_id"));
+        assert!(!answer_file(dir.path(), id).exists());
+    }
+
+    #[tokio::test]
+    async fn deny_list_beats_allow_list_on_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(
+            dir.path(),
+            ChannelAccessControl {
+                allowed_users: vec!["111".into()],
+                denied_users: vec!["111".into()],
+                ..Default::default()
+            },
+        );
+        let id = Uuid::new_v4();
+        let (st, _) = answer(&state, id, answer_from(Some("discord"), Some("111"))).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(!answer_file(dir.path(), id).exists());
+    }
+
+    #[tokio::test]
+    async fn answer_without_channel_fields_is_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = acl_state(dir.path(), only(&["111"]));
+        let id = Uuid::new_v4();
+        let (st, _) = answer(&state, id, answer_from(None, None)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(answer_file(dir.path(), id).exists());
+    }
+
+    #[test]
+    fn respond_body_accepts_plugin_fields_and_plain_body() {
+        let b: RespondRequest = serde_json::from_str(
+            r#"{"answer":"yes","source":"discord","channel":"discord","sender_id":"7","sender_roles":["r"]}"#,
+        )
+        .unwrap();
+        assert_eq!(b.sender.sender_id.as_deref(), Some("7"));
+        assert_eq!(b.sender.sender_roles, ["r"]);
+        let b: RespondRequest = serde_json::from_str(r#"{"answer":"yes"}"#).unwrap();
+        assert!(b.sender.channel.is_none() && b.sender.sender_id.is_none());
     }
 }

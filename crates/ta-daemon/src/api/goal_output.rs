@@ -320,6 +320,9 @@ impl GoalInputManager {
 pub struct GoalInputRequest {
     /// The text to send to the agent's stdin.
     pub input: String,
+    /// Set by channel plugins; checked against `[channels.access_control]`.
+    #[serde(flatten)]
+    pub sender: crate::api::cmd::ChannelSender,
 }
 
 /// `POST /api/goals/:id/input` — Write a line to the agent's stdin pipe (v0.10.18.5).
@@ -328,6 +331,17 @@ pub async fn goal_input_handler(
     Path(goal_id): Path<String>,
     Json(body): Json<GoalInputRequest>,
 ) -> impl IntoResponse {
+    // Channel access control (CR-09): a barred sender must not type into an
+    // agent's stdin. A request with no channel fields (CLI, web UI) is unaffected.
+    if let Err(resp) = crate::api::cmd::enforce_channel_access_for(
+        &state,
+        &body.sender,
+        &format!("send input to goal {goal_id}"),
+        "POST /api/goals/{id}/input",
+    ) {
+        return *resp;
+    }
+
     let resolved_id = resolve_goal_id(&state, &goal_id).await;
     let target_id = resolved_id.as_deref().unwrap_or(&goal_id);
 
@@ -706,5 +720,135 @@ mod tests {
         assert!(mgr.subscribe("goal-rm").await.is_none());
         let history = mgr.get_history_from("goal-rm", 0).await;
         assert!(history.is_empty());
+    }
+
+    // ── Channel access control on goal input (CR-09) ────────────────
+
+    use crate::api::cmd::ChannelSender;
+    use crate::config::{ChannelAccessControl, DaemonConfig};
+
+    fn input_from(channel: Option<&str>, sender: Option<&str>) -> GoalInputRequest {
+        GoalInputRequest {
+            input: "hello-agent".into(),
+            sender: ChannelSender {
+                channel: channel.map(str::to_string),
+                sender_id: sender.map(str::to_string),
+                sender_roles: vec![],
+            },
+        }
+    }
+
+    /// A state with `acl`, and a goal whose stdin is a `cat` writing to a file,
+    /// so "was input queued" is observable as file content.
+    async fn goal_with_stdin(
+        dir: &std::path::Path,
+        acl: ChannelAccessControl,
+    ) -> (Arc<AppState>, tokio::process::Child, std::path::PathBuf) {
+        let mut cfg = DaemonConfig::default();
+        cfg.channels.access_control = acl;
+        let state = Arc::new(AppState::new(dir.to_path_buf(), cfg));
+        let out = dir.join("stdin-seen.txt");
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("cat > '{}'", out.display()))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        state.goal_input.register("goal-cr09", stdin).await;
+        (state, child, out)
+    }
+
+    /// Close the goal's stdin, wait for `cat`, and return what it received.
+    async fn seen(
+        state: &Arc<AppState>,
+        mut child: tokio::process::Child,
+        out: &std::path::Path,
+    ) -> String {
+        state.goal_input.remove("goal-cr09").await;
+        child.wait().await.unwrap();
+        std::fs::read_to_string(out).unwrap_or_default()
+    }
+
+    async fn send(
+        state: &Arc<AppState>,
+        body: GoalInputRequest,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = goal_input_handler(
+            State(state.clone()),
+            Path("goal-cr09".to_string()),
+            Json(body),
+        )
+        .await
+        .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn only(users: &[&str]) -> ChannelAccessControl {
+        ChannelAccessControl {
+            allowed_users: users.iter().map(|u| u.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_permitted_sender_input_is_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, child, out) = goal_with_stdin(dir.path(), only(&["111"])).await;
+        let (st, _) = send(&state, input_from(Some("discord"), Some("111"))).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(seen(&state, child, &out).await, "hello-agent\n");
+    }
+
+    #[tokio::test]
+    async fn channel_denied_sender_gets_403_and_no_input_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, child, out) = goal_with_stdin(dir.path(), only(&["111"])).await;
+        let (st, body) = send(&state, input_from(Some("discord"), Some("999"))).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let msg = body["error"].as_str().unwrap();
+        assert!(msg.contains("999") && msg.contains("discord"), "{msg}");
+        assert!(
+            msg.contains("allowed_users") && msg.contains("daemon.toml"),
+            "{msg}"
+        );
+        assert_eq!(seen(&state, child, &out).await, "");
+    }
+
+    #[tokio::test]
+    async fn restricted_channel_without_sender_cannot_send_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, child, out) = goal_with_stdin(dir.path(), only(&["111"])).await;
+        let (st, body) = send(&state, input_from(Some("discord"), None)).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(body["error"].as_str().unwrap().contains("sender_id"));
+        assert_eq!(seen(&state, child, &out).await, "");
+    }
+
+    #[tokio::test]
+    async fn deny_list_beats_allow_list_on_goal_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let acl = ChannelAccessControl {
+            allowed_users: vec!["111".into()],
+            denied_users: vec!["111".into()],
+            ..Default::default()
+        };
+        let (state, child, out) = goal_with_stdin(dir.path(), acl).await;
+        let (st, _) = send(&state, input_from(Some("discord"), Some("111"))).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(seen(&state, child, &out).await, "");
+    }
+
+    #[tokio::test]
+    async fn goal_input_without_channel_fields_is_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, child, out) = goal_with_stdin(dir.path(), only(&["111"])).await;
+        let (st, _) = send(&state, input_from(None, None)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(seen(&state, child, &out).await, "hello-agent\n");
     }
 }

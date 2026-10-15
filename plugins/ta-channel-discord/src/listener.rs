@@ -514,7 +514,7 @@ async fn handle_message_create(
             author_name, text
         );
         let url = format!("{}/latest/input", goal_input_base_url);
-        let reply = forward_goal_input(http_client, &url, text).await;
+        let reply = forward_goal_input(http_client, &url, text, &sender).await;
         let _ = post_thread_reply(http_client, token, channel_id, msg_id, &reply).await;
         return;
     }
@@ -533,7 +533,7 @@ async fn handle_message_create(
                 author_name, goal_id, text
             );
             let url = format!("{}/{}/input", goal_input_base_url, goal_id);
-            let reply = forward_goal_input(http_client, &url, text).await;
+            let reply = forward_goal_input(http_client, &url, text, &sender).await;
             let _ = post_thread_reply(http_client, token, channel_id, msg_id, &reply).await;
             return;
         }
@@ -560,11 +560,16 @@ async fn handle_message_create(
     .await;
 }
 
-/// POST `{ "input": text }` to a goal input URL and return a Discord reply string.
-async fn forward_goal_input(client: &reqwest::Client, url: &str, text: &str) -> String {
+/// POST `{ "input": text }` plus the sender to a goal input URL and return a Discord reply string.
+async fn forward_goal_input(
+    client: &reqwest::Client,
+    url: &str,
+    text: &str,
+    sender: &Sender,
+) -> String {
     match client
         .post(url)
-        .json(&json!({ "input": text }))
+        .json(&goal_input_body(text, sender))
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -704,9 +709,10 @@ async fn handle_interaction_create(
                         }
                     };
 
+                    let sender = Sender::from_interaction(d);
                     let reply_text = match http_client
                         .post(&endpoint)
-                        .json(&json!({}))
+                        .json(&draft_action_body(&sender))
                         .timeout(Duration::from_secs(10))
                         .send()
                         .await
@@ -729,7 +735,16 @@ async fn handle_interaction_create(
                                 action,
                                 resp.status()
                             );
-                            format!(":x: Failed to {} draft: HTTP {}", action, resp.status())
+                            if resp.status() == reqwest::StatusCode::FORBIDDEN {
+                                format!(
+                                    ":no_entry: You are not permitted to {} drafts here. \
+                                     Ask an admin to add your id to `allowed_users` in \
+                                     `[channels.access_control]` in daemon.toml.",
+                                    action
+                                )
+                            } else {
+                                format!(":x: Failed to {} draft: HTTP {}", action, resp.status())
+                            }
                         }
                         Err(e) => {
                             eprintln!("[discord-listener] Cannot reach daemon: {}", e);
@@ -779,9 +794,10 @@ async fn handle_interaction_create(
 
             // POST answer to daemon's interaction endpoint.
             let respond_url = format!("{}/{}/respond", interactions_url, ta_interaction_id);
+            let sender = Sender::from_interaction(d);
             match http_client
                 .post(&respond_url)
-                .json(&json!({ "answer": choice, "source": "discord" }))
+                .json(&interaction_answer_body(choice, &sender))
                 .timeout(Duration::from_secs(10))
                 .send()
                 .await
@@ -938,15 +954,35 @@ impl Sender {
 /// JSON body for `POST /api/cmd`. `sender_id` is omitted (not sent as an empty
 /// string) when Discord gave none, so the daemon can refuse it on a restricted channel.
 fn command_body(full_command: &str, sender: &Sender) -> serde_json::Value {
-    let mut body = json!({
-        "command": full_command,
-        "channel": "discord",
-        "sender_roles": sender.roles,
-    });
+    with_sender(json!({ "command": full_command }), sender)
+}
+
+/// Add `channel`, `sender_id` and `sender_roles` to a request body so the
+/// daemon can apply `[channels.access_control]` (CR-09). Used for every route
+/// that acts on a person's behalf: commands, draft approve and deny, interaction
+/// answers and goal input. `sender_id` is left out when Discord gave none.
+fn with_sender(mut body: serde_json::Value, sender: &Sender) -> serde_json::Value {
+    body["channel"] = json!("discord");
+    body["sender_roles"] = json!(sender.roles);
     if let Some(id) = &sender.id {
         body["sender_id"] = json!(id);
     }
     body
+}
+
+/// JSON body for `POST /api/drafts/{id}/approve` and `/deny`.
+fn draft_action_body(sender: &Sender) -> serde_json::Value {
+    with_sender(json!({}), sender)
+}
+
+/// JSON body for `POST /api/interactions/{id}/respond`.
+fn interaction_answer_body(choice: &str, sender: &Sender) -> serde_json::Value {
+    with_sender(json!({ "answer": choice, "source": "discord" }), sender)
+}
+
+/// JSON body for `POST /api/goals/{id}/input`.
+fn goal_input_body(text: &str, sender: &Sender) -> serde_json::Value {
+    with_sender(json!({ "input": text }), sender)
 }
 
 async fn forward_command(
@@ -1204,6 +1240,61 @@ mod tests {
         assert_eq!(body["channel"], "discord");
         assert_eq!(body["sender_id"], "1234567890");
         assert_eq!(body["sender_roles"], json!(["r1", "r2"]));
+    }
+
+    fn sender_fixture() -> serde_json::Value {
+        json!({
+            "author": {"id": "1234567890"},
+            "member": {"roles": ["r1", "r2"]},
+        })
+    }
+
+    #[test]
+    fn draft_button_body_carries_sender_id_channel_and_roles() {
+        let body = draft_action_body(&Sender::from_message(&sender_fixture()));
+        assert_eq!(body["channel"], "discord");
+        assert_eq!(body["sender_id"], "1234567890");
+        assert_eq!(body["sender_roles"], json!(["r1", "r2"]));
+    }
+
+    #[test]
+    fn interaction_answer_body_carries_sender_and_keeps_answer() {
+        let body = interaction_answer_body("yes", &Sender::from_message(&sender_fixture()));
+        assert_eq!(body["answer"], "yes");
+        assert_eq!(body["source"], "discord");
+        assert_eq!(body["channel"], "discord");
+        assert_eq!(body["sender_id"], "1234567890");
+        assert_eq!(body["sender_roles"], json!(["r1", "r2"]));
+    }
+
+    #[test]
+    fn goal_input_body_carries_sender_and_keeps_input() {
+        let body = goal_input_body("go on", &Sender::from_message(&sender_fixture()));
+        assert_eq!(body["input"], "go on");
+        assert_eq!(body["channel"], "discord");
+        assert_eq!(body["sender_id"], "1234567890");
+        assert_eq!(body["sender_roles"], json!(["r1", "r2"]));
+    }
+
+    #[test]
+    fn unknown_sender_is_omitted_on_all_three_bodies_so_daemon_fails_closed() {
+        let none = Sender::from_message(&json!({}));
+        for body in [
+            draft_action_body(&none),
+            interaction_answer_body("yes", &none),
+            goal_input_body("x", &none),
+        ] {
+            assert!(body.get("sender_id").is_none(), "{body}");
+            assert_eq!(body["channel"], "discord");
+        }
+    }
+
+    #[test]
+    fn button_senders_come_from_the_interaction_payload() {
+        let click = json!({"member": {"user": {"id": "42"}, "roles": ["ops"]}});
+        let body = draft_action_body(&Sender::from_interaction(&click));
+        assert_eq!(body["sender_id"], "42");
+        assert_eq!(body["sender_roles"], json!(["ops"]));
     }
 
     #[test]

@@ -15,6 +15,24 @@ use serde::{Deserialize, Serialize};
 use crate::api::auth::{require_write, CallerIdentity};
 use crate::api::AppState;
 
+/// Who a channel plugin says is behind a request, flattened into the body of
+/// every route a plugin forwards a person's action to (CR-09). All three
+/// fields absent means a non-channel caller (CLI, web UI with its own token),
+/// which is not subject to channel access control; that is a deliberate
+/// boundary, not an oversight.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ChannelSender {
+    /// Channel plugin that forwarded the request (e.g. `"discord"`).
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Platform user id of the person who acted in `channel`.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Platform roles of the sender, where the platform provides them.
+    #[serde(default)]
+    pub sender_roles: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct CmdRequest {
     pub command: String,
@@ -766,23 +784,42 @@ fn unrestricted_warned() -> &'static std::sync::Mutex<std::collections::HashSet<
 }
 
 /// Enforce `[channels.access_control]` for a command forwarded by a channel
-/// plugin (CR-09). The plugin only reports the sender; the decision is made here.
-///
-/// - No `channel` and no `sender_id`: not a channel caller, unaffected.
-/// - Channel with no access control configured: allowed (warned once per start).
-/// - Restricted channel with no `sender_id`: refused (fail closed).
-/// - Otherwise `permits(sender_id, roles)` decides, and the outcome is audited.
+/// plugin (CR-09). Thin wrapper over [`enforce_channel_access_for`].
 fn enforce_channel_access(
     state: &AppState,
     body: &CmdRequest,
     command: &str,
 ) -> Result<(), Box<axum::response::Response>> {
-    let sender = body
+    let sender = ChannelSender {
+        channel: body.channel.clone(),
+        sender_id: body.sender_id.clone(),
+        sender_roles: body.sender_roles.clone(),
+    };
+    enforce_channel_access_for(state, &sender, command, "POST /api/cmd")
+}
+
+/// Enforce `[channels.access_control]` for any request a channel plugin
+/// forwards on a person's behalf (CR-09). The plugin only reports the sender;
+/// the decision is made here. `action` says what the sender tried (the command
+/// text, or e.g. `approve draft <id>`) and `route` is the HTTP route; both go
+/// in the error and the audit event.
+///
+/// - No `channel` and no `sender_id`: not a channel caller, unaffected.
+/// - Channel with no access control configured: allowed (warned once per start).
+/// - Restricted channel with no `sender_id`: refused (fail closed).
+/// - Otherwise `permits(sender_id, roles)` decides, and the outcome is audited.
+pub(crate) fn enforce_channel_access_for(
+    state: &AppState,
+    caller: &ChannelSender,
+    action: &str,
+    route: &str,
+) -> Result<(), Box<axum::response::Response>> {
+    let sender = caller
         .sender_id
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let channel = body
+    let channel = caller
         .channel
         .as_deref()
         .map(str::trim)
@@ -819,13 +856,13 @@ fn enforce_channel_access(
             ),
         ),
         Some(id) => {
-            if acl.permits(id, &body.sender_roles) {
+            if acl.permits(id, &caller.sender_roles) {
                 (true, String::new())
             } else {
                 (
                     false,
                     format!(
-                        "sender '{id}' is not permitted to run commands from channel '{channel}'. \
+                        "sender '{id}' is not permitted to act from channel '{channel}' ({route}: {action}). \
                          To allow them, add their id to allowed_users in [channels.access_control] \
                          in daemon.toml (and remove it from denied_users)"
                     ),
@@ -838,8 +875,9 @@ fn enforce_channel_access(
         state,
         &channel,
         sender,
-        &body.sender_roles,
-        command,
+        &caller.sender_roles,
+        action,
+        route,
         allowed,
     );
 
@@ -849,9 +887,10 @@ fn enforce_channel_access(
     tracing::warn!(
         channel = %channel,
         sender_id = sender.unwrap_or(""),
-        roles = ?body.sender_roles,
-        command = %command,
-        "channel command denied by access control"
+        roles = ?caller.sender_roles,
+        action = %action,
+        route = %route,
+        "channel request denied by access control"
     );
     Err(Box::new(
         (
@@ -874,6 +913,7 @@ fn write_channel_audit(
     sender: Option<&str>,
     roles: &[String],
     command: &str,
+    route: &str,
     allowed: bool,
 ) {
     let path = state.project_root.join(".ta").join("audit.jsonl");
@@ -888,6 +928,7 @@ fn write_channel_audit(
             "sender_id": sender,
             "sender_roles": roles,
             "command": command,
+            "route": route,
             "decision": decision,
         }));
     match ta_audit::AuditLog::open(&path) {
