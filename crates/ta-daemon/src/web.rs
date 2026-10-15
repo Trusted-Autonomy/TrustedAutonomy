@@ -50,6 +50,29 @@ struct WebState {
     apply_jobs: Arc<Mutex<HashMap<String, ApplyJobRecord>>>,
     /// Per-user state directory, where agent-context sightings are recorded.
     state_dir: PathBuf,
+    /// Daemon state, for `[channels.access_control]` (CR-09). `None` on the
+    /// legacy standalone `--web-port` listener, which has no daemon config and
+    /// serves the review UI only, so channel requests are not checked there.
+    access: Option<Arc<crate::api::AppState>>,
+}
+
+/// Check channel access control on a draft approve or deny (CR-09). Always
+/// `Ok` when there is no daemon state or the request carried no channel fields.
+fn check_draft_access(
+    state: &WebState,
+    sender: &crate::api::cmd::ChannelSender,
+    verb: &str,
+    id: &str,
+) -> Result<(), Box<axum::response::Response>> {
+    match &state.access {
+        Some(app) => crate::api::cmd::enforce_channel_access_for(
+            app,
+            sender,
+            &format!("{verb} draft {id}"),
+            &format!("POST /api/drafts/{{id}}/{verb}"),
+        ),
+        None => Ok(()),
+    }
 }
 
 // ── Apply jobs (v0.17.0.12.5) ───────────────────────────────────────
@@ -159,6 +182,9 @@ struct DenyRequest {
     /// even though none of them get applied from a denied draft.
     #[serde(default)]
     selected_uris: Option<Vec<String>>,
+    /// Set by channel plugins; checked against `[channels.access_control]`.
+    #[serde(flatten)]
+    sender: crate::api::cmd::ChannelSender,
 }
 
 fn default_deny_reason() -> String {
@@ -667,6 +693,9 @@ fn artifact_content_type(
 struct ApproveDraftRequest {
     #[serde(default)]
     selected_uris: Option<Vec<String>>,
+    /// Set by channel plugins; checked against `[channels.access_control]`.
+    #[serde(flatten)]
+    sender: crate::api::cmd::ChannelSender,
 }
 
 async fn approve_draft(
@@ -697,6 +726,10 @@ async fn approve_draft(
             }
         }
     };
+
+    if let Err(resp) = check_draft_access(&state, &approve_request.sender, "approve", &id) {
+        return *resp;
+    }
 
     // The named human when the call carried a verified assertion; the
     // credential holder when an agent client said it was acting (CR-03 item 6).
@@ -1011,6 +1044,10 @@ async fn deny_draft(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid UUID").into_response(),
     };
 
+    if let Err(resp) = check_draft_access(&state, &body.sender, "deny", &id) {
+        return *resp;
+    }
+
     let selected_uris = body.selected_uris;
     let claim = crate::actor_context::claim_for(&headers, proof.as_ref().map(|e| &e.0));
     let denier = crate::actor_context::actor_name(
@@ -1217,6 +1254,7 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
         memory_dir,
         apply_jobs: Arc::new(Mutex::new(HashMap::new())),
         state_dir: ta_credentials::human::user_state_dir(),
+        access: None,
     });
 
     build_web_routes(state)
@@ -1304,6 +1342,7 @@ pub fn build_full_router(
         memory_dir: app_state.memory_dir.clone(),
         apply_jobs: Arc::new(Mutex::new(HashMap::new())),
         state_dir: app_state.human_gate.state_dir().to_path_buf(),
+        access: Some(app_state.clone()),
     });
 
     // Build CORS layer using any extra origins from config (Studio URL, custom UIs).
@@ -2551,6 +2590,7 @@ mod tests {
             memory_dir: project.join(".ta").join("memory"),
             apply_jobs: Arc::new(Mutex::new(HashMap::new())),
             state_dir: state_dir.clone(),
+            access: Some(app_state.clone()),
         });
         let app = build_web_routes(web_state).layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -3668,5 +3708,193 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         keychain::reset();
+    }
+
+    // ── Channel access control on draft approve and deny (CR-09) ───────────
+
+    use crate::config::ChannelAccessControl;
+
+    struct AclWeb {
+        _dir: tempfile::TempDir,
+        packages_dir: PathBuf,
+        project: PathBuf,
+        app: Router,
+    }
+
+    fn acl_web(acl: ChannelAccessControl) -> AclWeb {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let packages_dir = project.join(".ta").join("pr_packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let mut config = crate::config::DaemonConfig::default();
+        config.channels.access_control = acl;
+        let app_state = Arc::new(crate::api::AppState::new(project.clone(), config));
+        let web_state = Arc::new(WebState {
+            pr_packages_dir: packages_dir.clone(),
+            memory_dir: project.join(".ta").join("memory"),
+            apply_jobs: Arc::new(Mutex::new(HashMap::new())),
+            state_dir: dir.path().join("human-state"),
+            access: Some(app_state),
+        });
+        AclWeb {
+            _dir: dir,
+            packages_dir,
+            project,
+            app: build_web_routes(web_state),
+        }
+    }
+
+    fn only(users: &[&str]) -> ChannelAccessControl {
+        ChannelAccessControl {
+            allowed_users: users.iter().map(|u| u.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::post(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// True while the draft has no Approved/Denied status object.
+    fn still_pending(packages_dir: &std::path::Path, id: Uuid) -> bool {
+        let text = std::fs::read_to_string(packages_dir.join(format!("{id}.json"))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        !v["status"].is_object()
+    }
+
+    fn draft_audit(project: &std::path::Path) -> Vec<serde_json::Value> {
+        ta_audit::AuditLog::read_all(project.join(".ta/audit.jsonl"))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.metadata)
+            .filter(|m| m["kind"] == "channel_access")
+            .collect()
+    }
+
+    async fn status_and_body(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn channel_permitted_sender_can_approve_and_deny() {
+        let w = acl_web(only(&["111"]));
+        let (a, d) = (Uuid::new_v4(), Uuid::new_v4());
+        write_draft_json(&w.packages_dir, a, serde_json::json!({}));
+        write_draft_json(&w.packages_dir, d, serde_json::json!({}));
+        let who = serde_json::json!({"channel": "discord", "sender_id": "111", "sender_roles": []});
+        let (st, _) = status_and_body(
+            &w.app,
+            json_post(&format!("/api/drafts/{a}/approve"), who.clone()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!still_pending(&w.packages_dir, a));
+        let (st, _) =
+            status_and_body(&w.app, json_post(&format!("/api/drafts/{d}/deny"), who)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!still_pending(&w.packages_dir, d));
+    }
+
+    #[tokio::test]
+    async fn channel_denied_sender_gets_403_and_draft_stays_pending() {
+        let w = acl_web(only(&["111"]));
+        let (a, d) = (Uuid::new_v4(), Uuid::new_v4());
+        write_draft_json(&w.packages_dir, a, serde_json::json!({}));
+        write_draft_json(&w.packages_dir, d, serde_json::json!({}));
+        let who = serde_json::json!({"channel": "discord", "sender_id": "999"});
+        for (verb, id) in [("approve", a), ("deny", d)] {
+            let (st, body) = status_and_body(
+                &w.app,
+                json_post(&format!("/api/drafts/{id}/{verb}"), who.clone()),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{verb}");
+            let msg = body["error"].as_str().unwrap();
+            assert!(msg.contains("999") && msg.contains("discord"), "{msg}");
+            assert!(
+                msg.contains("allowed_users") && msg.contains("daemon.toml"),
+                "{msg}"
+            );
+            assert!(still_pending(&w.packages_dir, id), "{verb} must not act");
+        }
+        let rows = draft_audit(&w.project);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r["decision"] == "denied"
+            && r["sender_id"] == "999"
+            && r["channel"] == "discord"));
+        let routes: Vec<_> = rows.iter().map(|r| r["route"].as_str().unwrap()).collect();
+        assert_eq!(
+            routes,
+            [
+                "POST /api/drafts/{id}/approve",
+                "POST /api/drafts/{id}/deny"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_channel_without_sender_cannot_approve() {
+        let w = acl_web(only(&["111"]));
+        let id = Uuid::new_v4();
+        write_draft_json(&w.packages_dir, id, serde_json::json!({}));
+        let (st, body) = status_and_body(
+            &w.app,
+            json_post(
+                &format!("/api/drafts/{id}/approve"),
+                serde_json::json!({"channel": "discord"}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(body["error"].as_str().unwrap().contains("sender_id"));
+        assert!(still_pending(&w.packages_dir, id));
+    }
+
+    #[tokio::test]
+    async fn deny_list_beats_allow_list_on_draft_approve() {
+        let w = acl_web(ChannelAccessControl {
+            allowed_users: vec!["111".into()],
+            denied_users: vec!["111".into()],
+            ..Default::default()
+        });
+        let id = Uuid::new_v4();
+        write_draft_json(&w.packages_dir, id, serde_json::json!({}));
+        let (st, _) = status_and_body(
+            &w.app,
+            json_post(
+                &format!("/api/drafts/{id}/approve"),
+                serde_json::json!({"channel": "discord", "sender_id": "111"}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(still_pending(&w.packages_dir, id));
+    }
+
+    #[tokio::test]
+    async fn request_without_channel_fields_is_unaffected_on_draft_routes() {
+        // CLI and web UI callers send neither field: the documented boundary.
+        let w = acl_web(only(&["111"]));
+        let id = Uuid::new_v4();
+        write_draft_json(&w.packages_dir, id, serde_json::json!({}));
+        let (st, _) = status_and_body(
+            &w.app,
+            json_post(&format!("/api/drafts/{id}/approve"), serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!still_pending(&w.packages_dir, id));
+        assert!(draft_audit(&w.project).is_empty());
     }
 }

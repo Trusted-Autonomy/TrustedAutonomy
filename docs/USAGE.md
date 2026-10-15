@@ -12176,7 +12176,7 @@ Rules follow deny-first precedence:
 2. If allowed lists are non-empty, only matching users/roles are permitted
 3. Empty allowed lists mean "allow all" (after deny checks)
 
-The daemon enforces these lists on every command a channel plugin forwards to it. The plugin only reports who sent the command (the channel name, the sender's platform user id and, where the platform provides them, their roles); the daemon decides. The Discord plugin sends all three. Slack and email do not forward commands to the daemon today, so they have no sender to check.
+The daemon enforces these lists on everything a channel plugin does on a person's behalf: commands, draft approve and deny buttons, interaction answer buttons, and goal input (`>text` or `ta input <goal> <text>`). The plugin only reports who acted (the channel name, the sender's platform user id and, where the platform provides them, their roles); the daemon decides. The Discord plugin sends all three on every one of those routes. Slack and email do not forward commands to the daemon today, so they have no sender to check.
 
 A per-plugin `[[channels.external]]` list whose `name` matches the channel (for example `name = "discord"`) overrides the global list for that channel. Everything else uses `[channels.access_control]`.
 
@@ -12189,12 +12189,13 @@ allowed_users = ["112233445566778899", "998877665544332211"]
 
 What happens:
 - A sender on the list runs the command as usual.
-- A sender who is not allowed gets a `403` and the command does not run. The Discord bot replies with an error naming the sender id and channel, and pointing at `allowed_users` in `[channels.access_control]`.
+- A sender who is not allowed gets a `403` and nothing happens: the command does not run, the draft stays pending, the question stays unanswered and no input reaches the agent. The error names the sender id and channel and points at `allowed_users` in `[channels.access_control]`. A barred person who clicks a draft button gets a reply saying they are not permitted.
 - A channel with any list configured refuses requests that arrive without a sender id, so a plugin that does not report senders cannot slip past it.
 - A channel with no lists configured stays open to everyone who can post there. The daemon logs a warning the first time it sees such a channel after each start.
-- CLI and web UI callers do not send a channel or sender id and are not affected by these lists. They are governed by their own tokens.
+- CLI and web UI callers do not send a channel or sender id and are not affected by these lists. They are governed by their own tokens. This is a boundary, not a gap: anyone holding a valid daemon token can leave the channel fields out, and closing that would need per-channel scoped tokens.
+- The standalone review UI listener (`--web-port`) has no daemon config and does not apply these lists. Point channel plugins at the main daemon address.
 
-Every channel command decision, allowed or denied, is appended to `.ta/audit.jsonl` with the channel, sender id, roles, command and decision. Denials are also logged as warnings.
+Every channel decision, allowed or denied, is appended to `.ta/audit.jsonl` with the channel, sender id, roles, the action, the route (for example `POST /api/drafts/{id}/approve`) and the decision. Denials are also logged as warnings.
 
 To find a Discord user id, open Discord, go to User Settings, Advanced, and turn on Developer Mode. Then right-click the person's name and choose Copy User ID. Role ids work the same way: Server Settings, Roles, right-click the role, Copy Role ID. Put role ids in `allowed_roles` or `denied_roles`.
 
