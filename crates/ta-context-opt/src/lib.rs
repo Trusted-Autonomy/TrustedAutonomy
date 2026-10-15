@@ -17,11 +17,16 @@
 //! [`OptimizersConfig`].
 
 mod config;
+mod hook;
 mod metrics;
 mod registry;
 mod store;
 
 pub use config::{OptimizersConfig, SlotSelection, USE_KEY_SUFFIX};
+pub use hook::{
+    measure_pair, parse_version, probe, sweep_orphans, Edition, HookInstall, HookInstaller,
+    HookProbe, HookRecord, HookRefusal, HookSpec, SweptInstall, INSTALLS_DIR,
+};
 pub use metrics::{estimate_tokens, OptMetrics};
 pub use registry::{
     ContextOptimizer, InputOptimizer, Optimizer, OptimizerInfo, OptimizerKind, OutputOptimizer,
@@ -52,14 +57,16 @@ pub enum OptError {
     #[error("invalid original reference '{0}': expected 64 lowercase hex characters")]
     BadReference(String),
     #[error(
-        "{slot} optimizer '{name}' is registered so its licence is on record, but TA has no \
-         integration for it yet, so selecting it would run with no optimization and report \
-         the same numbers as 'none'. Use one of: {usable}. See the optimizer slots section of \
-         docs/USAGE.md for what is wired"
+        "{slot} optimizer '{name}' cannot be used yet: {reason}. Selecting it anyway would run \
+         with no optimization and report the same numbers as 'none'. Use one of: {usable}. See \
+         the optimizer slots section of docs/USAGE.md"
     )]
     NotWired {
         slot: &'static str,
         name: String,
+        reason: String,
         usable: String,
     },
+    #[error("invalid [optimizers.input.{name}] table: {detail}. Fields: binary, min_version, edition, licence, install, verify, uninstall, touches, edition_probe, full_markers, sanity_marker, allow_busl")]
+    BadSpec { name: String, detail: String },
 }

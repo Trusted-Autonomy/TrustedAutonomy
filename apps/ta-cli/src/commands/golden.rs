@@ -548,9 +548,13 @@ fn replay(
     let store = GoldenStore::new(&config.workspace_root);
     let entry = store.load_entry(id)?;
     let overrides = parse_overrides(set)?;
+    // The project's `[optimizers.input.<name>]` specs apply, so `--set optimizers.input.use=rtk`
+    // is judged by exactly the spec the replayed goal will install with.
+    let project_cfg = super::compression::load_optimizers(&config.workspace_root)
+        .with_overrides(Some(&overrides));
     ta_context_opt::OptimizersConfig::validate_overrides(
         &overrides,
-        &ta_context_opt::Registry::builtin(),
+        &ta_context_opt::Registry::builtin().with_config(&project_cfg)?,
     )?;
     if let Some(cap) = max_usd {
         if !(cap.is_finite() && cap > 0.0) {

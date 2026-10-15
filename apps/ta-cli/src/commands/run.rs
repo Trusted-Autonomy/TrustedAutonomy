@@ -6782,6 +6782,11 @@ fn launch_agent_via_runtime(
     // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
     inject_compression_url(&mut env, config, staging_path, goal_id);
 
+    // Hook-kind input optimizer (for example rtk-oss): installed into THIS goal's staging copy
+    // only, removed when `_input_hook` drops at the end of this function, and swept on the next
+    // start if TA dies first. A hook that cannot be verified leaves the goal unoptimised.
+    let _input_hook = install_input_hook(config, staging_path, goal_id);
+
     // Sandbox plan (v0.17.12.6). Settings come from the REAL project root (staging
     // has no `.ta/`), the trusted policy from the daemon-only state dir. A
     // refused decision stops the launch before anything is spawned.
@@ -10661,19 +10666,10 @@ fn compression_base_url(
         return None;
     }
 
-    // `[optimizers.input] use` (or a replay's `--set optimizers.input.use=...`)
-    // that names a non-proxy optimizer (`none`, `rtk`) means no proxy for this run.
+    // `[optimizers.input] use` (or a replay's `--set optimizers.input.use=...`) that names a
+    // non-proxy optimizer (`none`, a hook kind such as `rtk`) means no proxy for this run. Hook
+    // kinds are installed and reported by `install_input_hook`.
     let effective = optimizers.with_overrides(overrides);
-    if let Some(name) = effective.input.use_.as_deref() {
-        // A registered optimizer TA has not integrated (`rtk`) would otherwise run unoptimised
-        // and look identical to `none`. The goal still runs; the user is told once, plainly.
-        if let Err(e) =
-            ta_context_opt::Registry::builtin().ensure_wired(ta_context_opt::Slot::Input, name)
-        {
-            tracing::warn!(agent = %agent_name, optimizer = %name, error = %e, "selected optimizer is not integrated; running without it");
-            eprintln!("[warn] {e}. This goal runs with no input optimization.");
-        }
-    }
     if let Some(false) = effective.input_wants_proxy() {
         tracing::info!(
             agent = %agent_name,
@@ -10717,6 +10713,114 @@ fn compression_base_url(
     }
 
     None
+}
+
+/// Install the selected hook-kind input optimizer for one goal and report the outcome.
+///
+/// Generic over `ta_context_opt::HookSpec`: nothing here knows which optimizer it is. Returns the
+/// guard that undoes the install when dropped, or `None` when the input slot does not select a
+/// hook-kind optimizer. A hook that cannot be installed or verified yields an inactive guard, the
+/// goal runs with no optimizer, and the goal output and the record say so.
+fn install_input_hook(
+    config: &AgentLaunchConfig,
+    staging_path: &std::path::Path,
+    goal_id: uuid::Uuid,
+) -> Option<ta_context_opt::HookInstall> {
+    use ta_context_opt::{HookInstaller, HookRecord, OptimizerKind, Registry, Slot};
+    let root = project_root_from_staging(staging_path)?;
+    let agent_name = config.name.as_deref().unwrap_or("claude-code");
+
+    // Undo installs left by a TA that crashed or was killed before it could clean up.
+    for s in ta_context_opt::sweep_orphans(&root) {
+        eprintln!(
+            "[optimizer] removed an orphaned hook install from goal {} ({} file(s) restored in {})",
+            s.goal_id, s.restored, s.staging
+        );
+        tracing::warn!(goal = %s.goal_id, staging = %s.staging, "swept orphaned optimizer hook install");
+    }
+
+    let (_, optimizers) = load_compression_section(&root);
+    let effective = optimizers.with_overrides(goal_experiment_overrides(&root, goal_id).as_ref());
+    let name = effective.input.use_.clone()?;
+    let registry = match Registry::builtin().with_config(&effective) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[warn] {e}. This goal runs with no input optimization.");
+            return None;
+        }
+    };
+    let is_hook = registry
+        .infos(Slot::Input)
+        .iter()
+        .any(|i| i.name == name && i.kind == OptimizerKind::Hook);
+    if !is_hook {
+        return None;
+    }
+    let record_path = root
+        .join(".ta")
+        .join("compression")
+        .join(format!("hook-{goal_id}.json"));
+    let write_record = |rec: &HookRecord| {
+        if let Some(dir) = record_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match serde_json::to_vec_pretty(rec) {
+            Ok(b) => {
+                if let Err(e) = std::fs::write(&record_path, b) {
+                    tracing::warn!(path = %record_path.display(), error = %e, "could not write optimizer record");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not serialise optimizer record"),
+        }
+    };
+    let Some(spec) = registry.hook_spec(Slot::Input, &name).cloned() else {
+        let rec = HookRecord::none(
+            &name,
+            &Default::default(),
+            &ta_context_opt::HookRefusal::NoSpec(name.clone()).to_string(),
+        );
+        eprintln!("[optimizer] {}", rec.summary);
+        write_record(&rec);
+        return None;
+    };
+    if !spec.agents.is_empty() && !spec.agents.iter().any(|a| a == agent_name) {
+        let rec = HookRecord::none(
+            &name,
+            &spec,
+            &format!(
+                "its install line is written for {} and this goal uses '{agent_name}'",
+                spec.agents.join(", ")
+            ),
+        );
+        eprintln!("[optimizer] {}", rec.summary);
+        write_record(&rec);
+        return None;
+    }
+    let guard = HookInstaller {
+        name: &name,
+        spec: &spec,
+    }
+    .install(&root, staging_path, &goal_id.to_string());
+    let rec = &guard.record;
+    if rec.active {
+        eprintln!(
+            "[optimizer] {} {} active for this goal (edition {:?}, licence {}{}); removed when the goal ends",
+            name,
+            rec.version.as_deref().unwrap_or("?"),
+            rec.edition,
+            rec.licence,
+            if rec.allow_busl { ", allow_busl OPT-IN" } else { "" }
+        );
+        tracing::info!(goal = %goal_id, optimizer = %name, version = ?rec.version, "optimizer hook installed");
+    } else {
+        eprintln!(
+            "[optimizer] {}. This goal runs with no input optimization.",
+            rec.summary
+        );
+        tracing::warn!(goal = %goal_id, optimizer = %name, summary = %rec.summary, "optimizer hook not active");
+    }
+    write_record(rec);
+    Some(guard)
 }
 
 /// Inject `ANTHROPIC_BASE_URL` into the agent env when compression is active.
@@ -17461,5 +17565,159 @@ mod optimizer_slot_tests {
             None
         );
         assert!(goal_experiment_overrides(dir.path(), uuid::Uuid::new_v4()).is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod input_hook_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A project root with `.ta/daemon.toml` selecting a fake rtk, a staging copy under it, and a
+    /// stand-in for the user's home that must never change.
+    struct Fx {
+        _t: tempfile::TempDir,
+        root: std::path::PathBuf,
+        staging: std::path::PathBuf,
+        home: std::path::PathBuf,
+        goal: uuid::Uuid,
+    }
+
+    fn fx(verify_ok: bool, select: bool) -> Fx {
+        let t = tempfile::tempdir().unwrap();
+        let goal = uuid::Uuid::new_v4();
+        let root = t.path().join("proj");
+        let staging = root.join(".ta/staging").join(goal.to_string());
+        let home = t.path().join("home");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/settings.json"), "{\"mine\":1}").unwrap();
+        std::fs::write(staging.join("CLAUDE.md"), "ctx\n").unwrap();
+        let bin = t.path().join("rtk");
+        // Real rtk-oss answers `rtk hook check "git status"` with `rtk git status` (exit 0) when its
+        // rewrite is available. The fake mirrors that and carries no `init` verb at all, because TA
+        // never runs `rtk init` (project scope does not install the hook, `-g` writes the user's home).
+        let check = if verify_ok {
+            "echo 'rtk git status'"
+        } else {
+            "exit 1"
+        };
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'rtk 0.23.0';; --help) echo 'init gain';; hook) case \"$2\" in check) {check};; esac;; esac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let use_line = if select { "use = \"rtk\"\n" } else { "" };
+        std::fs::write(
+            root.join(".ta/daemon.toml"),
+            format!(
+                "[optimizers.input]\n{use_line}\n[optimizers.input.rtk]\nbinary = \"{}\"\n",
+                bin.display()
+            ),
+        )
+        .unwrap();
+        Fx {
+            _t: t,
+            root,
+            staging,
+            home,
+            goal,
+        }
+    }
+
+    fn record(f: &Fx) -> serde_json::Value {
+        let p = f.root.join(format!(".ta/compression/hook-{}.json", f.goal));
+        serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_verified_hook_is_active_for_the_goal_and_gone_afterwards() {
+        let f = fx(true, true);
+        let cfg = builtin_agent_config("claude-code");
+        let home_before = std::fs::read(f.home.join(".claude/settings.json")).unwrap();
+        let guard = install_input_hook(&cfg, &f.staging, f.goal).expect("rtk selected");
+        assert!(guard.active(), "{}", guard.record.summary);
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(f.staging.join(".claude/settings.json")).expect("settings written"),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "rtk hook claude",
+            "{settings}"
+        );
+        let rec = record(&f);
+        assert_eq!(rec["active"], true);
+        assert_eq!(rec["version"], "0.23.0");
+        assert_eq!(rec["edition"], "oss");
+        assert_eq!(rec["allow_busl"], false);
+        drop(guard);
+        assert!(
+            !f.staging.join(".claude").exists(),
+            "hook removed from staging"
+        );
+        assert_eq!(
+            std::fs::read(f.home.join(".claude/settings.json")).unwrap(),
+            home_before
+        );
+    }
+
+    #[test]
+    fn an_unverified_hook_runs_the_goal_unoptimised_and_says_so_in_the_record() {
+        let f = fx(false, true);
+        let cfg = builtin_agent_config("claude-code");
+        let guard = install_input_hook(&cfg, &f.staging, f.goal).expect("rtk selected");
+        assert!(!guard.active());
+        let rec = record(&f);
+        assert_eq!(rec["active"], false);
+        assert_eq!(rec["optimizer"], "none");
+        assert!(
+            rec["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("optimizer: none (rtk hook not verified:"),
+            "{rec}"
+        );
+        assert!(
+            !f.staging.join(".claude").exists(),
+            "failed install left nothing behind"
+        );
+    }
+
+    #[test]
+    fn replay_override_selects_the_same_path_and_an_unselected_slot_installs_nothing() {
+        let f = fx(true, false);
+        let cfg = builtin_agent_config("claude-code");
+        assert!(install_input_hook(&cfg, &f.staging, f.goal).is_none());
+        assert!(!f.staging.join(".claude").exists());
+        // `ta golden replay --set optimizers.input.use=rtk` reaches the goal as an override.
+        let store = GoalRunStore::new(f.root.join(".ta/goals")).unwrap();
+        let mut g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            f.staging.clone(),
+            f.root.join("store"),
+        );
+        g.goal_run_id = f.goal;
+        g.experiment_overrides = Some(serde_json::json!({"optimizers.input.use": "rtk"}));
+        store.save(&g).unwrap();
+        let guard = install_input_hook(&cfg, &f.staging, f.goal).expect("override selects rtk");
+        assert!(guard.active(), "{}", guard.record.summary);
+    }
+
+    #[test]
+    fn a_goal_for_another_agent_does_not_receive_a_claude_code_hook() {
+        let f = fx(true, true);
+        let cfg = builtin_agent_config("codex");
+        let guard = install_input_hook(&cfg, &f.staging, f.goal);
+        assert!(guard.is_none());
+        assert!(record(&f)["summary"]
+            .as_str()
+            .unwrap()
+            .contains("claude-code"));
+        assert!(!f.staging.join(".claude").exists());
     }
 }

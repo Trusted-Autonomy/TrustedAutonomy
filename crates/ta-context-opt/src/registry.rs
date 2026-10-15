@@ -2,10 +2,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{estimate_tokens, OptError, OptMetrics, OptimizersConfig, OriginalStore};
+use crate::{estimate_tokens, HookSpec, OptError, OptMetrics, OptimizersConfig, OriginalStore};
 
 /// The three places an optimizer can sit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Slot {
     Input,
@@ -55,6 +55,11 @@ pub trait Optimizer: Send + Sync {
     /// Cheap probe. Must never start a visible window or a long-running
     /// process: a PATH lookup, not a spawn.
     fn available(&self) -> bool;
+
+    /// For hook-kind optimizers: the default spec TA ships. Config may overlay it.
+    fn hook_spec(&self) -> Option<HookSpec> {
+        None
+    }
 }
 
 /// Acts on tool and command output, files and logs before they enter context.
@@ -134,6 +139,8 @@ struct OutOfBand {
     licence: &'static str,
     /// Binary probed on PATH; `None` for a user-supplied proxy.
     binary: Option<&'static str>,
+    /// Default spec for a hook-kind entry. The hook lifecycle is generic over this data.
+    hook: Option<fn() -> HookSpec>,
 }
 
 impl Optimizer for OutOfBand {
@@ -148,17 +155,21 @@ impl Optimizer for OutOfBand {
     fn available(&self) -> bool {
         self.binary.is_none_or(|b| which::which(b).is_ok())
     }
+    fn hook_spec(&self) -> Option<HookSpec> {
+        self.hook.map(|f| f())
+    }
 }
 
 impl OutOfBand {
-    /// A hook-kind optimizer (RTK) needs TA to install the hook into the agent, and TA does not
-    /// yet. `apply` therefore refuses instead of returning the input unchanged with a
-    /// `lossless` metrics row for work that never happened.
+    /// A hook-kind optimizer works inside the agent, so TA never hands it text. `apply` refuses
+    /// instead of returning the input unchanged with a `lossless` metrics row for work that never
+    /// happened. Hook results are recorded by the goal's install record and `measure_pair`.
     fn refuse_if_hook(&self, slot: &'static str) -> Result<(), OptError> {
         if self.kind == OptimizerKind::Hook {
             return Err(OptError::NotWired {
                 slot,
                 name: self.name.to_string(),
+                reason: "a hook optimizer acts inside the agent and does not transform text passed to apply".into(),
                 usable: String::new(),
             });
         }
@@ -185,6 +196,7 @@ pub struct Registry {
     input: Vec<Box<dyn InputOptimizer>>,
     context: Vec<Box<dyn ContextOptimizer>>,
     output: Vec<Box<dyn OutputOptimizer>>,
+    specs: std::collections::BTreeMap<(Slot, String), HookSpec>,
 }
 
 impl Registry {
@@ -200,18 +212,21 @@ impl Registry {
                     kind: OptimizerKind::Hook,
                     licence: "Apache-2.0 (rtk-oss core; full rtk and rtk-proxy add BUSL-1.1 parts)",
                     binary: Some("rtk"),
+                    hook: Some(HookSpec::rtk_oss),
                 }),
                 Box::new(OutOfBand {
                     name: "headroom",
                     kind: OptimizerKind::Proxy,
                     licence: "Apache-2.0",
                     binary: Some("headroom"),
+                    hook: None,
                 }),
                 Box::new(OutOfBand {
                     name: "proxy",
                     kind: OptimizerKind::Proxy,
                     licence: "see the configured [compression.plugin] command",
                     binary: None,
+                    hook: None,
                 }),
             ],
             context: vec![
@@ -221,10 +236,73 @@ impl Registry {
                     kind: OptimizerKind::InProcess,
                     licence: "n/a (built into the agent)",
                     binary: None,
+                    hook: None,
                 }),
             ],
             output: vec![Box::new(NoneOptimizer)],
+            specs: Default::default(),
         }
+        .seed_specs()
+    }
+
+    fn seed_specs(mut self) -> Self {
+        for slot in [Slot::Input, Slot::Context, Slot::Output] {
+            let found: Vec<(String, HookSpec)> = match slot {
+                Slot::Input => self
+                    .input
+                    .iter()
+                    .map(|o| (o.info().name, o.hook_spec()))
+                    .collect::<Vec<_>>(),
+                Slot::Context => self
+                    .context
+                    .iter()
+                    .map(|o| (o.info().name, o.hook_spec()))
+                    .collect(),
+                Slot::Output => self
+                    .output
+                    .iter()
+                    .map(|o| (o.info().name, o.hook_spec()))
+                    .collect(),
+            }
+            .into_iter()
+            .filter_map(|(n, s)| s.map(|s| (n, s)))
+            .collect();
+            for (n, s) in found {
+                self.specs.insert((slot, n), s);
+            }
+        }
+        self
+    }
+
+    /// Overlay `[optimizers.<slot>.<name>]` hook tables from config onto the shipped specs.
+    /// A table naming an optimizer that is not a registered hook kind is ignored (it may be
+    /// another slot's setting); a malformed table is an error naming the table.
+    pub fn with_config(mut self, cfg: &OptimizersConfig) -> Result<Self, OptError> {
+        for (slot, sel) in [
+            (Slot::Input, &cfg.input),
+            (Slot::Context, &cfg.context),
+            (Slot::Output, &cfg.output),
+        ] {
+            let names: Vec<String> = sel.extra.keys().cloned().collect();
+            for name in names {
+                let is_hook = self
+                    .infos(slot)
+                    .iter()
+                    .any(|i| i.name == name && i.kind == OptimizerKind::Hook);
+                if !is_hook {
+                    continue;
+                }
+                if let Some(over) = sel.hook_override(&name)? {
+                    self.specs.entry((slot, name)).or_default().overlay(&over);
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// The effective spec (shipped default plus config) for a hook optimizer.
+    pub fn hook_spec(&self, slot: Slot, name: &str) -> Option<&HookSpec> {
+        self.specs.get(&(slot, name.to_string()))
     }
 
     pub fn names(&self, slot: Slot) -> Vec<String> {
@@ -271,25 +349,36 @@ impl Registry {
             .ok_or_else(|| self.unknown(Slot::Output, name))
     }
 
-    /// Refuse a name that is registered but has no TA integration (hook kind today). Without
-    /// this, `use = "rtk"` would run unoptimised and report the same numbers as `none`, so an
-    /// A/B replay arm would conclude the optimizer saves nothing. Unknown names are left to the
-    /// plain lookup so the two failures keep distinct messages.
+    /// Refuse a name that cannot do its job. For a hook kind that means: its spec is present, the
+    /// binary is on PATH, the version meets the minimum and the edition is acceptable (see
+    /// [`crate::probe`]). Without this, `use = "rtk"` would run unoptimised and report the same
+    /// numbers as `none`, so an A/B replay arm would conclude the optimizer saves nothing.
+    /// Unknown names are left to the plain lookup so the two failures keep distinct messages.
     pub fn ensure_wired(&self, slot: Slot, name: &str) -> Result<(), OptError> {
         let infos = self.infos(slot);
-        match infos.iter().find(|i| i.name == name) {
-            Some(i) if i.kind == OptimizerKind::Hook => Err(OptError::NotWired {
-                slot: slot.name(),
-                name: name.to_string(),
-                usable: infos
-                    .iter()
-                    .filter(|i| i.kind != OptimizerKind::Hook)
-                    .map(|i| i.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            }),
-            _ => Ok(()),
+        let Some(info) = infos.iter().find(|i| i.name == name) else {
+            return Ok(());
+        };
+        if info.kind != OptimizerKind::Hook {
+            return Ok(());
         }
+        let refuse = |reason: String| OptError::NotWired {
+            slot: slot.name(),
+            name: name.to_string(),
+            reason,
+            usable: infos
+                .iter()
+                .filter(|i| i.kind != OptimizerKind::Hook)
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let Some(spec) = self.hook_spec(slot, name) else {
+            return Err(refuse(crate::HookRefusal::NoSpec(name.into()).to_string()));
+        };
+        crate::probe(spec, name)
+            .map(|_| ())
+            .map_err(|e| refuse(e.to_string()))
     }
 
     /// The optimizer a config selects for the input slot (`none` when unset).
@@ -490,41 +579,122 @@ mod tests {
             .unwrap();
     }
 
+    fn rtk_cfg(binary: &std::path::Path) -> OptimizersConfig {
+        serde_json::from_value(serde_json::json!({
+            "input": {"rtk": {"binary": binary.display().to_string()}}
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn a_registered_but_unintegrated_optimizer_is_refused_not_silently_ignored() {
-        let r = Registry::builtin();
+    fn a_hook_optimizer_without_a_usable_binary_is_refused_not_silently_ignored() {
+        // Point the spec at a path that does not exist so the result never depends on whether
+        // this machine has a real rtk.
+        let dir = tempfile::tempdir().unwrap();
+        let r = Registry::builtin()
+            .with_config(&rtk_cfg(&dir.path().join("no-such-rtk")))
+            .unwrap();
+        let ov = serde_json::json!({"optimizers.input.use": "rtk"});
         // Replay validation fails before a replay spends tokens on an arm that would run
         // unoptimised and be reported identically to `none`.
-        let ov = serde_json::json!({"optimizers.input.use": "rtk"});
         let err = OptimizersConfig::validate_overrides(&ov, &r)
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("rtk") && err.contains("no integration"),
+            err.contains("rtk")
+                && err.contains("not found on PATH")
+                && err.contains("brew install rtk-ai/tap/rtk-oss"),
             "{err}"
         );
         assert!(
             err.contains("none, headroom, proxy"),
             "the message must name what can be used: {err}"
         );
-        // The config path refuses the same way, for every slot that selects.
         let sel = OptimizersConfig::default().with_overrides(Some(&ov));
         assert!(matches!(
             r.select_input(&sel),
             Err(crate::OptError::NotWired { .. })
         ));
         // `apply` cannot be used to fabricate a metrics row for work that never happened.
-        let dir = tempfile::tempdir().unwrap();
-        let store = OriginalStore::new(dir.path());
-        let rtk = r.input("rtk").unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(store_dir.path());
         assert!(matches!(
-            rtk.apply("some command output", &store),
+            r.input("rtk").unwrap().apply("some command output", &store),
             Err(crate::OptError::NotWired { .. })
         ));
-        // It is still registered, so its licence stays on record for `ta compression status`.
-        assert!(rtk.info().licence.contains("BUSL-1.1"));
-        // A wired optimizer and an unknown name keep their own behaviour.
+        // Its licence stays on record for `ta compression status`.
+        assert!(r.input("rtk").unwrap().info().licence.contains("BUSL-1.1"));
         assert!(r.ensure_wired(Slot::Input, "headroom").is_ok());
         assert!(r.ensure_wired(Slot::Input, "nonesuch").is_ok());
+    }
+
+    #[test]
+    fn a_hook_with_no_spec_is_refused() {
+        let mut r = Registry::builtin();
+        r.specs.clear();
+        let err = r.ensure_wired(Slot::Input, "rtk").unwrap_err().to_string();
+        assert!(
+            err.contains("no spec") && err.contains("[optimizers.input.rtk]"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_wired_rtk_flips_to_accepting_only_when_spec_binary_and_version_are_satisfied() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("rtk");
+        let script = |version: &str, help: &str| {
+            std::fs::write(
+                &bin,
+                format!("#!/bin/sh\ncase \"$1\" in --version) echo 'rtk {version}';; --help) echo '{help}';; esac\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let reg = || Registry::builtin().with_config(&rtk_cfg(&bin)).unwrap();
+        // binary missing
+        assert!(reg().ensure_wired(Slot::Input, "rtk").is_err());
+        // too old
+        script("0.22.0", "init");
+        assert!(reg().ensure_wired(Slot::Input, "rtk").is_err());
+        // full edition
+        script("0.23.0", "init pipeline");
+        assert!(reg().ensure_wired(Slot::Input, "rtk").is_err());
+        // unknown edition
+        script("0.23.0", "nothing useful");
+        assert!(reg().ensure_wired(Slot::Input, "rtk").is_err());
+        // all satisfied
+        script("0.23.0", "init gain");
+        reg().ensure_wired(Slot::Input, "rtk").unwrap();
+        let sel = OptimizersConfig::default()
+            .with_overrides(Some(&serde_json::json!({"optimizers.input.use": "rtk"})));
+        assert_eq!(reg().select_input(&sel).unwrap().info().name, "rtk");
+    }
+
+    #[test]
+    fn config_overlay_replaces_only_the_fields_it_names_and_bad_tables_are_reported() {
+        let cfg: OptimizersConfig = serde_json::from_value(serde_json::json!({
+            "input": {"use": "rtk", "rtk": {"min_version": "9.9.9", "install": ["x"]}}
+        }))
+        .unwrap();
+        let r = Registry::builtin().with_config(&cfg).unwrap();
+        let spec = r.hook_spec(Slot::Input, "rtk").unwrap();
+        assert_eq!(spec.min_version, "9.9.9");
+        assert_eq!(spec.install, vec!["x".to_string()]);
+        assert_eq!(spec.binary, "rtk");
+        assert_eq!(spec.edition, "oss");
+        assert!(!spec.allow_busl);
+        let bad: OptimizersConfig = serde_json::from_value(serde_json::json!({
+            "input": {"rtk": {"install": "not-a-list"}}
+        }))
+        .unwrap();
+        let e = Registry::builtin()
+            .with_config(&bad)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("[optimizers.input.rtk]"), "{e}");
     }
 }
