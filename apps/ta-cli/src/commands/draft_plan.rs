@@ -507,7 +507,10 @@ mod tests {
         assert!(unmatched_checked_failure(&reports).is_none());
         assert_eq!(m.rewritten.len(), 4);
         assert_eq!(m.new_phases.len(), 1, "{:?}", m.new_phases);
-        assert!(merged.contains("1. [x] Reviewer rewrite of item 1\n"));
+        // A Windows checkout of PLAN.md has CRLF line endings, which the carried line keeps.
+        assert!(merged
+            .replace("\r\n", "\n")
+            .contains("1. [x] Reviewer rewrite of item 1\n"));
         assert!(oracle_block(&merged, added).is_some(), "phase .24 landed");
         let (final_plan, outcomes) = finalize_phases(&merged, &ids);
         assert!(matches!(outcomes[0].result, PhaseResult::MarkedDone));
