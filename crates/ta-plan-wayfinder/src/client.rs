@@ -135,6 +135,52 @@ pub enum WayfinderClientError {
     },
 }
 
+/// Failure of a read-only `get_*_json` call. Each variant names the route
+/// (path and query only, never the token) and what to do about it; 401, 403,
+/// 404 and timeouts stay distinct so a caller can tell a dead credential from
+/// a missing role, a wrong id, and a slow server.
+#[derive(Debug, thiserror::Error)]
+pub enum WayfinderReadError {
+    #[error(
+        "Wayfinder returned 401 Unauthorized for GET {route}: the service-account token is \
+         unknown or revoked. Re-issue it in Wayfinder's Settings and store it again with \
+         `ta credential add`."
+    )]
+    Unauthorized { route: String },
+    #[error(
+        "Wayfinder returned 403 Forbidden for GET {route}: the service account lacks \
+         `project:read` on this project, or the project is outside its org. Grant the role in \
+         Wayfinder's Settings, or check `project_id` and `org_id` under [plan.wayfinder] in \
+         .ta/workflow.toml."
+    )]
+    Forbidden { route: String },
+    #[error(
+        "Wayfinder returned 404 Not Found for GET {route}: the id in that route does not exist \
+         in this project (or the project id is wrong). List first to find a valid id, and check \
+         `project_id` under [plan.wayfinder] in .ta/workflow.toml."
+    )]
+    NotFound { route: String },
+    #[error(
+        "Wayfinder returned unexpected status {status} for GET {route}. Check that Wayfinder is \
+         healthy and that `base_url` under [plan.wayfinder] in .ta/workflow.toml points at it."
+    )]
+    UnexpectedStatus {
+        route: String,
+        status: reqwest::StatusCode,
+    },
+    #[error(
+        "GET {route} to Wayfinder timed out after {timeout:?}. Wayfinder may be down or \
+         overloaded: retry shortly, and check that `base_url` under [plan.wayfinder] in \
+         .ta/workflow.toml is reachable."
+    )]
+    Timeout { route: String, timeout: Duration },
+    #[error(
+        "request GET {route} to Wayfinder failed: {message}. Check that `base_url` under \
+         [plan.wayfinder] in .ta/workflow.toml is correct and reachable."
+    )]
+    Request { route: String, message: String },
+}
+
 pub struct WayfinderClient {
     http: reqwest::blocking::Client,
     base_url: Url,
@@ -145,21 +191,123 @@ pub struct WayfinderClient {
     // ever use it. `WayfinderPlanConfig` still validates it's non-empty, as
     // a sanity check that the config was filled in deliberately.
     project_id: String,
+    // Carried only for the org-scoped read route `get_org_json` (the KPI
+    // catalogue has no project-scoped REST route). The plan-sync methods
+    // above never use it.
+    org_id: String,
     secret: crate::secret::RedactedSecret,
+    timeout: Duration,
 }
 
 impl WayfinderClient {
     pub fn new(config: &WayfinderPlanConfig) -> anyhow::Result<Self> {
+        Self::new_with_timeout(config, REQUEST_TIMEOUT)
+    }
+
+    /// `new` with an explicit per-request timeout (the read tools report it
+    /// in their timeout error; tests shorten it).
+    pub fn new_with_timeout(
+        config: &WayfinderPlanConfig,
+        timeout: Duration,
+    ) -> anyhow::Result<Self> {
         let http = reqwest::blocking::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .build()
             .context("failed to build the Wayfinder HTTP client")?;
         Ok(Self {
             http,
             base_url: config.base_url.clone(),
             project_id: config.project_id.clone(),
+            org_id: config.org_id.clone(),
             secret: config.secret.clone(),
+            timeout,
         })
+    }
+
+    /// The project every `get_project_json` call is scoped to.
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    /// `GET /api/projects/:project_id/<segments...>[?query]`, returning the
+    /// JSON body. Read-only and single-attempt. The project id is fixed at
+    /// construction; a caller cannot name another one.
+    pub fn get_project_json(
+        &self,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<serde_json::Value, WayfinderReadError> {
+        let mut url = self.project_url(segments);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
+        self.get_json(url)
+    }
+
+    /// `GET /api/orgs/:org_id/<segments...>[?query]`. Only for data that has
+    /// no project-scoped route (the KPI catalogue); callers must filter the
+    /// result to their own project.
+    pub fn get_org_json(
+        &self,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<serde_json::Value, WayfinderReadError> {
+        let mut url = self.base_url.clone();
+        {
+            let mut path = url
+                .path_segments_mut()
+                .expect("base_url is validated to be a path-having http(s) URL");
+            path.push("api").push("orgs").push(&self.org_id);
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
+        self.get_json(url)
+    }
+
+    fn get_json(&self, url: Url) -> Result<serde_json::Value, WayfinderReadError> {
+        let route = match url.query() {
+            Some(q) => format!("{}?{}", url.path(), q),
+            None => url.path().to_string(),
+        };
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(self.secret.expose_secret())
+            .send()
+            .map_err(|source| {
+                if source.is_timeout() {
+                    WayfinderReadError::Timeout {
+                        route: route.clone(),
+                        timeout: self.timeout,
+                    }
+                } else {
+                    WayfinderReadError::Request {
+                        route: route.clone(),
+                        message: source.without_url().to_string(),
+                    }
+                }
+            })?;
+        let status = response.status();
+        match status {
+            s if s == reqwest::StatusCode::UNAUTHORIZED => {
+                Err(WayfinderReadError::Unauthorized { route })
+            }
+            s if s == reqwest::StatusCode::FORBIDDEN => {
+                Err(WayfinderReadError::Forbidden { route })
+            }
+            s if s == reqwest::StatusCode::NOT_FOUND => Err(WayfinderReadError::NotFound { route }),
+            s if !s.is_success() => Err(WayfinderReadError::UnexpectedStatus { route, status }),
+            _ => response
+                .json()
+                .map_err(|source| WayfinderReadError::Request {
+                    route,
+                    message: format!("response was not valid JSON: {}", source.without_url()),
+                }),
+        }
     }
 
     /// Builds `<base_url>/api/projects/<project_id>/<segments...>`, letting
@@ -742,5 +890,122 @@ mod tests {
         let client = client_for(&mock);
         let err = client.list_tasks(None).unwrap_err();
         assert!(!err.to_string().contains("wfsa_test_secret"));
+    }
+
+    // ── Read-only GET helpers (CoS Wayfinder read tools) ───────────────
+
+    fn mount_status(mock: &BlockingMockServer, p: &str, status: u16) {
+        mock.block_on(
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(mock.server()),
+        );
+    }
+
+    #[test]
+    fn get_project_json_hits_the_project_route_with_bearer_auth_and_query() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/projects/proj-1/kpi-summary"))
+                .and(query_param("limit", "7"))
+                .and(header("authorization", "Bearer wfsa_test_secret"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+                )
+                .expect(1)
+                .mount(mock.server()),
+        );
+        let value = client_for(&mock)
+            .get_project_json(&["kpi-summary"], &[("limit", "7")])
+            .unwrap();
+        assert_eq!(value["ok"], true);
+    }
+
+    #[test]
+    fn get_org_json_hits_the_org_route() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/orgs/org-1/kpis"))
+                .and(query_param("project_id", "proj-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+                .expect(1)
+                .mount(mock.server()),
+        );
+        let value = client_for(&mock)
+            .get_org_json(&["kpis"], &[("project_id", "proj-1")])
+            .unwrap();
+        assert!(value.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_project_json_keeps_401_403_404_and_other_statuses_distinct() {
+        let mock = BlockingMockServer::start();
+        mount_status(&mock, "/api/projects/proj-1/a", 401);
+        mount_status(&mock, "/api/projects/proj-1/b", 403);
+        mount_status(&mock, "/api/projects/proj-1/c", 404);
+        mount_status(&mock, "/api/projects/proj-1/d", 500);
+        let client = client_for(&mock);
+        assert!(matches!(
+            client.get_project_json(&["a"], &[]),
+            Err(WayfinderReadError::Unauthorized { .. })
+        ));
+        assert!(matches!(
+            client.get_project_json(&["b"], &[]),
+            Err(WayfinderReadError::Forbidden { .. })
+        ));
+        assert!(matches!(
+            client.get_project_json(&["c"], &[]),
+            Err(WayfinderReadError::NotFound { .. })
+        ));
+        let err = client.get_project_json(&["d"], &[]).unwrap_err();
+        assert!(matches!(err, WayfinderReadError::UnexpectedStatus { .. }));
+        let text = err.to_string();
+        assert!(text.contains("500"), "{text}");
+        assert!(text.contains("/api/projects/proj-1/d"), "{text}");
+        assert!(!text.contains("wfsa_test_secret"), "{text}");
+    }
+
+    #[test]
+    fn get_project_json_reports_a_timeout_distinctly() {
+        let mock = BlockingMockServer::start();
+        mock.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/projects/proj-1/slow"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)),
+                )
+                .mount(mock.server()),
+        );
+        let config = WayfinderPlanConfig {
+            base_url: Url::parse(mock.uri()).unwrap(),
+            org_id: "org-1".to_string(),
+            project_id: "proj-1".to_string(),
+            secret: RedactedSecret::new("wfsa_test_secret".to_string()),
+        };
+        let client =
+            WayfinderClient::new_with_timeout(&config, std::time::Duration::from_millis(200))
+                .unwrap();
+        let err = client.get_project_json(&["slow"], &[]).unwrap_err();
+        assert!(matches!(err, WayfinderReadError::Timeout { .. }), "{err}");
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn a_task_id_with_path_characters_cannot_escape_the_project_route() {
+        let mock = BlockingMockServer::start();
+        // Only the encoded single-segment route is mounted; a request that
+        // escaped to another path would 404 instead.
+        mock.block_on(
+            Mock::given(method("GET"))
+                .and(path("/api/projects/proj-1/tasks/..%2Fother"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .mount(mock.server()),
+        );
+        assert!(client_for(&mock)
+            .get_project_json(&["tasks", "../other"], &[])
+            .is_ok());
     }
 }

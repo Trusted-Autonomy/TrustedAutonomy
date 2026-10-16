@@ -425,6 +425,10 @@ pub struct GatewayState {
     /// and every `ta_fs_*` call must target exactly this chat session.
     /// See `lock_to_chat_session`.
     pub chat_lock: Option<Uuid>,
+    /// Wayfinder project the chat-mode wake context pinned this server to
+    /// (`TA_CHAT_WAYFINDER_PROJECT_ID`). Read by the `ta_wayfinder_*` tools,
+    /// which never accept a project from a tool argument.
+    pub chat_wayfinder_project_id: Option<String>,
 }
 
 /// Caller mode determines what operations the MCP gateway allows.
@@ -578,6 +582,7 @@ impl GatewayState {
             projects: HashMap::new(),
             active_project: None,
             chat_lock: None,
+            chat_wayfinder_project_id: None,
         })
     }
 
@@ -926,6 +931,7 @@ impl GatewayState {
             crate::chat_launch::CHAT_VALIDITY_HOURS,
         )?;
         self.chat_lock = Some(goal.goal_run_id);
+        self.chat_wayfinder_project_id = launch.wayfinder_project_id.clone();
         tracing::info!(
             session_id = %goal.goal_run_id,
             agent_id = %launch.agent_id,
@@ -1560,6 +1566,72 @@ impl TaGatewayServer {
     // `tools::wiki`'s module doc for the full rationale and
     // `docs/superpowers/specs/2026-09-15-virtual-team-wiki-retrieval-design.md`
     // (`ta-virtual-team` repo) for the design.
+
+    #[tool(
+        description = "List tasks of the Wayfinder project this chat session is pinned to (read-only). Optional status and title_contains filters; newest updated first; capped at 100 with a truncated flag. The project is fixed by the session: do not pass project_id."
+    )]
+    fn ta_wayfinder_task_list(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_read::TaskListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wayfinder_task_list", None, None);
+        tools::wayfinder_read::handle_task_list(&self.state, params)
+    }
+
+    #[tool(
+        description = "Get one task of the pinned Wayfinder project with its dependencies and dependents (read-only). Find ids with ta_wayfinder_task_list."
+    )]
+    fn ta_wayfinder_task_get(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_read::TaskGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wayfinder_task_get", None, None);
+        tools::wayfinder_read::handle_task_get(&self.state, params)
+    }
+
+    #[tool(
+        description = "List goals of the pinned Wayfinder project (read-only), flattened from the goal tree, with task counts. Optional status and name_contains filters; capped at 100 with a truncated flag."
+    )]
+    fn ta_wayfinder_goal_list(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_read::GoalListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wayfinder_goal_list", None, None);
+        tools::wayfinder_read::handle_goal_list(&self.state, params)
+    }
+
+    #[tool(
+        description = "List the KPI metrics of one goal in the pinned Wayfinder project, with pace and tone (read-only). Get goal_id from ta_wayfinder_goal_list; for all metrics at once use ta_wayfinder_kpi_summary."
+    )]
+    fn ta_wayfinder_kpi_metric_list(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_read::KpiMetricListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wayfinder_kpi_metric_list", None, None);
+        tools::wayfinder_read::handle_kpi_metric_list(&self.state, params)
+    }
+
+    #[tool(
+        description = "Project-wide KPI health summary for the pinned Wayfinder project (read-only): counts by tone plus the worst-pace metrics, with a truncated flag."
+    )]
+    fn ta_wayfinder_kpi_summary(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_read::KpiSummaryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wayfinder_kpi_summary", None, None);
+        tools::wayfinder_read::handle_kpi_summary(&self.state, params)
+    }
+
+    #[tool(
+        description = "List the KPI catalogue visible to the pinned Wayfinder project (org-wide KPIs and this project's own, read-only). Capped at 100 with a truncated flag."
+    )]
+    fn ta_wayfinder_kpi_list(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_read::KpiListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_wayfinder_kpi_list", None, None);
+        tools::wayfinder_read::handle_kpi_list(&self.state, params)
+    }
 
     #[tool(
         description = "Search Wayfinder's org or project wiki for pages matching a query. Always live (never cached); ranking will improve transparently over time. scope is \"project\" or \"org\"; id is that scope's Wayfinder id."
@@ -2294,12 +2366,14 @@ mod tests {
         //           ta_whiteboard_outcome_send (v0.17.11.11)
         //           ta_wiki_search, ta_wiki_get, ta_wiki_types, ta_wiki_create,
         //           ta_wiki_update (v0.17.11.15)
+        //           ta_wayfinder_task_list, ta_wayfinder_task_get, ta_wayfinder_goal_list,
+        //           ta_wayfinder_kpi_metric_list, ta_wayfinder_kpi_summary, ta_wayfinder_kpi_list
         //           ta_propose_task_update (v0.17.11.12)
         //           ta_propose_task_create, ta_propose_task_reassign,
         //           ta_propose_task_needs_revision, ta_propose_task_on_hold,
         //           ta_propose_task_complete
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 59, "expected 59 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 65, "expected 65 tools, got: {:?}", names);
         for kind in crate::tools::wayfinder_task::ProposeKind::ALL {
             assert!(
                 names.iter().any(|n| n == kind.tool_name()),
@@ -3628,6 +3702,7 @@ mod tests {
             agent_id: agent_id.to_string(),
             session_id: Uuid::new_v4(),
             workspace_root: None,
+            wayfinder_project_id: None,
         }
     }
 
@@ -3744,6 +3819,25 @@ mod tests {
             );
         }
         assert!(server.tool_router.has_route("ta_fs_read"));
+        for read in [
+            "ta_wayfinder_task_list",
+            "ta_wayfinder_task_get",
+            "ta_wayfinder_goal_list",
+            "ta_wayfinder_kpi_metric_list",
+            "ta_wayfinder_kpi_summary",
+            "ta_wayfinder_kpi_list",
+        ] {
+            assert!(
+                server.tool_router.has_route(read),
+                "{} must be routable in chat mode",
+                read
+            );
+        }
+        assert!(
+            !names.iter().any(|n| n.starts_with("ta_propose_")),
+            "no ta_propose_* tool may be routable in chat mode: {:?}",
+            names
+        );
         // The Chief-of-Staff's outbound channel and its human-question tool
         // are deliberately routable (see the profile's comments).
         assert!(server.tool_router.has_route("ta_whiteboard_outcome_send"));

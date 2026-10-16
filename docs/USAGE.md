@@ -405,6 +405,37 @@ What a chat-mode launch gets:
 - **Only TA's MCP server**: the launch also passes `--strict-mcp-config --mcp-config .ta/mcp-agent-chat.json`, so MCP servers from your user settings and claude.ai connectors (Gmail, Linear, and so on) are not loaded.
 - **Deny list as a second layer**: the injected `.claude/settings.local.json` also denies every built-in tool by name. Nothing relies on that list being complete; the `--tools ""` allowlist is the control.
 
+### Reading Wayfinder from a Chat-Mode Session
+
+A chat-mode persona can look things up in Wayfinder, and only look. Six read tools are available. Each is a single `GET` against the Wayfinder REST API:
+
+| Tool | Returns |
+|---|---|
+| `ta_wayfinder_task_list` | Tasks, newest updated first. Optional `status` and `title_contains` filters. |
+| `ta_wayfinder_task_get` | One task by `task_id`, with its dependencies and dependents. |
+| `ta_wayfinder_goal_list` | Goals (the goal tree flattened) with task counts. Optional `status` and `name_contains` filters. |
+| `ta_wayfinder_kpi_metric_list` | The KPI metrics of one goal (`goal_id`), with pace and tone. |
+| `ta_wayfinder_kpi_summary` | Project-wide KPI health: counts by tone and the worst-pace metrics. |
+| `ta_wayfinder_kpi_list` | The KPI catalogue visible to the project (org-wide KPIs and the project's own). |
+
+There are no Wayfinder write tools in chat mode, and no `ta_propose_*` tool. To change something in Wayfinder (add a task, goal, KPI or datapoint), the persona hands the request off through the `delegate` outcome and a worker does it as a reviewed goal.
+
+**One project per session.** The project comes from your configuration, never from a tool argument. Set it in `.ta/workflow.toml`:
+
+```toml
+[plan.wayfinder]
+base_url = "https://wayfinder.example.com"
+org_id = "org-1"
+project_id = "proj-1"
+credential_name = "wayfinder-cos"
+```
+
+Store the service-account token once with `ta credential add` under that name (it needs the `project:read` scope). The token is only sent in the `Authorization` header and is never logged or shown in an error. If the chat launch also names a project (`TA_CHAT_WAYFINDER_PROJECT_ID`), it must match `project_id`; if the two differ, every read is refused and the error names both ids. A tool call that passes a different `project_id` is rejected the same way, before any request is sent. Two projects served by two sessions never read each other's data.
+
+**Output limits.** Responses are compact JSON. Lists return at most 100 items (50 by default, set `limit` from 1 to 100) with `total`, `returned` and `truncated` fields, so a cut is never silent. Long descriptions are shortened.
+
+**Errors say what to do.** A 401 means the token was rejected (re-add the credential), a 403 means it lacks `project:read` for the project, a 404 means the id does not exist (list first), and a timeout names the route and the 20 second limit. Each is reported separately, with the route that failed.
+
 To check the tool surface against your installed Claude Code, run `scripts/chat-mode-tool-surface-smoke.sh`. It starts `claude` with the chat-mode flags against a stub MCP server and fails if any tool other than `mcp__ta__*` is listed. It skips (exit 0) when `claude` is not installed.
 
 `ta run` refuses chat mode, with an explanation of what to change, when:

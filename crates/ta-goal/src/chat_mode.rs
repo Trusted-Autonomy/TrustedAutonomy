@@ -43,7 +43,11 @@ pub const TA_MCP_TOOL_PREFIX: &str = "mcp__ta__";
 /// `.ta/chat-scratch/**`), or is team-session coordination delivery that
 /// the chat-mode spec explicitly allows (whiteboard presence/handoff).
 /// Nothing here creates goals, builds or applies drafts, edits the plan,
-/// edits the wiki, mutates tasks, or performs external actions.
+/// edits the wiki, mutates tasks, or performs external actions. The six
+/// `ta_wayfinder_*` entries are read-only GETs against Wayfinder, pinned to
+/// the session's own project; Wayfinder WRITES (tasks, goals, KPIs,
+/// datapoints, and every `ta_propose_*` tool) are deliberately absent: work
+/// requests go out through the `delegate` outcome to a worker.
 pub const CHAT_MODE_MCP_TOOLS: &[&str] = &[
     // Workspace reads, policy-checked per call against the chat manifest.
     "ta_fs_read",
@@ -64,6 +68,15 @@ pub const CHAT_MODE_MCP_TOOLS: &[&str] = &[
     "ta_wiki_types",
     "community_search",
     "community_get",
+    // Read-only Wayfinder reads (Wayfinder DEC-9: exactly these six, no
+    // Wayfinder write tool). Each is a GET pinned to the project from the
+    // chat wake context / `[plan.wayfinder]`, never a tool argument.
+    "ta_wayfinder_task_list",
+    "ta_wayfinder_task_get",
+    "ta_wayfinder_goal_list",
+    "ta_wayfinder_kpi_metric_list",
+    "ta_wayfinder_kpi_summary",
+    "ta_wayfinder_kpi_list",
     // Team-session coordination delivery (allowed by the chat-mode spec).
     "ta_whiteboard_presence_register",
     "ta_whiteboard_presence_list",
@@ -284,6 +297,53 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// Wayfinder DEC-9: the CoS holds exactly six Wayfinder reads and no
+    /// Wayfinder write, and no `ta_propose_*` proposal tool of any kind.
+    #[test]
+    fn chat_profile_has_exactly_the_six_wayfinder_reads_and_no_writes() {
+        let wayfinder: Vec<&str> = CHAT_MODE_MCP_TOOLS
+            .iter()
+            .copied()
+            .filter(|t| t.contains("wayfinder"))
+            .collect();
+        assert_eq!(
+            wayfinder,
+            vec![
+                "ta_wayfinder_task_list",
+                "ta_wayfinder_task_get",
+                "ta_wayfinder_goal_list",
+                "ta_wayfinder_kpi_metric_list",
+                "ta_wayfinder_kpi_summary",
+                "ta_wayfinder_kpi_list",
+            ]
+        );
+        for tool in CHAT_MODE_MCP_TOOLS {
+            assert!(
+                !tool.starts_with("ta_propose_"),
+                "{tool}: no proposal tool may be in the chat-mode profile"
+            );
+            for write_verb in [
+                "create", "update", "add", "delete", "set", "assign", "complete",
+            ] {
+                assert!(
+                    !(tool.contains("wayfinder") && tool.contains(write_verb)),
+                    "{tool}: looks like a Wayfinder write tool"
+                );
+            }
+        }
+        for forbidden in [
+            "ta_wayfinder_task_create",
+            "ta_wayfinder_goal_create",
+            "ta_wayfinder_kpi_create",
+            "ta_wayfinder_kpi_metric_create",
+            "ta_wayfinder_kpi_datapoint_add",
+            "ta_propose_task_create",
+            "ta_propose_task_complete",
+        ] {
+            assert!(!is_chat_mode_mcp_tool(forbidden), "{forbidden}");
+        }
     }
 
     /// The profile itself must never contain a tool that mutates anything

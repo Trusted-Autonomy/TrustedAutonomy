@@ -96,6 +96,7 @@ mod tests {
             agent_id: "chief-of-staff".to_string(),
             session_id: uuid::Uuid::new_v4(),
             workspace_root: Some(staging.path().to_path_buf()),
+            wayfinder_project_id: None,
         };
         let config = chat_mode_config(&launch, project.path());
         assert_eq!(config.workspace_root, staging.path());

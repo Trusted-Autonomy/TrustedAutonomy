@@ -19,10 +19,11 @@ This single rule replaces what would otherwise be a growing list of "CoS can do 
 ### CoS's real toolset
 
 - Read: `ta_fs_read`, `ta_fs_diff`, wiki read (`ta_wiki_search`/`ta_wiki_get`), whiteboard read/presence.
+- Wayfinder reads (owner decision DEC-9): `ta_wayfinder_task_list`, `ta_wayfinder_task_get`, `ta_wayfinder_goal_list`, `ta_wayfinder_kpi_metric_list`, `ta_wayfinder_kpi_summary`, `ta_wayfinder_kpi_list`. Each is one `GET`, pinned to a single project taken from the session config (never from a tool argument; a differing `project_id` is rejected). Wayfinder writes remain excluded and no `ta_propose_*` tool is allowed: work requests go through the `delegate` outcome.
 - Reply: chat response back to the requester.
 - Classify-and-dispatch: decide what task(s) a chat/forum/meeting-note input implies (create new, update existing, assignment, status), then trigger a hardened `ta run` goal to realize that decision (see "Task mutation" below): this is a decision, not a tool that mutates state.
 - Request a follow-up goal when review finds a gap: if CoS reviews a completed goal's draft and finds the work incomplete or wrong, it requests a continuation using TA's existing `ta run --follow-up-goal <id>` mechanism (`apps/ta-cli/src/commands/run.rs:469`, confirmed real, already used to resume an existing goal's own staging context rather than starting a fresh one, per the comment at `run.rs:2103`: "rather than building a second one"). The follow-up runs in the *same* worktree/staging space as the original work, not a disconnected new task, so it continues from exactly where the gap was found.
-- Nothing else. No `ta_fs_write`, no git, no email, no `ta_wiki_create`/`ta_wiki_update`, no apply/approve-capable tool, no task-mutation tool (see below: none exists for any agent yet, and CoS specifically should never get one).
+- Nothing else. No Wayfinder write tool, no `ta_fs_write`, no git, no email, no `ta_wiki_create`/`ta_wiki_update`, no apply/approve-capable tool, no task-mutation tool (see below: none exists for any agent yet, and CoS specifically should never get one).
 
 ## Two real gaps found while resolving this, and how they resolve
 
