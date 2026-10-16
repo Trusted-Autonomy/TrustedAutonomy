@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Subcommand;
-use ta_goal::cost_export::{meridian_command, meridian_records, write_jsonl};
+use ta_goal::cost_export::{meridian_command, meridian_records, session_rows, write_jsonl};
 use ta_goal::cost_report::{
     build_report, goal_rows, parse_cost_group_by, scan_claude, scan_omp, CostFilter, CostGroup,
     CostGroupRow, CostReport, CostRow, CostTotals, Scan,
@@ -35,7 +35,8 @@ pub enum CostCommands {
         #[arg(long)]
         until: Option<String>,
         /// Group by a comma-separated list of: day, source, model, project,
-        /// context_bucket, origin_class.
+        /// context_bucket, origin_class, goal. For one typed row per goal and
+        /// session use `--json --rows` instead.
         #[arg(long, default_value = "source")]
         group_by: String,
         /// Only projects whose name contains this text (case-insensitive).
@@ -44,6 +45,11 @@ pub enum CostCommands {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// With --json, print one typed row per goal and per session (a JSON
+        /// array) instead of the grouped report. Same ids and token counts as
+        /// --meridian. An unpriced model has `usd: null`.
+        #[arg(long, requires = "json")]
+        rows: bool,
         /// Claude Code projects directory (default: ~/.claude/projects).
         #[arg(long, value_name = "DIR")]
         claude_dir: Option<PathBuf>,
@@ -65,6 +71,7 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
             group_by,
             project,
             json,
+            rows,
             claude_dir,
             omp_dir,
             meridian,
@@ -96,8 +103,15 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
                 .as_ref()
                 .map(|path| export_meridian(&inputs, path))
                 .transpose()?;
+            let rows_json = if *rows {
+                Some(rows_json(&inputs)?)
+            } else {
+                None
+            };
             let report = inputs.into_report();
-            if *json {
+            if let Some(text) = rows_json {
+                println!("{text}");
+            } else if *json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", render(&report));
@@ -134,13 +148,32 @@ impl Inputs {
     }
 }
 
-/// Write the Meridian file and return the confirmation text.
-fn export_meridian(inputs: &Inputs, path: &Path) -> anyhow::Result<String> {
+/// Every goal and session that passes the filters, as the typed rows array.
+fn export_rows(inputs: &Inputs) -> Vec<ta_goal::cost_export::SessionRow> {
+    let rows = filtered_rows(inputs);
+    let kept: Vec<&CostRow> = rows.iter().collect();
+    session_rows(&kept, inputs.goals.as_deref().unwrap_or(&[]))
+}
+
+/// All goal and transcript rows that pass --since/--until/--project.
+fn filtered_rows(inputs: &Inputs) -> Vec<CostRow> {
     let mut rows: Vec<CostRow> = inputs.goals.as_deref().map(goal_rows).unwrap_or_default();
     for scan in &inputs.scans {
         rows.extend(scan.rows.iter().cloned());
     }
-    let kept: Vec<&CostRow> = rows.iter().filter(|r| inputs.filter.matches(r)).collect();
+    rows.retain(|r| inputs.filter.matches(r));
+    rows
+}
+
+fn rows_json(inputs: &Inputs) -> anyhow::Result<String> {
+    serde_json::to_string_pretty(&export_rows(inputs))
+        .context("could not serialize the cost rows to JSON. Re-run without --rows to see the grouped report")
+}
+
+/// Write the Meridian file and return the confirmation text.
+fn export_meridian(inputs: &Inputs, path: &Path) -> anyhow::Result<String> {
+    let rows = filtered_rows(inputs);
+    let kept: Vec<&CostRow> = rows.iter().collect();
     let goals = inputs.goals.as_deref().unwrap_or(&[]);
     let records = meridian_records(&kept, goals);
     let out = write_jsonl(path, &records)?;
@@ -524,5 +557,193 @@ mod tests {
         let msg = export_meridian(&again, &out).unwrap();
         assert!(msg.contains("2 updated in place"), "{msg}");
         assert_eq!(fs::read_to_string(&out).unwrap(), text);
+    }
+
+    /// A project dir named `proj` holding three goals: runtime-priced (exact),
+    /// table-priced (estimated) and unpriced.
+    fn goal_fixture(root: &Path) -> GatewayConfig {
+        use chrono::{TimeZone, Utc};
+        use ta_goal::token_cost::CostSource;
+        let config = cfg(root);
+        fs::create_dir_all(&config.goals_dir).unwrap();
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let make = |id: &str, title: &str, model: &str, cost: f64, src: CostSource, hour: u32| {
+            let mut g = GoalRun::new(
+                title,
+                "obj",
+                "agent",
+                root.to_path_buf(),
+                root.to_path_buf(),
+            );
+            g.goal_run_id = id.parse().unwrap();
+            g.created_at = Utc.with_ymd_and_hms(2026, 10, 11, hour, 0, 0).unwrap();
+            g.plan_phase = Some("v1.0".into());
+            g.agent_model = model.into();
+            g.input_tokens = 100;
+            g.output_tokens = 20;
+            g.cache_read_input_tokens = 3000;
+            g.cache_creation_input_tokens = 40;
+            g.cost_usd = cost;
+            g.cost_source = src;
+            store.save(&g).unwrap();
+        };
+        make(
+            "00000000-0000-0000-0000-000000000001",
+            "exact goal",
+            "claude-sonnet-5-5",
+            1.5,
+            CostSource::Runtime,
+            1,
+        );
+        make(
+            "00000000-0000-0000-0000-000000000002",
+            "estimated goal",
+            "claude-opus-5-5",
+            2.25,
+            CostSource::Table,
+            2,
+        );
+        make(
+            "00000000-0000-0000-0000-000000000003",
+            "unpriced goal",
+            "mystery-model",
+            0.0,
+            CostSource::None,
+            3,
+        );
+        config
+    }
+
+    fn proj_root(dir: &Path) -> PathBuf {
+        let root = dir.join("proj");
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn rows_json_golden_shape_covers_exact_estimated_and_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = proj_root(dir.path());
+        let config = goal_fixture(&root);
+        let none = dir.path().join("none");
+        let inputs = gather(&config, None, None, "source", None, &none, &none).unwrap();
+        let got: serde_json::Value = serde_json::from_str(&rows_json(&inputs).unwrap()).unwrap();
+        let goal = |n: u8,
+                    title: &str,
+                    hour: u32,
+                    model: &str,
+                    usd: serde_json::Value,
+                    exact: bool,
+                    priced: bool| {
+            serde_json::json!({
+                "id": format!("ta_goals:00000000-0000-0000-0000-00000000000{n}"),
+                "kind": "goal",
+                "goal_id": format!("00000000-0000-0000-0000-00000000000{n}"),
+                "title": title,
+                "phase": "v1.0",
+                "project": "proj",
+                "model": model,
+                "started_at": format!("2026-10-11T{hour:02}:00:00+00:00"),
+                "tokens_input": 100,
+                "tokens_output": 20,
+                "cache_read_tokens": 3000,
+                "cache_write_tokens": 40,
+                "usd": usd,
+                "cost_exact": exact,
+                "priced": priced,
+            })
+        };
+        let want = serde_json::json!([
+            goal(
+                1,
+                "exact goal",
+                1,
+                "claude-sonnet-5-5",
+                serde_json::json!(1.5),
+                true,
+                true
+            ),
+            goal(
+                2,
+                "estimated goal",
+                2,
+                "claude-opus-5-5",
+                serde_json::json!(2.25),
+                false,
+                true
+            ),
+            goal(
+                3,
+                "unpriced goal",
+                3,
+                "mystery-model",
+                serde_json::Value::Null,
+                false,
+                false
+            ),
+        ]);
+        assert_eq!(got, want);
+        // Numbers are JSON numbers, never strings.
+        assert!(got[0]["tokens_input"].is_u64() && got[0]["usd"].is_f64());
+    }
+
+    #[test]
+    fn rows_and_meridian_share_ids_and_token_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = proj_root(dir.path());
+        let config = goal_fixture(&root);
+        let (claude, omp) = fixture(dir.path());
+        let inputs = gather(&config, None, None, "source", None, &claude, &omp).unwrap();
+        let out = dir.path().join("cost.jsonl");
+        export_meridian(&inputs, &out).unwrap();
+        let meridian: Vec<serde_json::Value> = fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let rows = export_rows(&inputs);
+        assert_eq!(rows.len(), 5); // 3 goals, 1 Claude session, 1 OMP session
+        assert_eq!(rows.len(), meridian.len());
+        for r in &rows {
+            let m = meridian
+                .iter()
+                .find(|m| m["id"] == r.id.as_str())
+                .unwrap_or_else(|| panic!("row {} missing from the Meridian file", r.id));
+            assert_eq!(m["tokens_input"], r.tokens_input, "{}", r.id);
+            assert_eq!(m["tokens_output"], r.tokens_output, "{}", r.id);
+            assert_eq!(m["cache_read_tokens"], r.cache_read_tokens.to_string());
+            assert_eq!(m["cache_write_tokens"], r.cache_write_tokens.to_string());
+            assert_eq!(m["cost_exact"], r.cost_exact.to_string());
+        }
+        // The unpriced goal carries no invented price in the rows.
+        let unpriced = rows.iter().find(|r| r.title == "unpriced goal").unwrap();
+        assert_eq!((unpriced.usd, unpriced.priced), (None, false));
+    }
+
+    #[test]
+    fn rows_respect_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = proj_root(dir.path());
+        let config = goal_fixture(&root);
+        let none = dir.path().join("none");
+        let g = |since: Option<&str>, project: Option<&str>| {
+            export_rows(&gather(&config, since, None, "source", project, &none, &none).unwrap())
+        };
+        assert_eq!(g(Some("2026-10-11T02:00:00Z"), None).len(), 2);
+        assert_eq!(g(None, Some("proj")).len(), 3);
+        assert!(g(None, Some("other")).is_empty());
+    }
+
+    #[test]
+    fn group_by_goal_gives_one_group_per_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = proj_root(dir.path());
+        let config = goal_fixture(&root);
+        let none = dir.path().join("none");
+        let rep = run_report(&config, None, None, "goal", None, &none, &none).unwrap();
+        assert_eq!(rep.groups.len(), 3);
+        assert!(rep.groups.iter().all(|g| g.group.contains_key("goal")));
+        let e = run_report(&config, None, None, "hour", None, &none, &none).unwrap_err();
+        assert!(e.to_string().contains("--json --rows"), "{e}");
     }
 }

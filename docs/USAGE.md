@@ -15087,7 +15087,7 @@ ta cost report --group-by context_bucket --json
 
 It reads three sources, each optional and found automatically: this project's TA goals, Claude Code sessions in `~/.claude/projects/**/*.jsonl`, and OMP sessions in `~/.omp/agent/sessions/**/*.jsonl`. Use `--claude-dir` and `--omp-dir` to read from somewhere else. A source that is not there is named in the header as missing; it is not an error.
 
-`--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket` and `origin_class` (the last applies to TA goals; other rows show `n/a`). `--since` and `--until` take a date or an RFC 3339 time (UTC), and `--project` keeps projects whose name contains the text.
+`--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket`, `origin_class` and `goal` (`origin_class` and `goal` apply to TA goals; other rows show `n/a`). For a flat list with one row per goal and session instead of groups, use `--json --rows` (see below). `--since` and `--until` take a date or an RFC 3339 time (UTC), and `--project` keeps projects whose name contains the text.
 
 Example output (trimmed):
 
@@ -15125,6 +15125,45 @@ meridian analyze --source jsonl --path cost.jsonl
 ```
 
 `--meridian <file.jsonl>` writes one record per TA goal or interactive session, using the same sources, filters and de-duplication as the report (a session whose transcript repeats a message counts once). After the report it prints the path, how many records were written and the exact `meridian` command to read the file.
+
+#### Exporting cost rows for Meridian and Wayfinder
+
+`ta cost report --json --rows` prints a JSON array with one row per TA goal and per interactive session, instead of the grouped report. `--since`, `--until` and `--project` apply as usual. The `--meridian` file is built from the same rows, so ids and token counts always match.
+
+```bash
+ta cost report --since 2026-10-01 --json --rows > cost-rows.json
+jq '.[] | select(.kind == "goal") | {id, phase, usd}' cost-rows.json
+```
+
+Each row looks like this:
+
+```json
+{
+  "id": "ta_goals:7c492eb6-fb25-4fb5-b79c-6c5d516ede43",
+  "kind": "goal",
+  "goal_id": "7c492eb6-fb25-4fb5-b79c-6c5d516ede43",
+  "title": "Native per-goal cost export",
+  "phase": "v0.17.12.19",
+  "project": "myapp",
+  "model": "claude-sonnet-5-5",
+  "started_at": "2026-10-11T01:00:00+00:00",
+  "tokens_input": 100,
+  "tokens_output": 20,
+  "cache_read_tokens": 3000,
+  "cache_write_tokens": 40,
+  "usd": 1.5,
+  "cost_exact": true,
+  "priced": true
+}
+```
+
+- `kind` is `goal` or `session`. `goal_id` and `phase` are `null` for sessions.
+- `id` is stable across runs. Use it as the key when loading rows into Meridian or Wayfinder so a re-export updates a row instead of duplicating it.
+- `cost_exact` is `true` only when the runtime reported the cost. `usd` is otherwise an estimate from the price table.
+- A model with no price has `usd: null` and `priced: false`. The tokens are still counted, but no price is ever invented. If any turn of a session is unpriced, the whole session is reported as unpriced.
+- All counts and `usd` are JSON numbers.
+
+For Meridian, write the JSONL file with `--meridian` as above. For Wayfinder, or any other tool that reads JSON, pipe the rows array straight in. `--rows` requires `--json`.
 
 Each record carries `id`, `title`, `timestamp`, `tokens_input` (uncached input only), `tokens_output`, `source` and, for goals, `phase`. Meridian keeps these string fields as metadata: `cost_usd`, `cost_exact` (`true` only when every turn's cost was reported rather than estimated), `model` (the model with the most tokens), `cache_read_tokens`, `cache_write_tokens`, `context_peak` (largest prompt in the session; `n/a` for goals) and `workload` (`goal` or `interactive`). Cache reads are kept out of `tokens_input` on purpose: they are most of an interactive session's cost, and folding them in would swamp the effort score.
 

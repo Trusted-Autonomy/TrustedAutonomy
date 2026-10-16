@@ -20,6 +20,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::cost_report::{CostKind, CostRow, CostSourceKind};
@@ -46,11 +47,51 @@ fn short(s: &str) -> &str {
     &s[..end]
 }
 
-/// Build one Meridian record per goal or session in `rows`, ordered by id.
+/// One goal or interactive session, aggregated from its [`CostRow`]s.
+///
+/// This is the single row shape behind both `ta cost report --meridian` and
+/// `ta cost report --json --rows`: both are built by [`session_rows`], so the
+/// two exports cannot disagree on ids, titles or token counts. Numbers are JSON
+/// numbers. A session with any unpriced turn has `usd: null` and
+/// `priced: false`; a price is never invented and a partial sum is never
+/// presented as a total.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionRow {
+    /// Stable across runs, the same id the Meridian export uses.
+    pub id: String,
+    /// `goal` for a TA goal, `session` for an interactive transcript session.
+    pub kind: &'static str,
+    /// The TA goal id; `null` for interactive sessions.
+    pub goal_id: Option<String>,
+    pub title: String,
+    pub phase: Option<String>,
+    pub project: String,
+    pub model: String,
+    /// RFC 3339, the earliest turn; `null` when no turn carried a timestamp.
+    pub started_at: Option<String>,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub usd: Option<f64>,
+    /// `true` only when every turn's cost was reported by the runtime.
+    pub cost_exact: bool,
+    /// `false` when any turn has no price.
+    pub priced: bool,
+    #[serde(skip)]
+    source: CostSourceKind,
+    /// Sum of the known turn costs (unpriced turns add 0), for the Meridian file.
+    #[serde(skip)]
+    usd_known: f64,
+    #[serde(skip)]
+    context_peak: Option<u64>,
+}
+
+/// Build one [`SessionRow`] per goal or session in `rows`, ordered by id.
 ///
 /// `goals` supplies each goal's title and plan phase; a transcript session is
 /// titled from its project and source since the transcript has no title.
-pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<Value> {
+pub fn session_rows(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<SessionRow> {
     let goal_by_id: HashMap<String, &GoalRun> = goals
         .iter()
         .map(|(_, g)| (g.goal_run_id.to_string(), g))
@@ -70,6 +111,7 @@ pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<V
             let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
             let mut usd = 0.0;
             let mut all_exact = true;
+            let mut all_priced = true;
             let mut peak: Option<u64> = None;
             let mut by_model: BTreeMap<&str, u64> = BTreeMap::new();
             for r in &rows {
@@ -79,6 +121,7 @@ pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<V
                 cache_write = cache_write.saturating_add(r.usage.cache_creation);
                 usd += r.usd;
                 all_exact &= r.kind == CostKind::Exact;
+                all_priced &= r.kind != CostKind::Unpriced;
                 peak = peak.max(r.context_tokens);
                 *by_model.entry(r.model.as_str()).or_default() += r.usage.total();
             }
@@ -89,40 +132,75 @@ pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<V
                 .map(|(m, _)| if m.is_empty() { "unknown" } else { m })
                 .unwrap_or("unknown");
             let ts = rows.iter().filter_map(|r| r.ts).min();
-            let goal = goal_by_id
-                .get(&session)
-                .filter(|_| source == CostSourceKind::Goals);
+            let is_goal = source == CostSourceKind::Goals;
+            let goal = goal_by_id.get(&session).filter(|_| is_goal);
             let project = &rows[0].project;
             let title = match goal {
                 Some(g) if !g.title.trim().is_empty() => g.title.clone(),
                 _ => format!("{project}: {} session {}", source.as_str(), short(&session)),
             };
-
-            let mut rec = Map::new();
-            rec.insert("id".into(), json!(record_id(source, &session)));
-            rec.insert("title".into(), json!(title));
-            if let Some(t) = ts {
-                rec.insert("timestamp".into(), json!(t.to_rfc3339()));
+            SessionRow {
+                id: record_id(source, &session),
+                kind: if is_goal { "goal" } else { "session" },
+                goal_id: is_goal.then(|| session.clone()),
+                title,
+                phase: goal.and_then(|g| g.plan_phase.clone()),
+                project: project.clone(),
+                model: model.to_string(),
+                started_at: ts.map(|t| t.to_rfc3339()),
+                tokens_input: input,
+                tokens_output: output,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: cache_write,
+                usd: all_priced.then_some(usd),
+                cost_exact: all_exact,
+                priced: all_priced,
+                source,
+                usd_known: usd,
+                context_peak: peak,
             }
-            rec.insert("tokens_input".into(), json!(input));
-            rec.insert("tokens_output".into(), json!(output));
-            rec.insert("source".into(), json!(source.as_str()));
-            if let Some(phase) = goal.and_then(|g| g.plan_phase.as_ref()) {
+        })
+        .collect()
+}
+
+/// Build one Meridian record per goal or session in `rows`, ordered by id.
+pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<Value> {
+    session_rows(rows, goals)
+        .into_iter()
+        .map(|r| {
+            let mut rec = Map::new();
+            rec.insert("id".into(), json!(r.id));
+            rec.insert("title".into(), json!(r.title));
+            if let Some(t) = &r.started_at {
+                rec.insert("timestamp".into(), json!(t));
+            }
+            rec.insert("tokens_input".into(), json!(r.tokens_input));
+            rec.insert("tokens_output".into(), json!(r.tokens_output));
+            rec.insert("source".into(), json!(r.source.as_str()));
+            if let Some(phase) = &r.phase {
                 rec.insert("phase".into(), json!(phase));
             }
-            rec.insert("cost_usd".into(), json!(format!("{usd:.4}")));
-            rec.insert("cost_exact".into(), json!(all_exact.to_string()));
-            rec.insert("model".into(), json!(model));
-            rec.insert("cache_read_tokens".into(), json!(cache_read.to_string()));
-            rec.insert("cache_write_tokens".into(), json!(cache_write.to_string()));
+            rec.insert("cost_usd".into(), json!(format!("{:.4}", r.usd_known)));
+            rec.insert("cost_exact".into(), json!(r.cost_exact.to_string()));
+            rec.insert("model".into(), json!(r.model));
+            rec.insert(
+                "cache_read_tokens".into(),
+                json!(r.cache_read_tokens.to_string()),
+            );
+            rec.insert(
+                "cache_write_tokens".into(),
+                json!(r.cache_write_tokens.to_string()),
+            );
             // A goal is many turns with no per-turn prompt size recorded.
             rec.insert(
                 "context_peak".into(),
-                json!(peak.map_or_else(|| "n/a".to_string(), |p| p.to_string())),
+                json!(r
+                    .context_peak
+                    .map_or_else(|| "n/a".to_string(), |p| p.to_string())),
             );
             rec.insert(
                 "workload".into(),
-                json!(if source == CostSourceKind::Goals {
+                json!(if r.source == CostSourceKind::Goals {
                     "goal"
                 } else {
                     "interactive"

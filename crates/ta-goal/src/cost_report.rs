@@ -446,6 +446,8 @@ pub enum CostGroup {
     Project,
     ContextBucket,
     OriginClass,
+    /// One group per TA goal (transcript sessions show `n/a`).
+    Goal,
 }
 
 impl CostGroup {
@@ -457,6 +459,7 @@ impl CostGroup {
             CostGroup::Project => "project",
             CostGroup::ContextBucket => "context_bucket",
             CostGroup::OriginClass => "origin_class",
+            CostGroup::Goal => "goal",
         }
     }
 
@@ -480,6 +483,8 @@ impl CostGroup {
                 .map(|t| context_bucket(t).to_string())
                 .unwrap_or_else(|| "n/a".to_string()),
             CostGroup::OriginClass => r.origin_class.clone().unwrap_or_else(|| "n/a".to_string()),
+            CostGroup::Goal if r.source == CostSourceKind::Goals => r.session.clone(),
+            CostGroup::Goal => "n/a".to_string(),
         }
     }
 }
@@ -495,10 +500,12 @@ pub fn parse_cost_group_by(s: &str) -> Result<Vec<CostGroup>, String> {
             "project" => CostGroup::Project,
             "context_bucket" => CostGroup::ContextBucket,
             "origin_class" => CostGroup::OriginClass,
+            "goal" => CostGroup::Goal,
             other => {
                 return Err(format!(
                     "unknown --group-by {other:?}: expected a comma-separated list of day, source, \
-                     model, project, context_bucket, origin_class (for example --group-by source,model)"
+                     model, project, context_bucket, origin_class, goal (for example --group-by source,model). \
+                     For one typed row per goal and session use --json --rows"
                 ))
             }
         };
