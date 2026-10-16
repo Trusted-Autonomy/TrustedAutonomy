@@ -103,6 +103,11 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub budget: BudgetConfig,
 
+    /// Wiki read-side switch. `[wiki] seed_context = false` stops goal agents
+    /// reading the wiki; writes still go through draft review.
+    #[serde(default)]
+    pub wiki: WikiConfig,
+
     /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
     ///
     /// Each command is run in the staging workspace. Results are embedded in the
@@ -1645,6 +1650,34 @@ pub struct BudgetConfig {
     pub max_usd: Option<f64>,
 }
 
+/// `[wiki]` section of `.ta/workflow.toml`.
+///
+/// ```toml
+/// [wiki]
+/// seed_context = false   # agents may not READ the wiki; writes still work
+/// ```
+///
+/// Default `true`. The gateway enforces it through
+/// [`WorkflowConfig::wiki_seed_context`], which reports a malformed value as
+/// an error naming the file and key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WikiConfig {
+    /// When false, the wiki READ tools (`ta_wiki_search`, `ta_wiki_get`,
+    /// `ta_wiki_types`) and any wiki context injection are refused.
+    #[serde(default = "default_wiki_seed_context")]
+    pub seed_context: bool,
+}
+
+fn default_wiki_seed_context() -> bool {
+    true
+}
+
+impl Default for WikiConfig {
+    fn default() -> Self {
+        Self { seed_context: true }
+    }
+}
+
 /// Garbage collection / draft lifecycle configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcConfig {
@@ -2219,6 +2252,16 @@ impl WorkflowConfig {
     ///   1. `<dir>/workflow.local.toml`  — canonical name
     ///   2. `<dir>/local.workflow.toml`  — deprecated name (warns and falls back)
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let base = Self::load_merged_value(path)?;
+        let config = base.try_into()?;
+        Ok(config)
+    }
+
+    /// Read `path` and merge any local override file on top, without
+    /// deserializing into [`WorkflowConfig`].
+    fn load_merged_value(
+        path: &std::path::Path,
+    ) -> Result<toml::Value, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let mut base: toml::Value = toml::from_str(&content)?;
 
@@ -2244,8 +2287,36 @@ impl WorkflowConfig {
             merge_toml_values(&mut base, local_val);
         }
 
-        let config = base.try_into()?;
-        Ok(config)
+        Ok(base)
+    }
+
+    /// Whether goal agents may READ the wiki (`[wiki] seed_context`).
+    ///
+    /// Reads the same file and local override as [`WorkflowConfig::load`].
+    /// A missing file, section or key means `true`. Only this key is
+    /// validated, so an unrelated problem elsewhere in the file cannot flip
+    /// the answer. A malformed value is an error naming the file and key.
+    pub fn wiki_seed_context(path: &std::path::Path) -> Result<bool, String> {
+        if !path.exists() {
+            return Ok(true);
+        }
+        let merged = Self::load_merged_value(path).map_err(|e| {
+            format!(
+                "could not read [wiki] seed_context from {}: {e}. Fix the TOML in that file \
+                 (or workflow.local.toml next to it).",
+                path.display()
+            )
+        })?;
+        match merged.get("wiki").and_then(|w| w.get("seed_context")) {
+            None => Ok(true),
+            Some(toml::Value::Boolean(b)) => Ok(*b),
+            Some(other) => Err(format!(
+                "invalid value for [wiki] seed_context in {}: expected true or false, got {}. \
+                 Set `seed_context = true` or `seed_context = false` under [wiki].",
+                path.display(),
+                other
+            )),
+        }
     }
 
     /// Try to load config, returning default if file doesn't exist
@@ -3150,5 +3221,53 @@ on_max_iterations = "fail"
             config_paths, canonical,
             "default_local_exclude_paths must exactly match LOCAL_TA_PATHS — prevent drift"
         );
+    }
+
+    fn wiki_seed(contents: Option<&str>) -> Result<bool, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workflow.toml");
+        if let Some(c) = contents {
+            std::fs::write(&path, c).unwrap();
+        }
+        WorkflowConfig::wiki_seed_context(&path)
+    }
+
+    #[test]
+    fn wiki_seed_context_defaults_to_true() {
+        assert_eq!(wiki_seed(None), Ok(true));
+        assert_eq!(wiki_seed(Some("")), Ok(true));
+        assert_eq!(wiki_seed(Some("[wiki]\n")), Ok(true));
+        assert!(WorkflowConfig::default().wiki.seed_context);
+    }
+
+    #[test]
+    fn wiki_seed_context_reads_false_and_true() {
+        assert_eq!(wiki_seed(Some("[wiki]\nseed_context = false\n")), Ok(false));
+        assert_eq!(wiki_seed(Some("[wiki]\nseed_context = true\n")), Ok(true));
+        let parsed: WorkflowConfig = toml::from_str("[wiki]\nseed_context = false\n").unwrap();
+        assert!(!parsed.wiki.seed_context);
+    }
+
+    #[test]
+    fn wiki_seed_context_local_override_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workflow.toml");
+        std::fs::write(&path, "[wiki]\nseed_context = true\n").unwrap();
+        std::fs::write(
+            dir.path().join("workflow.local.toml"),
+            "[wiki]\nseed_context = false\n",
+        )
+        .unwrap();
+        assert_eq!(WorkflowConfig::wiki_seed_context(&path), Ok(false));
+    }
+
+    #[test]
+    fn wiki_seed_context_malformed_value_names_file_and_key() {
+        let err = wiki_seed(Some("[wiki]\nseed_context = \"no\"\n")).unwrap_err();
+        assert!(err.contains("workflow.toml"), "{err}");
+        assert!(err.contains("[wiki] seed_context"), "{err}");
+        let err = wiki_seed(Some("[wiki\nseed_context = false\n")).unwrap_err();
+        assert!(err.contains("workflow.toml"), "{err}");
+        assert!(err.contains("seed_context"), "{err}");
     }
 }

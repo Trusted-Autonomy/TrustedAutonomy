@@ -317,6 +317,19 @@ For a read-only persona, `ta run --persona <name>`:
 - explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
 - refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
 
+### Turning Wiki Reads Off
+
+To stop agents from reading the wiki to seed or inform their context, add this to `.ta/workflow.toml`:
+
+```toml
+[wiki]
+seed_context = false
+```
+
+With it set, the gateway refuses `ta_wiki_search`, `ta_wiki_get` and `ta_wiki_types` (including cached pages) for goal agents and for chat-mode Chief-of-Staff sessions. The error names the setting and the file, and says to set `seed_context = true` to turn reads back on. Wiki writes are unaffected: `ta_wiki_create` and `ta_wiki_update` still queue changes for draft review as described below.
+
+The default is `true`, so a missing `[wiki]` section or key changes nothing. A value that is not `true` or `false` is an error that names the file and key; reads are refused until it is fixed. `ta doctor` prints a `wiki reads` line when the setting is off (or malformed) so you can see why reads are refused. A `.ta/workflow.local.toml` override applies as for other settings.
+
 ### Wiki Writes Are Reviewed
 
 `ta_wiki_create` and `ta_wiki_update` do not write to the wiki when an agent calls them. They check the input and queue the change in the goal's draft. Nothing reaches Wayfinder until you approve and apply that draft. `ta_wiki_search`, `ta_wiki_get` and `ta_wiki_types` are unchanged and read live.
