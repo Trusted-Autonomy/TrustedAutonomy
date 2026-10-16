@@ -4711,6 +4711,29 @@ fn view_package(
                     println!("     {line}");
                 }
                 println!("     Written to Wayfinder only when this draft is approved and applied.");
+            } else if ta_mcp_gateway::tools::wayfinder_task::ProposeKind::from_tool_name(
+                &action.tool_name,
+            )
+            .is_some_and(|k| k.is_planning())
+            {
+                // Goal / KPI / datapoint proposals: readable summary, then the
+                // `ref:<n>` index and idempotency key the replay will use.
+                println!(
+                    "  {}. [{}] {} ({})",
+                    i + 1,
+                    action.disposition,
+                    action.description,
+                    action.kind,
+                );
+                for line in ta_mcp_gateway::tools::wayfinder_task::review_lines(
+                    &action.tool_name,
+                    &action.parameters,
+                    i,
+                    &pkg.package_id.to_string(),
+                ) {
+                    println!("     {line}");
+                }
+                println!("     Sent to Wayfinder only when this draft is approved and applied.");
             } else {
                 println!(
                     "  {}. [{}] {} ({})",

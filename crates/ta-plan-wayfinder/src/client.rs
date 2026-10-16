@@ -181,6 +181,163 @@ pub enum WayfinderReadError {
     Request { route: String, message: String },
 }
 
+/// Right a service account needs to create goals, KPI metrics and datapoints.
+pub const RIGHT_TASKS_WRITE: &str = "tasks:write";
+/// Right a service account needs to create an org-level KPI.
+pub const RIGHT_KPIS_MANAGE: &str = "kpis:manage";
+
+/// `POST /api/projects/:id/goals`. Optional fields are omitted when `None`
+/// (an upsert by `external_id` leaves omitted fields alone).
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateGoalRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub kind: String,
+    pub parent_goal_id: Option<String>,
+    pub target_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+/// `POST /api/projects/:id/goals/:goal_id/kpi-metrics`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateKpiMetricRequest {
+    pub label: String,
+    pub unit: String,
+    pub target: f64,
+    pub cadence: String,
+    pub kind: String,
+    pub aggregation: String,
+    pub require_gate: bool,
+    pub weight: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+/// `POST /api/projects/:id/kpi-metrics/:metric_id/datapoints`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddKpiDatapointRequest {
+    pub value: f64,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+/// `POST /api/orgs/:org_id/kpis`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateOrgKpiRequest {
+    pub project_id: Option<String>,
+    pub label: String,
+    pub description: String,
+    pub weight: f64,
+    pub created_by: String,
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+/// What a write route returned: the new (or already existing) resource id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedResource {
+    pub id: String,
+}
+
+/// Failure of a goal / KPI write (`POST`). Every variant names the route
+/// (path only, never the token), the status, and what to do about it.
+#[derive(Debug, thiserror::Error)]
+pub enum WayfinderWriteError {
+    #[error(
+        "Wayfinder returned 401 Unauthorized for POST {route}: the service-account token is \
+         unknown or revoked. Re-issue it in Wayfinder's Settings and store it again with \
+         `ta credential add`, then re-run `ta draft apply` for this draft."
+    )]
+    Unauthorized { route: String },
+    #[error(
+        "Wayfinder returned 403 Forbidden for POST {route}: the service account is missing the \
+         `{right}` right. Grant `{right}` to it in Wayfinder's Settings, then re-run \
+         `ta draft apply` for this draft."
+    )]
+    Forbidden { route: String, right: &'static str },
+    #[error(
+        "Wayfinder returned 404 Not Found for POST {route}: the goal or metric id in that route \
+         does not exist in this project (or `project_id`/`org_id` under [plan.wayfinder] is \
+         wrong). Check the id, or propose it again against an existing goal or metric."
+    )]
+    NotFound { route: String },
+    #[error(
+        "Wayfinder returned 409 conflict for POST {route}: {detail}. Either this key was already \
+         used with a different body (change the proposal so it matches what was created, or \
+         remove the earlier object in Wayfinder), or the target refuses this write (datapoints \
+         cannot be added to a task_count metric, because its progress is derived from tasks: use \
+         an `external` metric instead)."
+    )]
+    Conflict { route: String, detail: String },
+    #[error(
+        "Wayfinder rejected the body of POST {route} with status {status}: {detail}. Fix the \
+         proposal's fields and propose it again."
+    )]
+    Invalid {
+        route: String,
+        status: reqwest::StatusCode,
+        detail: String,
+    },
+    #[error(
+        "Wayfinder returned unexpected status {status} for POST {route}: {detail}. Check that \
+         Wayfinder is healthy and that `base_url` under [plan.wayfinder] in .ta/workflow.toml \
+         points at it."
+    )]
+    UnexpectedStatus {
+        route: String,
+        status: reqwest::StatusCode,
+        detail: String,
+    },
+    #[error(
+        "POST {route} to Wayfinder timed out after {timeout:?}. Wayfinder may be down or \
+         overloaded: retry with `ta draft apply` (creates carry an external_id, so a retry \
+         cannot duplicate them)."
+    )]
+    Timeout { route: String, timeout: Duration },
+    #[error(
+        "request POST {route} to Wayfinder failed: {message}. Check that `base_url` under \
+         [plan.wayfinder] in .ta/workflow.toml is correct and reachable."
+    )]
+    Request { route: String, message: String },
+    #[error(
+        "Wayfinder accepted POST {route} but the response had no usable `id`: {detail}. Check \
+         the object in Wayfinder; dependent proposals in this draft cannot be applied until the \
+         id is known."
+    )]
+    BadResponse { route: String, detail: String },
+}
+
+/// Pulls a short human message out of an error body: `error` / `message` /
+/// `detail` string fields if the body is JSON, else the trimmed text.
+fn error_detail(body: &str) -> String {
+    let text = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            ["error", "message", "detail"].iter().find_map(|k| {
+                v.get(*k).and_then(|m| match m {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Object(o) => o
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string),
+                    _ => None,
+                })
+            })
+        })
+        .unwrap_or_else(|| body.trim().to_string());
+    if text.is_empty() {
+        return "(no message in the response body)".to_string();
+    }
+    if text.chars().count() > 300 {
+        let cut: String = text.chars().take(300).collect();
+        return format!("{cut}...");
+    }
+    text
+}
+
 pub struct WayfinderClient {
     http: reqwest::blocking::Client,
     base_url: Url,
@@ -252,6 +409,15 @@ impl WayfinderClient {
         segments: &[&str],
         query: &[(&str, &str)],
     ) -> Result<serde_json::Value, WayfinderReadError> {
+        let mut url = self.org_url(segments);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
+        self.get_json(url)
+    }
+
+    /// Builds `<base_url>/api/orgs/<org_id>/<segments...>`.
+    fn org_url(&self, segments: &[&str]) -> Url {
         let mut url = self.base_url.clone();
         {
             let mut path = url
@@ -262,10 +428,7 @@ impl WayfinderClient {
                 path.push(segment);
             }
         }
-        if !query.is_empty() {
-            url.query_pairs_mut().extend_pairs(query.iter().copied());
-        }
-        self.get_json(url)
+        url
     }
 
     fn get_json(&self, url: Url) -> Result<serde_json::Value, WayfinderReadError> {
@@ -470,6 +633,127 @@ impl WayfinderClient {
             return Ok(());
         }
         expect_success(response, "adding a task dependency")
+    }
+
+    /// `POST /api/projects/:id/goals`. Idempotent by `external_id`.
+    pub fn create_goal(
+        &self,
+        req: &CreateGoalRequest,
+    ) -> Result<CreatedResource, WayfinderWriteError> {
+        self.post_create(self.project_url(&["goals"]), req, RIGHT_TASKS_WRITE)
+    }
+
+    /// `POST /api/projects/:id/goals/:goal_id/kpi-metrics`.
+    pub fn create_kpi_metric(
+        &self,
+        goal_id: &str,
+        req: &CreateKpiMetricRequest,
+    ) -> Result<CreatedResource, WayfinderWriteError> {
+        self.post_create(
+            self.project_url(&["goals", goal_id, "kpi-metrics"]),
+            req,
+            RIGHT_TASKS_WRITE,
+        )
+    }
+
+    /// `POST /api/projects/:id/kpi-metrics/:metric_id/datapoints`.
+    pub fn add_kpi_datapoint(
+        &self,
+        metric_id: &str,
+        req: &AddKpiDatapointRequest,
+    ) -> Result<CreatedResource, WayfinderWriteError> {
+        self.post_create(
+            self.project_url(&["kpi-metrics", metric_id, "datapoints"]),
+            req,
+            RIGHT_TASKS_WRITE,
+        )
+    }
+
+    /// `POST /api/orgs/:org_id/kpis`.
+    pub fn create_org_kpi(
+        &self,
+        req: &CreateOrgKpiRequest,
+    ) -> Result<CreatedResource, WayfinderWriteError> {
+        self.post_create(self.org_url(&["kpis"]), req, RIGHT_KPIS_MANAGE)
+    }
+
+    /// Single-attempt JSON `POST` returning the created resource's `id`.
+    fn post_create<B: Serialize>(
+        &self,
+        url: Url,
+        body: &B,
+        right: &'static str,
+    ) -> Result<CreatedResource, WayfinderWriteError> {
+        let route = url.path().to_string();
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.secret.expose_secret())
+            .json(body)
+            .send()
+            .map_err(|source| {
+                if source.is_timeout() {
+                    WayfinderWriteError::Timeout {
+                        route: route.clone(),
+                        timeout: self.timeout,
+                    }
+                } else {
+                    WayfinderWriteError::Request {
+                        route: route.clone(),
+                        message: source.without_url().to_string(),
+                    }
+                }
+            })?;
+        let status = response.status();
+        let text = response.text().unwrap_or_default();
+        match status {
+            s if s == reqwest::StatusCode::UNAUTHORIZED => {
+                Err(WayfinderWriteError::Unauthorized { route })
+            }
+            s if s == reqwest::StatusCode::FORBIDDEN => {
+                Err(WayfinderWriteError::Forbidden { route, right })
+            }
+            s if s == reqwest::StatusCode::NOT_FOUND => {
+                Err(WayfinderWriteError::NotFound { route })
+            }
+            s if s == reqwest::StatusCode::CONFLICT => Err(WayfinderWriteError::Conflict {
+                route,
+                detail: error_detail(&text),
+            }),
+            s if s == reqwest::StatusCode::BAD_REQUEST
+                || s == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                Err(WayfinderWriteError::Invalid {
+                    route,
+                    status,
+                    detail: error_detail(&text),
+                })
+            }
+            s if !s.is_success() => Err(WayfinderWriteError::UnexpectedStatus {
+                route,
+                status,
+                detail: error_detail(&text),
+            }),
+            _ => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| WayfinderWriteError::BadResponse {
+                        route: route.clone(),
+                        detail: format!("not valid JSON ({e})"),
+                    })?;
+                value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| {
+                        !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+                    })
+                    .map(|id| CreatedResource { id: id.to_string() })
+                    .ok_or_else(|| WayfinderWriteError::BadResponse {
+                        route,
+                        detail: "no usable string `id` field (empty, or containing whitespace)"
+                            .to_string(),
+                    })
+            }
+        }
     }
 
     /// `GET /api/projects/:id/export` — owner-role-gated bulk snapshot.
@@ -1007,5 +1291,191 @@ mod tests {
         assert!(client_for(&mock)
             .get_project_json(&["tasks", "../other"], &[])
             .is_ok());
+    }
+
+    // ── goal / KPI writes ──
+
+    fn mount_post(mock: &BlockingMockServer, route: &str, status: u16, body: serde_json::Value) {
+        mock.block_on(
+            Mock::given(method("POST"))
+                .and(path(route))
+                .and(header("authorization", "Bearer wfsa_test_secret"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(mock.server()),
+        );
+    }
+
+    fn goal_req() -> CreateGoalRequest {
+        CreateGoalRequest {
+            name: "Ship".into(),
+            description: None,
+            kind: "milestone".into(),
+            parent_goal_id: None,
+            target_date: None,
+            external_id: Some("ta_draft:d:0".into()),
+        }
+    }
+
+    #[test]
+    fn create_goal_posts_the_contract_body_and_returns_the_id() {
+        let mock = BlockingMockServer::start();
+        mount_post(
+            &mock,
+            "/api/projects/proj-1/goals",
+            201,
+            serde_json::json!({"id": "g-1", "name": "Ship"}),
+        );
+        let created = client_for(&mock).create_goal(&goal_req()).unwrap();
+        assert_eq!(created.id, "g-1");
+        let reqs = mock.block_on(mock.server().received_requests()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "name": "Ship", "description": null, "kind": "milestone",
+                "parent_goal_id": null, "target_date": null, "external_id": "ta_draft:d:0"
+            })
+        );
+    }
+
+    #[test]
+    fn metric_datapoint_and_org_kpi_routes() {
+        let mock = BlockingMockServer::start();
+        mount_post(
+            &mock,
+            "/api/projects/proj-1/goals/g-1/kpi-metrics",
+            200,
+            serde_json::json!({"id": "m-1"}),
+        );
+        mount_post(
+            &mock,
+            "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
+            201,
+            serde_json::json!({"id": "dp-1"}),
+        );
+        mount_post(
+            &mock,
+            "/api/orgs/org-1/kpis",
+            201,
+            serde_json::json!({"id": "k-1"}),
+        );
+        let c = client_for(&mock);
+        let m = c
+            .create_kpi_metric(
+                "g-1",
+                &CreateKpiMetricRequest {
+                    label: "Signups".into(),
+                    unit: "signups".into(),
+                    target: 10.0,
+                    cadence: "weekly".into(),
+                    kind: "external".into(),
+                    aggregation: "sum".into(),
+                    require_gate: false,
+                    weight: 1.0,
+                    external_id: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(m.id, "m-1");
+        let d = c
+            .add_kpi_datapoint(
+                "m-1",
+                &AddKpiDatapointRequest {
+                    value: 3.0,
+                    source: "manual".into(),
+                    external_id: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(d.id, "dp-1");
+        let k = c
+            .create_org_kpi(&CreateOrgKpiRequest {
+                project_id: Some("proj-1".into()),
+                label: "Reach".into(),
+                description: "d".into(),
+                weight: 1.0,
+                created_by: "ta".into(),
+                source_ref: None,
+                external_id: None,
+            })
+            .unwrap();
+        assert_eq!(k.id, "k-1");
+    }
+
+    #[test]
+    fn forbidden_names_the_missing_right_per_route() {
+        let mock = BlockingMockServer::start();
+        mount_post(
+            &mock,
+            "/api/projects/proj-1/goals",
+            403,
+            serde_json::json!({}),
+        );
+        mount_post(&mock, "/api/orgs/org-1/kpis", 403, serde_json::json!({}));
+        let c = client_for(&mock);
+        let e = c.create_goal(&goal_req()).unwrap_err().to_string();
+        assert!(
+            e.contains("tasks:write") && e.contains("/api/projects/proj-1/goals"),
+            "{e}"
+        );
+        let e = c
+            .create_org_kpi(&CreateOrgKpiRequest {
+                project_id: None,
+                label: "L".into(),
+                description: String::new(),
+                weight: 1.0,
+                created_by: "ta".into(),
+                source_ref: None,
+                external_id: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("kpis:manage") && e.contains("/api/orgs/org-1/kpis"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn conflict_surfaces_the_server_message_and_the_fix() {
+        let mock = BlockingMockServer::start();
+        mount_post(
+            &mock,
+            "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
+            409,
+            serde_json::json!({"error": "datapoints are not accepted for task_count metrics"}),
+        );
+        let e = client_for(&mock)
+            .add_kpi_datapoint(
+                "m-1",
+                &AddKpiDatapointRequest {
+                    value: 1.0,
+                    source: "manual".into(),
+                    external_id: None,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(e, WayfinderWriteError::Conflict { .. }));
+        let s = e.to_string();
+        assert!(s.contains("conflict"), "{s}");
+        assert!(s.contains("not accepted for task_count metrics"), "{s}");
+        assert!(s.contains("external"), "fix must be named: {s}");
+        assert!(
+            s.contains("/api/projects/proj-1/kpi-metrics/m-1/datapoints"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn missing_id_in_a_success_response_is_a_typed_error() {
+        let mock = BlockingMockServer::start();
+        mount_post(
+            &mock,
+            "/api/projects/proj-1/goals",
+            201,
+            serde_json::json!({"ok": true}),
+        );
+        let e = client_for(&mock).create_goal(&goal_req()).unwrap_err();
+        assert!(matches!(e, WayfinderWriteError::BadResponse { .. }), "{e}");
     }
 }
