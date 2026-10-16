@@ -6917,6 +6917,9 @@ fn dry_run_apply_preview(
                         println!("[dry-run] {line}");
                     }
                 }
+                if let Some(msg) = super::draft_plan::unmatched_checked_failure(&reports) {
+                    println!("[dry-run] The real apply would FAIL here: {msg}");
+                }
                 planned = merged;
             }
         }
@@ -8026,6 +8029,15 @@ fn apply_package(
                                                 eprintln!("{line}");
                                             }
                                         }
+                                        if let Some(msg) =
+                                            super::draft_plan::unmatched_checked_failure(&reports)
+                                        {
+                                            anyhow::bail!(
+                                                "Draft {} cannot be applied: {}",
+                                                &package_id.to_string()[..8],
+                                                msg
+                                            );
+                                        }
                                         if merged != on_disk {
                                             std::fs::write(&source_path, merged.as_bytes())
                                                 .map_err(|e| {
@@ -8039,8 +8051,9 @@ fn apply_package(
                                                     )
                                                 })?;
                                             eprintln!(
-                                                "[plan-merge] PLAN.md: carried the draft's checkmarks for \
-                                                 phase(s) {}; no other line changed.",
+                                                "[plan-merge] PLAN.md: carried the draft's reviewed edits for \
+                                                 phase(s) {} (checkmarks, item rewrites, new phase blocks); \
+                                                 changes to other existing phases were not applied.",
                                                 phase_ids_for_precopy.join(", ")
                                             );
                                         } else {
