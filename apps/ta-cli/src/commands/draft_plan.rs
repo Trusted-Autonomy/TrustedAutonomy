@@ -72,6 +72,31 @@ pub fn describe_merge(report: &PhaseMergeReport) -> Vec<String> {
             labels(&m.newly_checked)
         ));
     }
+    if !m.rewritten.is_empty() {
+        let list = m
+            .rewritten
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} -> \"{}\"",
+                    r.before.label(),
+                    r.after.text.chars().take(80).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push(format!(
+            "[plan-merge] Phase {p}: carried {} reviewed rewrite(s) of unchecked item(s): {list}",
+            m.rewritten.len()
+        ));
+    }
+    if !m.new_phases.is_empty() {
+        out.push(format!(
+            "[plan-merge] Phase {p}: carried {} new phase block(s) the draft added: {}",
+            m.new_phases.len(),
+            m.new_phases.join("; ")
+        ));
+    }
     if !m.left_unchecked.is_empty() {
         out.push(format!(
             "[plan-merge] Phase {p}: {} item(s) were not completed by the draft and stay \
@@ -84,12 +109,35 @@ pub fn describe_merge(report: &PhaseMergeReport) -> Vec<String> {
     if !m.unmatched_in_draft.is_empty() {
         out.push(format!(
             "[plan-merge] Phase {p}: {} checked item(s) in the draft match no item in PLAN.md \
-             (reworded or removed) and were NOT applied: {}",
+             and cannot be applied: {}",
             m.unmatched_in_draft.len(),
             labels(&m.unmatched_in_draft)
         ));
     }
     out
+}
+
+/// The error apply fails with when a checked draft item matched nothing, or `None` when
+/// every checked item was carried. A checkmark that cannot be applied means the phase
+/// would be recorded as less complete than the draft says, so apply stops before writing.
+pub fn unmatched_checked_failure(reports: &[PhaseMergeReport]) -> Option<String> {
+    let parts: Vec<String> = reports
+        .iter()
+        .filter(|r| !r.merge.unmatched_in_draft.is_empty())
+        .map(|r| format!("phase {}: {}", r.phase, labels(&r.merge.unmatched_in_draft)))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The draft checked PLAN.md item(s) that match no item in the PLAN.md on disk, so \
+         `ta draft apply` stopped before changing anything in PLAN.md: {}. Each of these was \
+         removed, renumbered, or reworded in a place where the on-disk item is already \
+         checked or has a different number. Fix it in the draft's PLAN.md so the item keeps \
+         its number and text (or is unchecked), then re-run `ta draft apply`. \
+         `--skip-plan-merge` overrides this check.",
+        parts.join("; ")
+    ))
 }
 
 fn labels(items: &[OwnItem]) -> String {
@@ -411,6 +459,95 @@ mod tests {
             finalized, src,
             "applying a draft to a done phase must change nothing"
         );
+    }
+
+    /// The shape of the v0.17.12.21 apply: the reviewer reworded checked items of the
+    /// target phase and the draft added a whole new phase. Built from the repo's real PLAN.md.
+    #[test]
+    fn golden_reworded_items_and_new_phase_land_in_one_apply() {
+        let (_tmp, real) = real_plan_copy();
+        let target = "v0.17.12.21";
+        let added = "v0.17.12.24";
+        let (a_start, a_end) = oracle_block(&real, added).expect("phase .24 in the real plan");
+        let real_lines = lines(&real);
+        // Source: .24 does not exist yet and .21's items are open.
+        let (t_start, t_end) = oracle_block(&real, target).unwrap();
+        let mut src = String::new();
+        for (i, l) in real_lines.iter().enumerate() {
+            if i >= a_start && i < a_end {
+                continue;
+            }
+            if i >= t_start && i < t_end && l.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                src.push_str(&l.replacen("[x]", "[ ]", 1));
+            } else {
+                src.push_str(l);
+            }
+        }
+        let src = update_phase_status(&src, target, PlanStatus::InProgress);
+        // Draft: the real plan, with four checked items of .21 reworded.
+        let mut staging = String::new();
+        let mut reworded = 0;
+        for (i, l) in real_lines.iter().enumerate() {
+            if i >= t_start && i < t_end && l.contains(". [x] ") && reworded < 4 {
+                reworded += 1;
+                let n = l.split('.').next().unwrap();
+                staging.push_str(&format!("{n}. [x] Reviewer rewrite of item {n}\n"));
+            } else {
+                staging.push_str(l);
+            }
+        }
+        assert_eq!(
+            reworded, 4,
+            "the real .21 block should have 5 checked items"
+        );
+        let ids = vec![target.to_string()];
+        let (merged, reports) = merge_draft_plan(&src, &staging, &ids);
+        let m = &reports[0].merge;
+        assert!(m.unmatched_in_draft.is_empty(), "{m:?}");
+        assert!(unmatched_checked_failure(&reports).is_none());
+        assert_eq!(m.rewritten.len(), 4);
+        assert_eq!(m.new_phases.len(), 1, "{:?}", m.new_phases);
+        // A Windows checkout of PLAN.md has CRLF line endings, which the carried line keeps.
+        assert!(merged
+            .replace("\r\n", "\n")
+            .contains("1. [x] Reviewer rewrite of item 1\n"));
+        assert!(oracle_block(&merged, added).is_some(), "phase .24 landed");
+        let (final_plan, outcomes) = finalize_phases(&merged, &ids);
+        assert!(matches!(outcomes[0].result, PhaseResult::MarkedDone));
+        assert!(final_plan.contains("### v0.17.12.24 "));
+        // No other existing phase changed.
+        let other = "v0.17.12.22";
+        let (s0, e0) = oracle_block(&src, other).unwrap();
+        let (s1, e1) = oracle_block(&final_plan, other).unwrap();
+        assert_eq!(lines(&src)[s0..e0], lines(&final_plan)[s1..e1]);
+    }
+
+    #[test]
+    fn a_checked_item_matching_nothing_fails_the_apply_naming_it() {
+        let src =
+            "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] Done already\n2. [ ] Open\n";
+        // Item 1 is already checked in the source, so a reword of it has nothing to attach to.
+        let stg = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] Done, but reworded\n2. [ ] Open\n";
+        let ids = vec!["v1.0.0".to_string()];
+        let (merged, reports) = merge_draft_plan(src, stg, &ids);
+        assert_eq!(merged, src);
+        let msg = unmatched_checked_failure(&reports).expect("must fail");
+        assert!(msg.contains("v1.0.0"), "{msg}");
+        assert!(msg.contains("Done, but reworded"), "{msg}");
+        assert!(msg.contains("ta draft apply"), "{msg}");
+    }
+
+    #[test]
+    fn a_change_to_a_different_phase_is_refused_and_does_not_fail_the_apply() {
+        let src = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [ ] A\n\n### v1.1.0 - Y\n<!-- status: pending -->\n1. [ ] B\n";
+        let stg = "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] A\n\n### v1.1.0 - Y\n<!-- status: done -->\n1. [x] B reworded\n";
+        let ids = vec!["v1.0.0".to_string()];
+        let (merged, reports) = merge_draft_plan(src, stg, &ids);
+        assert_eq!(
+            merged,
+            "### v1.0.0 - X\n<!-- status: in_progress -->\n1. [x] A\n\n### v1.1.0 - Y\n<!-- status: pending -->\n1. [ ] B\n"
+        );
+        assert!(unmatched_checked_failure(&reports).is_none());
     }
 
     #[test]

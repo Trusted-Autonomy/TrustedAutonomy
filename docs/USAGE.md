@@ -2225,7 +2225,18 @@ Aborted with no changes made to the source tree (it is still on protected branch
 
 Fix the cause it names (usually a stale `.git/index.lock` or a working tree that cannot switch branches) or switch to a feature branch yourself (`git switch -c my-branch`), then re-run `ta draft apply`.
 
-**PLAN.md: only the target phase changes.** With `--phase` (or a goal linked to a phase), apply changes exactly two things in `PLAN.md`: the checkmarks of that phase's own numbered items that the draft checked, and that phase's `<!-- status: ... -->` marker. Every other byte is left alone: blank lines, code fences, other phases, and the checkboxes in them (including human-gate items such as sign-offs, which apply never checks). Apply never checks an item on your behalf. If the phase still has unchecked items when you apply, it stays at its current status and the open items are listed:
+**PLAN.md: only the target phase changes.** With `--phase` (or a goal linked to a phase), apply carries three kinds of edit from the draft's `PLAN.md`, and refuses everything else:
+
+| Carried | Rule |
+|---|---|
+| Checkmarks | An item of the target phase the draft checked is checked in `PLAN.md`. |
+| Item rewrites | If you reworded an item of the target phase in the draft, the new text is carried when the draft item has the same list number and the item in `PLAN.md` is still unchecked. |
+| New phase blocks | A whole phase the draft added (a heading whose id no phase in `PLAN.md` has) is inserted next to its neighbours. |
+| Refused | Any change to another existing phase: its items, text, or status marker. The `done` status is never copied from a draft. |
+
+Every other byte is left alone: blank lines, code fences, other phases, and the checkboxes in them (including human-gate items such as sign-offs, which apply never checks).
+
+If the draft checks an item that matches nothing in `PLAN.md` (it was removed, renumbered, or reworded where the `PLAN.md` item is already checked), apply stops with a non-zero exit before writing `PLAN.md` and names the items. Restore the item's number and text in the draft's `PLAN.md` and re-run `ta draft apply`. `ta draft apply --dry-run` shows the same message as "would FAIL". `--skip-plan-merge` overrides the check. Apply never checks an item on your behalf. If the phase still has unchecked items when you apply, it stays at its current status and the open items are listed:
 
 ```
 [plan-merge] Phase v0.17.11.29: 2 item(s) were not completed by the draft and stay unchecked: item 6 "..."; item 7 "...". Finish them, or move them to a named future phase (Deferred Items Policy), then mark the phase done.
