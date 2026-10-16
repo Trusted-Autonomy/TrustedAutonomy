@@ -135,6 +135,29 @@ pub(crate) fn execute_with_gh_check(
     }
 }
 
+/// One line when `[wiki] seed_context = false`, so the owner can see why wiki
+/// reads are refused. Silent when reads are on (the default). A malformed
+/// value is a warning that names the file and key.
+fn check_wiki_seed_context(config: &GatewayConfig) -> Option<CheckResult> {
+    let path = config.workspace_root.join(".ta").join("workflow.toml");
+    match ta_submit::WorkflowConfig::wiki_seed_context(&path) {
+        Ok(true) => None,
+        Ok(false) => Some(CheckResult::ok(
+            "wiki reads",
+            format!(
+                "OFF: [wiki] seed_context = false in {}. Agents cannot read the wiki; \
+                 writes still go through draft review.",
+                path.display()
+            ),
+        )),
+        Err(e) => Some(CheckResult::warn(
+            "wiki reads",
+            e,
+            "Set `seed_context = true` or `false` under [wiki] in .ta/workflow.toml",
+        )),
+    }
+}
+
 /// Old-location keys, tokens and NATS data inside the project tree, or bearer
 /// tokens left in team-session state. Fails under the `strict` posture.
 fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
@@ -242,6 +265,9 @@ fn run_all_checks_with(
 
     // 9b. Control-plane secrets must not live in the project tree.
     results.push(check_control_plane_secrets(config));
+
+    // 9c. Wiki read-side switch (only shown when off or malformed).
+    results.extend(check_wiki_seed_context(config));
 
     // 10. GC health.
     results.extend(check_gc(config));
@@ -2530,6 +2556,33 @@ mod tests {
         let result = check_missing_project_mcp_config_with_staging_global(&config);
         assert_eq!(result.status, CheckStatus::Ok);
         assert!(result.detail.contains("present"));
+    }
+
+    #[test]
+    fn doctor_shows_wiki_reads_line_only_when_seed_context_is_false() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        assert!(check_wiki_seed_context(&config).is_none());
+
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let wf = dir.path().join(".ta/workflow.toml");
+        std::fs::write(&wf, "[wiki]\nseed_context = false\n").unwrap();
+        let line = check_wiki_seed_context(&config).unwrap();
+        assert!(
+            line.detail.contains("seed_context = false"),
+            "{}",
+            line.detail
+        );
+        assert!(line.detail.contains("workflow.toml"), "{}", line.detail);
+
+        std::fs::write(&wf, "[wiki]\nseed_context = 3\n").unwrap();
+        let line = check_wiki_seed_context(&config).unwrap();
+        assert_eq!(line.status, CheckStatus::Warn);
+        assert!(
+            line.detail.contains("[wiki] seed_context"),
+            "{}",
+            line.detail
+        );
     }
 
     #[test]

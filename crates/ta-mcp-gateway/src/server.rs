@@ -3771,6 +3771,50 @@ mod tests {
         std::env::remove_var("TA_AGENT_ID");
     }
 
+    /// Chat-mode (Chief-of-Staff) wiki reads go through the same gateway
+    /// handlers, so `[wiki] seed_context = false` refuses them too.
+    #[test]
+    fn chat_mode_wiki_reads_are_refused_when_seed_context_is_false() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, dir) = chat_mode_server(&[], &launch);
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[wiki]\nseed_context = false\n",
+        )
+        .unwrap();
+
+        let expect_refused = |tool: &str, r: Result<CallToolResult, McpError>| {
+            let msg = r.expect_err(tool).to_string();
+            assert!(msg.contains(tool), "{msg}");
+            assert!(msg.contains("[wiki] seed_context = false"), "{msg}");
+            assert!(msg.contains("workflow.toml"), "{msg}");
+        };
+        expect_refused(
+            "ta_wiki_search",
+            server.ta_wiki_search(Parameters(tools::wiki::WikiSearchParams {
+                scope: "project".to_string(),
+                id: "p".to_string(),
+                query: "q".to_string(),
+            })),
+        );
+        expect_refused(
+            "ta_wiki_get",
+            server.ta_wiki_get(Parameters(tools::wiki::WikiGetParams {
+                scope: "project".to_string(),
+                id: "p".to_string(),
+                page_id: "x".to_string(),
+            })),
+        );
+        expect_refused(
+            "ta_wiki_types",
+            server.ta_wiki_types(Parameters(tools::wiki::WikiTypesParams {
+                scope: "project".to_string(),
+                id: "p".to_string(),
+            })),
+        );
+    }
+
     // ── Chat-mode launch (persona chat_mode = true / ta run --chat-mode) ──
 
     fn chat_launch(agent_id: &str) -> crate::chat_launch::ChatLaunch {
