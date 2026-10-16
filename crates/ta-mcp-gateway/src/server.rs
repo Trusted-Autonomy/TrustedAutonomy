@@ -2193,6 +2193,76 @@ impl TaGatewayServer {
         );
         tools::wayfinder_task::handle_propose_task_complete(&self.state, params)
     }
+
+    #[tool(
+        description = "Propose creating a Wayfinder goal (name, optional description, kind, parent_goal_id, target_date YYYY-MM-DD). \
+        Captured for human review in this goal's draft, never executed immediately; the goal is created only if the draft \
+        is approved and applied, with a derived idempotency key so re-applying cannot duplicate it. The result returns a `ref` \
+        (`ref:<n>`) that later proposals in this same draft can use as goal_id or parent_goal_id."
+    )]
+    fn ta_propose_goal_create(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeGoalCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_goal_create",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_goal_create(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose a countable KPI metric under a Wayfinder goal (this is what 'add a KPI to a goal' means): label, unit, \
+        target (> 0), cadence (none, daily, weekly, monthly), kind (task_count or external), optional aggregation (sum, latest), \
+        require_gate, weight. goal_id is a real goal id or a `ref:<n>` from ta_propose_goal_create in this draft. Captured for \
+        human review; created only if the draft is approved and applied. The result returns a `ref` for datapoints."
+    )]
+    fn ta_propose_kpi_metric_create(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeKpiMetricCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_kpi_metric_create",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_kpi_metric_create(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose recording a number against an `external` KPI metric: metric_id (real id or `ref:<n>` from \
+        ta_propose_kpi_metric_create in this draft), value (finite, within +-1e12), optional source. Wayfinder refuses datapoints on \
+        task_count metrics. Captured for human review; recorded only if the draft is approved and applied."
+    )]
+    fn ta_propose_kpi_datapoint_add(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeKpiDatapointAddParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_kpi_datapoint_add",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_kpi_datapoint_add(&self.state, params)
+    }
+
+    #[tool(
+        description = "Propose an org-level KPI (the alignment KPI that tasks link to): label, optional description, weight, source_ref. \
+        Tied to this project unless org_wide is true. Captured for human review; created only if the draft is approved and \
+        applied. Not for a countable target on a goal (use ta_propose_kpi_metric_create)."
+    )]
+    fn ta_propose_kpi_create(
+        &self,
+        Parameters(params): Parameters<tools::wayfinder_task::ProposeKpiCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_propose_kpi_create",
+            None,
+            params.goal_run_id.parse().ok(),
+        );
+        tools::wayfinder_task::handle_propose_kpi_create(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -2372,8 +2442,10 @@ mod tests {
         //           ta_propose_task_create, ta_propose_task_reassign,
         //           ta_propose_task_needs_revision, ta_propose_task_on_hold,
         //           ta_propose_task_complete
+        //           ta_propose_goal_create, ta_propose_kpi_metric_create,
+        //           ta_propose_kpi_datapoint_add, ta_propose_kpi_create
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 65, "expected 65 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 69, "expected 69 tools, got: {:?}", names);
         for kind in crate::tools::wayfinder_task::ProposeKind::ALL {
             assert!(
                 names.iter().any(|n| n == kind.tool_name()),
@@ -2457,6 +2529,10 @@ mod tests {
             "ta_wiki_update",
             "ta_external_action",
             "ta_propose_task_update",
+            "ta_propose_goal_create",
+            "ta_propose_kpi_metric_create",
+            "ta_propose_kpi_datapoint_add",
+            "ta_propose_kpi_create",
             "ta_draft",
             "ta_pr_build",
             "ta_goal_start",
@@ -3808,6 +3884,10 @@ mod tests {
             "ta_wiki_create",
             "ta_wiki_update",
             "ta_propose_task_update",
+            "ta_propose_goal_create",
+            "ta_propose_kpi_metric_create",
+            "ta_propose_kpi_datapoint_add",
+            "ta_propose_kpi_create",
             "ta_whiteboard_task_claim",
             "ta_context",
             "ta_human_verify",

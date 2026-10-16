@@ -20,7 +20,9 @@ mod store;
 mod test_support;
 
 pub use client::{
-    CreateTaskRequest, TaskDto, WayfinderClient, WayfinderClientError, WayfinderReadError,
+    AddKpiDatapointRequest, CreateGoalRequest, CreateKpiMetricRequest, CreateOrgKpiRequest,
+    CreateTaskRequest, CreatedResource, TaskDto, WayfinderClient, WayfinderClientError,
+    WayfinderReadError, WayfinderWriteError, RIGHT_KPIS_MANAGE, RIGHT_TASKS_WRITE,
     STATUS_CANCELLED, STATUS_DONE, STATUS_IN_PROGRESS, STATUS_ON_HOLD, STATUS_OPEN,
 };
 pub use config::WayfinderPlanConfig;

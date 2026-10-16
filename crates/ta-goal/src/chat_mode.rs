@@ -341,6 +341,10 @@ mod tests {
             "ta_wayfinder_kpi_datapoint_add",
             "ta_propose_task_create",
             "ta_propose_task_complete",
+            "ta_propose_goal_create",
+            "ta_propose_kpi_metric_create",
+            "ta_propose_kpi_datapoint_add",
+            "ta_propose_kpi_create",
         ] {
             assert!(!is_chat_mode_mcp_tool(forbidden), "{forbidden}");
         }

@@ -88,6 +88,13 @@ pub const MCP_TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     // External actions and outcome proposals.
     ("ta_external_action", ToolEffect::Mutating),
     ("ta_propose_task_update", ToolEffect::Mutating),
+    // Goal / KPI / datapoint proposals: captured into the draft and replayed
+    // on apply, never a live Wayfinder write, but still a mutation request,
+    // so a read-only role (and the chat-mode CoS) must not hold them.
+    ("ta_propose_goal_create", ToolEffect::Mutating),
+    ("ta_propose_kpi_metric_create", ToolEffect::Mutating),
+    ("ta_propose_kpi_datapoint_add", ToolEffect::Mutating),
+    ("ta_propose_kpi_create", ToolEffect::Mutating),
     // Unreal Engine.
     ("ue5_python_exec", ToolEffect::Mutating),
     ("ue5_scene_query", ToolEffect::ReadOnly),
@@ -395,6 +402,26 @@ mod tests {
             Some(ToolEffect::Mutating)
         );
         assert!(mutating_mcp_deny_patterns().contains(&"mcp__ta__ta_propose_*".to_string()));
+    }
+
+    #[test]
+    fn goal_and_kpi_proposals_are_classified_mutating_and_denied_to_read_only_roles() {
+        for t in [
+            "ta_propose_goal_create",
+            "ta_propose_kpi_metric_create",
+            "ta_propose_kpi_datapoint_add",
+            "ta_propose_kpi_create",
+        ] {
+            assert_eq!(classify_mcp_tool(t), Some(ToolEffect::Mutating), "{t}");
+            assert!(
+                MCP_TOOL_EFFECTS.iter().any(|(n, _)| *n == t),
+                "{t} must be listed explicitly, not only via the ta_propose_ prefix"
+            );
+            assert!(
+                mutating_mcp_deny_patterns().contains(&format!("mcp__ta__{t}")),
+                "{t} must be denied to read-only roles"
+            );
+        }
     }
 
     #[test]

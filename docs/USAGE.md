@@ -3225,6 +3225,33 @@ ta draft apply <draft-id>    # applies the files, then sends each approved propo
 
 On apply, TA prints one `[applied]` or `[failed]` line per proposal. Proposals are replayed only when a person is present: from an interactive terminal, or when you pass `--replay-actions`. A non-interactive apply (a script, CI, the session auto-apply gate, the release pipeline) applies the files, prints how many external actions were not replayed, and leaves them for you to run with `ta draft apply <id> --replay-actions`. `--no-replay-actions`, or `TA_NO_REPLAY_ACTIONS=1`, turns replay off even in a terminal. `ta draft apply <id> --chain --dry-run` previews the whole chain and changes and replays nothing. A failed proposal never blocks the others or the file changes; fix the cause and re-run `ta draft apply`. Re-applying is safe: replayed proposals are recorded in `.ta/wayfinder-task-replay.log` and skipped next time, and created tasks always carry an `external_id` (derived from the goal and proposal ids when the agent did not supply one), so a task is never created twice. A project without `[plan] backend = "wayfinder"` simply skips the proposals with a log line. The Wayfinder service account needs only `member` role for these calls.
 
+#### Proposing Wayfinder Goals, KPI Metrics and Datapoints in a Draft
+
+A project-manager worker can also propose goals, KPI metrics, datapoints and org-level KPIs. The Chief of Staff never writes these. They ride in the same draft a person reviews and are sent to Wayfinder only when that draft is applied, exactly like the task proposals above. Every tool requires `goal_run_id`.
+
+| Tool | What it proposes | Applied as | Right needed |
+|---|---|---|---|
+| `ta_propose_goal_create` | A goal (`name` required; `description`, `kind` (default `milestone`), `parent_goal_id`, `target_date` as `YYYY-MM-DD` optional) | `POST /api/projects/<project>/goals` | `tasks:write` |
+| `ta_propose_kpi_metric_create` | A countable target on a goal (`goal_id`, `label`, `unit`, `target`, `cadence`, `kind` required; `aggregation`, `require_gate`, `weight` optional) | `POST /api/projects/<project>/goals/<goal>/kpi-metrics` | `tasks:write` |
+| `ta_propose_kpi_datapoint_add` | One measured value on a metric (`metric_id`, `value` required; `source` optional) | `POST /api/projects/<project>/kpi-metrics/<metric>/datapoints` | `tasks:write` |
+| `ta_propose_kpi_create` | An org-level KPI (`label` required; `description`, `weight`, `source_ref` optional; `org_wide: true` for a KPI not tied to this project) | `POST /api/orgs/<org>/kpis` | `kpis:manage` |
+
+Input is checked when the proposal is captured, so a bad one is refused before it reaches a reviewer: values must be finite and within plus or minus 1e12, `target` must be positive, `cadence` is one of `none`, `daily`, `weekly`, `monthly`, metric `kind` is `task_count` or `external`, `aggregation` is `sum` or `latest`, and labels, units and kinds have length caps.
+
+**Referring to something created in the same draft.** A goal or metric that does not exist yet has no id. Each goal and metric proposal returns a `ref` such as `ref:0` in its result. Pass that string wherever an id is expected (`parent_goal_id`, `goal_id`, `metric_id`) and TA swaps in the real id at apply time. The number is the proposal's position in the draft, and a reference must point at an earlier proposal of the right kind.
+
+```text
+ta_propose_goal_create          name="Launch beta"                     -> ref:0
+ta_propose_kpi_metric_create    goal_id="ref:0" label="Signups" unit="users" target=500 cadence="weekly" kind="external"   -> ref:1
+ta_propose_kpi_datapoint_add    metric_id="ref:1" value=42
+```
+
+**What a reviewer sees.** `ta draft view <draft-id>` lists each proposal under pending actions with a readable summary: the goal or metric, its target and cadence, the `ref` other proposals can use, and the idempotency key (`ta_draft:<draft-id>:<n>`) that will be sent. A `task_count` metric is flagged, because Wayfinder counts those from tasks and refuses datapoints on them. Rejecting a proposal also stops the proposals that refer to it.
+
+**On apply.** Proposals are replayed in the order they were captured. Each create carries its `external_id`, so re-running `ta draft apply <draft-id>` never creates anything twice. If a step fails, the steps that depend on it are reported as `[blocked]` with the action they were waiting for, and the rest of the draft still applies. Fix the cause and re-run apply: finished steps are skipped and their ids are remembered in `.ta/wayfinder-task-replay.log`, so references still resolve. Failures name the route and the fix. A `403` names the missing right (`tasks:write` or `kpis:manage`) and a `409` is reported as a conflict with Wayfinder's own message, for example when a datapoint is sent to a `task_count` metric or when the same key was already used with different content.
+
+Chat-mode sessions have none of these tools. They stay read-only.
+
 #### Plan Lint
 
 `ta plan lint` detects four classes of structural problems in PLAN.md:
