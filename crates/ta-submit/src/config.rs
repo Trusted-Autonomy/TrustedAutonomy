@@ -1710,6 +1710,13 @@ pub struct CleanupConfig {
     /// JSON finding on stdin and prints `{"option": "...", "confidence": 0.0-1.0}`.
     #[serde(default)]
     pub assistant_command: Option<String>,
+
+    /// Prune local branches (and their worktrees) whose PR is merged, without being asked.
+    /// Runs after `ta draft watch` sees a merge and in the daemon's scheduled pass, and is
+    /// part of `ta cleanup`. Only branches the PR state proves are done are deleted; the rest
+    /// become questions. Default: true.
+    #[serde(default = "default_cleanup_branches")]
+    pub branches: bool,
 }
 
 impl Default for CleanupConfig {
@@ -1720,6 +1727,7 @@ impl Default for CleanupConfig {
             model_assist: false,
             archive: default_cleanup_archive(),
             assistant_command: None,
+            branches: default_cleanup_branches(),
         }
     }
 }
@@ -1740,6 +1748,10 @@ fn default_cleanup_retention_days() -> u64 {
 }
 
 fn default_cleanup_archive() -> bool {
+    true
+}
+
+fn default_cleanup_branches() -> bool {
     true
 }
 

@@ -7,8 +7,8 @@ use ta_changeset::DraftPackage;
 use ta_goal::CommitContext;
 
 use crate::adapter::{
-    CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult, Result, ReviewResult,
-    ReviewStatus, SavedVcsState, SourceAdapter, SubmitError, SyncResult,
+    BranchReviewInfo, CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult, Result,
+    ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SubmitError, SyncResult,
 };
 use crate::config::SubmitConfig;
 use crate::config::SyncConfig;
@@ -1568,6 +1568,91 @@ impl SourceAdapter for GitAdapter {
                     state,
                     checks_passing,
                 }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn reviews_for_branch(&self, branch: &str) -> Result<Option<Vec<BranchReviewInfo>>> {
+        if !self.has_gh_cli() {
+            return Ok(None);
+        }
+        let output = Command::new(&self.gh_program)
+            .args([
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--limit",
+                "30",
+                "--json",
+                "number,state,headRefOid",
+            ])
+            .current_dir(&self.work_dir)
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let json: serde_json::Value = serde_json::from_slice(&o.stdout).map_err(|e| {
+                    SubmitError::VcsError(format!("Failed to parse gh pr list output: {}", e))
+                })?;
+                let list = json.as_array().cloned().unwrap_or_default();
+                Ok(Some(
+                    list.iter()
+                        .map(|pr| BranchReviewInfo {
+                            review_id: pr
+                                .get("number")
+                                .map(|n| n.to_string().trim_matches('"').to_string())
+                                .unwrap_or_default(),
+                            state: pr
+                                .get("state")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_lowercase(),
+                            head_sha: pr
+                                .get("headRefOid")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string),
+                        })
+                        .collect(),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn closed_unmerged_branches(&self) -> Result<Option<Vec<String>>> {
+        if !self.has_gh_cli() {
+            return Ok(None);
+        }
+        let output = Command::new(&self.gh_program)
+            .args([
+                "pr",
+                "list",
+                "--state",
+                "closed",
+                "--limit",
+                "200",
+                "--json",
+                "headRefName,mergedAt",
+            ])
+            .current_dir(&self.work_dir)
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let json: serde_json::Value = serde_json::from_slice(&o.stdout).map_err(|e| {
+                    SubmitError::VcsError(format!("Failed to parse gh pr list output: {}", e))
+                })?;
+                let list = json.as_array().cloned().unwrap_or_default();
+                Ok(Some(
+                    list.iter()
+                        .filter(|pr| pr.get("mergedAt").is_none_or(|m| m.is_null()))
+                        .filter_map(|pr| pr.get("headRefName").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .collect(),
+                ))
             }
             _ => Ok(None),
         }

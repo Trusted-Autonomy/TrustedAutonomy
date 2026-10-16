@@ -139,6 +139,16 @@ pub fn execute(e: &Engine, action: &Action) -> anyhow::Result<(String, u64)> {
             e.truth.release_phase_claim(phase)?;
             Ok((format!("released daemon claim on phase {phase}"), 0))
         }
+        Action::PruneBranch {
+            branch,
+            tip_sha,
+            worktree,
+            force,
+            reason,
+        } => Ok((
+            crate::branches::prune(e, branch, tip_sha, worktree.as_deref(), *force, reason)?,
+            0,
+        )),
         Action::ArchiveRecords { goals, drafts } => {
             let n = crate::archive::archive_records(&e.paths, goals, drafts)?;
             Ok((format!("archived {n} record(s) under .ta/archive/"), 0))

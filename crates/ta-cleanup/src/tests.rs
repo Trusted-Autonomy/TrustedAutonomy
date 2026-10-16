@@ -17,6 +17,8 @@ struct Truth {
     live_pids: HashSet<u32>,
     claims: Vec<String>,
     released: RefCell<Vec<String>>,
+    branch_prs: HashMap<String, BranchPr>,
+    closed_unmerged: Vec<String>,
 }
 
 impl GroundTruth for Truth {
@@ -39,7 +41,18 @@ impl GroundTruth for Truth {
         self.released.borrow_mut().push(p.to_string());
         Ok(())
     }
+    fn branch_pr(&self, b: &str) -> BranchPr {
+        self.branch_prs
+            .get(b)
+            .cloned()
+            .unwrap_or_else(|| BranchPr::Unknown("no adapter configured".into()))
+    }
+    fn closed_unmerged_branches(&self) -> Vec<String> {
+        self.closed_unmerged.clone()
+    }
 }
+
+mod branches_tests;
 
 struct Fx {
     dir: tempfile::TempDir,

@@ -8,6 +8,7 @@
 
 pub mod act;
 pub mod archive;
+pub mod branches;
 pub mod model;
 pub mod run;
 pub mod scan;

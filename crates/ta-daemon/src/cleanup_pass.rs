@@ -1,12 +1,16 @@
 // cleanup_pass.rs: the daemon's periodic `ta cleanup`, AutoSafe findings only.
 //
-// Runs from the periodic gc loop when `[cleanup] auto = "safe"` (default
-// "off"). It never proposes and never asks: anything that is not unambiguous
-// from ground truth is left for `ta cleanup` or `ta doctor` to put to a person.
+// Runs from the periodic gc loop. With `[cleanup] auto = "safe"` (default "off") it covers
+// every group; otherwise it only prunes finished branches (`[cleanup] branches`, default on).
+// It never proposes and never asks: anything that is not unambiguous from ground truth is
+// left for `ta cleanup` or `ta doctor` to put to a person.
 
 use std::path::Path;
 
-use ta_cleanup::{act::FileCloser, Engine, GroundTruth, Paths, ReviewState, RunOptions, Settings};
+use ta_cleanup::{
+    act::FileCloser, BranchPr, Category, Engine, GroundTruth, Paths, ReviewState, RunOptions,
+    Settings,
+};
 use ta_submit::{SourceAdapter, WorkflowConfig};
 
 struct DaemonTruth {
@@ -31,6 +35,34 @@ impl GroundTruth for DaemonTruth {
         }
     }
 
+    fn branch_pr(&self, branch: &str) -> BranchPr {
+        let Some(a) = &self.adapter else {
+            return BranchPr::Unknown("no VCS adapter is configured".into());
+        };
+        BranchPr::from_lookup(
+            a.reviews_for_branch(branch)
+                .map(|o| {
+                    o.map(|v| {
+                        v.into_iter()
+                            .map(|r| (r.review_id, r.state, r.head_sha))
+                            .collect()
+                    })
+                })
+                .map_err(|e| e.to_string()),
+        )
+    }
+
+    fn closed_unmerged_branches(&self) -> Vec<String> {
+        match self.adapter.as_ref().map(|a| a.closed_unmerged_branches()) {
+            Some(Ok(Some(v))) => v,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "cleanup: could not list PRs closed without merging");
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn phase_done(&self, phase: &str) -> bool {
         let Ok(text) = std::fs::read_to_string(self.root.join("PLAN.md")) else {
             return false;
@@ -46,9 +78,16 @@ impl GroundTruth for DaemonTruth {
 /// Returns the number of actions taken (0 when disabled).
 pub fn run_if_enabled(root: &Path) -> usize {
     let wf = WorkflowConfig::load_or_default(&root.join(".ta/workflow.toml"));
-    if !wf.cleanup.auto_safe() {
+    // `auto = "safe"` runs every group. Otherwise only finished branches are pruned (default
+    // on, `[cleanup] branches = false` to stop): they are the one group the owner wants gone
+    // every time without having to turn anything on.
+    let only = if wf.cleanup.auto_safe() {
+        None
+    } else if wf.cleanup.branches {
+        Some(vec![Category::Branches])
+    } else {
         return 0;
-    }
+    };
     let adapter = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ta_submit::select_adapter(root, &wf.submit)
     }))
@@ -64,6 +103,7 @@ pub fn run_if_enabled(root: &Path) -> usize {
             retention_days: wf.cleanup.retention_days,
             archive: wf.cleanup.archive,
             model_assist: false,
+            branches: wf.cleanup.branches,
         },
         truth: &truth,
         closer: &FileCloser,
@@ -71,6 +111,7 @@ pub fn run_if_enabled(root: &Path) -> usize {
     };
     let opts = RunOptions {
         auto_safe_only: true,
+        only,
         ..Default::default()
     };
     match ta_cleanup::run(&engine, &opts, None) {
@@ -123,6 +164,25 @@ mod tests {
         let d = project("off");
         assert_eq!(run_if_enabled(d.path()), 0);
         assert!(d.path().join(".ta/apply.lock").exists());
+    }
+
+    #[test]
+    fn off_mode_does_not_touch_locks_but_still_looks_at_branches() {
+        // Not a git checkout, so the branches group finds nothing and must not fail.
+        let d = project("off");
+        assert_eq!(run_if_enabled(d.path()), 0);
+        assert!(d.path().join(".ta/apply.lock").exists());
+    }
+
+    #[test]
+    fn branches_can_be_switched_off() {
+        let d = project("off");
+        std::fs::write(
+            d.path().join(".ta/workflow.toml"),
+            "[cleanup]\nauto = \"off\"\nbranches = false\n",
+        )
+        .unwrap();
+        assert_eq!(run_if_enabled(d.path()), 0);
     }
 
     #[test]

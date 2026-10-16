@@ -264,6 +264,23 @@ pub trait SourceAdapter: Send + Sync {
         Ok(None)
     }
 
+    /// Every review/PR whose head is the branch `branch`, in any state.
+    ///
+    /// Branch cleanup asks this instead of `git branch -d` / `git cherry`, because a squash
+    /// merge rewrites patch ids and makes a finished branch look unmerged.
+    /// `Ok(None)` means the adapter cannot say (so the answer is "unknown", never "no PR");
+    /// `Ok(Some(vec![]))` means it looked and found no review for the branch.
+    /// Default: returns None (not supported).
+    fn reviews_for_branch(&self, _branch: &str) -> Result<Option<Vec<BranchReviewInfo>>> {
+        Ok(None)
+    }
+
+    /// Head branch names of reviews that were closed without merging.
+    /// Default: returns None (not supported).
+    fn closed_unmerged_branches(&self) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
     /// Merge a review/PR into the target branch and sync the local workspace.
     ///
     /// Git: calls `gh pr merge` to merge the PR immediately.
@@ -475,6 +492,17 @@ pub struct ReviewStatus {
     pub state: String,
     /// Whether CI checks are passing.
     pub checks_passing: Option<bool>,
+}
+
+/// One review/PR opened from a branch, as reported by `SourceAdapter::reviews_for_branch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchReviewInfo {
+    /// Review identifier (e.g. the PR number).
+    pub review_id: String,
+    /// "open", "merged" or "closed".
+    pub state: String,
+    /// Commit the review's branch pointed at when the review ended or was last seen.
+    pub head_sha: Option<String>,
 }
 
 /// Commit summary for log_since results.

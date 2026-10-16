@@ -12952,6 +12952,8 @@ fn merge_package(
         }
     }
 
+    super::cleanup::prune_branches_after_merge(config);
+
     println!(
         "\n✓ Draft {} merged and synced.",
         &package_id.to_string()[..8]
@@ -13059,6 +13061,8 @@ fn watch_package(
                             }
                         }
                     }
+
+                    super::cleanup::prune_branches_after_merge(config);
 
                     println!(
                         "\n✓ Draft {} merged and synced.",

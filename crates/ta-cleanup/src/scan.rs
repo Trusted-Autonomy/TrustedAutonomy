@@ -296,11 +296,17 @@ pub fn scan(e: &Engine, only: Option<&[Category]>) -> anyhow::Result<Vec<Finding
     if want(Category::Archive) {
         archive(&s, &mut out);
     }
+    // `[cleanup] branches = false` drops the group from runs that do not name it; naming it
+    // (`--only branches`) is an explicit request and always runs.
+    let named = only.is_some_and(|o| o.contains(&Category::Branches));
+    if want(Category::Branches) && (e.settings.branches || named) {
+        crate::branches::branches(&s, &mut out);
+    }
     Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mk(
+pub(crate) fn mk(
     kind: Kind,
     id: String,
     title: String,

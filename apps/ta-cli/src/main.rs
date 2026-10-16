@@ -683,7 +683,7 @@ enum Commands {
     ///   ta cleanup --dry-run               # show findings and reasons, change nothing
     ///   ta cleanup                         # act on safe findings, ask about the rest
     ///   ta cleanup --yes                   # also accept every proposal (never answers questions)
-    ///   ta cleanup --only drafts,staging   # limit to drafts|staging|goals|locks|archive
+    ///   ta cleanup --only drafts,staging   # limit to drafts|staging|goals|locks|archive|branches
     ///   ta cleanup --explain 025f676e      # full evidence for one finding
     Cleanup {
         /// Show findings and what would happen; change nothing.
@@ -692,7 +692,7 @@ enum Commands {
         /// Accept every proposal without asking. Questions are still asked.
         #[arg(long)]
         yes: bool,
-        /// Limit to these groups: drafts, staging, goals, locks, archive (comma separated).
+        /// Limit to these groups: drafts, staging, goals, locks, archive, branches (comma separated).
         #[arg(long, value_delimiter = ',')]
         only: Vec<String>,
         /// Print the evidence and reasoning for one finding id (e.g. 025f676e or draft:025f676e).
