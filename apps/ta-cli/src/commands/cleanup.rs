@@ -5,8 +5,8 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use ta_cleanup::{
-    Assistant, Category, Decider, DraftCloser, Engine, Finding, GroundTruth, Paths, Prompter,
-    Report, ReviewState, RunOptions, Settings, Suggestion,
+    Assistant, BranchPr, Category, Decider, DraftCloser, Engine, Finding, GroundTruth, Paths,
+    Prompter, Report, ReviewState, RunOptions, Settings, Suggestion,
 };
 use ta_mcp_gateway::GatewayConfig;
 use ta_submit::{SourceAdapter, WorkflowConfig};
@@ -101,6 +101,34 @@ impl GroundTruth for CliTruth {
             },
             Ok(None) => ReviewState::Unknown("the VCS adapter does not report review state".into()),
             Err(e) => ReviewState::Unknown(format!("VCS lookup failed: {e}")),
+        }
+    }
+
+    fn branch_pr(&self, branch: &str) -> BranchPr {
+        let Some(a) = &self.adapter else {
+            return BranchPr::Unknown("no VCS adapter is configured".into());
+        };
+        BranchPr::from_lookup(
+            a.reviews_for_branch(branch)
+                .map(|o| {
+                    o.map(|v| {
+                        v.into_iter()
+                            .map(|r| (r.review_id, r.state, r.head_sha))
+                            .collect()
+                    })
+                })
+                .map_err(|e| e.to_string()),
+        )
+    }
+
+    fn closed_unmerged_branches(&self) -> Vec<String> {
+        match self.adapter.as_ref().map(|a| a.closed_unmerged_branches()) {
+            Some(Ok(Some(v))) => v,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "cleanup: could not list PRs closed without merging");
+                Vec::new()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -324,6 +352,7 @@ pub fn settings_for(wf: &WorkflowConfig) -> Settings {
         retention_days: wf.cleanup.retention_days,
         archive: wf.cleanup.archive,
         model_assist: wf.cleanup.model_assist,
+        branches: wf.cleanup.branches,
     }
 }
 
@@ -403,6 +432,40 @@ pub fn run_auto_safe(config: &GatewayConfig, only: Vec<Category>) -> anyhow::Res
     })
 }
 
+/// Called right after a PR is observed merged (`ta draft watch`, `ta draft merge`): prune the
+/// branches and worktrees that merge finished. Honors `[cleanup] branches` (default on), only
+/// takes actions the PR state proves safe, and never fails the caller: a problem is printed
+/// with what to run instead.
+pub fn prune_branches_after_merge(config: &GatewayConfig) {
+    let wf = WorkflowConfig::load_or_default(&config.workspace_root.join(".ta/workflow.toml"));
+    if !wf.cleanup.branches {
+        println!("[cleanup] Branch pruning is off ([cleanup] branches = false); skipped.");
+        return;
+    }
+    match run_auto_safe(config, vec![Category::Branches]) {
+        Ok(r) => {
+            for d in &r.done {
+                println!("[cleanup] {}", d.summary);
+            }
+            for (id, err) in &r.failed {
+                eprintln!("[warn] cleanup could not prune {id}: {err}");
+            }
+            if r.done.is_empty() && r.failed.is_empty() {
+                println!("[cleanup] No finished branches to prune.");
+            }
+            if !r.questions_open.is_empty() {
+                println!(
+                    "[cleanup] {} branch(es) need a decision: run `ta cleanup --only branches`.",
+                    r.questions_open.len()
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "[warn] branch cleanup failed: {e}. Run `ta cleanup --only branches --dry-run` to see why."
+        ),
+    }
+}
+
 /// Run one pass accepting every proposal in `only` (used where the person has
 /// already named the destructive fix, e.g. `ta doctor --fix --only orphan_staging`).
 pub fn run_accepting(config: &GatewayConfig, only: Vec<Category>) -> anyhow::Result<Report> {
@@ -478,7 +541,9 @@ pub fn execute(
         )
     })?;
     if report.findings.is_empty() {
-        println!("Nothing to clean up. Checked drafts, goals, staging, locks and old records.");
+        println!(
+            "Nothing to clean up. Checked drafts, goals, staging, locks, old records and branches."
+        );
         return Ok(());
     }
     print!("{}", ta_cleanup::render_report(&report, dry_run));

@@ -45,6 +45,10 @@ pub enum Kind {
     LeftoverDecisions,
     PhaseClaim,
     Archive,
+    /// A local branch (and maybe its worktree) whose work is done or in question.
+    Branch,
+    /// A remote branch whose PR was closed without merging. Reported only.
+    RemoteBranch,
 }
 
 impl Kind {
@@ -60,6 +64,8 @@ impl Kind {
             Kind::LeftoverDecisions => "leftover_decisions",
             Kind::PhaseClaim => "phase_claim",
             Kind::Archive => "archive",
+            Kind::Branch => "branch",
+            Kind::RemoteBranch => "remote_branch",
         }
     }
 
@@ -72,6 +78,7 @@ impl Kind {
                 Category::Locks
             }
             Kind::Archive => Category::Archive,
+            Kind::Branch | Kind::RemoteBranch => Category::Branches,
         }
     }
 }
@@ -84,6 +91,7 @@ pub enum Category {
     Goals,
     Locks,
     Archive,
+    Branches,
 }
 
 impl Category {
@@ -94,12 +102,13 @@ impl Category {
             "goals" | "goal" => Some(Category::Goals),
             "locks" | "lock" => Some(Category::Locks),
             "archive" => Some(Category::Archive),
+            "branches" | "branch" => Some(Category::Branches),
             _ => None,
         }
     }
 
     pub fn names() -> &'static str {
-        "drafts, staging, goals, locks, archive"
+        "drafts, staging, goals, locks, archive, branches"
     }
 }
 
@@ -150,6 +159,18 @@ pub enum Action {
     },
     ReleasePhaseClaim {
         phase: String,
+    },
+    /// Delete a local branch, after removing its worktree if it has one. The branch is only
+    /// deleted while it still points at `tip_sha`, and the deletion is logged with that SHA so
+    /// `git branch <name> <sha>` brings it back.
+    PruneBranch {
+        branch: String,
+        tip_sha: String,
+        worktree: Option<PathBuf>,
+        /// Remove the worktree even with uncommitted or untracked files (a person said so).
+        force: bool,
+        /// Why this was safe or chosen, copied into the cleanup log.
+        reason: String,
     },
     ArchiveRecords {
         goals: Vec<Uuid>,
@@ -245,6 +266,56 @@ pub enum ReviewState {
     Unknown(String),
 }
 
+/// One PR opened from a branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchReview {
+    pub review_id: String,
+    pub state: ReviewState,
+    /// Commit the PR branch pointed at when the PR ended or was last seen.
+    pub head_sha: Option<String>,
+}
+
+/// What the VCS says about the PRs of one branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchPr {
+    /// The VCS looked and found no PR for the branch.
+    NoPr,
+    /// One or more PRs (a branch can be reused).
+    Prs(Vec<BranchReview>),
+    /// No adapter, adapter failed or cannot answer. Never read as "no PR".
+    Unknown(String),
+}
+
+/// One PR as `(review id, state, head sha)`.
+pub type BranchPrRow = (String, String, Option<String>);
+
+impl BranchPr {
+    /// Build from an adapter answer of `(review id, state, head sha)` triples.
+    pub fn from_lookup(r: Result<Option<Vec<BranchPrRow>>, String>) -> Self {
+        match r {
+            Err(e) => BranchPr::Unknown(format!("VCS lookup failed: {e}")),
+            Ok(None) => BranchPr::Unknown("the VCS adapter does not report PRs by branch".into()),
+            Ok(Some(v)) if v.is_empty() => BranchPr::NoPr,
+            Ok(Some(v)) => BranchPr::Prs(
+                v.into_iter()
+                    .map(|(review_id, state, head_sha)| BranchReview {
+                        review_id,
+                        state: match state.to_ascii_lowercase().as_str() {
+                            "merged" => ReviewState::Merged,
+                            "closed" => ReviewState::Closed,
+                            "open" | "draft" => ReviewState::Open,
+                            other => {
+                                ReviewState::Unknown(format!("unrecognised review state '{other}'"))
+                            }
+                        },
+                        head_sha,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// Everything the engine cannot read from `.ta/` itself.
 pub trait GroundTruth {
     /// State of the PR/review named by `review_ref` (a number or URL).
@@ -261,6 +332,15 @@ pub trait GroundTruth {
     /// Release a daemon claim. Errors are reported, not fatal.
     fn release_phase_claim(&self, _phase: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    /// The PRs opened from `branch`. This, not `git branch -d` or `git cherry`, decides whether
+    /// a branch is done: a squash merge rewrites patch ids.
+    fn branch_pr(&self, _branch: &str) -> BranchPr {
+        BranchPr::Unknown("no VCS adapter is configured".into())
+    }
+    /// Branches whose PR was closed without merging. Empty when the VCS cannot say.
+    fn closed_unmerged_branches(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -333,6 +413,8 @@ pub struct Settings {
     pub retention_days: u64,
     pub archive: bool,
     pub model_assist: bool,
+    /// Include the `branches` group in runs that do not name it. Default: true.
+    pub branches: bool,
 }
 
 impl Default for Settings {
@@ -342,6 +424,7 @@ impl Default for Settings {
             retention_days: 90,
             archive: true,
             model_assist: false,
+            branches: true,
         }
     }
 }
