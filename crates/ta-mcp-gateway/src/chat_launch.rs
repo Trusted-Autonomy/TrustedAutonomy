@@ -39,6 +39,12 @@ pub const ENV_CHAT_AGENT_ID: &str = "TA_CHAT_AGENT_ID";
 /// Workspace root chat reads resolve against (the goal's staging copy).
 pub const ENV_CHAT_WORKSPACE_ROOT: &str = "TA_CHAT_WORKSPACE_ROOT";
 
+/// The Wayfinder project this chat session is bound to (the CoS wake
+/// context). Optional: when absent the pin is `[plan.wayfinder].project_id`
+/// from `.ta/workflow.toml`. When present it must AGREE with that config, or
+/// the read tools refuse (fail closed). Never taken from a tool argument.
+pub const ENV_CHAT_WAYFINDER_PROJECT_ID: &str = "TA_CHAT_WAYFINDER_PROJECT_ID";
+
 /// Resource scope the chat manifest is compiled against.
 pub const CHAT_RESOURCE_SCOPE: &str = "fs://workspace/**";
 /// Validity of a launched chat session's manifest. Matches the
@@ -53,6 +59,8 @@ pub struct ChatLaunch {
     pub agent_id: String,
     pub session_id: Uuid,
     pub workspace_root: Option<PathBuf>,
+    /// Wayfinder project this session is pinned to, from the wake context.
+    pub wayfinder_project_id: Option<String>,
 }
 
 impl ChatLaunch {
@@ -114,10 +122,15 @@ impl ChatLaunch {
             .filter(|s| !s.trim().is_empty())
             .map(PathBuf::from);
 
+        let wayfinder_project_id = get(ENV_CHAT_WAYFINDER_PROJECT_ID)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Ok(Some(Self {
             agent_id,
             session_id,
             workspace_root,
+            wayfinder_project_id,
         }))
     }
 }
@@ -156,9 +169,11 @@ mod tests {
             (ENV_CHAT_SESSION_ID, &id.to_string()),
             (ENV_CHAT_AGENT_ID, "chief-of-staff"),
             (ENV_CHAT_WORKSPACE_ROOT, "/tmp/staging"),
+            (ENV_CHAT_WAYFINDER_PROJECT_ID, " proj-1 "),
         ]))
         .unwrap()
         .unwrap();
+        assert_eq!(launch.wayfinder_project_id.as_deref(), Some("proj-1"));
         assert_eq!(launch.session_id, id);
         assert_eq!(launch.agent_id, "chief-of-staff");
         assert_eq!(launch.workspace_root, Some(PathBuf::from("/tmp/staging")));

@@ -73,6 +73,13 @@ pub const MCP_TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("ta_whiteboard_task_complete", ToolEffect::Mutating),
     ("ta_whiteboard_outcome_send", ToolEffect::ReadOnly),
     // Wiki (Wayfinder; not policy-gated on the TA side).
+    // Wayfinder reads for the CoS chat mode: single GETs pinned to one project.
+    ("ta_wayfinder_task_list", ToolEffect::ReadOnly),
+    ("ta_wayfinder_task_get", ToolEffect::ReadOnly),
+    ("ta_wayfinder_goal_list", ToolEffect::ReadOnly),
+    ("ta_wayfinder_kpi_metric_list", ToolEffect::ReadOnly),
+    ("ta_wayfinder_kpi_summary", ToolEffect::ReadOnly),
+    ("ta_wayfinder_kpi_list", ToolEffect::ReadOnly),
     ("ta_wiki_search", ToolEffect::ReadOnly),
     ("ta_wiki_get", ToolEffect::ReadOnly),
     ("ta_wiki_types", ToolEffect::ReadOnly),
