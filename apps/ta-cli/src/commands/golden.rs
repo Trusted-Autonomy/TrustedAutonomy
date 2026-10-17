@@ -122,7 +122,9 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
 /// Deny the replay's draft and delete its goal and staging. The result is already recorded
 /// under `.ta/golden/<id>/replays/`, and the draft is a throwaway, so leaving it would only
 /// pile up reviews and gigabytes of staging. Failures are reported with the command to retry.
-fn discard_replay_goal(ta_bin: &Path, goal_id: &str) {
+fn discard_replay_goal(ta_bin: &Path, full_goal_id: &str) {
+    // `ta draft deny` resolves a goal by its short prefix, not its full UUID.
+    let goal_id = &full_goal_id[..full_goal_id.len().min(8)];
     let steps: [(&str, Vec<&str>); 2] = [
         (
             "deny the replay draft",
