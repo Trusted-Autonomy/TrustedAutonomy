@@ -1,0 +1,57 @@
+# Org layer: AmplifiedByAI. Applies to every project in the org.
+# Projects add to this file and never supersede it.
+schema_version = 2
+layer = "org"
+org = "amplifiedbyai"
+
+# Org default for every rule below that does not set its own mode.
+# shadow = supervisor decides, human still approves, agreement is recorded.
+default_mode = "shadow"
+
+# Blocks first, so nothing below can approve past them.
+[[approval_rules]]
+id = "org-block-secrets"
+kind = "wiki"
+match = { body_patterns = ["(?i)api[_-]?key\\s*[:=]", "(?i)password\\s*[:=]", "-----BEGIN [A-Z ]*PRIVATE KEY-----"] }
+action = "block"
+label = "Wiki body contains a secret-shaped string"
+
+[[approval_rules]]
+id = "org-block-wiki-deletes"
+kind = "wiki"
+match = { operations = ["delete", "rename"] }
+action = "block"
+label = "Wiki deletes and renames always need a human"
+
+[[approval_rules]]
+id = "org-block-protected-wiki-types"
+kind = "wiki"
+match = { page_types = ["policy", "decision", "constitution", "legal"] }
+action = "review"
+label = "Policy, decision, constitution and legal pages always get human review"
+
+# Narrow approvals. Each needs the supervisor to pass with enough confidence.
+[[approval_rules]]
+id = "org-wiki-append-notes"
+kind = "wiki"
+match = { operations = ["update"], page_types = ["note", "log", "reference"], max_changed_lines = 40 }
+action = "approve"
+min_confidence = 0.85
+mode = "shadow"
+label = "Small edits to note, log and reference pages"
+
+[[approval_rules]]
+id = "org-wiki-create-notes"
+kind = "wiki"
+match = { operations = ["create"], page_types = ["note", "reference"], max_changed_lines = 120 }
+action = "approve"
+min_confidence = 0.85
+mode = "shadow"
+label = "New note and reference pages"
+
+# Everything else in the wiki is reviewed.
+[[approval_rules]]
+id = "org-wiki-default"
+kind = "wiki"
+match = {}
+action = "review"
