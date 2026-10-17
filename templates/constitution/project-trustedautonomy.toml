@@ -1,0 +1,70 @@
+# Project layer: Trusted Autonomy (TrustedAutonomy). Adds to the org file; never supersedes it.
+schema_version = 2
+layer = "project"
+org = "amplifiedbyai"
+project = "trustedautonomy"
+
+# A project can move a rule toward shadow. It cannot move an org rule from shadow to enforce.
+default_mode = "shadow"
+
+# ---- Code and file changes (kind = "fs": parsed by ta-policy today) ----
+[[approval_rules]]
+id = "trustedautonomy-block-secrets-and-ci"
+kind = "fs"
+patterns = ["**/*.pem", "**/*.key", "**/*token*", ".github/workflows/**", "install.sh", "Cargo.lock"]
+action = "block"
+label = "Secrets, CI and installer need a human"
+
+[[approval_rules]]
+id = "trustedautonomy-docs"
+kind = "fs"
+patterns = ["docs/**", "*.md"]
+action = "approve"
+min_confidence = 0.9
+mode = "shadow"
+label = "Docs only"
+
+[[approval_rules]]
+id = "trustedautonomy-default-fs"
+kind = "fs"
+patterns = ["**"]
+action = "review"
+
+# ---- Task changes (kind = "task": proposed; replayed to Wayfinder after approval) ----
+# Creates are low risk. Anything that changes existing work needs a human.
+[[approval_rules]]
+id = "trustedautonomy-task-block-destructive"
+kind = "task"
+match = { operations = ["delete", "reprioritize", "reassign", "complete", "on_hold"] }
+action = "review"
+label = "Changes to existing tasks need a human"
+
+[[approval_rules]]
+id = "trustedautonomy-task-create"
+kind = "task"
+match = { operations = ["create"], max_items_per_draft = 10, requires_source_request = true }
+action = "approve"
+min_confidence = 0.85
+mode = "shadow"
+label = "New tasks that cite a source request, up to 10 per draft"
+
+[[approval_rules]]
+id = "trustedautonomy-task-datapoint"
+kind = "task"
+match = { operations = ["record_datapoint"], max_items_per_draft = 20 }
+action = "review"
+label = "Datapoints stay on review until Wayfinder idempotency (W13) ships"
+
+[[approval_rules]]
+id = "trustedautonomy-task-default"
+kind = "task"
+match = {}
+action = "review"
+
+# ---- Wiki (inherits every org wiki rule; add project-specific tightening here) ----
+[[approval_rules]]
+id = "trustedautonomy-wiki-default"
+kind = "wiki"
+match = {}
+action = "review"
+label = "Project wiki: org rules decide first; anything they do not approve is reviewed"

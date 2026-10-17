@@ -11388,6 +11388,49 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 #### Version: `0.17.12-alpha.25`
 
+### v0.17.12.26 - Conversation-Aware Supervisor Review and Constitution v2 Kinds
+<!-- status: pending -->
+
+**Goal**: Plug a conversation-aware reviewer into the existing supervisor slot and extend `[[approval_rules]]` with `wiki` and `task` kinds and org+project layering. Design: `docs/design/supervisor-review-and-constitution.md`. Samples: `templates/constitution/`.
+
+1. [ ] `conversation-reviewer` supervisor profile: read-only, independent of the author session, untrusted-input fencing, outputs `intent_match` and per-item `decisions[]`.
+2. [ ] Conversation context pack input (recent turns plus project wiki retrieval; swaps to the per-project RAG-KG when it lands).
+3. [ ] Constitution v2 parsing: `id`, `kind`, `match`, `mode`, `min_confidence`, `origins`, `schema_version`, `layer`. Unknown kind is a loud error.
+4. [ ] Org+project layering: most restrictive wins, project cannot loosen or disable an org rule.
+5. [ ] Gateway-stamped `project-manager` origin for funnel drafts; H9 for `cos` and `chat` unchanged.
+6. [ ] Goes through the existing auto-approve entry point (call-site guard test stays green).
+
+**Effort**: L.
+
+#### Version: `0.17.12-alpha.26`
+
+### v0.17.12.27 - Constitution Shadow Mode and Promotion Report
+<!-- status: pending -->
+
+**Goal**: Every auto-approval rule starts in shadow: the supervisor decides, the human still approves, agreement is recorded.
+
+1. [ ] `mode = shadow|enforce` at file, rule and project level (project can only move toward shadow).
+2. [ ] `.ta/audit/auto-approve-shadow.jsonl` with draft, item, rule, would-be action, human action, agreement.
+3. [ ] `ta constitution shadow report` per rule: count, agreement, disagreements; promotion bar configurable (default 50 decisions, at most 2 percent disagreement, no machine-approve of a human-rejected item).
+4. [ ] Mode setting and report exposed to Wayfinder (message 013).
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.27`
+
+### v0.17.12.28 - typed-ask Refinement for Close Phase-Title Matches (after alpha)
+<!-- status: pending -->
+
+**Goal**: When `ta plan resolve` scores two or more candidates close together, ask typed-ask (prompt plus candidates, structured pick with confidence) before falling back to the numbered menu. CoS chat shows the top 3 to 5 candidates sorted by likelihood.
+
+1. [ ] Close-match band in `ta-plan` resolve; typed-ask call only inside the band.
+2. [ ] Below the typed-ask confidence floor, block and list candidates (unchanged behaviour).
+3. [ ] CoS chat flow: `ta plan resolve --json`, show top 3 to 5, confirm in chat.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.28`
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
 
