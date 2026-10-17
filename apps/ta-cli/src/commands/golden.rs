@@ -201,14 +201,24 @@ fn capture(
             goal.display_tag()
         );
     }
-    if !goal.workspace_path.exists() {
-        anyhow::bail!(
-            "The staging workspace of goal {} ({}) no longer exists, so its baseline diff cannot be computed. \
-             Capture a goal whose workspace is still present (before `ta gc` removes it).",
-            goal.display_tag(),
-            goal.workspace_path.display()
-        );
-    }
+    // The staging folder is removed by `ta cleanup` once a goal is applied. The result is then
+    // read from the commit the apply recorded on the draft package, so a finished goal stays
+    // capturable. The check command needs the workspace and is skipped in that case.
+    let workspace_present = goal.workspace_path.exists();
+    let result_commit = if workspace_present {
+        None
+    } else {
+        match draft_commit_sha(config, &goal_id) {
+            Some(sha) if ensure_commit(&config.workspace_root, &sha).is_ok() => Some(sha),
+            _ => anyhow::bail!(
+                "The staging workspace of goal {} ({}) no longer exists and its draft records no apply commit \
+                 present in this repository, so its baseline diff cannot be computed. Capture a goal whose \
+                 workspace is still present, or fetch the apply commit (`git fetch --all`).",
+                goal.display_tag(),
+                goal.workspace_path.display()
+            ),
+        }
+    };
     let paths = draft_paths(config, &goal_id)?.ok_or_else(|| {
         anyhow::anyhow!(
             "Goal {} has no draft package, so there is no result to use as a baseline. \
@@ -223,11 +233,26 @@ fn capture(
     let diff = build_diff(
         &paths,
         |rel| git_show(&config.workspace_root, &start_commit, rel),
-        |rel| read_text(&goal.workspace_path.join(rel)),
+        |rel| match &result_commit {
+            Some(sha) => git_show(&config.workspace_root, sha, rel),
+            None => read_text(&goal.workspace_path.join(rel)),
+        },
     );
     let stats = diff_stats(&diff);
+    if let Some(sha) = &result_commit {
+        notes.push(format!(
+            "The staging workspace is gone, so the baseline diff was read from apply commit {}.{}",
+            short(sha),
+            if check.is_some() {
+                " The check was not run at capture."
+            } else {
+                ""
+            }
+        ));
+    }
 
     let check_passed = match check {
+        Some(_) if result_commit.is_some() => None,
         Some(cmd) => match run_check(cmd, &goal.workspace_path) {
             Ok(pass) => Some(pass),
             Err(e) => {
@@ -1125,6 +1150,38 @@ fn draft_paths(config: &GatewayConfig, goal_id: &str) -> anyhow::Result<Option<V
     Ok(best.map(|(_, p)| p))
 }
 
+/// The apply commit recorded on the newest draft package of `goal_id`, if any.
+fn draft_commit_sha(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+    let mut best: Option<(String, String)> = None;
+    for item in std::fs::read_dir(&config.pr_packages_dir).ok()?.flatten() {
+        let path = item.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if v.pointer("/goal/goal_id").and_then(Value::as_str) != Some(goal_id) {
+            continue;
+        }
+        let Some(sha) = v.pointer("/vcs_status/commit_sha").and_then(Value::as_str) else {
+            continue;
+        };
+        let created = v
+            .pointer("/created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if best.as_ref().is_none_or(|(c, _)| created > *c) {
+            best = Some((created, sha.to_string()));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Run a check command in `dir`; `Ok(true)` when it exits 0.
 fn run_check(cmd: &str, dir: &Path) -> anyhow::Result<bool> {
     #[cfg(windows)]
@@ -1335,6 +1392,72 @@ mod tests {
             .expect("capturing twice must be refused")
             .to_string();
         assert!(again.contains("already exists"), "{again}");
+    }
+
+    /// Commit the staging result onto a branch off `start`, the way an apply does, and record it.
+    fn apply_commit(f: &Fixture, g: &GoalRun) -> String {
+        let p = f.project.path();
+        git_ok(p, &["checkout", "-q", "-b", "applied", &f.start]);
+        std::fs::write(p.join("a.txt"), "one\n2\n").unwrap();
+        std::fs::write(p.join("b.txt"), "new\n").unwrap();
+        git_ok(p, &["add", "a.txt", "b.txt"]);
+        git_ok(p, &["commit", "-q", "-m", "applied"]);
+        let sha = rev(p);
+        git_ok(p, &["checkout", "-q", "main"]);
+        let pkg = serde_json::json!({
+            "created_at": "2026-10-15T00:00:00Z",
+            "goal": {"goal_id": g.goal_run_id.to_string()},
+            "changes": {"artifacts": [
+                {"resource_uri": "fs://workspace/a.txt"},
+                {"resource_uri": "fs://workspace/b.txt"},
+            ]},
+            "vcs_status": {"commit_sha": sha},
+        });
+        std::fs::write(
+            f.config.pr_packages_dir.join("applied.json"),
+            pkg.to_string(),
+        )
+        .unwrap();
+        sha
+    }
+
+    #[test]
+    fn capture_reads_the_baseline_from_the_apply_commit_when_staging_is_gone() {
+        let f = fixture();
+        let g = finished_goal(&f, "Applied goal");
+        apply_commit(&f, &g);
+        std::fs::remove_dir_all(&g.workspace_path).unwrap();
+        let c = capture(&f.config, &g.goal_run_id.to_string(), Some("exit 0"), false).unwrap();
+        let diff = GoldenStore::new(f.project.path())
+            .load_baseline_diff(&c.entry.id)
+            .unwrap();
+        assert!(diff.contains("-two\n+2\n"), "{diff}");
+        assert!(
+            diff.contains("--- /dev/null\n+++ b/b.txt\n+new\n"),
+            "{diff}"
+        );
+        assert_eq!(c.entry.baseline.files_changed, 2);
+        assert_eq!(c.entry.baseline.check_passed, None);
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.contains("apply commit") && n.contains("check was not run")),
+            "{:?}",
+            c.notes
+        );
+    }
+
+    #[test]
+    fn capture_without_staging_or_apply_commit_is_refused_with_next_steps() {
+        let f = fixture();
+        let g = finished_goal(&f, "Gone goal");
+        std::fs::remove_dir_all(&g.workspace_path).unwrap();
+        let err = capture(&f.config, &g.goal_run_id.to_string(), None, false)
+            .err()
+            .expect("must be refused")
+            .to_string();
+        assert!(err.contains("no apply commit"), "{err}");
+        assert!(err.contains("git fetch"), "{err}");
     }
 
     #[test]
