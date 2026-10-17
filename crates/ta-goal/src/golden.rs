@@ -63,6 +63,71 @@ pub struct Baseline {
     pub captured_at: DateTime<Utc>,
 }
 
+/// The settings a run happened under, so a baseline can be compared with a later run on
+/// like terms. Without it a token or cost delta cannot be attributed to anything.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunEnvironment {
+    /// How this was obtained: `measured at replay start`, `measured at capture (after the run
+    /// finished, so it may differ from the run's own settings)` or `declared by owner: ...`.
+    pub provenance: String,
+    #[serde(default)]
+    pub ta_version: String,
+    #[serde(default)]
+    pub claude_code_version: String,
+    #[serde(default)]
+    pub rtk_version: String,
+    #[serde(default)]
+    pub headroom_version: String,
+    /// Resolved optimizer choice per slot (`none`, `rtk`, `headroom`, ... or `not chosen`).
+    #[serde(default)]
+    pub input_slot: String,
+    #[serde(default)]
+    pub context_slot: String,
+    #[serde(default)]
+    pub output_slot: String,
+    #[serde(default)]
+    pub compression_enabled: bool,
+    #[serde(default)]
+    pub anthropic_base_url: Option<String>,
+    /// Claude Code `autoCompactWindow` from `~/.claude/settings.json`, when set.
+    #[serde(default)]
+    pub auto_compact_window: Option<u64>,
+    #[serde(default)]
+    pub daemon_toml_sha256: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl RunEnvironment {
+    /// One line for reports.
+    pub fn summary(&self) -> String {
+        format!(
+            "input={} context={} output={} compression={} ta={} claude={} rtk={} headroom={} ({})",
+            self.input_slot,
+            self.context_slot,
+            self.output_slot,
+            if self.compression_enabled {
+                "on"
+            } else {
+                "off"
+            },
+            or_unknown(&self.ta_version),
+            or_unknown(&self.claude_code_version),
+            or_unknown(&self.rtk_version),
+            or_unknown(&self.headroom_version),
+            self.provenance
+        )
+    }
+}
+
+fn or_unknown(s: &str) -> &str {
+    if s.is_empty() {
+        "?"
+    } else {
+        s
+    }
+}
+
 /// One golden entry (`entry.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoldenEntry {
@@ -82,6 +147,10 @@ pub struct GoldenEntry {
     #[serde(default)]
     pub check_command: Option<String>,
     pub baseline: Baseline,
+    /// What the baseline ran under. `None` on entries captured before this was recorded;
+    /// such a baseline is not a valid comparison until `ta golden annotate` fills it in.
+    #[serde(default)]
+    pub baseline_environment: Option<RunEnvironment>,
 }
 
 /// What one replay produced (`replays/<replay_id>.json`).
@@ -132,6 +201,9 @@ pub struct ReplayRecord {
     /// Why the replay could not be measured, in words the user can act on.
     #[serde(default)]
     pub failure: Option<String>,
+    /// The settings in force when the replay started.
+    #[serde(default)]
+    pub environment: Option<RunEnvironment>,
 }
 
 /// Verdict for one replay against its baseline.
@@ -545,6 +617,15 @@ impl GoldenStore {
         Ok(dir)
     }
 
+    /// Rewrite `entry.json` of an existing entry (used by `ta golden annotate`).
+    pub fn update_entry(&self, entry: &GoldenEntry) -> anyhow::Result<()> {
+        let dir = self.entry_dir(&entry.id)?;
+        write_file(
+            &dir.join("entry.json"),
+            &serde_json::to_string_pretty(entry)?,
+        )
+    }
+
     pub fn load_entry(&self, id: &str) -> anyhow::Result<GoldenEntry> {
         let path = self.entry_dir(id)?.join("entry.json");
         let text = std::fs::read_to_string(&path).map_err(|e| {
@@ -712,6 +793,7 @@ mod tests {
             agent_model: String::new(),
             check_command: check.map(str::to_string),
             baseline: baseline(),
+            baseline_environment: None,
         }
     }
 
@@ -738,6 +820,7 @@ mod tests {
             similarity,
             check_passed: check,
             failure: None,
+            environment: None,
         }
     }
 

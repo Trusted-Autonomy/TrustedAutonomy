@@ -19,8 +19,8 @@ use clap::Subcommand;
 use serde_json::Value;
 use ta_goal::golden::{
     default_entry_id, diff_similarity, diff_stats, parse_overrides, render_file_diff, sha256_hex,
-    verdict, Baseline, GoldenEntry, GoldenStore, ReplayRecord, Verdict, VerdictResult,
-    EQUIVALENCE_THRESHOLD,
+    verdict, Baseline, GoldenEntry, GoldenStore, ReplayRecord, RunEnvironment, Verdict,
+    VerdictResult, EQUIVALENCE_THRESHOLD,
 };
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
@@ -42,6 +42,26 @@ pub enum GoldenCommands {
         /// Capture a goal that started from uncommitted changes anyway.
         #[arg(long)]
         allow_dirty: bool,
+    },
+    /// Record what a baseline actually ran under (optimizers, tool versions), declared by you.
+    ///
+    /// Entries captured before environments were recorded have none, and a baseline without
+    /// one cannot be compared fairly. Use the settings you know the original goal ran with.
+    Annotate {
+        /// Golden entry id.
+        id: String,
+        /// Input optimizer slot the baseline ran with: none, rtk, headroom, ...
+        #[arg(long)]
+        input: String,
+        /// Context optimizer slot (default none).
+        #[arg(long, default_value = "none")]
+        context: String,
+        /// Output optimizer slot (default none).
+        #[arg(long, default_value = "none")]
+        output: String,
+        /// Free text, e.g. "all optimizers on per owner; unverified".
+        #[arg(long)]
+        note: String,
     },
     /// List golden entries with baseline cost and age.
     List {
@@ -91,6 +111,30 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
         } => {
             let captured = capture(config, goal_id, check.as_deref(), *allow_dirty)?;
             print!("{}", render_capture(&captured));
+            Ok(())
+        }
+        GoldenCommands::Annotate {
+            id,
+            input,
+            context,
+            output,
+            note,
+        } => {
+            let store = GoldenStore::new(&config.workspace_root);
+            let mut entry = store.load_entry(id)?;
+            let mut env = entry.baseline_environment.clone().unwrap_or_default();
+            env.provenance = format!("declared by owner, not measured: {note}");
+            env.input_slot = input.clone();
+            env.context_slot = context.clone();
+            env.output_slot = output.clone();
+            env.compression_enabled = input != "none";
+            env.note = Some(note.clone());
+            entry.baseline_environment = Some(env);
+            store.update_entry(&entry)?;
+            println!(
+                "Recorded the baseline environment for '{id}': input={input} context={context} output={output}. \
+                 It is marked as declared, not measured. Verify it with a replay under the same settings."
+            );
             Ok(())
         }
         GoldenCommands::List { json } => list(config, *json),
@@ -345,6 +389,11 @@ fn capture(
         agent_id: goal.agent_id.clone(),
         agent_model: goal.agent_model.clone(),
         check_command: check.map(str::to_string),
+        baseline_environment: Some(collect_environment(
+            config,
+            None,
+            "measured at capture, after the run finished, so it may differ from the run's own settings",
+        )),
         baseline: Baseline {
             cost_usd: goal.cost_usd,
             cost_estimated: goal.cost_estimated,
@@ -739,6 +788,11 @@ fn replay(
         similarity: None,
         check_passed: None,
         failure: None,
+        environment: Some(collect_environment(
+            config,
+            Some(&overrides),
+            "measured at replay start",
+        )),
     };
     let mut diff: Option<String> = None;
     let mut draft_note = None;
@@ -911,6 +965,10 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
             b.outcome,
             check_label(e.check_command.as_deref(), b.check_passed),
         ));
+        out.push_str(&match &e.baseline_environment {
+            Some(env) => format!("  Baseline ran under: {}\n", env.summary()),
+            None => "  Baseline ran under: NOT RECORDED. Not a valid comparison until `ta golden annotate` records it.\n".to_string(),
+        });
         if replays.is_empty() {
             out.push_str(&format!(
                 "  No replays yet. Try: ta golden replay {} --set key=value\n\n",
@@ -948,6 +1006,9 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
                     .unwrap_or_else(|| "-".into()),
                 v.verdict.as_str(),
             ));
+            if let Some(env) = &r.environment {
+                out.push_str(&format!("    {} ran under: {}\n", r.tag, env.summary()));
+            }
             if v.needs_human_review() {
                 review.push(format!(
                     "  {} / {}: {} ({})",
@@ -985,6 +1046,63 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
         ));
     }
     out
+}
+
+/// First line of `<bin> --version`, or empty when the tool is missing.
+fn tool_version(bin: &str) -> String {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// The settings a run happens under: resolved optimizer slots (with `overrides` applied),
+/// tool versions, proxy URL and the Claude Code compaction window. No secrets are read.
+fn collect_environment(
+    config: &GatewayConfig,
+    overrides: Option<&Value>,
+    provenance: &str,
+) -> RunEnvironment {
+    let cfg = super::compression::load_optimizers(&config.workspace_root).with_overrides(overrides);
+    let slot = |s: &ta_context_opt::SlotSelection| {
+        s.use_.clone().unwrap_or_else(|| "not chosen".to_string())
+    };
+    let daemon_toml = config.workspace_root.join(".ta").join("daemon.toml");
+    let claude_settings = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".claude").join("settings.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let input = slot(&cfg.input);
+    RunEnvironment {
+        provenance: provenance.to_string(),
+        ta_version: env!("CARGO_PKG_VERSION").to_string(),
+        claude_code_version: tool_version("claude"),
+        rtk_version: tool_version("rtk"),
+        headroom_version: tool_version("headroom"),
+        compression_enabled: input != "none" && input != "not chosen",
+        input_slot: input,
+        context_slot: slot(&cfg.context),
+        output_slot: slot(&cfg.output),
+        anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
+        auto_compact_window: claude_settings
+            .as_ref()
+            .and_then(|v| v.get("autoCompactWindow"))
+            .and_then(Value::as_u64),
+        daemon_toml_sha256: std::fs::read_to_string(daemon_toml)
+            .ok()
+            .map(|t| sha256_hex(&t)),
+        note: None,
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1585,6 +1703,39 @@ mod tests {
         s
     }
 
+    #[test]
+    fn capture_records_a_baseline_environment_and_annotate_marks_it_declared() {
+        let f = fixture();
+        let entry = captured_entry(&f, None);
+        let env = entry
+            .baseline_environment
+            .as_ref()
+            .expect("capture records one");
+        assert!(env.provenance.starts_with("measured at capture"));
+        let store = GoldenStore::new(&f.config.workspace_root);
+        execute(
+            &GoldenCommands::Annotate {
+                id: entry.id.clone(),
+                input: "rtk".into(),
+                context: "agent-native".into(),
+                output: "none".into(),
+                note: "all on per owner".into(),
+            },
+            &f.config,
+        )
+        .unwrap();
+        let after = store
+            .load_entry(&entry.id)
+            .unwrap()
+            .baseline_environment
+            .unwrap();
+        assert_eq!(after.input_slot, "rtk");
+        assert!(after.compression_enabled);
+        assert!(after
+            .provenance
+            .starts_with("declared by owner, not measured"));
+    }
+
     fn captured_entry(f: &Fixture, check: Option<&str>) -> GoldenEntry {
         let g = finished_goal(f, "Fix the thing");
         capture(&f.config, &g.goal_run_id.to_string(), check, false)
@@ -1722,6 +1873,13 @@ mod tests {
 
         // Result: identical diff to the baseline, check passes, saved and reportable.
         assert_eq!(out.record.outcome, "pr_ready");
+        let env = out
+            .record
+            .environment
+            .as_ref()
+            .expect("replay records its environment");
+        assert_eq!(env.provenance, "measured at replay start");
+        assert!(!env.ta_version.is_empty());
         assert_eq!(out.record.similarity, Some(1.0));
         assert_eq!(out.record.check_passed, Some(true));
         assert_eq!(out.record.cost_usd, 1.0);
