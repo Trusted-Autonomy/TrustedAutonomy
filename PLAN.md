@@ -11432,7 +11432,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.28`
 
 ### v0.17.12.29 - Task Intake Funnel, TA Side (`ta_request_task`)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Let any goal agent request a task or datapoint outside its own goal through one central, audited queue, without writing to Wayfinder or to its own draft. The project-manager role drains the queue into one reviewed draft (VT side, separate phase). Design: alpha-channel `DESIGN-task-intake-funnel.md` revision 2 and `REDTEAM-task-intake-funnel-2026-10-16.md`.
 
