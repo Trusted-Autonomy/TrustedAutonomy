@@ -2747,8 +2747,11 @@ pub fn execute(
     //   3. Prefix match → auto-expand to single pending phase
     //   4. Multiple candidates → interactive disambiguation (or structured
     //      error on non-TTY stdin so the caller can retry with --phase)
-    //   5. No version token → auto-detect single in_progress phase
-    //   6. No in_progress → insert gap phase stub into PLAN.md
+    //   5. No version token → match the title against PLAN.md phases; resolve
+    //      only when exactly one is clearly the best, else ask (TTY) or fail
+    //      with candidates and retry commands (headless). `--phase next` picks
+    //      the first startable pending phase.
+    //   6. `--new-phase` is the only way an ad-hoc phase stub gets inserted.
     //
     // Chat-mode and cos/chat-origin goals skip all of it (v0.17.11.30): they
     // never link, insert or claim a phase and leave PLAN.md untouched.
@@ -2771,7 +2774,27 @@ pub fn execute(
         let plan_path = source_root.join("PLAN.md");
         if plan_path.exists() {
             let phases = plan::load_plan(&source_root).unwrap_or_default();
-            match plan::resolve_phase(phase.as_deref(), title, &phases, quiet)? {
+            // A follow-up or a reused goal already carries its phase: it keeps the
+            // legacy single-in_progress link and its own claim is not "held by another".
+            let reuses_goal = existing_goal_id.is_some() || follow_up.is_some();
+            let new_phase_requested = plan::cli_new_phase_requested();
+            let claims = if reuses_goal {
+                Vec::new()
+            } else {
+                plan::live_phase_claims(&config.goals_dir, None)
+            };
+            let ctx = plan::ResolveContext {
+                claims: &claims,
+                fallback: if new_phase_requested {
+                    plan::TitleFallback::NewPhase
+                } else if reuses_goal {
+                    plan::TitleFallback::LegacyAutoLink
+                } else {
+                    plan::TitleFallback::Block
+                },
+                can_prompt: !headless,
+            };
+            match plan::resolve_phase_with(phase.as_deref(), title, &phases, quiet, &ctx)? {
                 Some(resolved) => {
                     if !quiet {
                         if let plan::ResolveSource::PrefixMatch { ref from } = resolved.source {
@@ -2780,11 +2803,23 @@ pub fn execute(
                     }
                     Some(resolved.id)
                 }
-                None => {
-                    // No version found and no in_progress phase → gap insertion.
-                    title.and_then(|t| plan::auto_detect_phase(&source_root, t, true))
+                None if new_phase_requested => {
+                    // `--new-phase`: the only way an ad-hoc stub gets inserted.
+                    title.and_then(|t| plan::create_adhoc_phase_stub(&source_root, t, quiet))
                 }
+                None => None,
             }
+        } else if phase
+            .as_deref()
+            .is_some_and(|p| p.trim().eq_ignore_ascii_case("next"))
+        {
+            anyhow::bail!(
+                "--phase next needs a PLAN.md, but none exists at {}.\n\
+                 Attempted: pick the first pending phase whose dependencies are done.\n\
+                 Next: run from the project root, create a plan with `ta plan create`, or name a \
+                 phase explicitly with --phase <id>.",
+                plan_path.display()
+            );
         } else {
             phase.clone()
         }
@@ -11685,6 +11720,7 @@ context_inject = "{mode_toml}"
         // The control for the two tests below: without the chat/cos rule the
         // same project does get an in_progress stub in PLAN.md.
         let (project, config) = plan_project();
+        let _new_phase = super::super::plan::CliNewPhaseGuard::set(true);
         run_no_launch(&config, project.path(), "Answer a question", None, None).unwrap();
         let plan = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
         assert_ne!(
@@ -11692,6 +11728,22 @@ context_inject = "{mode_toml}"
             "control run must change PLAN.md"
         );
         assert!(plan.contains("status: in_progress"), "{plan}");
+    }
+
+    #[test]
+    fn an_unmatched_title_without_new_phase_blocks_and_touches_nothing() {
+        let (project, config) = plan_project();
+        let err = run_no_launch(&config, project.path(), "Answer a question", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("phase_not_found"), "{err}");
+        assert!(err.contains("--new-phase"), "{err}");
+        let plan = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert_eq!(plan, PLAN_FOR_CLAIM_TESTS, "PLAN.md must be byte-identical");
+        let goals = std::fs::read_dir(&config.goals_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert_eq!(goals, 0, "no goal (and so no claim) may be created");
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod history;
 pub mod memory_store;
 pub mod parse;
 pub mod query;
+pub mod resolve;
 pub mod schema;
 pub mod store;
 
@@ -36,6 +37,11 @@ pub use query::{
     last_completed_phase_id, next_actionable_phase_id, next_actionable_phases, parent_phase_id,
     parse_semver_id, phase_id_to_semver, warn_unparseable_phase_id_for_bump, BlockingPhase,
     ExpectedVersion,
+};
+pub use resolve::{
+    candidate_for, exclusion_reason, is_confident, match_title, resolve_next, score_title,
+    BlockedPhase, Candidate, ClaimedPhase, NextBlocked, TitleMatch, MAX_LISTED_CANDIDATES,
+    MIN_CONFIDENT_MARGIN, MIN_CONFIDENT_SCORE, MIN_LISTED_SCORE,
 };
 pub use schema::{
     default_doc_search_dirs, default_statuses, PhasePattern, PlanPhase, PlanSchema, PlanStatus,
