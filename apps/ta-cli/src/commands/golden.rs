@@ -19,8 +19,8 @@ use clap::Subcommand;
 use serde_json::Value;
 use ta_goal::golden::{
     default_entry_id, diff_similarity, diff_stats, parse_overrides, render_file_diff, sha256_hex,
-    verdict, Baseline, GoldenEntry, GoldenStore, ReplayRecord, Verdict, VerdictResult,
-    EQUIVALENCE_THRESHOLD,
+    verdict, Baseline, GoldenEntry, GoldenStore, ReplayRecord, RunEnvironment, Verdict,
+    VerdictResult, EQUIVALENCE_THRESHOLD,
 };
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
@@ -42,6 +42,26 @@ pub enum GoldenCommands {
         /// Capture a goal that started from uncommitted changes anyway.
         #[arg(long)]
         allow_dirty: bool,
+    },
+    /// Record what a baseline actually ran under (optimizers, tool versions), declared by you.
+    ///
+    /// Entries captured before environments were recorded have none, and a baseline without
+    /// one cannot be compared fairly. Use the settings you know the original goal ran with.
+    Annotate {
+        /// Golden entry id.
+        id: String,
+        /// Input optimizer slot the baseline ran with: none, rtk, headroom, ...
+        #[arg(long)]
+        input: String,
+        /// Context optimizer slot (default none).
+        #[arg(long, default_value = "none")]
+        context: String,
+        /// Output optimizer slot (default none).
+        #[arg(long, default_value = "none")]
+        output: String,
+        /// Free text, e.g. "all optimizers on per owner; unverified".
+        #[arg(long)]
+        note: String,
     },
     /// List golden entries with baseline cost and age.
     List {
@@ -66,6 +86,10 @@ pub enum GoldenCommands {
         /// Stop the replay if it would spend more than this many USD.
         #[arg(long, value_name = "USD")]
         max_usd: Option<f64>,
+        /// Keep the replay's goal, draft and staging for inspection. By default they
+        /// are denied and deleted once the result is recorded.
+        #[arg(long)]
+        keep: bool,
     },
     /// Compare replays with their baselines: cost, tokens, outcome, check and
     /// diff, with a verdict of equivalent, differs or failed.
@@ -89,12 +113,37 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
             print!("{}", render_capture(&captured));
             Ok(())
         }
+        GoldenCommands::Annotate {
+            id,
+            input,
+            context,
+            output,
+            note,
+        } => {
+            let store = GoldenStore::new(&config.workspace_root);
+            let mut entry = store.load_entry(id)?;
+            let mut env = entry.baseline_environment.clone().unwrap_or_default();
+            env.provenance = format!("declared by owner, not measured: {note}");
+            env.input_slot = input.clone();
+            env.context_slot = context.clone();
+            env.output_slot = output.clone();
+            env.compression_enabled = input != "none";
+            env.note = Some(note.clone());
+            entry.baseline_environment = Some(env);
+            store.update_entry(&entry)?;
+            println!(
+                "Recorded the baseline environment for '{id}': input={input} context={context} output={output}. \
+                 It is marked as declared, not measured. Verify it with a replay under the same settings."
+            );
+            Ok(())
+        }
         GoldenCommands::List { json } => list(config, *json),
         GoldenCommands::Replay {
             id,
             set,
             tag,
             max_usd,
+            keep,
         } => {
             let ta_bin = std::env::current_exe().context(
                 "could not find the running `ta` binary to launch the replay; \
@@ -103,9 +152,64 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
             let mut run = |cmd: &mut Command| cmd.status();
             let outcome = replay(config, &ta_bin, id, set, tag.as_deref(), *max_usd, &mut run)?;
             print!("{}", render_replay(&outcome));
+            if !*keep {
+                if let Some(goal_id) = &outcome.record.goal_id {
+                    discard_replay_goal(&ta_bin, goal_id);
+                }
+            }
             Ok(())
         }
         GoldenCommands::Report { ids, json } => report(config, ids, *json),
+    }
+}
+
+/// Deny the replay's draft and delete its goal and staging. The result is already recorded
+/// under `.ta/golden/<id>/replays/`, and the draft is a throwaway, so leaving it would only
+/// pile up reviews and gigabytes of staging. Failures are reported with the command to retry.
+fn discard_replay_goal(ta_bin: &Path, full_goal_id: &str) {
+    // `ta draft deny` resolves a goal by its short prefix, not its full UUID.
+    let goal_id = &full_goal_id[..full_goal_id.len().min(8)];
+    let steps: [(&str, Vec<&str>); 2] = [
+        (
+            "deny the replay draft",
+            vec![
+                "draft",
+                "deny",
+                goal_id,
+                "--reason",
+                "golden replay result recorded; draft is a throwaway",
+                "--accept-terms",
+            ],
+        ),
+        (
+            "delete the replay goal and staging",
+            vec![
+                "goal",
+                "delete",
+                goal_id,
+                "--reason",
+                "golden replay finished",
+                "--accept-terms",
+            ],
+        ),
+    ];
+    for (what, args) in steps {
+        match Command::new(ta_bin).args(&args).output() {
+            Ok(o) if o.status.success() => println!("Cleanup: {what} ({}): done.", short(goal_id)),
+            Ok(o) => println!(
+                "Cleanup: could not {what} ({}): {}. Retry: ta {}",
+                short(goal_id),
+                String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("no error text"),
+                args.join(" ")
+            ),
+            Err(e) => println!(
+                "Cleanup: could not {what}: {e}. Retry: ta {}",
+                args.join(" ")
+            ),
+        }
     }
 }
 
@@ -201,14 +305,24 @@ fn capture(
             goal.display_tag()
         );
     }
-    if !goal.workspace_path.exists() {
-        anyhow::bail!(
-            "The staging workspace of goal {} ({}) no longer exists, so its baseline diff cannot be computed. \
-             Capture a goal whose workspace is still present (before `ta gc` removes it).",
-            goal.display_tag(),
-            goal.workspace_path.display()
-        );
-    }
+    // The staging folder is removed by `ta cleanup` once a goal is applied. The result is then
+    // read from the commit the apply recorded on the draft package, so a finished goal stays
+    // capturable. The check command needs the workspace and is skipped in that case.
+    let workspace_present = goal.workspace_path.exists();
+    let result_commit = if workspace_present {
+        None
+    } else {
+        match draft_commit_sha(config, &goal_id) {
+            Some(sha) if ensure_commit(&config.workspace_root, &sha).is_ok() => Some(sha),
+            _ => anyhow::bail!(
+                "The staging workspace of goal {} ({}) no longer exists and its draft records no apply commit \
+                 present in this repository, so its baseline diff cannot be computed. Capture a goal whose \
+                 workspace is still present, or fetch the apply commit (`git fetch --all`).",
+                goal.display_tag(),
+                goal.workspace_path.display()
+            ),
+        }
+    };
     let paths = draft_paths(config, &goal_id)?.ok_or_else(|| {
         anyhow::anyhow!(
             "Goal {} has no draft package, so there is no result to use as a baseline. \
@@ -223,11 +337,26 @@ fn capture(
     let diff = build_diff(
         &paths,
         |rel| git_show(&config.workspace_root, &start_commit, rel),
-        |rel| read_text(&goal.workspace_path.join(rel)),
+        |rel| match &result_commit {
+            Some(sha) => git_show(&config.workspace_root, sha, rel),
+            None => read_text(&goal.workspace_path.join(rel)),
+        },
     );
     let stats = diff_stats(&diff);
+    if let Some(sha) = &result_commit {
+        notes.push(format!(
+            "The staging workspace is gone, so the baseline diff was read from apply commit {}.{}",
+            short(sha),
+            if check.is_some() {
+                " The check was not run at capture."
+            } else {
+                ""
+            }
+        ));
+    }
 
     let check_passed = match check {
+        Some(_) if result_commit.is_some() => None,
         Some(cmd) => match run_check(cmd, &goal.workspace_path) {
             Ok(pass) => Some(pass),
             Err(e) => {
@@ -260,6 +389,11 @@ fn capture(
         agent_id: goal.agent_id.clone(),
         agent_model: goal.agent_model.clone(),
         check_command: check.map(str::to_string),
+        baseline_environment: Some(collect_environment(
+            config,
+            None,
+            "measured at capture, after the run finished, so it may differ from the run's own settings",
+        )),
         baseline: Baseline {
             cost_usd: goal.cost_usd,
             cost_estimated: goal.cost_estimated,
@@ -444,6 +578,7 @@ fn build_replay_command(
     cmd.arg("run")
         .arg(format!("Golden replay {} {}", entry.id, tag))
         .arg("--headless")
+        .arg("--new-phase")
         .arg("--objective-file")
         .arg(prompt_path)
         .arg("--source")
@@ -653,6 +788,11 @@ fn replay(
         similarity: None,
         check_passed: None,
         failure: None,
+        environment: Some(collect_environment(
+            config,
+            Some(&overrides),
+            "measured at replay start",
+        )),
     };
     let mut diff: Option<String> = None;
     let mut draft_note = None;
@@ -699,8 +839,7 @@ fn replay(
                         }
                     }
                     draft_note = Some(format!(
-                        "The replay's draft is left unapplied (goal {}). Review it with `ta draft list`, \
-                         and close it with `ta draft close` when you are done.",
+                        "The replay's draft is never applied. It is denied and deleted after the result is recorded unless you pass --keep (goal {}).",
                         short(&record.goal_id.clone().unwrap_or_default())
                     ));
                 }
@@ -826,6 +965,10 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
             b.outcome,
             check_label(e.check_command.as_deref(), b.check_passed),
         ));
+        out.push_str(&match &e.baseline_environment {
+            Some(env) => format!("  Baseline ran under: {}\n", env.summary()),
+            None => "  Baseline ran under: NOT RECORDED. Not a valid comparison until `ta golden annotate` records it.\n".to_string(),
+        });
         if replays.is_empty() {
             out.push_str(&format!(
                 "  No replays yet. Try: ta golden replay {} --set key=value\n\n",
@@ -863,6 +1006,9 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
                     .unwrap_or_else(|| "-".into()),
                 v.verdict.as_str(),
             ));
+            if let Some(env) = &r.environment {
+                out.push_str(&format!("    {} ran under: {}\n", r.tag, env.summary()));
+            }
             if v.needs_human_review() {
                 review.push(format!(
                     "  {} / {}: {} ({})",
@@ -900,6 +1046,63 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
         ));
     }
     out
+}
+
+/// First line of `<bin> --version`, or empty when the tool is missing.
+fn tool_version(bin: &str) -> String {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// The settings a run happens under: resolved optimizer slots (with `overrides` applied),
+/// tool versions, proxy URL and the Claude Code compaction window. No secrets are read.
+fn collect_environment(
+    config: &GatewayConfig,
+    overrides: Option<&Value>,
+    provenance: &str,
+) -> RunEnvironment {
+    let cfg = super::compression::load_optimizers(&config.workspace_root).with_overrides(overrides);
+    let slot = |s: &ta_context_opt::SlotSelection| {
+        s.use_.clone().unwrap_or_else(|| "not chosen".to_string())
+    };
+    let daemon_toml = config.workspace_root.join(".ta").join("daemon.toml");
+    let claude_settings = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".claude").join("settings.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let input = slot(&cfg.input);
+    RunEnvironment {
+        provenance: provenance.to_string(),
+        ta_version: env!("CARGO_PKG_VERSION").to_string(),
+        claude_code_version: tool_version("claude"),
+        rtk_version: tool_version("rtk"),
+        headroom_version: tool_version("headroom"),
+        compression_enabled: input != "none" && input != "not chosen",
+        input_slot: input,
+        context_slot: slot(&cfg.context),
+        output_slot: slot(&cfg.output),
+        anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
+        auto_compact_window: claude_settings
+            .as_ref()
+            .and_then(|v| v.get("autoCompactWindow"))
+            .and_then(Value::as_u64),
+        daemon_toml_sha256: std::fs::read_to_string(daemon_toml)
+            .ok()
+            .map(|t| sha256_hex(&t)),
+        note: None,
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1125,6 +1328,38 @@ fn draft_paths(config: &GatewayConfig, goal_id: &str) -> anyhow::Result<Option<V
     Ok(best.map(|(_, p)| p))
 }
 
+/// The apply commit recorded on the newest draft package of `goal_id`, if any.
+fn draft_commit_sha(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+    let mut best: Option<(String, String)> = None;
+    for item in std::fs::read_dir(&config.pr_packages_dir).ok()?.flatten() {
+        let path = item.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if v.pointer("/goal/goal_id").and_then(Value::as_str) != Some(goal_id) {
+            continue;
+        }
+        let Some(sha) = v.pointer("/vcs_status/commit_sha").and_then(Value::as_str) else {
+            continue;
+        };
+        let created = v
+            .pointer("/created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if best.as_ref().is_none_or(|(c, _)| created > *c) {
+            best = Some((created, sha.to_string()));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Run a check command in `dir`; `Ok(true)` when it exits 0.
 fn run_check(cmd: &str, dir: &Path) -> anyhow::Result<bool> {
     #[cfg(windows)]
@@ -1337,6 +1572,72 @@ mod tests {
         assert!(again.contains("already exists"), "{again}");
     }
 
+    /// Commit the staging result onto a branch off `start`, the way an apply does, and record it.
+    fn apply_commit(f: &Fixture, g: &GoalRun) -> String {
+        let p = f.project.path();
+        git_ok(p, &["checkout", "-q", "-b", "applied", &f.start]);
+        std::fs::write(p.join("a.txt"), "one\n2\n").unwrap();
+        std::fs::write(p.join("b.txt"), "new\n").unwrap();
+        git_ok(p, &["add", "a.txt", "b.txt"]);
+        git_ok(p, &["commit", "-q", "-m", "applied"]);
+        let sha = rev(p);
+        git_ok(p, &["checkout", "-q", "main"]);
+        let pkg = serde_json::json!({
+            "created_at": "2026-10-15T00:00:00Z",
+            "goal": {"goal_id": g.goal_run_id.to_string()},
+            "changes": {"artifacts": [
+                {"resource_uri": "fs://workspace/a.txt"},
+                {"resource_uri": "fs://workspace/b.txt"},
+            ]},
+            "vcs_status": {"commit_sha": sha},
+        });
+        std::fs::write(
+            f.config.pr_packages_dir.join("applied.json"),
+            pkg.to_string(),
+        )
+        .unwrap();
+        sha
+    }
+
+    #[test]
+    fn capture_reads_the_baseline_from_the_apply_commit_when_staging_is_gone() {
+        let f = fixture();
+        let g = finished_goal(&f, "Applied goal");
+        apply_commit(&f, &g);
+        std::fs::remove_dir_all(&g.workspace_path).unwrap();
+        let c = capture(&f.config, &g.goal_run_id.to_string(), Some("exit 0"), false).unwrap();
+        let diff = GoldenStore::new(f.project.path())
+            .load_baseline_diff(&c.entry.id)
+            .unwrap();
+        assert!(diff.contains("-two\n+2\n"), "{diff}");
+        assert!(
+            diff.contains("--- /dev/null\n+++ b/b.txt\n+new\n"),
+            "{diff}"
+        );
+        assert_eq!(c.entry.baseline.files_changed, 2);
+        assert_eq!(c.entry.baseline.check_passed, None);
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.contains("apply commit") && n.contains("check was not run")),
+            "{:?}",
+            c.notes
+        );
+    }
+
+    #[test]
+    fn capture_without_staging_or_apply_commit_is_refused_with_next_steps() {
+        let f = fixture();
+        let g = finished_goal(&f, "Gone goal");
+        std::fs::remove_dir_all(&g.workspace_path).unwrap();
+        let err = capture(&f.config, &g.goal_run_id.to_string(), None, false)
+            .err()
+            .expect("must be refused")
+            .to_string();
+        assert!(err.contains("no apply commit"), "{err}");
+        assert!(err.contains("git fetch"), "{err}");
+    }
+
     #[test]
     fn capture_refuses_goals_that_cannot_be_a_baseline() {
         let f = fixture();
@@ -1400,6 +1701,39 @@ mod tests {
         #[cfg(not(windows))]
         let s = Command::new("true").status().unwrap();
         s
+    }
+
+    #[test]
+    fn capture_records_a_baseline_environment_and_annotate_marks_it_declared() {
+        let f = fixture();
+        let entry = captured_entry(&f, None);
+        let env = entry
+            .baseline_environment
+            .as_ref()
+            .expect("capture records one");
+        assert!(env.provenance.starts_with("measured at capture"));
+        let store = GoldenStore::new(&f.config.workspace_root);
+        execute(
+            &GoldenCommands::Annotate {
+                id: entry.id.clone(),
+                input: "rtk".into(),
+                context: "agent-native".into(),
+                output: "none".into(),
+                note: "all on per owner".into(),
+            },
+            &f.config,
+        )
+        .unwrap();
+        let after = store
+            .load_entry(&entry.id)
+            .unwrap()
+            .baseline_environment
+            .unwrap();
+        assert_eq!(after.input_slot, "rtk");
+        assert!(after.compression_enabled);
+        assert!(after
+            .provenance
+            .starts_with("declared by owner, not measured"));
     }
 
     fn captured_entry(f: &Fixture, check: Option<&str>) -> GoldenEntry {
@@ -1539,12 +1873,19 @@ mod tests {
 
         // Result: identical diff to the baseline, check passes, saved and reportable.
         assert_eq!(out.record.outcome, "pr_ready");
+        let env = out
+            .record
+            .environment
+            .as_ref()
+            .expect("replay records its environment");
+        assert_eq!(env.provenance, "measured at replay start");
+        assert!(!env.ta_version.is_empty());
         assert_eq!(out.record.similarity, Some(1.0));
         assert_eq!(out.record.check_passed, Some(true));
         assert_eq!(out.record.cost_usd, 1.0);
         assert_eq!(out.verdict.verdict, Verdict::Equivalent);
         assert!(estimate_lines(&entry, Some(5.0)).contains("$2.00"));
-        assert!(out.draft_note.as_deref().unwrap().contains("unapplied"));
+        assert!(out.draft_note.as_deref().unwrap().contains("never applied"));
         let store = GoldenStore::new(f.project.path());
         assert_eq!(store.list_replays(&entry.id).unwrap().len(), 1);
 
