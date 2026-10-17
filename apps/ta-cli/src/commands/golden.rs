@@ -469,6 +469,7 @@ fn build_replay_command(
     cmd.arg("run")
         .arg(format!("Golden replay {} {}", entry.id, tag))
         .arg("--headless")
+        .arg("--new-phase")
         .arg("--objective-file")
         .arg(prompt_path)
         .arg("--source")
