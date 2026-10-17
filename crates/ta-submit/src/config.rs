@@ -2142,6 +2142,12 @@ pub struct StagingConfig {
     /// are removed before a new goal is created. Set to 0 to disable. Default: 5.
     #[serde(default = "default_staging_max_gb")]
     pub staging_max_gb: f64,
+    /// Remove build-output directories (`target/`, `node_modules/`, the other
+    /// default excludes and `.taignore` entries) from a goal's staging copy when
+    /// the agent exits, before the draft is built. They are never part of the
+    /// diff. `ta run --keep-build-output` keeps them for one goal. Default: true.
+    #[serde(default = "default_reclaim_build_output")]
+    pub reclaim_build_output: bool,
 }
 
 impl Default for StagingConfig {
@@ -2151,8 +2157,13 @@ impl Default for StagingConfig {
             min_disk_mb: default_min_disk_mb(),
             strategy: StagingStrategy::Full,
             staging_max_gb: default_staging_max_gb(),
+            reclaim_build_output: default_reclaim_build_output(),
         }
     }
+}
+
+fn default_reclaim_build_output() -> bool {
+    true
 }
 
 fn default_auto_clean() -> bool {

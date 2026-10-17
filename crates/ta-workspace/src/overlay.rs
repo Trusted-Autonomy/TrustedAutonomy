@@ -199,6 +199,107 @@ impl ExcludePatterns {
     }
 }
 
+impl ExcludePatterns {
+    /// Is a directory called `name` build output that the copy excludes and that
+    /// is therefore never part of a diff? True for `dir/` patterns and exact-name
+    /// patterns (including `.taignore` entries). Never true for agent
+    /// infrastructure (`.ta/`, ...) or VCS metadata (`.git/`, ...), and never for
+    /// `*.ext` patterns, which name files.
+    pub fn is_build_output_dir(&self, name: &str) -> bool {
+        if crate::path_safety::is_infrastructure_component(name) {
+            return false;
+        }
+        self.patterns.iter().any(|pattern| {
+            if let Some(dir_name) = pattern.strip_suffix('/') {
+                name == dir_name
+            } else if pattern.starts_with('*') {
+                false
+            } else {
+                name == pattern
+            }
+        })
+    }
+}
+
+/// Outcome of [`reclaim_build_output`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReclaimStats {
+    /// Staging-relative paths (forward slashes) of the directories removed.
+    pub dirs_removed: Vec<String>,
+    /// Total size of everything removed, in bytes.
+    pub bytes_freed: u64,
+    /// Directories that could not be removed: staging-relative path and error.
+    pub failures: Vec<(String, String)>,
+}
+
+/// Remove build-output directories (`target/`, `node_modules/`, the other
+/// default excludes and `.taignore` entries) from a staging copy.
+///
+/// These directories are excluded when staging is created and from every diff,
+/// so removing them can never lose reviewable work. Only real directories that
+/// match [`ExcludePatterns::is_build_output_dir`] are removed. Symlinks (smart
+/// staging links excluded directories back to the source) are left alone, as are
+/// infrastructure and VCS directories, and no individual file is ever touched.
+pub fn reclaim_build_output(staging_dir: &Path, excludes: &ExcludePatterns) -> ReclaimStats {
+    let mut stats = ReclaimStats::default();
+    reclaim_walk(staging_dir, staging_dir, excludes, &mut stats);
+    stats
+}
+
+fn reclaim_walk(root: &Path, dir: &Path, excludes: &ExcludePatterns, stats: &mut ReclaimStats) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // `DirEntry::file_type` does not follow symlinks: a link is not a dir here.
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if crate::path_safety::is_infrastructure_component(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if excludes.is_build_output_dir(&name) {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let size = dir_size_no_follow(&path);
+            match fs::remove_dir_all(&path) {
+                Ok(()) => {
+                    stats.bytes_freed += size;
+                    stats.dirs_removed.push(rel);
+                }
+                Err(e) => stats.failures.push((rel, e.to_string())),
+            }
+        } else {
+            reclaim_walk(root, &path, excludes, stats);
+        }
+    }
+}
+
+fn dir_size_no_follow(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                total += dir_size_no_follow(&entry.path());
+            } else if file_type.is_file() {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
 // ── End V1 copy-optimization excludes ─────────────────────────────
 
 /// A change detected by diffing the staging workspace against the source.

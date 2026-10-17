@@ -9,6 +9,7 @@
 //
 // Lightweight: no disk I/O unless issues are detected.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -24,6 +25,11 @@ use ta_events::EventEnvelope;
 use ta_goal::operations::{ActionSeverity, CorrectiveAction, OperationsLog};
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use uuid::Uuid;
+
+/// Default seconds a goal may stay `running` with a dead agent process while its
+/// owning `ta run` process is still alive (post-agent review and draft build).
+/// Configurable via `[operations] post_agent_grace_secs` in daemon.toml.
+pub const DEFAULT_POST_AGENT_GRACE_SECS: u64 = 1800;
 
 /// Watchdog configuration extracted from daemon.toml `[operations]` and `[power]`.
 #[derive(Debug, Clone)]
@@ -53,6 +59,10 @@ pub struct WatchdogConfig {
     /// Startup grace period: seconds to wait for the first heartbeat before
     /// applying `heartbeat_timeout_secs` (v0.15.7.1).
     pub agent_start_timeout_secs: u64,
+    /// Seconds a goal may keep `running` with a dead agent while its owning
+    /// `ta run` process (`GoalRun::owner_pid`) is alive. Past this the goal is
+    /// failed and the reason says the grace period was exceeded.
+    pub post_agent_grace_secs: u64,
 }
 
 impl Default for WatchdogConfig {
@@ -66,6 +76,7 @@ impl Default for WatchdogConfig {
             finalize_timeout_secs: 600,
             heartbeat_timeout_secs: 120,
             agent_start_timeout_secs: 60,
+            post_agent_grace_secs: DEFAULT_POST_AGENT_GRACE_SECS,
         }
     }
 }
@@ -99,6 +110,7 @@ impl WatchdogConfig {
             finalize_timeout_secs: finalize,
             heartbeat_timeout_secs: heartbeat_timeout,
             agent_start_timeout_secs: agent_start_timeout,
+            post_agent_grace_secs: ops.post_agent_grace_secs,
         }
     }
 
@@ -113,6 +125,7 @@ impl WatchdogConfig {
             finalize_timeout_secs: ops.finalize_timeout_secs,
             heartbeat_timeout_secs: 120,
             agent_start_timeout_secs: 60,
+            post_agent_grace_secs: ops.post_agent_grace_secs,
         }
     }
 }
@@ -139,6 +152,11 @@ pub struct WatchdogState {
     /// Used to suppress re-firing every watchdog cycle while disk stays low
     /// (v0.17.0.12.5 item 6).
     last_disk_alert_wall: Option<SystemTime>,
+    /// When the watchdog first saw each `running` goal's agent process dead
+    /// while its owner (`ta run`) was alive. Starts the post-agent grace clock.
+    /// In memory only: a daemon restart restarts the grace period, which errs
+    /// on the side of keeping the goal.
+    dead_agent_first_seen: HashMap<Uuid, DateTime<Utc>>,
 }
 
 impl Default for WatchdogState {
@@ -150,6 +168,7 @@ impl Default for WatchdogState {
             api_was_reachable: None,
             disk_alert_first_noticed: None,
             last_disk_alert_wall: None,
+            dead_agent_first_seen: HashMap::new(),
         }
     }
 }
@@ -173,6 +192,7 @@ pub async fn run_watchdog(
         interval_secs = config.interval_secs,
         zombie_delay = config.zombie_transition_delay_secs,
         stale_threshold = config.stale_question_threshold_secs,
+        post_agent_grace_secs = config.post_agent_grace_secs,
         wake_grace_secs = config.wake_grace_secs,
         "Watchdog started"
     );
@@ -391,6 +411,14 @@ fn watchdog_cycle(
         }
     }
 
+    // Forget grace clocks for goals that are no longer `running` (they settled
+    // or were removed), so a later episode starts a fresh clock.
+    state.dead_agent_first_seen.retain(|id, _| {
+        goals
+            .iter()
+            .any(|g| g.goal_run_id == *id && matches!(g.state, GoalRunState::Running))
+    });
+
     for goal in &goals {
         match &goal.state {
             GoalRunState::Running => {
@@ -404,6 +432,7 @@ fn watchdog_cycle(
                     &mut issues,
                     in_wake_grace,
                     project_root,
+                    &mut state.dead_agent_first_seen,
                 );
             }
             GoalRunState::Finalizing {
@@ -643,6 +672,7 @@ fn check_running_goal(
     issues: &mut Vec<HealthIssue>,
     in_wake_grace: bool,
     project_root: &Path,
+    dead_agent_first_seen: &mut HashMap<Uuid, DateTime<Utc>>,
 ) {
     // During wake grace period, suppress all liveness alerts.
     if in_wake_grace {
@@ -705,11 +735,47 @@ fn check_running_goal(
     }
 
     // Process is dead.
-    // If the agent exited cleanly, run.rs should have already transitioned the goal to
-    // `Finalizing` before we get here. A goal in `Running` with a dead PID means either:
-    //   a) The process was killed unexpectedly (SIGKILL, crash)
-    //   b) The run.rs exit handler crashed before writing `Finalizing`
-    // In both cases, treat as zombie.
+    // If the agent exited cleanly, run.rs transitions the goal to `Finalizing`
+    // shortly after. A goal in `Running` with a dead agent PID means either:
+    //   a) The owning `ta run` is still finishing up (post-agent work, or the
+    //      moment between the agent exiting and `Finalizing` being written)
+    //   b) The process was killed unexpectedly and `ta run` died with it
+    // Case (a) must never be failed: the finished work is about to be collected.
+    let owner_alive = goal.owner_pid.map(is_process_alive).unwrap_or(false);
+    let phase = goal
+        .post_agent_phase
+        .as_deref()
+        .unwrap_or("not yet recorded");
+    let mut owner_note = match goal.owner_pid {
+        None => "no owning ta run PID was recorded".to_string(),
+        Some(owner) if owner_alive => format!("owning ta run (PID {}) is still alive", owner),
+        Some(owner) => format!("owning ta run (PID {}) is also gone", owner),
+    };
+
+    if owner_alive {
+        let first_seen = *dead_agent_first_seen
+            .entry(goal.goal_run_id)
+            .or_insert(*now);
+        let dead_for_secs = (*now - first_seen).num_seconds().max(0) as u64;
+        if dead_for_secs < config.post_agent_grace_secs {
+            tracing::info!(
+                goal_id = %goal.goal_run_id,
+                agent_pid = pid,
+                owner_pid = ?goal.owner_pid,
+                post_agent_phase = phase,
+                dead_for_secs = dead_for_secs,
+                grace_secs = config.post_agent_grace_secs,
+                decision = "keep_running",
+                "Watchdog: agent exited but owning ta run is alive, within post-agent grace period"
+            );
+            return;
+        }
+        owner_note = format!(
+            "{}, but the post-agent grace period of {}s was exceeded \
+             (post-agent phase: {}; configure with [operations] post_agent_grace_secs)",
+            owner_note, config.post_agent_grace_secs, phase
+        );
+    }
 
     let age_secs = (*now - goal.updated_at).num_seconds().unsigned_abs();
     if age_secs < config.zombie_transition_delay_secs {
@@ -725,10 +791,11 @@ fn check_running_goal(
 
     let detail = format!(
         "Agent process (PID {}) for goal '{}' is gone without updating state \
-         (last update: {}s ago). Run: ta goal recover {}",
+         (last update: {}s ago; {}). Run: ta goal recover {}",
         pid,
         goal.display_tag(),
         age_secs,
+        owner_note,
         &goal.goal_run_id.to_string()[..8],
     );
 
@@ -737,6 +804,10 @@ fn check_running_goal(
         pid = pid,
         age_secs = age_secs,
         prev_state = %goal.state,
+        owner_pid = ?goal.owner_pid,
+        owner_alive = owner_alive,
+        post_agent_phase = phase,
+        decision = "fail",
         "Watchdog: goal state transition running -> failed (zombie_goal)"
     );
 
@@ -769,10 +840,11 @@ fn check_running_goal(
 
     // Transition to Failed.
     let reason = format!(
-        "Agent process (PID {}) exited without updating goal state. \
+        "Agent process (PID {}) exited without updating goal state; {}. \
          Detected by daemon watchdog after {}s. \
          Run `ta goal recover {}` to restore state if a draft was created.",
         pid,
+        owner_note,
         age_secs,
         &goal.goal_run_id.to_string()[..8],
     );
@@ -1278,6 +1350,19 @@ pub fn startup_recovery_scan(project_root: &Path) -> usize {
             continue;
         }
 
+        // The owning `ta run` outlives the agent through post-agent review and
+        // draft build. A daemon restart during that window must not touch the goal.
+        if goal.owner_pid.map(is_process_alive).unwrap_or(false) {
+            tracing::info!(
+                goal_id = %goal.goal_run_id,
+                owner_pid = ?goal.owner_pid,
+                post_agent_phase = goal.post_agent_phase.as_deref().unwrap_or("unknown"),
+                decision = "keep_running",
+                "startup_recovery_scan: agent exited but owning ta run is alive, leaving goal to it"
+            );
+            continue;
+        }
+
         // Agent process is dead (or no PID). Check if staging workspace exists.
         let staging_exists = goal.workspace_path.exists();
 
@@ -1606,6 +1691,105 @@ mod tests {
         goal.state = GoalRunState::Running;
         goal.agent_pid = Some(99999999); // Very unlikely to be alive
         assert_eq!(process_health_label(&goal), "dead");
+    }
+
+    /// Run one `check_running_goal` pass against a Running goal whose agent is
+    /// dead and whose last update is `idle_secs` old. Returns the persisted goal
+    /// and the health issues raised.
+    fn run_dead_agent_check(
+        owner_pid: Option<u32>,
+        grace_secs: u64,
+        first_seen_secs_ago: Option<i64>,
+        idle_secs: i64,
+    ) -> (GoalRun, Vec<HealthIssue>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+        let event_store = FsEventStore::new(dir.path().join("events"));
+        let now = Utc::now();
+
+        let mut goal = GoalRun::new(
+            "Liveness",
+            "obj",
+            "agent",
+            dir.path().join("staging"),
+            dir.path().join("store"),
+        );
+        goal.state = GoalRunState::Running;
+        goal.agent_pid = Some(99_999_999); // not alive
+        goal.owner_pid = owner_pid;
+        goal.updated_at = now - chrono::Duration::seconds(idle_secs);
+        store.save(&goal).unwrap();
+
+        let config = WatchdogConfig {
+            zombie_transition_delay_secs: 60,
+            post_agent_grace_secs: grace_secs,
+            ..WatchdogConfig::default()
+        };
+        let mut first_seen = HashMap::new();
+        if let Some(ago) = first_seen_secs_ago {
+            first_seen.insert(goal.goal_run_id, now - chrono::Duration::seconds(ago));
+        }
+        let mut issues = Vec::new();
+        check_running_goal(
+            &goal,
+            &config,
+            &store,
+            &event_store,
+            &now,
+            &mut issues,
+            false,
+            dir.path(),
+            &mut first_seen,
+        );
+        let after = store.get(goal.goal_run_id).unwrap().unwrap();
+        (after, issues)
+    }
+
+    #[test]
+    fn live_owner_within_grace_is_not_failed() {
+        // Idle for far longer than the zombie delay, as after a long agent run.
+        let (after, issues) = run_dead_agent_check(Some(std::process::id()), 1800, None, 5000);
+        assert_eq!(after.state, GoalRunState::Running);
+        assert!(issues.is_empty(), "no issue expected: {:?}", issues);
+    }
+
+    #[test]
+    fn live_owner_past_grace_is_failed_and_reason_names_the_condition() {
+        let (after, issues) =
+            run_dead_agent_check(Some(std::process::id()), 1800, Some(1801), 5000);
+        match after.state {
+            GoalRunState::Failed { reason } => {
+                assert!(reason.contains("is still alive"), "{}", reason);
+                assert!(reason.contains("grace period of 1800s"), "{}", reason);
+                assert!(reason.contains("ta goal recover"), "{}", reason);
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, "zombie_goal");
+    }
+
+    #[test]
+    fn agent_and_owner_gone_is_failed_and_reason_says_so() {
+        let (after, _) = run_dead_agent_check(Some(99_999_998), 1800, None, 5000);
+        match after.state {
+            GoalRunState::Failed { reason } => {
+                assert!(reason.contains("is also gone"), "{}", reason);
+                assert!(!reason.contains("grace period"), "{}", reason);
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn no_recorded_owner_is_failed_and_reason_says_so() {
+        let (after, _) = run_dead_agent_check(None, 1800, None, 5000);
+        match after.state {
+            GoalRunState::Failed { reason } => {
+                assert!(reason.contains("no owning ta run PID"), "{}", reason);
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
     }
 
     #[test]

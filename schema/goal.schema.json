@@ -650,6 +650,15 @@
       "minimum": 0,
       "type": "integer"
     },
+    "owner_pid": {
+      "description": "PID of the `ta run` process that owns this goal.\n\nUnlike `agent_pid` (cleared when the agent exits), this stays set for the\nwhole run, including the post-agent review and draft build. The daemon\nwatchdog treats a live owner as proof that the goal is still being\nhandled and does not fail it just because the agent process is gone.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "parent_goal_id": {
       "description": "Parent goal ID for follow-up goals (enables iterative refinement).",
       "format": "uuid",
@@ -668,6 +677,13 @@
     },
     "plan_phase": {
       "description": "Optional plan phase this goal is working on (e.g., \"4b\").",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "post_agent_phase": {
+      "description": "What the owning `ta run` is doing after the agent process exited:\n[`POST_AGENT_PHASE_REVIEWING`] or [`POST_AGENT_PHASE_BUILDING_DRAFT`].\n`None` while the agent is running or for goals that never ran post-agent\nwork. Shown by `ta goal inspect`.",
       "type": [
         "string",
         "null"

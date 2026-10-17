@@ -1515,6 +1515,8 @@ fn create_constitution_amend_draft(
             .and_then(|n| n.to_str())
             .map(|s| s.to_string()),
         agent_pid: None,
+        owner_pid: None,
+        post_agent_phase: None,
         heartbeat_required: false,
         auto_cancel_after_draft: false,
         pr_url: None,
@@ -2314,6 +2316,8 @@ fn create_review_draft(
             .and_then(|n| n.to_str())
             .map(|s| s.to_string()),
         agent_pid: None,
+        owner_pid: None,
+        post_agent_phase: None,
         heartbeat_required: false,
         auto_cancel_after_draft: false,
         pr_url: None,
