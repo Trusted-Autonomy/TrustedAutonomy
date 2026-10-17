@@ -501,6 +501,53 @@ pub enum PlanCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Show which phase a title, a version, or `next` resolves to. Read-only.
+    ///
+    /// Runs the same resolver as `ta run` without --phase and prints the
+    /// outcome: `resolved`, `ambiguous` or `none`, the phase when resolved, and
+    /// the scored candidates. Never claims a phase, edits PLAN.md or starts a
+    /// goal. Exits 0 for all three outcomes; read `outcome` (or use --json).
+    ///
+    /// Examples:
+    ///   ta plan resolve "golden set capture"
+    ///   ta plan resolve next --json
+    Resolve {
+        /// Free text: a goal title, a phase version (v0.17.12.5), or `next`.
+        text: String,
+        /// Output the stable JSON document (documented in docs/USAGE.md).
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+thread_local! {
+    static CLI_NEW_PHASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Scoped carrier for `ta run --new-phase`. `main.rs` holds one for the
+/// duration of its `run::execute(...)` call, which keeps the flag out of
+/// `execute`'s long, widely-shared parameter list. Thread-local and restored on
+/// drop, so parallel tests cannot observe each other's value.
+pub struct CliNewPhaseGuard {
+    previous: bool,
+}
+
+impl CliNewPhaseGuard {
+    pub fn set(enabled: bool) -> Self {
+        let previous = CLI_NEW_PHASE.with(|c| c.replace(enabled));
+        Self { previous }
+    }
+}
+
+impl Drop for CliNewPhaseGuard {
+    fn drop(&mut self) {
+        CLI_NEW_PHASE.with(|c| c.set(self.previous));
+    }
+}
+
+/// Whether `--new-phase` was passed for the `execute` call on this thread.
+pub(crate) fn cli_new_phase_requested() -> bool {
+    CLI_NEW_PHASE.with(|c| c.get())
 }
 
 /// Subcommands for `ta plan review`.
@@ -719,7 +766,58 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         PlanCommands::BuildStatus { refresh, once } => plan_build_status(config, *refresh, *once),
         PlanCommands::Pragma { no_scan } => plan_pragma(config, *no_scan),
         PlanCommands::Waves { phases, json } => plan_waves_cmd(config, phases.as_deref(), *json),
+        PlanCommands::Resolve { text, json } => plan_resolve_cmd(config, text, *json),
     }
+}
+
+/// `ta plan resolve`: print what the resolver would do, change nothing.
+fn plan_resolve_cmd(config: &GatewayConfig, text: &str, json_output: bool) -> anyhow::Result<()> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    if !plan_path.exists() {
+        anyhow::bail!(
+            "No PLAN.md at {}. `ta plan resolve` matches text against the phases in PLAN.md; \
+             run it from a project root, or create a plan with `ta plan create`.",
+            plan_path.display()
+        );
+    }
+    let phases = load_plan(&config.workspace_root)?;
+    let claims = live_phase_claims(&config.goals_dir, None);
+    let outcome = resolve_outcome(text, &phases, &claims);
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+
+    let label = match outcome.outcome {
+        OutcomeKind::Resolved => "resolved",
+        OutcomeKind::Ambiguous => "ambiguous",
+        OutcomeKind::None => "none",
+    };
+    println!("{label}: {}", outcome.message);
+    if let Some(p) = &outcome.phase {
+        println!("  phase: {} {} [{}]", p.id, p.title, p.status);
+    }
+    if !outcome.candidates.is_empty() {
+        println!("Candidates (best first):");
+        for (i, c) in outcome.candidates.iter().enumerate() {
+            println!("  {}. {}", i + 1, candidate_line(c));
+        }
+    }
+    let quoted = shell_quote_title(text);
+    match (outcome.outcome, &outcome.phase) {
+        (OutcomeKind::Resolved, Some(p)) => {
+            println!("Start it with: ta run {quoted} --phase {}", p.id)
+        }
+        (_, _) => {
+            for c in outcome.candidates.iter().filter(|c| c.is_eligible()) {
+                println!("Pick one with: ta run {quoted} --phase {}", c.id);
+            }
+            println!("Or create a new ad-hoc phase on purpose: ta run {quoted} --new-phase");
+        }
+    }
+    println!("(read-only: nothing was claimed and PLAN.md was not changed)");
+    Ok(())
 }
 
 // ── Data model + schema-driven parsing (v0.17.11.1: extracted to ta-plan) ──
@@ -3837,57 +3935,18 @@ pub use ta_plan::{
     next_actionable_phases,
 };
 
-/// Auto-detect the plan phase for a goal run.
-///
-/// Priority (first match wins):
-/// 1. `--phase` explicit flag (never called here — handled by caller)
-/// 2. Semver found in goal title (e.g., `"v0.15.15.2 — Fix auth"` → `v0.15.15.2`)
-/// 3. Exactly one phase currently `in_progress` in PLAN.md → use it
-/// 4. None of the above → generate a gap semver and insert stub into PLAN.md
-///
-/// Returns `(phase_id, was_auto_detected, message_to_print)`.
-pub fn auto_detect_phase(project_root: &Path, title: &str, quiet: bool) -> Option<String> {
-    let plan_path = project_root.join("PLAN.md");
-    if !plan_path.exists() {
-        return None;
-    }
+/// Insert an ad-hoc `in_progress` stub phase for `title` into PLAN.md and
+/// return its ID. Only `ta run --new-phase` reaches this: an unmatched title
+/// must never insert a phase unasked.
+pub fn create_adhoc_phase_stub(project_root: &Path, title: &str, quiet: bool) -> Option<String> {
     let phases = load_plan(project_root).unwrap_or_default();
-
-    // 2. Semver in title.
-    if let Some(phase_id) = extract_semver_from_title(title) {
-        // Verify it's actually a known phase.
-        if phases.iter().any(|p| phase_ids_match(&p.id, &phase_id)) {
-            if !quiet {
-                println!("Auto-linked phase from title: {}", phase_id);
-            }
-            return Some(phase_id);
-        }
-        // Unknown phase from title — still use it (could be a new phase being named).
-        if !quiet {
-            println!(
-                "Phase ID extracted from title: {} (not yet in PLAN.md)",
-                phase_id
-            );
-        }
-        return Some(phase_id);
-    }
-
-    // 3. Exactly one in_progress phase.
-    if let Some(phase_id) = find_single_in_progress(&phases) {
-        if !quiet {
-            println!("Auto-linked phase: {} (currently in_progress)", phase_id);
-        }
-        return Some(phase_id);
-    }
-
-    // 4. No match → generate gap semver and insert stub.
     let last_done = last_completed_phase_id(&phases);
     let gap_id = create_gap_semver(&last_done, &phases);
     if !quiet {
         println!(
-            "No phase specified — inserted ad-hoc phase {} in PLAN.md. \
+            "Created ad-hoc phase {} in PLAN.md for \"{}\" (--new-phase). \
              Use --phase to target a planned phase instead.",
-            gap_id
+            gap_id, title
         );
     }
     let _ = insert_adhoc_phase(project_root, &gap_id, title);
@@ -3910,8 +3969,13 @@ pub enum ResolveSource {
     },
     /// Chosen interactively or auto-selected via title-word fuzzy match.
     FuzzyMatch,
-    /// No version found; the single in-progress phase was used.
+    /// No version found; the single in-progress phase was used (follow-up and
+    /// `--goal-id` reuse only).
     AutoInProgress,
+    /// The words of the title clearly matched one phase title.
+    TitleMatch,
+    /// `--phase next`.
+    NextPhase,
 }
 
 /// The result of `resolve_phase()`.
@@ -3921,32 +3985,167 @@ pub struct ResolvedPhase {
     pub source: ResolveSource,
 }
 
-/// Unified phase resolution: single entry point used by `ta run`, `ta goal start`,
-/// and any other command that accepts a `--phase` argument.
-///
-/// Resolution order (first match wins):
-/// 1. **Exact match**: parse `v\d+(\.\d+)*` from `explicit_phase` (if provided) or `title`.
-///    If the parsed ID matches a plan phase exactly, return it.
-/// 2. **Prefix expansion**: if no exact match, find all *pending* phases whose ID starts
-///    with the parsed token. Single pending match → auto-select and log. Zero or multiple
-///    → disambiguation.
-/// 3. **Title-word fuzzy match**: score pending phases by word overlap with the title.
-///    Collect candidates above the threshold and merge into the disambiguation list.
-/// 4. **Interactive disambiguation**: when more than one candidate exists, print a numbered
-///    menu and read a selection. Non-TTY stdin → fail with a structured error listing
-///    candidates so the caller can retry with `--phase`.
-/// 5. **Auto in-progress**: if no version token was found anywhere, fall back to the single
-///    in-progress phase (if exactly one exists). Otherwise return `None` so the caller can
-///    insert a gap phase.
-///
-/// Returns `Ok(Some(ResolvedPhase))` on success, `Ok(None)` when no plan phase could be
-/// determined (caller should handle gap insertion), and `Err` on disambiguation failure.
+/// What `resolve_phase_with` does when the input names no version token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleFallback {
+    /// Match the title against PLAN.md. Block (or ask on a TTY) unless exactly
+    /// one phase is clearly the best. Never inserts or claims anything.
+    Block,
+    /// `ta run --new-phase`: skip title matching, the caller inserts an ad-hoc
+    /// phase on purpose.
+    NewPhase,
+    /// Follow-up and `--goal-id` reuse: the goal already carries its phase, so
+    /// only the legacy "single in_progress phase" link applies.
+    LegacyAutoLink,
+}
+
+/// Everything `resolve_phase_with` needs beyond the plan itself.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolveContext<'a> {
+    /// Phases a live goal currently holds (see [`live_phase_claims`]).
+    pub claims: &'a [ta_plan::ClaimedPhase],
+    pub fallback: TitleFallback,
+    /// Whether it is acceptable to ask the user a question (false for
+    /// headless launches). Prompting also requires stdin to be a terminal.
+    pub can_prompt: bool,
+}
+
+impl Default for ResolveContext<'_> {
+    fn default() -> Self {
+        Self {
+            claims: &[],
+            fallback: TitleFallback::Block,
+            can_prompt: false,
+        }
+    }
+}
+
+fn is_next_keyword(text: &str) -> bool {
+    text.trim().eq_ignore_ascii_case("next")
+}
+
+/// How a version token lines up with the plan.
+enum TokenMatch<'a> {
+    /// Exactly the named phase.
+    Exact(&'a PlanPhase),
+    /// The token names a done phase with no pending sub-phases.
+    DoneOnly,
+    /// The token is a prefix of exactly one pending phase.
+    Prefix(&'a PlanPhase),
+    /// Zero or several pending phases share the prefix.
+    Open(Vec<&'a PlanPhase>),
+}
+
+fn match_version_token<'a>(
+    token: &str,
+    is_explicit: bool,
+    phases: &'a [PlanPhase],
+) -> TokenMatch<'a> {
+    // Exact match. For an explicit --phase flag any phase matches (the user
+    // knows what they want); for a title-extracted token only claimable phases
+    // do, so a done parent phase never shadows its pending sub-phases.
+    let exact = if is_explicit {
+        phases.iter().find(|p| phase_ids_match(&p.id, token))
+    } else {
+        phases.iter().find(|p| {
+            phase_ids_match(&p.id, token)
+                && matches!(p.status, PlanStatus::Pending | PlanStatus::InProgress)
+        })
+    };
+    if let Some(phase) = exact {
+        return TokenMatch::Exact(phase);
+    }
+
+    let token_norm = token.trim_start_matches('v');
+    let done_match = phases
+        .iter()
+        .any(|p| phase_ids_match(&p.id, token) && p.status == PlanStatus::Done);
+    if done_match {
+        let has_pending_sub = phases.iter().any(|p| {
+            p.status == PlanStatus::Pending
+                && p.id
+                    .trim_start_matches('v')
+                    .starts_with(&format!("{}.", token_norm))
+        });
+        if !has_pending_sub {
+            return TokenMatch::DoneOnly;
+        }
+    }
+
+    // Prefix expansion, pending phases only. The dot separator keeps
+    // "v0.15.30.5" from matching "v0.15.30.50".
+    let prefix_matches: Vec<&PlanPhase> = phases
+        .iter()
+        .filter(|p| {
+            if p.status != PlanStatus::Pending {
+                return false;
+            }
+            let id_norm = p.id.trim_start_matches('v');
+            id_norm == token_norm || id_norm.starts_with(&format!("{}.", token_norm))
+        })
+        .collect();
+    if prefix_matches.len() == 1 {
+        return TokenMatch::Prefix(prefix_matches[0]);
+    }
+    TokenMatch::Open(prefix_matches)
+}
+
+/// Unified phase resolution with the default (strict, non-interactive) context.
+/// See [`resolve_phase_with`].
+#[cfg(test)]
 pub fn resolve_phase(
     explicit_phase: Option<&str>,
     title: Option<&str>,
     phases: &[PlanPhase],
     quiet: bool,
 ) -> anyhow::Result<Option<ResolvedPhase>> {
+    resolve_phase_with(
+        explicit_phase,
+        title,
+        phases,
+        quiet,
+        &ResolveContext::default(),
+    )
+}
+
+/// Unified phase resolution: single entry point used by `ta run` and any other
+/// command that accepts a `--phase` argument.
+///
+/// Resolution order (first match wins):
+/// 0. **`next`**: `--phase next` picks the first pending phase in plan order whose
+///    `Depends on` phases are all done, skipping `in_progress` and live-claimed
+///    phases. Nothing qualifying is an error naming the blocking dependencies.
+/// 1. **Exact match**: parse `v\d+(\.\d+)*` from `explicit_phase` (if provided) or `title`.
+///    If the parsed ID matches a plan phase exactly, return it. A title-extracted
+///    phase held by a live goal is refused, not silently reused.
+/// 2. **Prefix expansion**: if no exact match, find all *pending* phases whose ID starts
+///    with the parsed token. Single pending match → auto-select and log. Zero or multiple
+///    → disambiguation.
+/// 3. **Title-word fuzzy match** (version token present but unresolved): score pending
+///    phases by word overlap and merge into the disambiguation list.
+/// 4. **Interactive disambiguation**: when more than one candidate exists, print a numbered
+///    menu and read a selection. Non-TTY stdin → fail with a structured error listing
+///    candidates so the caller can retry with `--phase`.
+/// 5. **Title match** (no usable version token): score the title against every phase
+///    (`ta_plan::match_title`). Exactly one clear winner is resolved; anything else
+///    blocks: a numbered question on a TTY, a structured error otherwise. This never
+///    returns `Ok(None)` for an unmatched title, so no caller can fall into inserting
+///    an ad-hoc phase by accident. [`TitleFallback::NewPhase`] opts out on purpose.
+///
+/// Returns `Ok(Some(ResolvedPhase))` on success, `Ok(None)` when the caller should
+/// proceed without a plan phase (or create one, for `NewPhase`), and `Err` when the
+/// phase could not be determined safely.
+pub fn resolve_phase_with(
+    explicit_phase: Option<&str>,
+    title: Option<&str>,
+    phases: &[PlanPhase],
+    quiet: bool,
+    ctx: &ResolveContext<'_>,
+) -> anyhow::Result<Option<ResolvedPhase>> {
+    if explicit_phase.is_some_and(is_next_keyword) {
+        return resolve_next_phase(phases, ctx, quiet).map(Some);
+    }
+
     // Determine the version token to look up and whether it came from an explicit flag.
     let (version_token, is_explicit) = if let Some(ep) = explicit_phase {
         // The explicit flag may itself be a plain version string or a short label like "4b".
@@ -3958,49 +4157,39 @@ pub fn resolve_phase(
     };
 
     if let Some(ref token) = version_token {
-        // Step 1: exact match.
-        //
-        // For an explicit --phase flag: match any phase (the user knows what they want).
-        // For title-extracted: only match claimable (Pending or InProgress) phases so that
-        // a done parent phase doesn't shadow its pending sub-phases.
-        let exact_match = if is_explicit {
-            phases.iter().find(|p| phase_ids_match(&p.id, token))
-        } else {
-            phases.iter().find(|p| {
-                phase_ids_match(&p.id, token)
-                    && matches!(p.status, PlanStatus::Pending | PlanStatus::InProgress)
-            })
-        };
-        if let Some(phase) = exact_match {
-            let source = if is_explicit {
-                ResolveSource::Explicit
-            } else {
-                ResolveSource::TitleExtracted
-            };
-            if !quiet && source == ResolveSource::TitleExtracted {
-                println!("Auto-linked phase from title: {}", phase.id);
+        let prefix_matches = match match_version_token(token, is_explicit, phases) {
+            TokenMatch::Exact(phase) => {
+                if !is_explicit {
+                    if let Some(why) = ta_plan::exclusion_reason(phase, ctx.claims) {
+                        anyhow::bail!(
+                            "phase_unavailable: the title names phase {} ({}) but it is {}.\n\
+                             Attempted: link this goal to {} from the version in the title.\n\
+                             Next: finish or close the goal that holds it (`ta goal list`), or pick \
+                             another phase with `ta run \"<title>\" --phase <id>`. \
+                             `ta plan resolve \"<title>\"` shows the options without starting anything.",
+                            phase.id,
+                            phase.title,
+                            why,
+                            phase.id
+                        );
+                    }
+                }
+                let source = if is_explicit {
+                    ResolveSource::Explicit
+                } else {
+                    ResolveSource::TitleExtracted
+                };
+                if !quiet && source == ResolveSource::TitleExtracted {
+                    println!("Auto-linked phase from title: {}", phase.id);
+                }
+                return Ok(Some(ResolvedPhase {
+                    id: phase.id.clone(),
+                    source,
+                }));
             }
-            return Ok(Some(ResolvedPhase {
-                id: phase.id.clone(),
-                source,
-            }));
-        }
-
-        // Step 1b: if the token exactly matches a Done phase with no pending sub-phases,
-        // proceed without phase linkage rather than falling through to a misleading
-        // "not yet in PLAN.md" message and then failing at the claim step.
-        let token_norm = token.trim_start_matches('v');
-        let done_match = phases
-            .iter()
-            .any(|p| phase_ids_match(&p.id, token) && p.status == PlanStatus::Done);
-        if done_match {
-            let has_pending_sub = phases.iter().any(|p| {
-                p.status == PlanStatus::Pending
-                    && p.id
-                        .trim_start_matches('v')
-                        .starts_with(&format!("{}.", token_norm))
-            });
-            if !has_pending_sub {
+            TokenMatch::DoneOnly => {
+                // Proceed without phase linkage rather than falling through to a
+                // misleading "not yet in PLAN.md" message and failing at the claim step.
                 if !quiet {
                     println!(
                         "Title matches completed phase {token} — proceeding without phase \
@@ -4009,43 +4198,27 @@ pub fn resolve_phase(
                 }
                 return Ok(None);
             }
-            // Has pending sub-phases — fall through to prefix expansion so the sub-phase is picked.
-        }
-
-        // Step 2: prefix expansion — only among pending phases.
-        let prefix_matches: Vec<&PlanPhase> = phases
-            .iter()
-            .filter(|p| {
-                if p.status != PlanStatus::Pending {
-                    return false;
+            TokenMatch::Prefix(matched) => {
+                if !quiet {
+                    println!(
+                        "Phase resolved: {} → {} (prefix expansion)",
+                        token, matched.id
+                    );
                 }
-                let id_norm = p.id.trim_start_matches('v');
-                // Require a dot separator after the prefix so "v0.15.30.5" doesn't
-                // accidentally match "v0.15.30.50".
-                id_norm == token_norm || id_norm.starts_with(&format!("{}.", token_norm))
-            })
-            .collect();
-
-        if prefix_matches.len() == 1 {
-            let matched = prefix_matches[0];
-            if !quiet {
-                println!(
-                    "Phase resolved: {} → {} (prefix expansion)",
-                    token, matched.id
-                );
+                return Ok(Some(ResolvedPhase {
+                    id: matched.id.clone(),
+                    source: ResolveSource::PrefixMatch {
+                        from: token.clone(),
+                    },
+                }));
             }
-            return Ok(Some(ResolvedPhase {
-                id: matched.id.clone(),
-                source: ResolveSource::PrefixMatch {
-                    from: token.clone(),
-                },
-            }));
-        }
+            TokenMatch::Open(prefix_matches) => prefix_matches,
+        };
 
         // Build a candidate list for disambiguation from prefix matches (if >1).
         let mut candidates: Vec<&PlanPhase> = prefix_matches;
 
-        // Step 3: title-word fuzzy match — merge into candidates.
+        // Title-word fuzzy match: merge into candidates.
         if let Some(t) = title {
             let words: Vec<&str> = t
                 .split(|c: char| !c.is_alphanumeric())
@@ -4065,12 +4238,11 @@ pub fn resolve_phase(
             }
         }
 
-        // Step 4: disambiguation.
         if !candidates.is_empty() {
             return disambiguate_phase(&candidates, title.unwrap_or(token), token);
         }
 
-        // No candidates at all — if explicit, pass through as-is (unknown phase).
+        // No candidates at all: an explicit unknown phase passes through as-is.
         if is_explicit {
             return Ok(Some(ResolvedPhase {
                 id: token.clone(),
@@ -4078,31 +4250,571 @@ pub fn resolve_phase(
             }));
         }
 
-        // Title-extracted token with zero matches — fall through to None.
-        if !quiet {
-            println!(
-                "Phase ID extracted from title: {} (not yet in PLAN.md)",
-                token
+        // A version in the title that PLAN.md does not have. Strict mode must not
+        // invent that phase: fall through to matching the words of the title.
+        if ctx.fallback != TitleFallback::Block {
+            if !quiet {
+                println!(
+                    "Phase ID extracted from title: {} (not yet in PLAN.md)",
+                    token
+                );
+            }
+            return Ok(Some(ResolvedPhase {
+                id: token.clone(),
+                source: ResolveSource::TitleExtracted,
+            }));
+        }
+    }
+
+    match ctx.fallback {
+        TitleFallback::NewPhase => Ok(None),
+        TitleFallback::LegacyAutoLink => {
+            if let Some(phase_id) = find_single_in_progress(phases) {
+                if !quiet {
+                    println!("Auto-linked phase: {} (currently in_progress)", phase_id);
+                }
+                return Ok(Some(ResolvedPhase {
+                    id: phase_id,
+                    source: ResolveSource::AutoInProgress,
+                }));
+            }
+            Ok(None)
+        }
+        TitleFallback::Block => {
+            // Nothing to match against (title derived later from --objective-file).
+            let Some(text) = title.filter(|t| !t.trim().is_empty()) else {
+                return Ok(None);
+            };
+            let outcome = outcome_by_title(text, phases, ctx.claims);
+            if let (OutcomeKind::Resolved, Some(chosen)) = (outcome.outcome, &outcome.phase) {
+                if !quiet {
+                    println!("[resolved \"{}\" -> {} {}]", text, chosen.id, chosen.title);
+                }
+                tracing::info!(title = %text, phase = %chosen.id, "phase resolved from title");
+                return Ok(Some(ResolvedPhase {
+                    id: chosen.id.clone(),
+                    source: ResolveSource::TitleMatch,
+                }));
+            }
+            block_on_unresolved(text, &outcome, ctx.can_prompt)
+        }
+    }
+}
+
+/// `--phase next` for `ta run`.
+fn resolve_next_phase(
+    phases: &[PlanPhase],
+    ctx: &ResolveContext<'_>,
+    quiet: bool,
+) -> anyhow::Result<ResolvedPhase> {
+    match ta_plan::resolve_next(phases, ctx.claims) {
+        Ok(chosen) => {
+            if !quiet {
+                println!("[resolved next -> {} {}]", chosen.id, chosen.title);
+            }
+            tracing::info!(phase = %chosen.id, "phase resolved from `next`");
+            Ok(ResolvedPhase {
+                id: chosen.id,
+                source: ResolveSource::NextPhase,
+            })
+        }
+        Err(blocked) => anyhow::bail!("{}", next_blocked_message(&blocked)),
+    }
+}
+
+fn next_blocked_message(blocked: &ta_plan::NextBlocked) -> String {
+    let mut msg = String::from(
+        "phase_next_unavailable: no pending phase can start now (--phase next).\n\
+         Attempted: pick the first pending phase in PLAN.md order whose `Depends on` phases are \
+         all done, skipping in_progress phases and phases a live goal holds.\n",
+    );
+    msg.push_str(&format!(
+        "Found: {} pending phase(s), none startable.\n",
+        blocked.pending_total
+    ));
+    if !blocked.blocked.is_empty() {
+        msg.push_str("Blocked by unfinished dependencies:\n");
+        for b in blocked.blocked.iter().take(ta_plan::MAX_LISTED_CANDIDATES) {
+            msg.push_str(&format!(
+                "  {}  {}  waits on {}\n",
+                b.id,
+                b.title,
+                b.blocked_by.join(", ")
+            ));
+        }
+        if blocked.blocked.len() > ta_plan::MAX_LISTED_CANDIDATES {
+            msg.push_str(&format!(
+                "  ... and {} more (see `ta plan status`)\n",
+                blocked.blocked.len() - ta_plan::MAX_LISTED_CANDIDATES
+            ));
+        }
+    }
+    if !blocked.claimed.is_empty() {
+        msg.push_str(&format!(
+            "Held by a live goal: {}\n",
+            blocked.claimed.join(", ")
+        ));
+    }
+    msg.push_str(
+        "Next: finish the blocking phases (`ta plan status`), or name a phase explicitly with \
+         `ta run \"<title>\" --phase <id>`.",
+    );
+    msg
+}
+
+// ── `ta plan resolve` and the title-match outcome ───────────────────────────
+
+/// Outcome of resolving text to a phase. Serialized as lower-case strings in
+/// `ta plan resolve --json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutcomeKind {
+    Resolved,
+    Ambiguous,
+    None,
+}
+
+/// How a resolved phase was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolveMethod {
+    /// A version token in the text named the phase exactly.
+    Version,
+    /// A version token was a prefix of exactly one pending phase.
+    Prefix,
+    /// The words of the text matched one phase title clearly.
+    Title,
+    /// The `next` keyword.
+    Next,
+}
+
+/// The phase a resolved outcome points at.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ResolvedPhaseInfo {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+}
+
+/// The stable result of `ta plan resolve`. Field names and the three
+/// `outcome` values are a contract (documented in docs/USAGE.md): add fields
+/// freely, never rename or repurpose them without bumping `schema_version`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ResolveOutcome {
+    pub schema_version: u32,
+    /// The text that was resolved, as given.
+    pub input: String,
+    pub outcome: OutcomeKind,
+    /// Set only when `outcome` is `resolved`.
+    pub method: Option<ResolveMethod>,
+    /// Set only when `outcome` is `resolved`.
+    pub phase: Option<ResolvedPhaseInfo>,
+    /// Scored phases, best first, at most [`ta_plan::MAX_LISTED_CANDIDATES`].
+    /// Phases that matched but may not be chosen carry an `excluded` reason.
+    pub candidates: Vec<ta_plan::Candidate>,
+    /// One sentence saying why the outcome is what it is.
+    pub message: String,
+}
+
+const RESOLVE_SCHEMA_VERSION: u32 = 1;
+
+impl ResolveOutcome {
+    fn resolved(input: &str, method: ResolveMethod, c: ta_plan::Candidate, why: String) -> Self {
+        Self {
+            schema_version: RESOLVE_SCHEMA_VERSION,
+            input: input.to_string(),
+            outcome: OutcomeKind::Resolved,
+            method: Some(method),
+            phase: Some(ResolvedPhaseInfo {
+                id: c.id.clone(),
+                title: c.title.clone(),
+                status: c.status.clone(),
+            }),
+            candidates: vec![c],
+            message: why,
+        }
+    }
+
+    fn unresolved(
+        input: &str,
+        outcome: OutcomeKind,
+        candidates: Vec<ta_plan::Candidate>,
+        message: String,
+    ) -> Self {
+        Self {
+            schema_version: RESOLVE_SCHEMA_VERSION,
+            input: input.to_string(),
+            outcome,
+            method: None,
+            phase: None,
+            candidates,
+            message,
+        }
+    }
+}
+
+/// Phases currently held by a live goal. Read-only: a missing goal store is an
+/// empty list, never created. `ignore_goal` lets a reused goal keep its own phase.
+pub fn live_phase_claims(
+    goals_dir: &Path,
+    ignore_goal: Option<uuid::Uuid>,
+) -> Vec<ta_plan::ClaimedPhase> {
+    if !goals_dir.is_dir() {
+        return Vec::new();
+    }
+    let store = match ta_goal::GoalRunStore::new(goals_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %goals_dir.display(), error = %e, "cannot open goal store to check phase claims; treating no phase as claimed");
+            return Vec::new();
+        }
+    };
+    let goals = match store.list() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(path = %goals_dir.display(), error = %e, "cannot list goals to check phase claims; treating no phase as claimed");
+            return Vec::new();
+        }
+    };
+    goals
+        .into_iter()
+        .filter(|g| Some(g.goal_run_id) != ignore_goal)
+        .filter(|g| !ta_goal::phase_release::state_ends_claim(&g.state))
+        .filter_map(|g| {
+            g.plan_phase.map(|phase_id| ta_plan::ClaimedPhase {
+                phase_id,
+                goal_id: g.goal_run_id.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn candidate_line(c: &ta_plan::Candidate) -> String {
+    match &c.excluded {
+        Some(why) => format!(
+            "{}  {}  [{}, excluded: {}]  score {:.2}",
+            c.id, c.title, c.status, why, c.score
+        ),
+        None => format!(
+            "{}  {}  [{}]  score {:.2}",
+            c.id, c.title, c.status, c.score
+        ),
+    }
+}
+
+/// Why a title match is not confident, in one sentence.
+fn explain_unconfident(m: &ta_plan::TitleMatch) -> String {
+    let eligible: Vec<&ta_plan::Candidate> =
+        m.candidates.iter().filter(|c| c.is_eligible()).collect();
+    let best_excluded = m.candidates.iter().find(|c| !c.is_eligible());
+    if let (Some(ex), Some(top)) = (best_excluded, eligible.first()) {
+        if ex.score >= top.score {
+            return format!(
+                "the closest title match, {} \"{}\", is {} and cannot be chosen",
+                ex.id,
+                ex.title,
+                ex.excluded.as_deref().unwrap_or("excluded")
             );
         }
-        return Ok(Some(ResolvedPhase {
-            id: token.clone(),
-            source: ResolveSource::TitleExtracted,
-        }));
     }
+    let Some(top) = eligible.first() else {
+        return match best_excluded {
+            Some(ex) => format!(
+                "the only title match, {} \"{}\", is {} and cannot be chosen",
+                ex.id,
+                ex.title,
+                ex.excluded.as_deref().unwrap_or("excluded")
+            ),
+            None => format!(
+                "no pending or in_progress phase title is similar enough (nothing scored {:.2} or more)",
+                ta_plan::MIN_LISTED_SCORE
+            ),
+        };
+    };
+    let above = eligible
+        .iter()
+        .filter(|c| c.score + 1e-9 >= ta_plan::MIN_CONFIDENT_SCORE)
+        .count();
+    if above > 1 {
+        format!("{above} phases match closely, so none is clearly the right one")
+    } else if top.score + 1e-9 < ta_plan::MIN_CONFIDENT_SCORE {
+        format!(
+            "the best match scored {:.2}, below the {:.2} needed to be sure",
+            top.score,
+            ta_plan::MIN_CONFIDENT_SCORE
+        )
+    } else {
+        format!(
+            "the best match leads the runner-up by less than {:.2}",
+            ta_plan::MIN_CONFIDENT_MARGIN
+        )
+    }
+}
 
-    // Step 5: no version token found anywhere — try single in-progress.
-    if let Some(phase_id) = find_single_in_progress(phases) {
-        if !quiet {
-            println!("Auto-linked phase: {} (currently in_progress)", phase_id);
+/// Title-words resolution into a [`ResolveOutcome`]. Pure.
+fn outcome_by_title(
+    text: &str,
+    phases: &[PlanPhase],
+    claims: &[ta_plan::ClaimedPhase],
+) -> ResolveOutcome {
+    let m = ta_plan::match_title(text, phases, claims);
+    if let Some(chosen) = m.chosen() {
+        return ResolveOutcome::resolved(
+            text,
+            ResolveMethod::Title,
+            chosen.clone(),
+            format!(
+                "one phase title clearly matches (score {:.2}, threshold {:.2}, margin {:.2})",
+                chosen.score,
+                ta_plan::MIN_CONFIDENT_SCORE,
+                ta_plan::MIN_CONFIDENT_MARGIN
+            ),
+        );
+    }
+    let message = explain_unconfident(&m);
+    let kind = if m.candidates.iter().any(|c| c.is_eligible()) {
+        OutcomeKind::Ambiguous
+    } else {
+        OutcomeKind::None
+    };
+    ResolveOutcome::unresolved(text, kind, m.candidates, message)
+}
+
+fn outcome_for_next(
+    text: &str,
+    phases: &[PlanPhase],
+    claims: &[ta_plan::ClaimedPhase],
+) -> ResolveOutcome {
+    match ta_plan::resolve_next(phases, claims) {
+        Ok(c) => ResolveOutcome::resolved(
+            text,
+            ResolveMethod::Next,
+            c,
+            "first pending phase in plan order whose dependencies are all done".to_string(),
+        ),
+        Err(blocked) => {
+            let mut message = format!(
+                "no pending phase can start now ({} pending, {} blocked by dependencies, {} held by a live goal)",
+                blocked.pending_total,
+                blocked.blocked.len(),
+                blocked.claimed.len()
+            );
+            if let Some(first) = blocked.blocked.first() {
+                message.push_str(&format!(
+                    "; {} waits on {}",
+                    first.id,
+                    first.blocked_by.join(", ")
+                ));
+            }
+            ResolveOutcome::unresolved(text, OutcomeKind::None, Vec::new(), message)
         }
-        return Ok(Some(ResolvedPhase {
-            id: phase_id,
-            source: ResolveSource::AutoInProgress,
-        }));
+    }
+}
+
+/// Resolve `input` (a title, a version, or `next`) to a phase. Pure and
+/// read-only: never claims, edits PLAN.md or starts a goal. `ta plan resolve`
+/// prints this; `ta run` uses the same version-token and title rules.
+pub fn resolve_outcome(
+    input: &str,
+    phases: &[PlanPhase],
+    claims: &[ta_plan::ClaimedPhase],
+) -> ResolveOutcome {
+    let text = input.trim();
+    if is_next_keyword(text) {
+        return outcome_for_next(input, phases, claims);
     }
 
-    Ok(None)
+    let bare_version = !text.is_empty() && text.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let token = if bare_version {
+        Some(format!("v{text}"))
+    } else {
+        extract_semver_from_title(text)
+    };
+
+    if let Some(token) = token {
+        match match_version_token(&token, false, phases) {
+            TokenMatch::Exact(p) => {
+                let c = ta_plan::candidate_for(p, 1.0, claims);
+                return if let Some(why) = c.excluded.clone() {
+                    let message =
+                        format!("{} \"{}\" is {} and cannot be chosen", p.id, p.title, why);
+                    ResolveOutcome::unresolved(input, OutcomeKind::None, vec![c], message)
+                } else {
+                    ResolveOutcome::resolved(
+                        input,
+                        ResolveMethod::Version,
+                        c,
+                        format!("the version {token} names this phase exactly"),
+                    )
+                };
+            }
+            TokenMatch::DoneOnly => {
+                let done: Vec<ta_plan::Candidate> = phases
+                    .iter()
+                    .filter(|p| phase_ids_match(&p.id, &token))
+                    .map(|p| ta_plan::candidate_for(p, 1.0, claims))
+                    .collect();
+                let message = format!(
+                    "{token} is already done and has no pending sub-phases, so it cannot be chosen"
+                );
+                return ResolveOutcome::unresolved(input, OutcomeKind::None, done, message);
+            }
+            TokenMatch::Prefix(p) => {
+                let c = ta_plan::candidate_for(p, 1.0, claims);
+                return if let Some(why) = c.excluded.clone() {
+                    let message =
+                        format!("{} \"{}\" is {} and cannot be chosen", p.id, p.title, why);
+                    ResolveOutcome::unresolved(input, OutcomeKind::None, vec![c], message)
+                } else {
+                    ResolveOutcome::resolved(
+                        input,
+                        ResolveMethod::Prefix,
+                        c,
+                        format!("{token} is a prefix of exactly one pending phase"),
+                    )
+                };
+            }
+            TokenMatch::Open(list) if list.len() > 1 => {
+                let candidates: Vec<ta_plan::Candidate> = list
+                    .iter()
+                    .take(ta_plan::MAX_LISTED_CANDIDATES)
+                    .map(|p| ta_plan::candidate_for(p, 1.0, claims))
+                    .collect();
+                let message = format!("{token} is a prefix of {} pending phases", list.len());
+                return ResolveOutcome::unresolved(
+                    input,
+                    OutcomeKind::Ambiguous,
+                    candidates,
+                    message,
+                );
+            }
+            // The version is not in the plan: fall back to the words.
+            TokenMatch::Open(_) => {}
+        }
+    }
+
+    outcome_by_title(input, phases, claims)
+}
+
+fn shell_quote_title(title: &str) -> String {
+    format!("\"{}\"", title.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The structured block message for an unresolved title: what was attempted,
+/// what was found, and the exact commands to retry.
+fn block_message(title: &str, outcome: &ResolveOutcome) -> String {
+    let code = match outcome.outcome {
+        OutcomeKind::Ambiguous => "phase_ambiguous",
+        _ => "phase_not_found",
+    };
+    let quoted = shell_quote_title(title);
+    let mut msg = format!(
+        "{code}: could not choose a plan phase for {quoted} (`ta run` without --phase). \
+         Nothing was claimed and PLAN.md was not changed.\n\
+         Attempted: match the title against the pending and in_progress phases in PLAN.md.\n\
+         Found: {}.\n",
+        outcome.message
+    );
+    if !outcome.candidates.is_empty() {
+        msg.push_str("Candidates (best first):\n");
+        for (i, c) in outcome
+            .candidates
+            .iter()
+            .take(ta_plan::MAX_LISTED_CANDIDATES)
+            .enumerate()
+        {
+            msg.push_str(&format!("  {}. {}\n", i + 1, candidate_line(c)));
+        }
+    }
+    msg.push_str("Next:\n");
+    let eligible: Vec<&ta_plan::Candidate> = outcome
+        .candidates
+        .iter()
+        .filter(|c| c.is_eligible())
+        .take(ta_plan::MAX_LISTED_CANDIDATES)
+        .collect();
+    if eligible.is_empty() {
+        msg.push_str("  Pick a phase from `ta plan status`, then:\n");
+        msg.push_str(&format!("    ta run {quoted} --phase <id>\n"));
+    } else {
+        for c in &eligible {
+            msg.push_str(&format!("  ta run {quoted} --phase {}\n", c.id));
+        }
+    }
+    msg.push_str(&format!(
+        "  ta run {quoted} --phase next            (first pending phase whose dependencies are done)\n\
+         \x20 ta run {quoted} --new-phase             (create a genuinely new ad-hoc phase on purpose)\n\
+         \x20 ta plan resolve {quoted}                (inspect the match without starting anything)"
+    ));
+    msg
+}
+
+/// Parse a 1-based menu answer. `Ok(None)` means the user cancelled.
+fn parse_menu_selection(input: &str, count: usize) -> anyhow::Result<Option<usize>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("q") {
+        return Ok(None);
+    }
+    let n: usize = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid selection '{}'. Enter a number 1-{} or q to cancel.",
+            trimmed,
+            count
+        )
+    })?;
+    if n == 0 || n > count {
+        anyhow::bail!("Selection {} out of range. Enter a number 1-{}.", n, count);
+    }
+    Ok(Some(n - 1))
+}
+
+/// Ask on a TTY, otherwise fail with [`block_message`]. Never inserts a phase.
+fn block_on_unresolved(
+    title: &str,
+    outcome: &ResolveOutcome,
+    can_prompt: bool,
+) -> anyhow::Result<Option<ResolvedPhase>> {
+    use std::io::IsTerminal as _;
+
+    let eligible: Vec<&ta_plan::Candidate> = outcome
+        .candidates
+        .iter()
+        .filter(|c| c.is_eligible())
+        .collect();
+    if !(can_prompt && !eligible.is_empty() && std::io::stdin().is_terminal()) {
+        return Err(anyhow::anyhow!("{}", block_message(title, outcome)));
+    }
+
+    eprintln!(
+        "\nCould not choose a plan phase for {}: {}.",
+        shell_quote_title(title),
+        outcome.message
+    );
+    eprintln!("Which phase is this goal for?");
+    for (i, c) in eligible.iter().enumerate() {
+        eprintln!("  [{}] {}", i + 1, candidate_line(c));
+    }
+    for c in outcome.candidates.iter().filter(|c| !c.is_eligible()) {
+        eprintln!("      (not selectable) {}", candidate_line(c));
+    }
+    eprint!(
+        "Enter a number, or q to cancel (use --new-phase to create a new ad-hoc phase instead): "
+    );
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    match parse_menu_selection(&input, eligible.len())? {
+        Some(idx) => Ok(Some(ResolvedPhase {
+            id: eligible[idx].id.clone(),
+            source: ResolveSource::FuzzyMatch,
+        })),
+        None => anyhow::bail!(
+            "Phase selection cancelled for {}. Nothing was claimed. Retry with \
+             `ta run {} --phase <id>` or `--new-phase`.",
+            shell_quote_title(title),
+            shell_quote_title(title)
+        ),
+    }
 }
 
 /// Print a numbered disambiguation menu and read a selection from stdin.
@@ -10479,7 +11191,12 @@ Build it.
             make_named_phase("v0.2.0", "Running", PlanStatus::InProgress),
             make_named_phase("v0.3.0", "Pending", PlanStatus::Pending),
         ];
-        let result = resolve_phase(None, Some("fix auth bug"), &phases, true)
+        // Only follow-up / --goal-id reuse keeps the legacy single-in_progress link.
+        let ctx = ResolveContext {
+            fallback: TitleFallback::LegacyAutoLink,
+            ..ResolveContext::default()
+        };
+        let result = resolve_phase_with(None, Some("fix auth bug"), &phases, true, &ctx)
             .unwrap()
             .unwrap();
         assert_eq!(result.id, "v0.2.0");
@@ -10492,11 +11209,15 @@ Build it.
             make_named_phase("v0.1.0", "Done", PlanStatus::Done),
             make_named_phase("v0.2.0", "Pending", PlanStatus::Pending),
         ];
-        let result = resolve_phase(None, Some("fix auth bug"), &phases, true).unwrap();
-        assert!(
-            result.is_none(),
-            "should return None so caller inserts gap phase"
-        );
+        let ctx = ResolveContext {
+            fallback: TitleFallback::LegacyAutoLink,
+            ..ResolveContext::default()
+        };
+        let result = resolve_phase_with(None, Some("fix auth bug"), &phases, true, &ctx).unwrap();
+        assert!(result.is_none(), "legacy link finds nothing to link");
+        // The default context blocks instead of falling through to a stub.
+        let err = resolve_phase(None, Some("fix auth bug"), &phases, true).unwrap_err();
+        assert!(err.to_string().contains("phase_not_found"), "{err}");
     }
 
     // ── v0.15.15.7: find_next_pending with filter tests ──────────────────────
@@ -12313,5 +13034,345 @@ mod expected_version_cli_tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
         let err = read_workspace_version(dir.path()).unwrap_err().to_string();
         assert!(err.contains("[workspace.package]"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod phase_resolution_tests {
+    use super::*;
+    use ta_plan::ClaimedPhase;
+
+    fn phase(id: &str, title: &str, status: PlanStatus, deps: &[&str]) -> PlanPhase {
+        PlanPhase {
+            id: id.to_string(),
+            title: title.to_string(),
+            status,
+            depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            human_review_items: vec![],
+            api_impact: vec![],
+        }
+    }
+
+    fn sample_plan() -> Vec<PlanPhase> {
+        vec![
+            phase("v1.0.0", "Base Platform", PlanStatus::Done, &[]),
+            phase(
+                "v1.0.1",
+                "Golden Set Capture and Replay",
+                PlanStatus::Pending,
+                &["v1.0.0"],
+            ),
+            phase(
+                "v1.0.2",
+                "Signed Public Releases",
+                PlanStatus::Pending,
+                &["v1.0.0"],
+            ),
+            phase("v1.0.3", "Cost Report Export", PlanStatus::Pending, &[]),
+            phase("v1.0.4", "Cost Report Meridian", PlanStatus::Pending, &[]),
+        ]
+    }
+
+    fn strict() -> ResolveContext<'static> {
+        ResolveContext::default()
+    }
+
+    #[test]
+    fn version_token_in_title_resolves_exactly() {
+        let r = resolve_phase_with(
+            None,
+            Some("v1.0.2 anything"),
+            &sample_plan(),
+            true,
+            &strict(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(r.id, "v1.0.2");
+        assert_eq!(r.source, ResolveSource::TitleExtracted);
+    }
+
+    #[test]
+    fn unique_confident_title_match_resolves() {
+        let r = resolve_phase_with(
+            None,
+            Some("Capture and replay for the golden set"),
+            &sample_plan(),
+            true,
+            &strict(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(r.id, "v1.0.1");
+        assert_eq!(r.source, ResolveSource::TitleMatch);
+    }
+
+    #[test]
+    fn two_close_titles_block_with_candidates_and_retry_commands() {
+        let err = resolve_phase_with(None, Some("cost report"), &sample_plan(), true, &strict())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("phase_ambiguous"), "{err}");
+        assert!(
+            err.contains("Attempted:") && err.contains("Found:"),
+            "{err}"
+        );
+        assert!(err.contains("v1.0.3") && err.contains("v1.0.4"), "{err}");
+        assert!(
+            err.contains("ta run \"cost report\" --phase v1.0.3"),
+            "{err}"
+        );
+        assert!(err.contains("--new-phase"), "{err}");
+        assert!(err.contains("ta plan resolve"), "{err}");
+    }
+
+    #[test]
+    fn non_tty_failure_lists_at_most_five_candidates_with_scores_status_and_commands() {
+        let mut plan = sample_plan();
+        for i in 5..10 {
+            plan.push(phase(
+                &format!("v1.0.{i}"),
+                "Cost Report Variant",
+                PlanStatus::Pending,
+                &[],
+            ));
+        }
+        // can_prompt is true but stdin is not a terminal under `cargo test`.
+        let ctx = ResolveContext {
+            can_prompt: true,
+            ..strict()
+        };
+        let err = resolve_phase_with(None, Some("cost report"), &plan, true, &ctx)
+            .unwrap_err()
+            .to_string();
+        let numbered = err
+            .lines()
+            .filter(|l| {
+                l.trim_start().starts_with(|c: char| c.is_ascii_digit()) && l.contains("score")
+            })
+            .count();
+        assert_eq!(numbered, ta_plan::MAX_LISTED_CANDIDATES, "{err}");
+        assert!(err.contains("[pending]") && err.contains("score "), "{err}");
+        let retries = err.matches("--phase v1.0.").count();
+        assert_eq!(retries, ta_plan::MAX_LISTED_CANDIDATES, "{err}");
+    }
+
+    #[test]
+    fn no_match_blocks_and_never_returns_none() {
+        let err = resolve_phase_with(
+            None,
+            Some("rewrite the quantum frobnicator"),
+            &sample_plan(),
+            true,
+            &strict(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("phase_not_found"), "{err}");
+        assert!(
+            err.contains("--phase <id>") && err.contains("--new-phase"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn new_phase_fallback_skips_matching_so_the_caller_creates_the_stub() {
+        let ctx = ResolveContext {
+            fallback: TitleFallback::NewPhase,
+            ..strict()
+        };
+        let r = resolve_phase_with(
+            None,
+            Some("rewrite the frobnicator"),
+            &sample_plan(),
+            true,
+            &ctx,
+        )
+        .unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn unknown_version_in_title_does_not_invent_a_phase() {
+        let err = resolve_phase_with(
+            None,
+            Some("v9.9.9 something odd"),
+            &sample_plan(),
+            true,
+            &strict(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("phase_not_found"), "{err}");
+    }
+
+    #[test]
+    fn next_respects_dependencies_and_skips_in_progress() {
+        let plan = vec![
+            phase("v1.0.0", "Base", PlanStatus::Done, &[]),
+            phase("v1.0.1", "Running", PlanStatus::InProgress, &["v1.0.0"]),
+            phase(
+                "v1.0.2",
+                "Waits on running",
+                PlanStatus::Pending,
+                &["v1.0.1"],
+            ),
+            phase("v1.0.3", "Ready", PlanStatus::Pending, &["v1.0.0"]),
+        ];
+        let r = resolve_phase_with(Some("next"), None, &plan, true, &strict())
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.id, "v1.0.3");
+        assert_eq!(r.source, ResolveSource::NextPhase);
+    }
+
+    #[test]
+    fn next_with_nothing_startable_names_the_blocking_dependencies() {
+        let plan = vec![
+            phase("v1.0.1", "Running", PlanStatus::InProgress, &[]),
+            phase(
+                "v1.0.2",
+                "Waits on running",
+                PlanStatus::Pending,
+                &["v1.0.1"],
+            ),
+        ];
+        let err = resolve_phase_with(Some("NEXT"), None, &plan, true, &strict())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("v1.0.2") && err.contains("v1.0.1 (in_progress)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn next_skips_a_phase_held_by_a_live_goal() {
+        let claims = [ClaimedPhase {
+            phase_id: "v1.0.1".into(),
+            goal_id: "g-1".into(),
+        }];
+        let ctx = ResolveContext {
+            claims: &claims,
+            ..strict()
+        };
+        let r = resolve_phase_with(Some("next"), None, &sample_plan(), true, &ctx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.id, "v1.0.2");
+    }
+
+    #[test]
+    fn title_version_naming_a_live_claimed_phase_is_refused() {
+        let claims = [ClaimedPhase {
+            phase_id: "v1.0.2".into(),
+            goal_id: "g-7".into(),
+        }];
+        let ctx = ResolveContext {
+            claims: &claims,
+            ..strict()
+        };
+        let err = resolve_phase_with(None, Some("v1.0.2 go"), &sample_plan(), true, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("held by live goal g-7"), "{err}");
+    }
+
+    // ── `ta plan resolve` JSON contract ──────────────────────────────────
+
+    #[test]
+    fn resolve_json_shape_resolved() {
+        let o = resolve_outcome("golden set capture replay", &sample_plan(), &[]);
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["input"], "golden set capture replay");
+        assert_eq!(v["outcome"], "resolved");
+        assert_eq!(v["method"], "title");
+        assert_eq!(v["phase"]["id"], "v1.0.1");
+        assert_eq!(v["phase"]["status"], "pending");
+        let c = &v["candidates"][0];
+        assert_eq!(c["id"], "v1.0.1");
+        assert!(c["score"].is_number());
+        assert!(c["excluded"].is_null());
+        assert!(v["message"].is_string());
+    }
+
+    #[test]
+    fn resolve_json_shape_ambiguous() {
+        let o = resolve_outcome("cost report", &sample_plan(), &[]);
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["outcome"], "ambiguous");
+        assert!(v["method"].is_null());
+        assert!(v["phase"].is_null());
+        assert_eq!(v["candidates"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn resolve_json_shape_none() {
+        let o = resolve_outcome("quantum frobnicator", &sample_plan(), &[]);
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["outcome"], "none");
+        assert!(v["phase"].is_null());
+        assert_eq!(v["candidates"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn resolve_next_outcome_and_version_outcome() {
+        let n = resolve_outcome("next", &sample_plan(), &[]);
+        assert_eq!(n.method, Some(ResolveMethod::Next));
+        assert_eq!(n.phase.unwrap().id, "v1.0.1");
+        let v = resolve_outcome("1.0.2", &sample_plan(), &[]);
+        assert_eq!(v.method, Some(ResolveMethod::Version));
+        assert_eq!(v.phase.unwrap().id, "v1.0.2");
+    }
+
+    #[test]
+    fn excluded_done_phase_is_explained_when_it_is_the_best_match() {
+        let plan = vec![
+            phase("v1.0.0", "Base Platform Setup", PlanStatus::Done, &[]),
+            phase("v1.0.1", "Unrelated Billing Work", PlanStatus::Pending, &[]),
+        ];
+        let o = resolve_outcome("base platform setup", &plan, &[]);
+        assert_eq!(o.outcome, OutcomeKind::None);
+        assert!(o.message.contains("already done"), "{}", o.message);
+        assert_eq!(o.candidates[0].id, "v1.0.0");
+        assert_eq!(o.candidates[0].excluded.as_deref(), Some("already done"));
+        // And `ta run` blocks with the same explanation rather than choosing another phase.
+        let err = resolve_phase_with(None, Some("base platform setup"), &plan, true, &strict())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already done"), "{err}");
+    }
+
+    #[test]
+    fn excluded_live_claimed_phase_is_explained() {
+        let claims = [ClaimedPhase {
+            phase_id: "v1.0.1".into(),
+            goal_id: "g-9".into(),
+        }];
+        let o = resolve_outcome("golden set capture replay", &sample_plan(), &claims);
+        assert_ne!(o.outcome, OutcomeKind::Resolved);
+        assert!(o.message.contains("held by live goal g-9"), "{}", o.message);
+    }
+
+    #[test]
+    fn menu_selection_parsing() {
+        assert_eq!(parse_menu_selection("2\n", 3).unwrap(), Some(1));
+        assert_eq!(parse_menu_selection("q", 3).unwrap(), None);
+        assert_eq!(parse_menu_selection("", 3).unwrap(), None);
+        assert!(parse_menu_selection("0", 3).is_err());
+        assert!(parse_menu_selection("4", 3).is_err());
+        assert!(parse_menu_selection("x", 3).is_err());
+    }
+
+    #[test]
+    fn live_phase_claims_reads_only_live_goals_and_never_creates_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("goals");
+        assert!(live_phase_claims(&missing, None).is_empty());
+        assert!(
+            !missing.exists(),
+            "read-only: must not create the goal store"
+        );
     }
 }

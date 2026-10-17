@@ -257,9 +257,17 @@ enum Commands {
         /// Detailed objective for the goal.
         #[arg(long, default_value = "")]
         objective: String,
-        /// Plan phase this goal implements (e.g., "4b").
+        /// Plan phase this goal implements (e.g., "4b"), or `next` for the first
+        /// pending phase whose `Depends on` phases are all done.
+        ///
+        /// Without --phase, TA matches the title against PLAN.md phases and asks
+        /// (or fails, when headless) if it is not sure. It never guesses.
         #[arg(long)]
         phase: Option<String>,
+        /// Create a new ad-hoc phase for this goal on purpose. Without this flag a
+        /// title that matches no PLAN.md phase blocks instead of inserting one.
+        #[arg(long, conflicts_with = "phase")]
+        new_phase: bool,
         /// Follow up on a previous goal (ID prefix or omit for interactive picker).
         #[arg(long)]
         follow_up: Option<Option<String>>,
@@ -1874,6 +1882,7 @@ fn dispatch_raw(
             source,
             objective,
             phase,
+            new_phase,
             follow_up,
             follow_up_draft,
             follow_up_goal,
@@ -1953,6 +1962,8 @@ fn dispatch_raw(
                 );
             }
             let _chat_mode_guard = commands::chat_launch::CliChatModeGuard::set(*chat_mode);
+            // `--new-phase`: carried the same way (keeps `execute`'s parameter list stable).
+            let _new_phase_guard = commands::plan::CliNewPhaseGuard::set(*new_phase);
             // `--intake-file`: carried the same way. Multi-goal workflows would
             // not pass it on to their sub-goals, so reject that combination.
             if intake_file.is_some()

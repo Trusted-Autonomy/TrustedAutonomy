@@ -3134,6 +3134,81 @@ A phase already marked `done` is never reset back to `pending` by any of the abo
 guards against stale or duplicate goal bookkeeping (e.g. deleting a leftover goal record
 for work that already merged) accidentally reopening completed plan phases.
 
+#### Letting TA find the phase from the title
+
+You do not have to remember a phase ID. Without `--phase`, `ta run` matches your title against the `pending` and `in_progress` phases in `PLAN.md`:
+
+```bash
+ta run "golden set capture"
+# [resolved "golden set capture" -> v0.17.12.20 Golden Set: Capture and Replay Goals]
+```
+
+Resolution order: a version in the title (`v0.17.12.20 ...`), then the words of the title (case-insensitive, ignoring stop words, plurals and version tokens). TA only continues when exactly one phase is clearly the best match. If it is not sure, it never guesses and never creates a phase for you:
+
+- **In a terminal** it shows a numbered list of candidates and asks which one you mean.
+- **Headless or piped** it exits non-zero with the candidates (id, title, status, score) and the exact commands to retry:
+
+```text
+phase_ambiguous: could not choose a plan phase for "cost report" (`ta run` without --phase). Nothing was claimed and PLAN.md was not changed.
+Candidates (best first):
+  1. v0.17.12.18  `ta cost report`: Spend Across Goals  [pending]  score 0.81
+  2. v0.17.12.19  `ta cost report` Export to Meridian  [pending]  score 0.77
+Next:
+  ta run "cost report" --phase v0.17.12.18
+  ta run "cost report" --phase v0.17.12.19
+  ta run "cost report" --phase next
+  ta run "cost report" --new-phase
+  ta plan resolve "cost report"
+```
+
+A phase that is done, deferred, or held by a live goal is never chosen. If it was your best title match, the message says why it was excluded.
+
+To start work that really is not in the plan, opt in explicitly. This inserts a new ad-hoc phase and claims it:
+
+```bash
+ta run "Investigate flaky CI" --new-phase
+```
+
+To take whatever should be done next, use `--phase next`. It picks the first `pending` phase in plan order whose `Depends on` phases are all done, skipping phases that are `in_progress` or held by a live goal, and prints which one it chose. If none qualifies it fails and names the dependencies that are blocking:
+
+```bash
+ta run "Next planned phase" --phase next
+# [resolved next -> v0.17.12.25 TA Defects Found During the Autonomous Run]
+```
+
+#### Previewing a resolution (`ta plan resolve`)
+
+`ta plan resolve` runs the same resolver and only reports. It never claims a phase, edits `PLAN.md`, or starts a goal, so it is safe for scripts and read-only assistants:
+
+```bash
+ta plan resolve "golden set capture"
+ta plan resolve next --json
+ta plan resolve v0.17.12.20
+```
+
+It exits 0 for all three outcomes (`resolved`, `ambiguous`, `none`); read the `outcome` field. The `--json` document is stable:
+
+```json
+{
+  "schema_version": 1,
+  "input": "golden set capture",
+  "outcome": "resolved",
+  "method": "title",
+  "phase": { "id": "v0.17.12.20", "title": "Golden Set: Capture and Replay Goals", "status": "pending" },
+  "candidates": [
+    { "id": "v0.17.12.20", "title": "Golden Set: Capture and Replay Goals", "status": "pending", "score": 0.93, "excluded": null }
+  ],
+  "message": "one phase title clearly matches (score 0.93, threshold 0.60, margin 0.15)"
+}
+```
+
+- `outcome`: `resolved`, `ambiguous` (several plausible phases) or `none` (nothing selectable).
+- `method` and `phase`: set only when `resolved`, otherwise `null`. `method` is `version`, `prefix`, `title` or `next`.
+- `candidates`: up to 5 scored phases, best first. `score` is 0 to 1 (1.0 for version and `next` matches). `excluded` is `null` for selectable phases, or a reason such as `"already done"` or `"held by live goal <id>"`.
+- `message`: one sentence explaining the outcome.
+
+New fields may be added; existing fields keep their names and meaning while `schema_version` is 1.
+
 Plan commands:
 
 ```bash
@@ -3143,6 +3218,7 @@ ta plan status --json                # Machine-readable progress (includes defer
 ta plan status --check-order         # Warn if any Done phase appears after a Pending phase
 ta plan status --check-versions      # Warn if binary version is ahead of highest completed phase
 ta plan next                         # Next pending phase with suggested command
+ta plan resolve "<text>" [--json]    # Which phase would `ta run` pick? (read-only)
 ta plan validate v0.3.1              # Phase details, linked goals, draft summaries
 ta plan history                      # Status transition history
 ta plan mark-done v0.8.0,v0.8.1     # Batch-mark multiple phases as done
