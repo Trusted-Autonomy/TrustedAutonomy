@@ -66,6 +66,10 @@ pub enum GoldenCommands {
         /// Stop the replay if it would spend more than this many USD.
         #[arg(long, value_name = "USD")]
         max_usd: Option<f64>,
+        /// Keep the replay's goal, draft and staging for inspection. By default they
+        /// are denied and deleted once the result is recorded.
+        #[arg(long)]
+        keep: bool,
     },
     /// Compare replays with their baselines: cost, tokens, outcome, check and
     /// diff, with a verdict of equivalent, differs or failed.
@@ -95,6 +99,7 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
             set,
             tag,
             max_usd,
+            keep,
         } => {
             let ta_bin = std::env::current_exe().context(
                 "could not find the running `ta` binary to launch the replay; \
@@ -103,9 +108,62 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
             let mut run = |cmd: &mut Command| cmd.status();
             let outcome = replay(config, &ta_bin, id, set, tag.as_deref(), *max_usd, &mut run)?;
             print!("{}", render_replay(&outcome));
+            if !*keep {
+                if let Some(goal_id) = &outcome.record.goal_id {
+                    discard_replay_goal(&ta_bin, goal_id);
+                }
+            }
             Ok(())
         }
         GoldenCommands::Report { ids, json } => report(config, ids, *json),
+    }
+}
+
+/// Deny the replay's draft and delete its goal and staging. The result is already recorded
+/// under `.ta/golden/<id>/replays/`, and the draft is a throwaway, so leaving it would only
+/// pile up reviews and gigabytes of staging. Failures are reported with the command to retry.
+fn discard_replay_goal(ta_bin: &Path, goal_id: &str) {
+    let steps: [(&str, Vec<&str>); 2] = [
+        (
+            "deny the replay draft",
+            vec![
+                "draft",
+                "deny",
+                goal_id,
+                "--reason",
+                "golden replay result recorded; draft is a throwaway",
+                "--accept-terms",
+            ],
+        ),
+        (
+            "delete the replay goal and staging",
+            vec![
+                "goal",
+                "delete",
+                goal_id,
+                "--reason",
+                "golden replay finished",
+                "--accept-terms",
+            ],
+        ),
+    ];
+    for (what, args) in steps {
+        match Command::new(ta_bin).args(&args).output() {
+            Ok(o) if o.status.success() => println!("Cleanup: {what} ({}): done.", short(goal_id)),
+            Ok(o) => println!(
+                "Cleanup: could not {what} ({}): {}. Retry: ta {}",
+                short(goal_id),
+                String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("no error text"),
+                args.join(" ")
+            ),
+            Err(e) => println!(
+                "Cleanup: could not {what}: {e}. Retry: ta {}",
+                args.join(" ")
+            ),
+        }
     }
 }
 
@@ -725,8 +783,7 @@ fn replay(
                         }
                     }
                     draft_note = Some(format!(
-                        "The replay's draft is left unapplied (goal {}). Review it with `ta draft list`, \
-                         and close it with `ta draft close` when you are done.",
+                        "The replay's draft is never applied. It is denied and deleted after the result is recorded unless you pass --keep (goal {}).",
                         short(&record.goal_id.clone().unwrap_or_default())
                     ));
                 }
@@ -1668,7 +1725,7 @@ mod tests {
         assert_eq!(out.record.cost_usd, 1.0);
         assert_eq!(out.verdict.verdict, Verdict::Equivalent);
         assert!(estimate_lines(&entry, Some(5.0)).contains("$2.00"));
-        assert!(out.draft_note.as_deref().unwrap().contains("unapplied"));
+        assert!(out.draft_note.as_deref().unwrap().contains("never applied"));
         let store = GoldenStore::new(f.project.path());
         assert_eq!(store.list_replays(&entry.id).unwrap().len(), 1);
 
