@@ -59,7 +59,7 @@ Layering (org file plus project file):
 
 - Default for every sample. Setting at three levels: file `default_mode`, per rule `mode`, project override toward shadow.
 - Each decision in shadow appends to `.ta/audit/auto-approve-shadow.jsonl`: draft id, item id, rule id, would-be action, supervisor verdict and confidence, the human's actual action, agree or disagree.
-- `ta constitution shadow report` shows per rule: decisions, agreement rate, disagreements with links. Suggested promotion bar (configurable): at least 50 decisions and at most 2 percent disagreement, and zero cases where the machine would have approved something the human rejected.
+- `ta constitution shadow report` shows per rule: decisions, agreement rate, disagreements with links. Suggested promotion bar (configurable): at least 50 decisions and at most 2 percent disagreement, and zero cases where the machine would have approved something the human rejected. Meeting the bar never switches a rule automatically. TA shows a recommendation (in the report, in `ta constitution shadow report`, and in Wayfinder) with a link to the setting, or raises an ask-human to switch. Only a human action changes `mode` from `shadow` to `enforce`, and the change itself goes through draft review.
 - Wayfinder is asked to expose the mode setting and show the shadow report (message 013).
 
 ## 7. Phases
@@ -71,7 +71,7 @@ Layering (org file plus project file):
 
 ## 8. Open decisions
 
-1. Mode override semantics in section 5 (project may only move toward shadow).
-2. Promotion bar numbers in section 6.
+1. (Decided 2026-10-16) Project may only move a rule toward shadow.
+2. (Decided 2026-10-16) 50 decisions at 2 percent is the recommendation threshold only; switching is always a human action.
 3. Distinct origin name for project-manager drafts.
 4. Whether Wayfinder or TA owns the canonical org file once Wayfinder serves it (proposed: Wayfinder).

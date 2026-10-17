@@ -11411,7 +11411,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 1. [ ] `mode = shadow|enforce` at file, rule and project level (project can only move toward shadow).
 2. [ ] `.ta/audit/auto-approve-shadow.jsonl` with draft, item, rule, would-be action, human action, agreement.
-3. [ ] `ta constitution shadow report` per rule: count, agreement, disagreements; promotion bar configurable (default 50 decisions, at most 2 percent disagreement, no machine-approve of a human-rejected item).
+3. [ ] `ta constitution shadow report` per rule: count, agreement, disagreements; recommendation threshold configurable (default 50 decisions, at most 2 percent disagreement, no machine-approve of a human-rejected item). Reaching it only shows a recommendation with a link to the setting, or raises an ask-human; it never switches a rule automatically.
 4. [ ] Mode setting and report exposed to Wayfinder (message 013).
 
 **Effort**: M.
