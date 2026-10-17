@@ -11431,6 +11431,22 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 #### Version: `0.17.12-alpha.28`
 
+### v0.17.12.29 - Task Intake Funnel, TA Side (`ta_request_task`)
+<!-- status: pending -->
+
+**Goal**: Let any goal agent request a task or datapoint outside its own goal through one central, audited queue, without writing to Wayfinder or to its own draft. The project-manager role drains the queue into one reviewed draft (VT side, separate phase). Design: alpha-channel `DESIGN-task-intake-funnel.md` revision 2 and `REDTEAM-task-intake-funnel-2026-10-16.md`.
+
+1. [ ] `ta_request_task` MCP tool: kinds `create-task` and `record-datapoint` only, typed per-kind schema using the existing `validate_*` helpers, body capped at 2 KB. Source goal and role come from gateway state, never tool arguments. Project id comes from the goal record and fails closed.
+2. [ ] Queue `.ta/task-intake/queue.jsonl`: daemon/gateway-only append under flock, one write per line with fsync, torn trailing line skipped. Drain by atomic rename to `batch-<id>.jsonl`. Status in a separate append-only ledger with states queued, claimed(lease), drafted, applied, rejected(reason), expired.
+3. [ ] Caps: per goal, per role per hour, per project; loud refusal ("queue full, retry or ask_human"). Dedupe on a server-side hash of kind, target and normalized body.
+4. [ ] `ta_request_` added to MUTATING_TOOL_PREFIXES; tests prove it is absent from CoS chat, read-only persona and chat profile surfaces.
+5. [ ] `ta_request_status` read tool (queued or done only) and a read-only `ta task-intake list` CLI.
+6. [ ] Audit log entry for every transition; tests: concurrent append, torn line, kill between drain and ack, caps and dedupe, cross-project isolation, injection corpus through the fence.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.29`
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
 
