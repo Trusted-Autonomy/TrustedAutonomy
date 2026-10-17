@@ -11432,7 +11432,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.28`
 
 ### v0.17.12.29 - Task Intake Funnel, TA Side (`ta_request_task`)
-<!-- status: in_progress -->
+<!-- status: pending -->
 
 **Goal**: Let any goal agent request a task or datapoint outside its own goal through one central, audited queue, without writing to Wayfinder or to its own draft. The project-manager role drains the queue into one reviewed draft (VT side, separate phase). Design: alpha-channel `DESIGN-task-intake-funnel.md` revision 2 and `REDTEAM-task-intake-funnel-2026-10-16.md`.
 
@@ -11446,6 +11446,55 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.29`
+
+### v0.17.12.30 - Goal Liveness Watchdog Fix and Build Output Reclaim
+<!-- status: pending -->
+
+**Goal**: Stop two defects that lost a finished goal on 2026-10-16. (a) The daemon watchdog marked a goal `failed` ("Agent process exited without updating goal state") while its `ta run` parent was still alive and doing post-agent review and draft build. (b) The staging-size cap then deleted that failed goal's staging, including the finished work, so `ta goal recover` could not help. Each goal's staging also grows to about 5.8 GB because the agent's `cargo build` writes `target/` inside it, which starts at about 52 MB.
+
+1. [ ] Watchdog: a goal whose agent process exited is not failed while its owning `ta run` process (pid recorded on the goal) is alive and within a post-agent grace period (named constant, configurable under the existing watchdog settings). State the phase it is in (`reviewing`, `building draft`) in `ta goal inspect`. Fail it only when both the agent and the owner are gone, or the grace period is exceeded, and say which in the reason.
+2. [ ] Staging cap: never reclaim a failed goal whose staging holds uncollected work (changed files against the start commit and no draft package, or `ta goal recover` would succeed). Such goals are reported with the exact recover command and counted but skipped. A running or post-agent goal is never reclaimed.
+3. [ ] Reclaim build output at agent exit: when the agent process exits, remove the exclude-pattern build directories (`target/`, `node_modules/`, and the other `DEFAULT_EXCLUDES` directories, plus `.taignore` entries) from the staging copy before draft build. They are never part of the diff. Log the bytes freed per goal. Config switch `[staging] reclaim_build_output` default true; a goal can keep them with `--keep-build-output` for debugging.
+4. [ ] Verification gates run by `ta draft apply` or the agent that need a build recreate `target/` on demand; confirm no gate depends on a kept `target/`.
+5. [ ] Tests: watchdog does not fail a goal with a live owner inside the grace period, does after it; cap skips an unrecovered failed goal and reclaims a recovered or applied one; reclaim removes only excluded directories and never source files; frees bytes are logged.
+6. [ ] USAGE how-to: disk use of goals, the reclaim setting, and recovering a goal.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.30`
+
+### v0.17.12.31 - Shared Build Cache for Goal Agents
+<!-- status: pending -->
+
+**Depends on**: v0.17.12.30
+
+**Goal**: Stop every goal compiling the whole workspace from scratch into its own staging `target/`. Goal agents build into one shared cache outside staging.
+
+1. [ ] Set `CARGO_TARGET_DIR` for goal agents to `.ta/build-cache/<toolchain-key>/target` (key from rustc version, target triple and Cargo.lock hash of dependencies), outside staging and excluded from staging copies. Configurable, default on, off with `--no-build-cache`.
+2. [ ] Concurrent goals: Cargo's own build lock serializes the same target directory; document the wait and surface "waiting for build lock held by goal <id>" in goal output. Option for per-goal subdirectories sharing a registry-level cache (sccache) when contention is measured to matter.
+3. [ ] Size management: cap the cache (`[staging] build_cache_max_gb`), evict least recently used toolchain keys, and show it in `ta doctor` and `ta cleanup`.
+4. [ ] Isolation: a goal's build output never leaves the cache into a draft; the cache is not readable through MCP file tools; document that a shared cache is shared across goals of one project only.
+5. [ ] Measurement (monitor): record per-goal wall time and bytes of build output before and after, and report the first ten goals in `ta cost report`/`ta doctor`. Flag any goal whose result differs from a clean build.
+6. [ ] Tests: key changes with toolchain and lockfile, eviction, two goals share the cache, exclude from staging copy and from drafts.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.31`
+
+### v0.17.12.32 - Lazy Copy-on-Write Staging (after alpha, before public launch)
+<!-- status: pending -->
+
+**Goal**: Replace the full-copy overlay with a real lazy copy-on-write view of the project so staging costs disk and time only for files an agent writes. Removes the V1 temporary exclude lists (`DEFAULT_EXCLUDES`) and the `TODO(cow)` in `ta-workspace` overlay.
+
+1. [ ] Design note first: options (hardlink-on-read with copy-on-first-write, FUSE or file-provider mount, APFS clone of the tree, overlayfs on Linux, ProjectedFS on Windows), the O_NOFOLLOW and symlink-escape checks, cross-platform fallbacks, and how agents that write via shell see it.
+2. [ ] Implement the chosen mechanism behind the existing staging-mode setting; the full copy stays as the fallback.
+3. [ ] Diff and apply see only written files; a goal that writes nothing costs about zero disk.
+4. [ ] Measure: staging size and creation time on this repo against the full copy; add the figures to the phase notes.
+5. [ ] Conformance tests on macOS, Linux and Windows CI, including write-through of deletions and renames.
+
+**Effort**: L.
+
+#### Version: `0.17.12-alpha.32`
 
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: pending -->
