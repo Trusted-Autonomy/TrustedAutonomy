@@ -11448,7 +11448,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.29`
 
 ### v0.17.12.30 - Goal Liveness Watchdog Fix and Build Output Reclaim
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Stop two defects that lost a finished goal on 2026-10-16. (a) The daemon watchdog marked a goal `failed` ("Agent process exited without updating goal state") while its `ta run` parent was still alive and doing post-agent review and draft build. (b) The staging-size cap then deleted that failed goal's staging, including the finished work, so `ta goal recover` could not help. Each goal's staging also grows to about 5.8 GB because the agent's `cargo build` writes `target/` inside it, which starts at about 52 MB.
 
