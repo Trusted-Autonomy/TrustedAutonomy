@@ -2823,6 +2823,9 @@ fn goal_inspect(
             "elapsed_minutes": elapsed.num_minutes(),
             "agent_pid": goal.agent_pid,
             "process_alive": process_alive,
+            "owner_pid": goal.owner_pid,
+            "owner_alive": goal.owner_pid.map(is_process_alive),
+            "post_agent_phase": goal.post_agent_phase,
             "staging_path": goal.workspace_path.display().to_string(),
             "staging_exists": staging_exists,
             "staging_size_bytes": staging_size,
@@ -2867,6 +2870,23 @@ fn goal_inspect(
             println!("  PID:    {} ({})", pid, status);
         }
         None => println!("  PID:    not recorded"),
+    }
+    if let Some(owner) = goal.owner_pid {
+        let status = if is_process_alive(owner) {
+            "alive"
+        } else {
+            "dead"
+        };
+        println!(
+            "  Owner:  {} ({}), the `ta run` that launched the agent",
+            owner, status
+        );
+    }
+    if let Some(phase) = &goal.post_agent_phase {
+        println!(
+            "  Phase:  {} (agent has exited; `ta run` is finishing the goal)",
+            phase
+        );
     }
     println!();
 

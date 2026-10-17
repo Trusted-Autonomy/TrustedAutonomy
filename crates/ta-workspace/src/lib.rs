@@ -46,7 +46,8 @@ pub use log_rotation::{
     RotationOutcome,
 };
 pub use overlay::{
-    verify_staging_isolation, ExcludePatterns, OverlayStagingMode, OverlayWorkspace,
+    reclaim_build_output, verify_staging_isolation, ExcludePatterns, OverlayStagingMode,
+    OverlayWorkspace, ReclaimStats,
 };
 pub use partitioning::{
     git_is_ignored, gitignore_block, merge_svn_ignore, p4_is_ignored, p4ignore_block,

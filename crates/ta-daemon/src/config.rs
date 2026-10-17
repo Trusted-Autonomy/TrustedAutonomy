@@ -638,6 +638,7 @@ impl Default for QaAgentConfig {
 /// heartbeat_interval_secs = 10
 /// watchdog_interval_secs = 30
 /// zombie_transition_delay_secs = 60
+/// post_agent_grace_secs = 1800
 /// stale_question_threshold_secs = 3600
 /// prompt_dismiss_after_output_secs = 5
 /// prompt_verify_timeout_secs = 10
@@ -693,6 +694,12 @@ pub struct OperationsConfig {
     /// backward compatibility with existing daemon.toml files.
     #[serde(default = "default_finalize_timeout")]
     pub finalize_timeout_secs: u64,
+
+    /// Seconds a goal may stay `running` with an exited agent process while its
+    /// owning `ta run` process is still alive (post-agent review and draft
+    /// build) before the watchdog fails it (default: 1800 = 30 min).
+    #[serde(default = "default_post_agent_grace")]
+    pub post_agent_grace_secs: u64,
 }
 
 /// Auto-heal policy: which low-risk corrective actions the daemon can take without asking.
@@ -745,6 +752,10 @@ fn default_finalize_timeout() -> u64 {
     1800
 }
 
+fn default_post_agent_grace() -> u64 {
+    crate::watchdog::DEFAULT_POST_AGENT_GRACE_SECS
+}
+
 impl Default for OperationsConfig {
     fn default() -> Self {
         Self {
@@ -756,6 +767,7 @@ impl Default for OperationsConfig {
             prompt_dismiss_after_output_secs: default_prompt_dismiss_after_output(),
             prompt_verify_timeout_secs: default_prompt_verify_timeout(),
             finalize_timeout_secs: default_finalize_timeout(),
+            post_agent_grace_secs: default_post_agent_grace(),
             auto_heal: AutoHealConfig::default(),
         }
     }

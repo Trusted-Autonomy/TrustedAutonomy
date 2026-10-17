@@ -4194,6 +4194,45 @@ On startup, the daemon prints how much was freed:
 gc: removed 3 staging dir(s), freed ~2.1 GB
 ```
 
+#### What GC never deletes
+
+GC and the staging size cap never delete a staging directory that might hold work you have not collected:
+
+- A **failed** goal whose staging differs from your source project, or whose draft is still pending review or approved, is kept. GC prints the reason and the command to run, for example `ta goal recover a1b2c3d4`.
+- A goal that is running, finalizing, or whose `ta run` or agent process is still alive is kept.
+- If GC cannot tell (the source project is missing, the drafts cannot be read), it keeps the directory.
+- Applied, completed, merged and closed goals, and goals you cancelled yourself, are reclaimed as before.
+
+The GC summary counts these directories (`N kept (uncollected work or in use)`). When the staging cap cannot free enough space for this reason, it says so. Recover or discard those goals, then run `ta gc` again:
+
+```bash
+ta goal recover a1b2c3d4   # rebuild a draft from the staging directory
+ta goal inspect a1b2c3d4   # see state, owner, staging path and size
+```
+
+#### Build output is reclaimed automatically
+
+Most of a staging directory is usually build output (`target/`, `node_modules/` and anything else in the default excludes or your `.taignore`). Once the agent has exited and the verification gates have passed or finished, `ta run` removes those directories from staging. The directories never reach the draft, so the draft is unchanged. The bytes freed are logged and printed per goal:
+
+```
+Reclaimed 5.6 GB of build output (1 directory) from staging for goal 8ba9a769.
+```
+
+Verification gates recreate `target/` on demand in the staging directory, so nothing relies on a kept one. Source files and symlinks are never removed.
+
+To keep build output for one goal (for example to debug a failing build in staging):
+
+```bash
+ta run "title" --keep-build-output
+```
+
+To turn reclaim off for the project, add to `.ta/workflow.toml`:
+
+```toml
+[staging]
+reclaim_build_output = false   # default: true
+```
+
 #### Viewing staging status
 
 ```bash
@@ -10488,7 +10527,21 @@ Add to `.ta/daemon.toml`:
 watchdog_interval_secs = 30        # check cycle (default: 30, 0 to disable)
 zombie_transition_delay_secs = 60  # wait before transitioning dead process (default: 60)
 stale_question_threshold_secs = 3600  # re-notify after this (default: 1h)
+post_agent_grace_secs = 1800       # keep a goal whose agent exited while `ta run` is alive (default: 30m)
 ```
+
+#### Goals in post-agent review
+
+When the agent exits, the `ta run` process that launched it keeps working: it runs the verification gates, the supervisor review and the draft build. The watchdog does not fail a goal in that window. While the owning `ta run` process is alive, a goal whose agent has exited is left alone for `post_agent_grace_secs`. `ta goal inspect <id>` shows the owner and the phase:
+
+```
+Process:
+  PID:    43257 (dead)
+  Owner:  43101 (alive), the `ta run` that launched the agent
+  Phase:  reviewing (agent has exited; `ta run` is finishing the goal)
+```
+
+If the goal is failed anyway, the failure reason says which condition applied: the agent and its `ta run` are both gone, no owner was recorded, or the owner is alive but the grace period was exceeded. In every case the reason ends with the `ta goal recover` command to run. Raise `post_agent_grace_secs` if your review or draft build legitimately takes longer than 30 minutes.
 
 #### Goal health in CLI output
 

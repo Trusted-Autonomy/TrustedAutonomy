@@ -309,6 +309,11 @@ enum Commands {
         /// server, chat-safe MCP tools only, all native tools denied.
         #[arg(long)]
         chat_mode: bool,
+        /// Keep build output (target/, node_modules/, .taignore entries) in this
+        /// goal's staging after the agent exits, for debugging. By default it is
+        /// reclaimed (see `[staging] reclaim_build_output` in workflow.toml).
+        #[arg(long)]
+        keep_build_output: bool,
         /// Suppress streaming agent output; still print completion/failure summary.
         /// Default for daemon-dispatched and channel-dispatched goals.
         /// Inverse: omit --quiet (current interactive default) shows full output.
@@ -1895,6 +1900,7 @@ fn dispatch_raw(
             skip_verify,
             persona,
             chat_mode,
+            keep_build_output,
             quiet,
             goal_id,
             workflow,
@@ -1962,6 +1968,9 @@ fn dispatch_raw(
                 );
             }
             let _chat_mode_guard = commands::chat_launch::CliChatModeGuard::set(*chat_mode);
+            // `--keep-build-output`: carried the same way.
+            let _keep_build_output_guard =
+                commands::staging_reclaim::KeepBuildOutputGuard::set(*keep_build_output);
             // `--new-phase`: carried the same way (keeps `execute`'s parameter list stable).
             let _new_phase_guard = commands::plan::CliNewPhaseGuard::set(*new_phase);
             // `--intake-file`: carried the same way. Multi-goal workflows would
