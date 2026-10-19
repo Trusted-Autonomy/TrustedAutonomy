@@ -11023,6 +11023,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 ### v0.17.12.5.1 - Capability Probe and Machine-Readable Install Facts
 <!-- status: pending -->
 **Depends on**: none (land early; small)
+**Order**: 1
 
 **Goal**: A script can ask `ta` what it can safely do, and can supply secrets and read terms status without scraping text. Requested by the VT installer, which today cannot tell a safe `ta` from an unsafe one: `ta --version` reads `0.17.11-alpha.8` both before and after the CoS hardening, and a build made before PR #646 lists `--chat-mode` and `--origin` in `ta run --help` while its daemon does not pass them.
 
