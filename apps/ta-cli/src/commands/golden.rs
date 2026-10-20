@@ -18,9 +18,10 @@ use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use serde_json::Value;
 use ta_goal::golden::{
-    default_entry_id, diff_similarity, diff_stats, parse_overrides, render_file_diff, sha256_hex,
-    verdict, Baseline, GoldenEntry, GoldenStore, ReplayRecord, RunEnvironment, Verdict,
-    VerdictResult, EQUIVALENCE_THRESHOLD,
+    arm_stats, default_entry_id, diff_similarity, diff_stats, parse_overrides, recompute_entry,
+    render_file_diff, sha256_hex, verdict, ArmStats, Baseline, CheckRun, GoldenEntry, GoldenStore,
+    RecomputeOutcome, ReplayRecord, RunEnvironment, SeriesStats, Verdict, VerdictResult,
+    EQUIVALENCE_THRESHOLD,
 };
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
@@ -91,6 +92,23 @@ pub enum GoldenCommands {
         #[arg(long)]
         keep: bool,
     },
+    /// Recompute files, lines and similarity of an entry's baseline and replays from their
+    /// stored diffs, into new fields (the original numbers are never overwritten).
+    ///
+    /// Older entries stored a changed-lines-only diff whose counts were inflated for files
+    /// with large test modules. Those cannot be read exactly: they are flagged, not guessed,
+    /// unless you pass --reconstruct, which rebuilds the real changes from the changed lines
+    /// and labels the result as reconstructed.
+    Recompute {
+        /// Golden entry id.
+        id: String,
+        /// Print what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// For diffs without context, rebuild the real changes from the stored changed lines.
+        #[arg(long)]
+        reconstruct: bool,
+    },
     /// Compare replays with their baselines: cost, tokens, outcome, check and
     /// diff, with a verdict of equivalent, differs or failed.
     Report {
@@ -157,6 +175,16 @@ pub fn execute(cmd: &GoldenCommands, config: &GatewayConfig) -> anyhow::Result<(
                     discard_replay_goal(&ta_bin, goal_id);
                 }
             }
+            Ok(())
+        }
+        GoldenCommands::Recompute {
+            id,
+            dry_run,
+            reconstruct,
+        } => {
+            let store = GoldenStore::new(&config.workspace_root);
+            let items = recompute_entry(&store, id, *reconstruct, *dry_run)?;
+            print!("{}", render_recompute(id, &items, *dry_run, *reconstruct));
             Ok(())
         }
         GoldenCommands::Report { ids, json } => report(config, ids, *json),
@@ -355,10 +383,15 @@ fn capture(
         ));
     }
 
+    let mut check_run: Option<CheckRun> = None;
     let check_passed = match check {
         Some(_) if result_commit.is_some() => None,
         Some(cmd) => match run_check(cmd, &goal.workspace_path) {
-            Ok(pass) => Some(pass),
+            Ok(run) => {
+                let pass = run.passed;
+                check_run = Some(run);
+                Some(pass)
+            }
             Err(e) => {
                 notes.push(format!(
                     "The check could not be run, so the baseline records no check result: {e}"
@@ -408,6 +441,8 @@ fn capture(
             lines_removed: stats.removed,
             diff_sha256: sha256_hex(&diff),
             check_passed,
+            check_run,
+            recomputed: None,
             captured_at: Utc::now(),
         },
     };
@@ -746,7 +781,11 @@ fn replay(
         max_usd,
     );
     tracing::info!(golden_id = %entry.id, tag = %tag, scratch = %scratch.path.display(), "launching golden replay");
-    let status = runner(&mut cmd).map_err(|e| {
+    let run_index = store.next_run_index(id)?;
+    let run_started_at = Utc::now();
+    let status = runner(&mut cmd);
+    let run_finished_at = Utc::now();
+    let status = status.map_err(|e| {
         anyhow::anyhow!(
             "could not launch `{}` for the replay: {e}. Run it by hand to see why: {}",
             ta_bin.display(),
@@ -772,8 +811,9 @@ fn replay(
         tag: tag.clone(),
         set: set.to_vec(),
         goal_id: None,
-        started_at,
-        completed_at: Some(Utc::now()),
+        // Wall clock of the whole replay command (agent run included), not of this bookkeeping.
+        started_at: run_started_at,
+        completed_at: Some(run_finished_at),
         outcome: "no goal created".to_string(),
         cost_usd: 0.0,
         cost_estimated: false,
@@ -784,9 +824,14 @@ fn replay(
         turns: None,
         aborted_budget: false,
         files_changed: 0,
+        lines_added: None,
+        lines_removed: None,
         diff_sha256: None,
         similarity: None,
         check_passed: None,
+        check_run: None,
+        run_index: Some(run_index),
+        recomputed: None,
         failure: None,
         environment: Some(collect_environment(
             config,
@@ -827,12 +872,17 @@ fn replay(
                     );
                     let stats = diff_stats(&d);
                     record.files_changed = stats.files;
+                    record.lines_added = Some(stats.added);
+                    record.lines_removed = Some(stats.removed);
                     record.diff_sha256 = Some(sha256_hex(&d));
                     record.similarity = Some(diff_similarity(&store.load_baseline_diff(id)?, &d));
                     diff = Some(d);
                     if let Some(cmd) = &entry.check_command {
                         match run_check(cmd, &goal.workspace_path) {
-                            Ok(pass) => record.check_passed = Some(pass),
+                            Ok(run) => {
+                                record.check_passed = Some(run.passed);
+                                record.check_run = Some(run);
+                            }
                             Err(e) => {
                                 record.failure = Some(format!("the check could not be run: {e}"))
                             }
@@ -934,7 +984,12 @@ fn report(config: &GatewayConfig, ids: &[String], json: bool) -> anyhow::Result<
                         })
                     })
                     .collect();
-                serde_json::json!({ "entry": e, "replays": rows })
+                serde_json::json!({
+                    "entry": e,
+                    "replays": rows,
+                    "arms": arm_stats(replays),
+                    "note": COST_NOTE,
+                })
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -943,6 +998,125 @@ fn report(config: &GatewayConfig, ids: &[String], json: bool) -> anyhow::Result<
     }
     Ok(())
 }
+
+/// `+a -r` of a replay's diff and whether the numbers can be trusted.
+fn replay_lines(r: &ReplayRecord) -> String {
+    if let Some(rc) = &r.recomputed {
+        return format!(
+            "{} file(s) +{} -{} (recomputed: {})",
+            rc.files_changed,
+            rc.lines_added,
+            rc.lines_removed,
+            rc.method.split(';').next().unwrap_or("")
+        );
+    }
+    match (r.lines_added, r.lines_removed) {
+        (Some(a), Some(d)) => format!("{} file(s) +{a} -{d}", r.files_changed),
+        _ => format!(
+            "{} file(s), line counts not recorded (older differ, unreliable; run `ta golden recompute {}`)",
+            r.files_changed, r.golden_id
+        ),
+    }
+}
+
+fn baseline_lines(b: &Baseline, id: &str) -> String {
+    match &b.recomputed {
+        Some(rc) => format!(
+            "{} file(s) +{} -{} (recomputed: {}; recorded at capture: {} file(s) +{} -{})",
+            rc.files_changed,
+            rc.lines_added,
+            rc.lines_removed,
+            rc.method.split(';').next().unwrap_or(""),
+            b.files_changed,
+            b.lines_added,
+            b.lines_removed
+        ),
+        None => format!(
+            "{} file(s) +{} -{} (as recorded at capture; if captured before the diff fix these are inflated, see `ta golden recompute {id}`)",
+            b.files_changed, b.lines_added, b.lines_removed
+        ),
+    }
+}
+
+fn check_run_line(r: &ReplayRecord) -> String {
+    match &r.check_run {
+        Some(c) => {
+            let tests = c
+                .tests
+                .map(|t| {
+                    format!(
+                        ", tests {} passed {} failed {} ignored",
+                        t.passed, t.failed, t.ignored
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "{} (exit {}, {}s, `{}`{})",
+                if c.passed { "pass" } else { "FAIL" },
+                c.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into()),
+                (c.finished_at - c.started_at).num_seconds(),
+                truncate(&c.command, 60),
+                tests
+            )
+        }
+        None => match r.check_passed {
+            Some(true) => "pass (no run record)".to_string(),
+            Some(false) => "FAIL (no run record)".to_string(),
+            None => "not run".to_string(),
+        },
+    }
+}
+
+fn fmt_tokens(s: &SeriesStats) -> String {
+    format!(
+        "mean {:.0}, min {:.0}, max {:.0}, n={}",
+        s.mean, s.min, s.max, s.n
+    )
+}
+
+fn fmt_cost_series(s: &SeriesStats) -> String {
+    format!(
+        "mean ${:.2}, min ${:.2}, max ${:.2}, n={}",
+        s.mean, s.min, s.max, s.n
+    )
+}
+
+fn render_arms(arms: &[ArmStats]) -> String {
+    let mut out = String::from("  Per arm (tokens are the primary metric, cost is secondary):\n");
+    for a in arms {
+        out.push_str(&format!("    {}  [labels: {}]\n", a.arm, a.tags.join(", ")));
+        match &a.tokens {
+            Some(s) => {
+                out.push_str(&format!("      total tokens: {}\n", fmt_tokens(s)));
+                if s.n == 1 {
+                    out.push_str(
+                        "      n=1, not a distribution: one run says nothing about spread.\n",
+                    );
+                }
+            }
+            None => out.push_str("      total tokens: n/a\n"),
+        }
+        if let Some(s) = &a.output_tokens {
+            out.push_str(&format!("      output tokens: {}\n", fmt_tokens(s)));
+        }
+        match &a.cost_usd {
+            Some(s) => {
+                out.push_str(&format!("      cost: {}\n", fmt_cost_series(s)));
+                if s.n == 1 {
+                    out.push_str("      n=1, not a distribution.\n");
+                }
+            }
+            None => out.push_str("      cost: n/a (none recorded)\n"),
+        }
+    }
+    out
+}
+
+const COST_NOTE: &str = "Note: cost_usd is as reported by the agent runtime. It does not reconcile with the \
+token counts at any fixed per-token prices (cache pricing, plan discounts and runtime accounting differ), \
+so compare tokens first and treat cost as a secondary signal.";
 
 fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
     let mut out = String::new();
@@ -957,13 +1131,18 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
             b.cache_creation_tokens,
         );
         out.push_str(&format!(
-            "{} ({})\n  Baseline: {}, {} tokens, outcome {}, check {}\n",
+            "{} ({})\n  Baseline: {} tokens (in {} out {} cache-read {} cache-create {}), {}, outcome {}, check {}\n  Baseline diff: {}\n",
             e.id,
             e.title,
-            fmt_cost(b.cost_usd, b.cost_estimated),
             base_tokens,
+            b.input_tokens,
+            b.output_tokens,
+            b.cache_read_tokens,
+            b.cache_creation_tokens,
+            fmt_cost(b.cost_usd, b.cost_estimated),
             b.outcome,
             check_label(e.check_command.as_deref(), b.check_passed),
+            baseline_lines(b, &e.id),
         ));
         out.push_str(&match &e.baseline_environment {
             Some(env) => format!("  Baseline ran under: {}\n", env.summary()),
@@ -976,10 +1155,6 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
             ));
             continue;
         }
-        out.push_str(&format!(
-            "  {:<24} {:>10} {:>9} {:>11} {:>9} {:<16} {:<7} {:>5}  {}\n",
-            "TAG", "COST", "D COST", "TOKENS", "D TOKENS", "OUTCOME", "CHECK", "DIFF", "VERDICT"
-        ));
         for r in replays {
             let v = verdict(e, r);
             let tokens = total_tokens(
@@ -989,25 +1164,56 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
                 r.cache_creation_tokens,
             );
             out.push_str(&format!(
-                "  {:<24} {:>10} {:>9} {:>11} {:>9} {:<16} {:<7} {:>5}  {}\n",
-                truncate(&r.tag, 24),
-                fmt_cost(r.cost_usd, r.cost_estimated),
-                delta_pct(b.cost_usd, r.cost_usd),
+                "  Run {} '{}' ({}): {}\n",
+                r.run_index
+                    .map(|i| format!("#{i}"))
+                    .unwrap_or_else(|| "(no index)".into()),
+                r.tag,
+                short(&r.replay_id),
+                v.verdict.as_str()
+            ));
+            out.push_str(&format!(
+                "    tokens:  {} total ({} vs baseline): in {} / out {} / cache-read {} / cache-create {}\n",
                 tokens,
                 delta_pct(base_tokens as f64, tokens as f64),
-                truncate(&r.outcome, 16),
-                match r.check_passed {
-                    Some(true) => "pass",
-                    Some(false) => "FAIL",
-                    None => "-",
-                },
-                r.similarity
-                    .map(|s| format!("{:.0}%", s * 100.0))
-                    .unwrap_or_else(|| "-".into()),
-                v.verdict.as_str(),
+                r.input_tokens,
+                r.output_tokens,
+                r.cache_read_tokens,
+                r.cache_creation_tokens
+            ));
+            out.push_str(&format!(
+                "    cost:    {} ({} vs baseline, as reported by the runtime)\n",
+                fmt_cost(r.cost_usd, r.cost_estimated),
+                delta_pct(b.cost_usd, r.cost_usd)
+            ));
+            out.push_str(&format!(
+                "    outcome: {}\n    check:   {}\n    diff:    {}, similarity {}\n",
+                r.outcome,
+                check_run_line(r),
+                replay_lines(r),
+                match (
+                    r.recomputed.as_ref().and_then(|c| c.similarity),
+                    r.similarity
+                ) {
+                    (Some(s), Some(orig)) => format!(
+                        "{:.0}% (recomputed; {:.0}% as originally recorded)",
+                        s * 100.0,
+                        orig * 100.0
+                    ),
+                    (Some(s), None) => format!("{:.0}% (recomputed)", s * 100.0),
+                    (None, Some(s)) => format!("{:.0}%", s * 100.0),
+                    (None, None) => "n/a".to_string(),
+                }
+            ));
+            out.push_str(&format!(
+                "    when:    {}{}\n",
+                r.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                r.completed_at
+                    .map(|c| format!(" to {}", c.format("%H:%M:%S UTC")))
+                    .unwrap_or_default()
             ));
             if let Some(env) = &r.environment {
-                out.push_str(&format!("    {} ran under: {}\n", r.tag, env.summary()));
+                out.push_str(&format!("    ran under: {}\n", env.summary()));
             }
             if v.needs_human_review() {
                 review.push(format!(
@@ -1019,6 +1225,7 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
                 ));
             }
         }
+        out.push_str(&render_arms(&arm_stats(replays)));
         let n = replays.len();
         if n == 1 {
             single_sample = true;
@@ -1037,9 +1244,11 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
         }
         out.push_str("Review a replay's draft with `ta draft list`; its diff is in .ta/golden/<id>/replays/.\n");
     }
+    out.push_str(COST_NOTE);
+    out.push('\n');
     if single_sample {
         out.push_str(&format!(
-            "One replay is one sample: agent runs vary, so treat a cost difference as a lead and repeat \
+            "One replay is one sample (n=1, not a distribution): agent runs vary, so treat a difference as a lead and repeat \
              the replay before acting on a borderline result. Equivalent means check passes (when one is \
              defined) and diff similarity is at least {:.0}%.\n",
             EQUIVALENCE_THRESHOLD * 100.0
@@ -1048,7 +1257,74 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
     out
 }
 
-/// First line of `<bin> --version`, or empty when the tool is missing.
+fn render_recompute(
+    id: &str,
+    items: &[ta_goal::golden::RecomputeItem],
+    dry_run: bool,
+    reconstruct: bool,
+) -> String {
+    let mut out = format!(
+        "Recompute for '{id}'{}\n",
+        if dry_run {
+            " (dry run, nothing written)"
+        } else {
+            ""
+        }
+    );
+    let (mut changed, mut flagged, mut same) = (0, 0, 0);
+    for i in items {
+        let (f, a, r, s) = i.original;
+        let orig = format!(
+            "{} file(s) +{} -{}{}",
+            f,
+            a.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
+            r.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
+            s.map(|s| format!(", similarity {:.0}%", s * 100.0))
+                .unwrap_or_default()
+        );
+        match &i.outcome {
+            RecomputeOutcome::Recomputed(n) => {
+                changed += 1;
+                out.push_str(&format!(
+                    "  {}: {} -> {} file(s) +{} -{}{}\n    method: {}\n",
+                    i.subject,
+                    orig,
+                    n.files_changed,
+                    n.lines_added,
+                    n.lines_removed,
+                    n.similarity
+                        .map(|s| format!(", similarity {:.0}%", s * 100.0))
+                        .unwrap_or_default(),
+                    n.method
+                ));
+            }
+            RecomputeOutcome::Unchanged => {
+                same += 1;
+                out.push_str(&format!("  {}: already recomputed, unchanged\n", i.subject));
+            }
+            RecomputeOutcome::Flagged(why) => {
+                flagged += 1;
+                out.push_str(&format!(
+                    "  {}: NOT recomputed ({orig} stays as recorded). {why}\n",
+                    i.subject
+                ));
+            }
+        }
+    }
+    out.push_str(&format!(
+        "{changed} {}, {same} unchanged, {flagged} flagged. The original numbers are never overwritten; \
+         recomputed values are stored beside them in a `recomputed` field.\n",
+        if dry_run { "would change" } else { "updated" }
+    ));
+    if flagged > 0 && !reconstruct {
+        out.push_str(&format!(
+            "Flagged diffs have no context lines. To estimate their true counts from the stored \
+             changed lines: ta golden recompute {id} --reconstruct (add --dry-run to preview).\n"
+        ));
+    }
+    out
+}
+
 fn tool_version(bin: &str) -> String {
     Command::new(bin)
         .arg("--version")
@@ -1360,8 +1636,10 @@ fn draft_commit_sha(config: &GatewayConfig, goal_id: &str) -> Option<String> {
     best.map(|(_, s)| s)
 }
 
-/// Run a check command in `dir`; `Ok(true)` when it exits 0.
-fn run_check(cmd: &str, dir: &Path) -> anyhow::Result<bool> {
+/// Run a check command in `dir` and return the full record of the run: the command line,
+/// start and finish times, exit code, bounded output tails and parsed test counts. An `Err`
+/// means the command could not be started at all.
+fn run_check(cmd: &str, dir: &Path) -> anyhow::Result<CheckRun> {
     #[cfg(windows)]
     let mut c = {
         let mut c = Command::new("cmd");
@@ -1374,18 +1652,23 @@ fn run_check(cmd: &str, dir: &Path) -> anyhow::Result<bool> {
         c.args(["-c", cmd]);
         c
     };
-    let status = c
-        .current_dir(dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "could not start `{cmd}` in {}: {e}. Run it by hand to see why.",
-                dir.display()
-            )
-        })?;
-    Ok(status.success())
+    let started_at = Utc::now();
+    let out = c.current_dir(dir).output().map_err(|e| {
+        anyhow::anyhow!(
+            "could not start `{cmd}` in {}: {e}. Run it by hand to see why.",
+            dir.display()
+        )
+    })?;
+    let run = CheckRun::from_output(
+        cmd,
+        started_at,
+        Utc::now(),
+        out.status.code(),
+        &out.stdout,
+        &out.stderr,
+    );
+    tracing::info!(command = %cmd, exit_code = ?run.exit_code, passed = run.passed, "golden check finished");
+    Ok(run)
 }
 
 #[allow(dead_code)]
@@ -1550,10 +1833,14 @@ mod tests {
         assert!(diff.contains("-two\n+2\n"), "{diff}");
         assert!(!diff.contains("later"), "{diff}");
         assert!(
-            diff.contains("--- /dev/null\n+++ b/b.txt\n+new\n"),
+            diff.contains("--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1,1 @@\n+new\n"),
             "{diff}"
         );
         let e = store.load_entry(&c.entry.id).unwrap();
+        let run = e.baseline.check_run.clone().expect("check run is recorded");
+        assert_eq!(run.command, "exit 0");
+        assert_eq!(run.exit_code, Some(0));
+        assert!(run.passed && run.finished_at >= run.started_at);
         assert_eq!(e.start_commit, f.start);
         assert_eq!(e.baseline.cost_usd, 2.0);
         assert_eq!(e.baseline.input_tokens, 100);
@@ -1611,7 +1898,7 @@ mod tests {
             .unwrap();
         assert!(diff.contains("-two\n+2\n"), "{diff}");
         assert!(
-            diff.contains("--- /dev/null\n+++ b/b.txt\n+new\n"),
+            diff.contains("--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1,1 @@\n+new\n"),
             "{diff}"
         );
         assert_eq!(c.entry.baseline.files_changed, 2);
@@ -1895,6 +2182,147 @@ mod tests {
         assert!(text.contains("equivalent"), "{text}");
         assert!(text.contains("one sample"), "{text}");
         assert!(!text.contains("Needs human review"), "{text}");
+    }
+
+    #[test]
+    fn two_replays_each_keep_their_own_check_result_in_their_own_record() {
+        let f = fixture();
+        let entry = captured_entry(&f, Some("echo checking; echo oops >&2; exit 0"));
+        let head = rev(f.project.path());
+        let store = GoldenStore::new(f.project.path());
+        let mut outs = Vec::new();
+        for tag in ["arm-a", "arm-a"] {
+            // The same label twice: the old label-keyed result would have collided.
+            let mut run = fake_run(&f, "one\n2\n", head.clone(), Default::default());
+            outs.push(
+                replay(
+                    &f.config,
+                    Path::new("ta"),
+                    &entry.id,
+                    &[],
+                    Some(tag),
+                    None,
+                    &mut run,
+                )
+                .unwrap(),
+            );
+        }
+        let records = store.list_replays(&entry.id).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_ne!(records[0].replay_id, records[1].replay_id);
+        assert_eq!(
+            records.iter().map(|r| r.run_index).collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+        for r in &records {
+            let c = r
+                .check_run
+                .as_ref()
+                .expect("check run persisted in the record");
+            assert!(c.command.contains("echo checking"));
+            assert_eq!(c.exit_code, Some(0));
+            assert!(c.passed && c.stdout_tail.contains("checking"));
+            assert!(c.stderr_tail.contains("oops"));
+            assert!(c.finished_at >= c.started_at);
+            assert_eq!((r.lines_added, r.lines_removed), (Some(2), Some(1)));
+            assert!(r.completed_at.unwrap() >= r.started_at);
+        }
+        // The first record is exactly what was written; the second run did not touch it.
+        let first = std::fs::read_to_string(&outs[0].record_path).unwrap();
+        assert!(first.contains(&records[0].replay_id));
+        assert!(!first.contains(&records[1].replay_id));
+    }
+
+    #[test]
+    fn a_failing_check_is_recorded_with_its_exit_code_and_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_check(
+            "echo bad; echo 'test result: FAILED. 1 passed; 2 failed; 0 ignored;'; exit 3",
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(run.exit_code, Some(3));
+        assert!(!run.passed);
+        assert!(run.stdout_tail.contains("bad"));
+        assert_eq!(run.tests.map(|t| (t.passed, t.failed)), Some((1, 2)));
+    }
+
+    #[test]
+    fn report_shows_every_token_kind_check_lines_similarity_and_arm_stats() {
+        let f = fixture();
+        let entry = captured_entry(&f, Some("exit 0"));
+        let head = rev(f.project.path());
+        let mut run = fake_run(&f, "one\n2\n", head, Default::default());
+        replay(
+            &f.config,
+            Path::new("ta"),
+            &entry.id,
+            &[],
+            Some("solo"),
+            None,
+            &mut run,
+        )
+        .unwrap();
+        let store = GoldenStore::new(f.project.path());
+        let mut replays = store.list_replays(&entry.id).unwrap();
+        replays[0].cache_read_tokens = 777;
+        replays[0].cache_creation_tokens = 333;
+        let text = render_report(&[(entry.clone(), replays.clone())]);
+        assert!(text.contains("cache-read 777"), "{text}");
+        assert!(text.contains("cache-create 333"), "{text}");
+        assert!(text.contains("out 900"), "{text}");
+        assert!(text.contains("check:   pass (exit 0"), "{text}");
+        assert!(text.contains("+2 -1"), "{text}");
+        assert!(text.contains("similarity 100%"), "{text}");
+        assert!(text.contains("Run #1"), "{text}");
+        assert!(
+            text.contains("mean") && text.contains("min") && text.contains("max"),
+            "{text}"
+        );
+        assert!(text.contains("n=1, not a distribution"), "{text}");
+        assert!(
+            text.contains("does not reconcile with the token counts"),
+            "{text}"
+        );
+
+        // Two more samples in the same arm: n=3 and no single-sample warning for the arm.
+        let mut more = replays.clone();
+        for i in 0..2 {
+            let mut r = replays[0].clone();
+            r.replay_id = format!("extra-{i}");
+            r.output_tokens = 1000 + i as u64 * 100;
+            more.push(r);
+        }
+        let text = render_report(&[(entry, more)]);
+        assert!(text.contains("n=3"), "{text}");
+    }
+
+    #[test]
+    fn recompute_command_renders_dry_run_and_flags_old_diffs() {
+        let f = fixture();
+        let entry = captured_entry(&f, None);
+        let store = GoldenStore::new(f.project.path());
+        // Replace the baseline diff with an old-format one.
+        std::fs::write(
+            store.entry_dir(&entry.id).unwrap().join("baseline.diff"),
+            "--- a/a.txt\n+++ b/a.txt\n-two\n+2\n",
+        )
+        .unwrap();
+        let items = recompute_entry(&store, &entry.id, false, true).unwrap();
+        let text = render_recompute(&entry.id, &items, true, false);
+        assert!(text.contains("dry run, nothing written"), "{text}");
+        assert!(text.contains("NOT recomputed"), "{text}");
+        assert!(text.contains("--reconstruct"), "{text}");
+        let items = recompute_entry(&store, &entry.id, true, true).unwrap();
+        let text = render_recompute(&entry.id, &items, true, true);
+        assert!(text.contains("would change"), "{text}");
+        assert!(text.contains("reconstructed"), "{text}");
+        assert!(store
+            .load_entry(&entry.id)
+            .unwrap()
+            .baseline
+            .recomputed
+            .is_none());
     }
 
     #[test]
