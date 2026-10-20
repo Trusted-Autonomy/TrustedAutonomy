@@ -247,8 +247,48 @@ fn parse_status_str(s: &str) -> PlanStatus {
         "done" => PlanStatus::Done,
         "in_progress" => PlanStatus::InProgress,
         "deferred" => PlanStatus::Deferred,
+        "blocked" => PlanStatus::Blocked,
         _ => PlanStatus::Pending,
     }
+}
+
+/// Collect `**Blocked on**: <reason>` lines, keyed by phase id, using the
+/// default schema's phase patterns. The line must sit within a few lines
+/// under the phase heading (after the status marker). Free text only; a
+/// phase with no such line has no entry.
+pub fn parse_blocked_on(content: &str) -> std::collections::HashMap<String, String> {
+    let schema = PlanSchema::default_schema();
+    let patterns: Vec<Regex> = schema
+        .phase_patterns
+        .iter()
+        .filter_map(|p| Regex::new(&p.regex).ok())
+        .collect();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = std::collections::HashMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        let Some(id) = patterns
+            .iter()
+            .find_map(|p| p.captures(line))
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        else {
+            continue;
+        };
+        for next in lines.iter().skip(i + 1).take(6) {
+            let t = next.trim();
+            if let Some(rest) = t.strip_prefix("**Blocked on**:") {
+                let reason = rest.trim();
+                if !reason.is_empty() {
+                    out.insert(id.clone(), reason.to_string());
+                }
+                break;
+            }
+            if patterns.iter().any(|p| p.is_match(t)) {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Parse PLAN.md content into a list of phases (using the default schema).
@@ -483,5 +523,23 @@ mod tests {
                 diff
             );
         }
+    }
+
+    #[test]
+    fn blocked_status_round_trips_through_parse_and_update() {
+        let md = "### v0.1.0 - A\n<!-- status: pending -->\n";
+        let updated = update_phase_status(md, "v0.1.0", PlanStatus::Blocked);
+        assert!(updated.contains("<!-- status: blocked -->"));
+        assert_eq!(parse_plan(&updated)[0].status, PlanStatus::Blocked);
+        let back = update_phase_status(&updated, "v0.1.0", PlanStatus::Pending);
+        assert_eq!(parse_plan(&back)[0].status, PlanStatus::Pending);
+    }
+
+    #[test]
+    fn parse_blocked_on_reads_reason_line_per_phase() {
+        let md = "### v0.1.0 - A\n<!-- status: blocked -->\n**Blocked on**: owner decision\n\n### v0.2.0 - B\n<!-- status: pending -->\n";
+        let m = parse_blocked_on(md);
+        assert_eq!(m.get("v0.1.0").map(String::as_str), Some("owner decision"));
+        assert!(!m.contains_key("v0.2.0"));
     }
 }

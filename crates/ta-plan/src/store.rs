@@ -250,7 +250,7 @@ impl PlanStore for FilePlanStore {
                 history::reset_phase_if_in_progress(&self.project_root, id, note.unwrap_or(""))
                     .map(|_| ())
             }
-            PlanStatus::Done | PlanStatus::Deferred => {
+            PlanStatus::Done | PlanStatus::Deferred | PlanStatus::Blocked => {
                 self.write_terminal_status(id, new_status, note)
             }
         }
@@ -507,6 +507,21 @@ mod tests {
             store.get_phase("v0.2.0").unwrap().unwrap().status,
             PlanStatus::Deferred
         );
+    }
+
+    #[test]
+    fn file_plan_store_marks_a_phase_blocked_and_it_is_not_ready() {
+        let (dir, store) = setup();
+        store
+            .update_phase_status("v0.2.0", PlanStatus::Blocked, None)
+            .unwrap();
+        assert_eq!(
+            store.get_phase("v0.2.0").unwrap().unwrap().status,
+            PlanStatus::Blocked
+        );
+        let on_disk = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert!(on_disk.contains("<!-- status: blocked -->"));
+        assert!(store.next_ready_phases().unwrap().is_empty());
     }
 
     #[test]

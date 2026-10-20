@@ -838,6 +838,7 @@ pub fn format_plan_checklist(phases: &[PlanPhase], current_phase: Option<&str>) 
         let checkbox = match phase.status {
             PlanStatus::Done => "[x]",
             PlanStatus::Deferred => "[-]",
+            PlanStatus::Blocked => "[!]",
             PlanStatus::InProgress => "[~]",
             _ => "[ ]",
         };
@@ -936,6 +937,7 @@ pub fn format_plan_checklist_windowed(
     for phase in non_done_before {
         let checkbox = match phase.status {
             PlanStatus::Deferred => "[-]",
+            PlanStatus::Blocked => "[!]",
             PlanStatus::InProgress => "[~]",
             _ => "[ ]",
         };
@@ -950,6 +952,7 @@ pub fn format_plan_checklist_windowed(
         let checkbox = match current.status {
             PlanStatus::Done => "[x]",
             PlanStatus::Deferred => "[-]",
+            PlanStatus::Blocked => "[!]",
             PlanStatus::InProgress => "[~]",
             _ => "[ ]",
         };
@@ -968,6 +971,7 @@ pub fn format_plan_checklist_windowed(
         let checkbox = match phase.status {
             PlanStatus::Done => "[x]",
             PlanStatus::Deferred => "[-]",
+            PlanStatus::Blocked => "[!]",
             PlanStatus::InProgress => "[~]",
             _ => "[ ]",
         };
@@ -1311,6 +1315,7 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
             PlanStatus::InProgress => "in_progress",
             PlanStatus::Pending => "pending",
             PlanStatus::Deferred => "deferred",
+            PlanStatus::Blocked => "blocked",
         };
         if is_sub_phase(&phase.id) {
             // Indent sub-phases under their parent with a tree connector.
@@ -1331,6 +1336,57 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Per-status phase counts shown by `ta plan status` (text and JSON).
+/// `pending` counts only startable phases; `blocked` and `deferred` are
+/// reported separately and never counted as pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatusCounts {
+    total: usize,
+    done: usize,
+    in_progress: usize,
+    pending: usize,
+    deferred: usize,
+    blocked: usize,
+}
+
+impl StatusCounts {
+    fn from_phases(phases: &[PlanPhase]) -> Self {
+        let n = |s: PlanStatus| phases.iter().filter(|p| p.status == s).count();
+        Self {
+            total: phases.len(),
+            done: n(PlanStatus::Done),
+            in_progress: n(PlanStatus::InProgress),
+            pending: n(PlanStatus::Pending),
+            deferred: n(PlanStatus::Deferred),
+            blocked: n(PlanStatus::Blocked),
+        }
+    }
+}
+
+/// Text lines for the Blocked section of `ta plan status`: a count line and
+/// one line per blocked phase with its `**Blocked on**` reason when present.
+/// Empty when nothing is blocked.
+fn blocked_summary_lines(
+    phases: &[PlanPhase],
+    reasons: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let blocked: Vec<&PlanPhase> = phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::Blocked)
+        .collect();
+    if blocked.is_empty() {
+        return vec![];
+    }
+    let mut lines = vec![format!("  Blocked:     {}", blocked.len())];
+    for p in blocked {
+        lines.push(match reasons.get(&p.id) {
+            Some(reason) => format!("    [!] {} blocked on: {}", p.id, reason),
+            None => format!("    [!] {} blocked (no reason recorded)", p.id),
+        });
+    }
+    lines
 }
 
 fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> anyhow::Result<()> {
@@ -1356,23 +1412,18 @@ fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> a
             .map(|v| v.iter().map(|a| (a.phase_id.as_str(), a)).collect())
             .unwrap_or_default();
 
-    let done = phases
-        .iter()
-        .filter(|p| p.status == PlanStatus::Done)
-        .count();
-    let in_progress = phases
-        .iter()
-        .filter(|p| p.status == PlanStatus::InProgress)
-        .count();
-    let pending = phases
-        .iter()
-        .filter(|p| p.status == PlanStatus::Pending)
-        .count();
-    let deferred = phases
-        .iter()
-        .filter(|p| p.status == PlanStatus::Deferred)
-        .count();
-    let total = phases.len();
+    let counts = StatusCounts::from_phases(&phases);
+    let StatusCounts {
+        total,
+        done,
+        in_progress,
+        pending,
+        deferred,
+        blocked,
+    } = counts;
+    let blocked_reasons = std::fs::read_to_string(config.workspace_root.join("PLAN.md"))
+        .map(|c| ta_plan::parse_blocked_on(&c))
+        .unwrap_or_default();
 
     // Count pending human review items from the store.
     let hr_store = HumanReviewStore::new(&config.workspace_root);
@@ -1395,6 +1446,7 @@ fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> a
             "in_progress": in_progress,
             "pending": pending,
             "deferred": deferred,
+            "blocked": blocked,
             "human_review_pending": hr_pending_count,
             "phases": phases.iter().map(|p| {
                 let hr_count = hr_by_phase.get(&p.id).copied().unwrap_or(0);
@@ -1409,6 +1461,7 @@ fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> a
                     "id": p.id,
                     "title": p.title,
                     "status": format!("{}", p.status),
+                    "blocked_on": blocked_reasons.get(&p.id),
                     "human_review_pending": hr_count,
                     "kpi_alignment": kpi_alignment,
                 })
@@ -1424,6 +1477,9 @@ fn show_status(config: &GatewayConfig, json_output: bool, kpi_output: bool) -> a
     println!("  Pending:     {}", pending);
     if deferred > 0 {
         println!("  Deferred:    {}", deferred);
+    }
+    for line in blocked_summary_lines(&phases, &blocked_reasons) {
+        println!("{}", line);
     }
     if hr_pending_count > 0 {
         println!(
@@ -4839,6 +4895,7 @@ fn disambiguate_phase(
             PlanStatus::InProgress => "in_progress",
             PlanStatus::Done => "done",
             PlanStatus::Deferred => "deferred",
+            PlanStatus::Blocked => "blocked",
         };
         eprintln!(
             "  [{}] {} — {}  ({})",
@@ -6598,6 +6655,7 @@ fn plan_build_autonomous(
                     PlanStatus::Done => "done",
                     PlanStatus::InProgress => "in_progress",
                     PlanStatus::Deferred => "deferred",
+                    PlanStatus::Blocked => "blocked",
                     PlanStatus::Pending => "pending",
                 }
             );
@@ -12913,6 +12971,65 @@ persona = "strict-reviewer"
             is_dry_run_merge,
             "dry-run merge should be logged with detail='dry_run'"
         );
+    }
+
+    // ── blocked status ──
+
+    const BLOCKED_PLAN: &str = "### v0.1.0 - Done one\n<!-- status: done -->\n\n### v0.2.0 - Held\n<!-- status: blocked -->\n**Blocked on**: owner decision on X\n\n### v0.3.0 - Free\n<!-- status: pending -->\n\n### v0.4.0 - Parked\n<!-- status: deferred -->\n";
+
+    #[test]
+    fn blocked_status_parse_display_and_marker() {
+        let phases = parse_plan(BLOCKED_PLAN);
+        assert_eq!(phases[1].status, PlanStatus::Blocked);
+        assert_eq!(PlanStatus::Blocked.to_string(), "blocked");
+        let list = format_plan_checklist(&phases, None);
+        assert!(list.contains("- [!] Phase v0.2.0"), "{list}");
+        let windowed = format_plan_checklist_windowed(&phases, Some("v0.1.0"), 5, 5);
+        assert!(windowed.contains("[!] Phase v0.2.0"), "{windowed}");
+    }
+
+    #[test]
+    fn find_next_pending_skips_blocked() {
+        let phases = parse_plan(BLOCKED_PLAN);
+        assert_eq!(find_next_pending(&phases, None).unwrap().id, "v0.3.0");
+        let only_blocked = parse_plan("### v0.1.0 - Held\n<!-- status: blocked -->\n");
+        assert!(find_next_pending(&only_blocked, None).is_none());
+    }
+
+    #[test]
+    fn status_counts_separate_blocked_from_pending() {
+        let phases = parse_plan(BLOCKED_PLAN);
+        let c = StatusCounts::from_phases(&phases);
+        assert_eq!(
+            c,
+            StatusCounts {
+                total: 4,
+                done: 1,
+                in_progress: 0,
+                pending: 1,
+                deferred: 1,
+                blocked: 1
+            }
+        );
+    }
+
+    #[test]
+    fn blocked_summary_lines_show_reason() {
+        let phases = parse_plan(BLOCKED_PLAN);
+        let reasons = ta_plan::parse_blocked_on(BLOCKED_PLAN);
+        let lines = blocked_summary_lines(&phases, &reasons);
+        assert_eq!(lines[0], "  Blocked:     1");
+        assert!(lines[1].contains("v0.2.0 blocked on: owner decision on X"));
+        assert!(blocked_summary_lines(&parse_plan(SAMPLE_PLAN), &reasons).is_empty());
+    }
+
+    #[test]
+    fn show_status_text_and_json_ok_with_blocked_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PLAN.md"), BLOCKED_PLAN).unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        assert!(show_status(&config, false, false).is_ok());
+        assert!(show_status(&config, true, false).is_ok());
     }
 
     // v0.17.0.13: `ta plan status --kpi` — in-process KPI alignment scoring.

@@ -3664,6 +3664,18 @@ Deferred phases are:
 - Included in status counts (`ta plan status --json`)
 - Not candidates for `ta plan next` suggestions
 
+#### Blocked Phases
+
+Mark a phase `blocked` when it is wanted but cannot start until something outside the phase happens (an owner decision or an external dependency). Optionally record why on the next line:
+
+```markdown
+### v0.1.5 - Signed Releases
+<!-- status: blocked -->
+**Blocked on**: owner actions: signing certificate secrets must exist first.
+```
+
+`pending` means startable now, `deferred` means deliberately postponed, and `blocked` means waiting. Blocked phases are shown with `[!]`, are never offered as the next phase, are not counted as pending, and appear as their own `Blocked` count (with the reason) in `ta plan status` and `ta plan status --json`.
+
 #### Phase Ordering Enforcement
 
 TA can detect and warn when phases are implemented out of order — for example, when a `Done` phase appears after a `Pending` phase in your plan.

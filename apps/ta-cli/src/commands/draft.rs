@@ -9936,6 +9936,7 @@ fn apply_package(
             super::plan::PlanStatus::InProgress => "in_progress",
             super::plan::PlanStatus::Pending => "pending",
             super::plan::PlanStatus::Deferred => "deferred",
+            super::plan::PlanStatus::Blocked => "blocked",
         };
         if *status == super::plan::PlanStatus::Done {
             println!("  Plan:   {} -> {}", phase, status_str);
