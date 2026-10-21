@@ -269,6 +269,24 @@ pub(crate) fn publish_completion(
         aborted = record.aborted,
         "goal completion record published"
     );
+    // Usage ledger: one append-only line per finished goal (project + global),
+    // so `ta usage` and budgets see every goal. The project root is the parent
+    // of the `.ta` directory that holds the events dir; when the events dir is
+    // laid out differently the ledger is skipped, and that is logged.
+    match events_dir
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == ".ta"))
+        .and_then(|p| p.parent())
+    {
+        Some(root) => {
+            ta_goal::usage_ledger::record_goal_completion(root, &record);
+        }
+        None => tracing::warn!(
+            goal_id = %goal_id,
+            events_dir = %events_dir.display(),
+            "usage ledger not written: the events dir is not <project>/.ta/events, so the project root is unknown"
+        ),
+    }
     if !quiet {
         println!("{}", summary_line(&record));
     }
@@ -433,5 +451,34 @@ mod tests {
         assert!(text.contains("\"origin_class\":\"asked\""), "{text}");
         // A missing goal is logged, not a panic.
         assert!(publish_completion(&goals, &events, uuid::Uuid::new_v4(), true).is_none());
+    }
+
+    /// Golden failure: a finished goal must never vanish from the usage ledger.
+    /// Publishing (even twice) leaves exactly one project row and one global
+    /// row carrying the goal's tokens.
+    #[test]
+    fn publishing_a_goal_writes_one_usage_ledger_row_per_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage_dir = dir.path().join("usage-home");
+        std::env::set_var(ta_goal::usage_ledger::USAGE_DIR_ENV, &usage_dir);
+        let root = dir.path().join("proj");
+        let goals = root.join(".ta").join("goals");
+        let events = root.join(".ta").join("events");
+        let store = GoalRunStore::new(&goals).unwrap();
+        let mut g = goal();
+        g.input_tokens = 7;
+        g.output_tokens = 3;
+        store.save(&g).unwrap();
+        publish_completion(&goals, &events, g.goal_run_id, true).unwrap();
+        publish_completion(&goals, &events, g.goal_run_id, true).unwrap();
+        for ledger in [
+            ta_goal::usage_ledger::UsageLedger::for_project(&root),
+            ta_goal::usage_ledger::UsageLedger::global(),
+        ] {
+            let read = ledger.read();
+            assert_eq!(read.records.len(), 1, "{}", ledger.path().display());
+            assert_eq!(read.records[0].total_tokens(), 10);
+            assert_eq!(read.records[0].goal_id, Some(g.goal_run_id.to_string()));
+        }
     }
 }

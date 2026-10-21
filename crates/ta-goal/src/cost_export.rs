@@ -165,6 +165,23 @@ pub fn session_rows(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<Sessi
 
 /// Build one Meridian record per goal or session in `rows`, ordered by id.
 pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<Value> {
+    meridian_records_with_usage(rows, goals, None)
+}
+
+/// Like [`meridian_records`], plus the plan and budget percentages as string
+/// extras on every record (`plan_usage_pct`, `budget_used_pct`,
+/// `usage_captured_at`). A percentage that is unknown is `"n/a"`, matching how
+/// `context_peak` is written, so consumers never read a missing value as 0.
+pub fn meridian_records_with_usage(
+    rows: &[&CostRow],
+    goals: &[(String, GoalRun)],
+    usage: Option<&crate::usage::UsageSummary>,
+) -> Vec<Value> {
+    let pct = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |p| format!("{p:.2}"));
+    let captured = usage
+        .and_then(|u| u.plan.as_ref())
+        .and_then(|p| p.captured_at)
+        .map_or_else(|| "n/a".to_string(), |t| t.to_rfc3339());
     session_rows(rows, goals)
         .into_iter()
         .map(|r| {
@@ -206,6 +223,11 @@ pub fn meridian_records(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<V
                     "interactive"
                 }),
             );
+            if let Some(u) = usage {
+                rec.insert("plan_usage_pct".into(), json!(pct(u.plan_usage_pct)));
+                rec.insert("budget_used_pct".into(), json!(pct(u.budget_used_pct)));
+                rec.insert("usage_captured_at".into(), json!(captured.clone()));
+            }
             Value::Object(rec)
         })
         .collect()

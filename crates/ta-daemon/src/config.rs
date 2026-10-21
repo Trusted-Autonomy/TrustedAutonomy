@@ -2434,6 +2434,17 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// `[budget]` and `[usage]` live in daemon.toml but are read by
+    /// `ta usage`, not the daemon; they must not break loading.
+    #[test]
+    fn budget_and_usage_tables_are_tolerated() {
+        let cfg: DaemonConfig = toml::from_str(
+            "[budget]\nwindow = \"week\"\nusd = 50.0\n[budget.model.\"opus\"]\ntokens = 100\n[usage]\nplan_max_age_minutes = 30\n[daemon]\nauto_update = \"never\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.daemon.auto_update, ta_lifecycle::AutoUpdateMode::Never);
+    }
+
     #[test]
     fn auto_update_defaults_to_the_conservative_ask() {
         let cfg: DaemonConfig = toml::from_str("").unwrap();

@@ -638,6 +638,10 @@ pub struct CostReport {
     /// have no per-turn prompt size and are not in this table.
     pub context_buckets: Vec<CostGroupRow>,
     pub notes: Vec<String>,
+    /// Plan and budget usage (`plan_usage_pct`, `budget_used_pct`, meters).
+    /// Additive: absent in older reports and filled in by the CLI.
+    #[serde(default)]
+    pub usage: Option<crate::usage::UsageSummary>,
 }
 
 /// Build the report from already-scanned sources.
@@ -713,6 +717,7 @@ pub fn build_report(
              many turns and have no bucket."
                 .to_string(),
         ],
+        usage: None,
     }
 }
 

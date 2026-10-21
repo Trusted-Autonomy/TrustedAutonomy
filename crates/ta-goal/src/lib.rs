@@ -45,6 +45,8 @@ pub mod start_state;
 pub mod store;
 pub mod token_cost;
 pub mod tool_surface;
+pub mod usage;
+pub mod usage_ledger;
 pub mod velocity;
 
 pub use analysis::{
