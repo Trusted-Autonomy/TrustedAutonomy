@@ -577,20 +577,22 @@ mod tests {
 
     #[test]
     fn golden_look_alike_headings_are_not_confused() {
-        let (_tmp, src) = real_plan_copy();
-        let phases = parse_plan(&src);
+        let (_tmp, original) = real_plan_copy();
+        let phases = parse_plan(&original);
         // Find a phase whose id is a strict prefix of another phase's id (e.g. v0.17.12 / v0.17.12.1).
+        // Status is not part of the property under test, so any such phase will do: the real
+        // PLAN.md moves on as phases complete, and we reset the chosen one to pending below.
         let id = phases
             .iter()
-            .filter(|p| p.status == PlanStatus::Pending)
             .find(|p| {
                 phases
                     .iter()
                     .any(|q| q.id != p.id && q.id.starts_with(&format!("{}.", p.id)))
-                    && oracle_block(&src, &p.id).is_some()
+                    && oracle_block(&original, &p.id).is_some()
             })
             .map(|p| p.id.clone())
-            .expect("a pending phase with a longer look-alike id");
+            .expect("a phase with a longer look-alike id");
+        let src = update_phase_status(&original, &id, PlanStatus::Pending);
         let (merged, finalized) = run_plan_apply(&src, &hostile_draft(&src), &id);
         let block = oracle_block(&src, &id).unwrap();
         assert_identical_outside(&src, &merged, block, "lookalike/merged");
