@@ -1679,6 +1679,12 @@ mod tests {
     use super::*;
     use ta_goal::BudgetAbort;
 
+    /// Check commands run through `sh -c` on Unix and `cmd /C` on Windows, which have
+    /// different quoting and separators, so tests pick the form for the platform.
+    fn portable_cmd(unix: &str, windows: &str) -> String {
+        if cfg!(windows) { windows } else { unix }.to_string()
+    }
+
     fn git_ok(dir: &Path, args: &[&str]) {
         let st = Command::new("git")
             .env_remove("GIT_DIR")
@@ -2187,7 +2193,13 @@ mod tests {
     #[test]
     fn two_replays_each_keep_their_own_check_result_in_their_own_record() {
         let f = fixture();
-        let entry = captured_entry(&f, Some("echo checking; echo oops >&2; exit 0"));
+        let entry = captured_entry(
+            &f,
+            Some(&portable_cmd(
+                "echo checking; echo oops >&2; exit 0",
+                "echo checking& echo oops 1>&2& exit 0",
+            )),
+        );
         let head = rev(f.project.path());
         let store = GoldenStore::new(f.project.path());
         let mut outs = Vec::new();
@@ -2237,7 +2249,10 @@ mod tests {
     fn a_failing_check_is_recorded_with_its_exit_code_and_output() {
         let dir = tempfile::tempdir().unwrap();
         let run = run_check(
-            "echo bad; echo 'test result: FAILED. 1 passed; 2 failed; 0 ignored;'; exit 3",
+            &portable_cmd(
+                "echo bad; echo 'test result: FAILED. 1 passed; 2 failed; 0 ignored;'; exit 3",
+                "echo bad& echo test result: FAILED. 1 passed; 2 failed; 0 ignored;& exit 3",
+            ),
             dir.path(),
         )
         .unwrap();
