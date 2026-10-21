@@ -274,6 +274,11 @@ impl GoalRunState {
     }
 }
 
+/// Post-agent phase: the agent exited and the owning `ta run` is reviewing the result.
+pub const POST_AGENT_PHASE_REVIEWING: &str = "reviewing";
+/// Post-agent phase: the agent exited and the owning `ta run` is building the draft.
+pub const POST_AGENT_PHASE_BUILDING_DRAFT: &str = "building draft";
+
 /// A GoalRun — one unit of agent work from start to completion.
 ///
 /// This is the top-level execution unit introduced by the Plan Revision doc.
@@ -403,6 +408,22 @@ pub struct GoalRun {
     /// reads this to verify the agent process is still alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
+
+    /// PID of the `ta run` process that owns this goal.
+    ///
+    /// Unlike `agent_pid` (cleared when the agent exits), this stays set for the
+    /// whole run, including the post-agent review and draft build. The daemon
+    /// watchdog treats a live owner as proof that the goal is still being
+    /// handled and does not fail it just because the agent process is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+
+    /// What the owning `ta run` is doing after the agent process exited:
+    /// [`POST_AGENT_PHASE_REVIEWING`] or [`POST_AGENT_PHASE_BUILDING_DRAFT`].
+    /// `None` while the agent is running or for goals that never ran post-agent
+    /// work. Shown by `ta goal inspect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_agent_phase: Option<String>,
 
     /// Whether this agent sends heartbeats to the daemon (v0.13.14).
     ///
@@ -750,6 +771,8 @@ impl GoalRun {
             thread_id: None,
             project_name: None,
             agent_pid: None,
+            owner_pid: None,
+            post_agent_phase: None,
             heartbeat_required: false,
             auto_cancel_after_draft: false,
             pr_url: None,
@@ -818,6 +841,16 @@ impl GoalRun {
                 from: self.state.to_string(),
                 to: new_state.to_string(),
             });
+        }
+        // The post-agent label only describes the Running -> Finalizing window;
+        // any settled state (draft ready, failed, applied, ...) ends it.
+        if !matches!(
+            new_state,
+            GoalRunState::Running
+                | GoalRunState::Finalizing { .. }
+                | GoalRunState::DraftPending { .. }
+        ) {
+            self.post_agent_phase = None;
         }
         self.state = new_state;
         self.updated_at = Utc::now();

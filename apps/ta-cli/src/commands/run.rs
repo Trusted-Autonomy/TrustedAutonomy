@@ -4559,8 +4559,18 @@ pub fn execute(
         if let Ok(store) = GoalRunStore::new(&goals_dir_for_pid) {
             if let Ok(Some(mut g)) = store.get(goal_run_id) {
                 g.agent_pid = Some(pid);
+                // The owning `ta run` PID outlives the agent: the watchdog uses it
+                // to avoid failing a goal whose agent exited but whose post-agent
+                // review and draft build are still in progress.
+                g.owner_pid = Some(std::process::id());
+                g.post_agent_phase = None;
                 let _ = store.save(&g);
-                tracing::info!(goal_id = %goal_run_id, pid = pid, "Stored agent PID for watchdog");
+                tracing::info!(
+                    goal_id = %goal_run_id,
+                    pid = pid,
+                    owner_pid = std::process::id(),
+                    "Stored agent PID and owner PID for watchdog"
+                );
             }
         }
     };
@@ -4709,6 +4719,8 @@ pub fn execute(
             if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
                 if let Ok(Some(mut g)) = store.get(goal.goal_run_id) {
                     g.agent_pid = None;
+                    g.owner_pid = Some(std::process::id());
+                    g.post_agent_phase = Some(ta_goal::POST_AGENT_PHASE_REVIEWING.to_string());
                     // v0.15.14.2: Persist accumulated token counts from stream-json.
                     // v0.17.12.15: all four token kinds, the cost (runtime-reported
                     // when available, else priced from the table) and a budget abort.
@@ -5485,7 +5497,27 @@ pub fn execute(
         }
     };
 
+    // 6e. Reclaim build output (target/, node_modules/, ...) from staging. This
+    //     runs after the verification gates, which recreate `target/` on demand
+    //     and so never depend on a kept one, and before the draft is built so the
+    //     diff walks a small tree. The diff ignores excluded dirs, so the draft is
+    //     identical either way.
+    {
+        let reclaim_source = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+        super::staging_reclaim::reclaim_after_agent(
+            config,
+            goal.goal_run_id,
+            &staging_path,
+            reclaim_source,
+        );
+    }
+
     // 7. Build draft package from the diff.
+    set_post_agent_phase(
+        &config.goals_dir,
+        goal.goal_run_id,
+        ta_goal::POST_AGENT_PHASE_BUILDING_DRAFT,
+    );
     //    In macro sessions, the agent may have already submitted/applied drafts
     //    via MCP tools, transitioning the goal out of Running state. Only build
     //    a draft if the goal is still running.
@@ -10099,6 +10131,22 @@ fn ingest_memory_out(staging_path: &Path, config: &GatewayConfig) {
     );
     // Clean up the output file.
     let _ = std::fs::remove_file(&out_path);
+}
+
+/// Record what the owning `ta run` is doing after the agent exited, so the
+/// daemon watchdog and `ta goal inspect` can tell "still reviewing" from "dead".
+/// Best effort: a failed write only loses the label, never the goal.
+fn set_post_agent_phase(goals_dir: &std::path::Path, goal_id: uuid::Uuid, phase: &str) {
+    let Ok(store) = GoalRunStore::new(goals_dir) else {
+        return;
+    };
+    if let Ok(Some(mut g)) = store.get(goal_id) {
+        g.owner_pid = Some(std::process::id());
+        g.post_agent_phase = Some(phase.to_string());
+        if let Err(e) = store.save(&g) {
+            tracing::warn!(goal_id = %goal_id, phase = phase, "Could not record post-agent phase: {}", e);
+        }
+    }
 }
 
 /// Append a progress journal entry to `.ta/goals/<id>/progress.jsonl` (v0.14.12).

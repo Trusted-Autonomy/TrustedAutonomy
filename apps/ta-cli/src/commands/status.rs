@@ -821,6 +821,8 @@ mod tests {
             thread_id: None,
             project_name: None,
             agent_pid: None,
+            owner_pid: None,
+            post_agent_phase: None,
             heartbeat_required: false,
             auto_cancel_after_draft: false,
             pr_url: None,

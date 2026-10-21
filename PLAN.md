@@ -11023,6 +11023,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 ### v0.17.12.5.1 - Capability Probe and Machine-Readable Install Facts
 <!-- status: pending -->
 **Depends on**: none (land early; small)
+**Order**: 1
 
 **Goal**: A script can ask `ta` what it can safely do, and can supply secrets and read terms status without scraping text. Requested by the VT installer, which today cannot tell a safe `ta` from an unsafe one: `ta --version` reads `0.17.11-alpha.8` both before and after the CoS hardening, and a build made before PR #646 lists `--chat-mode` and `--origin` in `ta run --help` while its daemon does not pass them.
 
@@ -11364,6 +11365,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 ### v0.17.12.25 - TA Defects Found During the Autonomous Run
 <!-- status: in_progress -->
 **Depends on**: v0.17.12.22
+**Order**: 1
 
 **Goal**: Fix the defects in TA itself found while running phases .5 to .22 unattended on 2026-10-14 and 2026-10-15. Each item states the evidence and a check, so it can be reproduced before and confirmed after. Where an item says "cause unconfirmed", the first step is to find the cause, not to guess a fix.
 
@@ -11390,6 +11392,8 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 ### v0.17.12.26 - Conversation-Aware Supervisor Review and Constitution v2 Kinds
 <!-- status: pending -->
+**Depends on**: v0.17.12.29 (item 5 stamps an origin on funnel drafts, which this phase's task intake produces)
+**Order**: 3
 
 **Goal**: Plug a conversation-aware reviewer into the existing supervisor slot and extend `[[approval_rules]]` with `wiki` and `task` kinds and org+project layering. Design: `docs/design/supervisor-review-and-constitution.md`. Samples: `templates/constitution/`.
 
@@ -11406,6 +11410,8 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 ### v0.17.12.27 - Constitution Shadow Mode and Promotion Report
 <!-- status: pending -->
+**Depends on**: v0.17.12.26 (shadow mode applies to the constitution v2 rules and supervisor review that phase adds)
+**Order**: 4
 
 **Goal**: Every auto-approval rule starts in shadow: the supervisor decides, the human still approves, agreement is recorded.
 
@@ -11419,7 +11425,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.27`
 
 ### v0.17.12.28 - typed-ask Refinement for Close Phase-Title Matches (after alpha)
-<!-- status: pending -->
+<!-- status: deferred -->
 
 **Goal**: When `ta plan resolve` scores two or more candidates close together, ask typed-ask (prompt plus candidates, structured pick with confidence) before falling back to the numbered menu. CoS chat shows the top 3 to 5 candidates sorted by likelihood.
 
@@ -11432,7 +11438,8 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.28`
 
 ### v0.17.12.29 - Task Intake Funnel, TA Side (`ta_request_task`)
-<!-- status: in_progress -->
+<!-- status: pending -->
+**Order**: 2
 
 **Goal**: Let any goal agent request a task or datapoint outside its own goal through one central, audited queue, without writing to Wayfinder or to its own draft. The project-manager role drains the queue into one reviewed draft (VT side, separate phase). Design: alpha-channel `DESIGN-task-intake-funnel.md` revision 2 and `REDTEAM-task-intake-funnel-2026-10-16.md`.
 
@@ -11447,8 +11454,57 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 #### Version: `0.17.12-alpha.29`
 
-### v0.18.0 — SA Enterprise Credential Store Plugin
+### v0.17.12.30 - Goal Liveness Watchdog Fix and Build Output Reclaim
+<!-- status: in_progress -->
+
+**Goal**: Stop two defects that lost a finished goal on 2026-10-16. (a) The daemon watchdog marked a goal `failed` ("Agent process exited without updating goal state") while its `ta run` parent was still alive and doing post-agent review and draft build. (b) The staging-size cap then deleted that failed goal's staging, including the finished work, so `ta goal recover` could not help. Each goal's staging also grows to about 5.8 GB because the agent's `cargo build` writes `target/` inside it, which starts at about 52 MB.
+
+1. [ ] Watchdog: a goal whose agent process exited is not failed while its owning `ta run` process (pid recorded on the goal) is alive and within a post-agent grace period (named constant, configurable under the existing watchdog settings). State the phase it is in (`reviewing`, `building draft`) in `ta goal inspect`. Fail it only when both the agent and the owner are gone, or the grace period is exceeded, and say which in the reason.
+2. [ ] Staging cap: never reclaim a failed goal whose staging holds uncollected work (changed files against the start commit and no draft package, or `ta goal recover` would succeed). Such goals are reported with the exact recover command and counted but skipped. A running or post-agent goal is never reclaimed.
+3. [ ] Reclaim build output at agent exit: when the agent process exits, remove the exclude-pattern build directories (`target/`, `node_modules/`, and the other `DEFAULT_EXCLUDES` directories, plus `.taignore` entries) from the staging copy before draft build. They are never part of the diff. Log the bytes freed per goal. Config switch `[staging] reclaim_build_output` default true; a goal can keep them with `--keep-build-output` for debugging.
+4. [ ] Verification gates run by `ta draft apply` or the agent that need a build recreate `target/` on demand; confirm no gate depends on a kept `target/`.
+5. [ ] Tests: watchdog does not fail a goal with a live owner inside the grace period, does after it; cap skips an unrecovered failed goal and reclaims a recovered or applied one; reclaim removes only excluded directories and never source files; frees bytes are logged.
+6. [ ] USAGE how-to: disk use of goals, the reclaim setting, and recovering a goal.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.30`
+
+### v0.17.12.31 - Shared Build Cache for Goal Agents
 <!-- status: pending -->
+
+**Depends on**: v0.17.12.30
+
+**Goal**: Stop every goal compiling the whole workspace from scratch into its own staging `target/`. Goal agents build into one shared cache outside staging.
+
+1. [ ] Set `CARGO_TARGET_DIR` for goal agents to `.ta/build-cache/<toolchain-key>/target` (key from rustc version, target triple and Cargo.lock hash of dependencies), outside staging and excluded from staging copies. Configurable, default on, off with `--no-build-cache`.
+2. [ ] Concurrent goals: Cargo's own build lock serializes the same target directory; document the wait and surface "waiting for build lock held by goal <id>" in goal output. Option for per-goal subdirectories sharing a registry-level cache (sccache) when contention is measured to matter.
+3. [ ] Size management: cap the cache (`[staging] build_cache_max_gb`), evict least recently used toolchain keys, and show it in `ta doctor` and `ta cleanup`.
+4. [ ] Isolation: a goal's build output never leaves the cache into a draft; the cache is not readable through MCP file tools; document that a shared cache is shared across goals of one project only.
+5. [ ] Measurement (monitor): record per-goal wall time and bytes of build output before and after, and report the first ten goals in `ta cost report`/`ta doctor`. Flag any goal whose result differs from a clean build.
+6. [ ] Tests: key changes with toolchain and lockfile, eviction, two goals share the cache, exclude from staging copy and from drafts.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.31`
+
+### v0.17.12.32 - Lazy Copy-on-Write Staging (after alpha, before public launch)
+<!-- status: pending -->
+
+**Goal**: Replace the full-copy overlay with a real lazy copy-on-write view of the project so staging costs disk and time only for files an agent writes. Removes the V1 temporary exclude lists (`DEFAULT_EXCLUDES`) and the `TODO(cow)` in `ta-workspace` overlay.
+
+1. [ ] Design note first: options (hardlink-on-read with copy-on-first-write, FUSE or file-provider mount, APFS clone of the tree, overlayfs on Linux, ProjectedFS on Windows), the O_NOFOLLOW and symlink-escape checks, cross-platform fallbacks, and how agents that write via shell see it.
+2. [ ] Implement the chosen mechanism behind the existing staging-mode setting; the full copy stays as the fallback.
+3. [ ] Diff and apply see only written files; a goal that writes nothing costs about zero disk.
+4. [ ] Measure: staging size and creation time on this repo against the full copy; add the figures to the phase notes.
+5. [ ] Conformance tests on macOS, Linux and Windows CI, including write-through of deletions and renames.
+
+**Effort**: L.
+
+#### Version: `0.17.12-alpha.32`
+
+### v0.18.0 — SA Enterprise Credential Store Plugin
+<!-- status: deferred -->
 
 **Goal**: Replace `FileVault` with an enterprise credential store backend for SA deployments. Agent session tokens are issued against credentials stored in HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, or equivalent. User validation is required before token issuance — agent identity is asserted via session ID, signed token, or SPIFFE SVID.
 
@@ -11477,7 +11533,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 7. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
 
 ### v0.18.0.4 — SA Horizontal Scaling: Daemon Sharding for Concurrent Load
-<!-- status: pending -->
+<!-- status: deferred -->
 
 **Goal**: A single TA daemon currently hosts all coordination state for one project (see `docs/superpowers/specs/2026-09-11-daemon-hosted-whiteboard-design.md`, which centralizes whiteboard presence/handoff/task-claim into the daemon). At enterprise scale, one daemon process may not sustain the concurrent agent/user load a large org's virtual-team deployment generates. This is an SA-tier capability, not a TA-core or virtual-team-add-on concern — ordinary self-hosted deployments (single operator, VCS-shared team, private-label customer cloud) are all single-daemon by design and don't need this.
 
@@ -11491,7 +11547,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 > Note: Windows AppContainer parity (formerly v0.18.0.5) moved to v0.17.12.9 so all platforms launch together.
 
 ### v0.18.0.6 - Sandbox Verification Runs and Plugin Subprocesses
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.12.10
 
 1. [ ] TA's own staging verification commands (build, test, lint) run under the worker profile, network off by default.
@@ -11502,7 +11558,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.18.0-alpha.6`
 
 ### v0.18.0.7 - Container Provider: Docker, Podman, Lima (Universal Fallback)
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.12.6
 
 1. [ ] `oci` runtime plugin for Docker and rootless Podman (Linux), Docker Desktop, Colima and Lima (macOS), Docker Desktop (Windows).
@@ -11514,7 +11570,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.18.0-alpha.7`
 
 ### v0.18.0.8 - Windows WSL2 Provider and Stricter AppContainer for the CoS
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.12.9, v0.18.0.7
 
 1. [ ] Optional TA-managed WSL2 distro with interop and automount disabled, staging in the distro filesystem, Linux sandbox inside.
@@ -11525,7 +11581,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.18.0-alpha.8`
 
 ### v0.18.0.9 - Multi-Tenant Token Scoping and Peer Identity (TA-06)
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.12.10, v0.18.0
 
 1. [ ] Per-project and per-organization `TokenScope`; tokens cannot act across projects on a shared daemon.
@@ -11536,7 +11592,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.18.0-alpha.9`
 
 ### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
-<!-- status: pending -->
+<!-- status: deferred -->
 
 **Goal**: Extract the agent launch, lifecycle, and runtime code from `ta-cli` and `ta-goal` into a standalone `ta-agent` crate. This enables Meridian, IDE plugins, and third-party tools to spawn and manage Claude Code agents without depending on the full TA stack.
 
@@ -11560,7 +11616,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 ---
 ### v0.18.1.1 — Native LLM Provider Abstraction: Model-Agnostic Agent Operation
-<!-- status: pending -->
+<!-- status: deferred -->
 
 **Depends on**: v0.18.1 (`ta-agent` standalone library established)
 
@@ -11588,7 +11644,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 ---
 ### v0.18.2 — Extract App Packaging as `ta-package` + Cross-Platform Installer
-<!-- status: pending -->
+<!-- status: deferred -->
 
 **Goal**: Extract the release pipeline and installer scaffolding from TA into a standalone `ta-package` crate and a shared GitHub Actions reusable workflow. Meridian and future plugin apps produce signed, versioned Windows/Mac/Linux installers without reimplementing packaging logic.
 
@@ -11610,7 +11666,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 #### Version: `0.18.2-alpha`
 ### v0.18.3 — Voice-to-Text Plugin: Hands-Free Goal Input
-<!-- status: pending -->
+<!-- status: deferred -->
 
 **Goal**: Enable voice-driven TA interaction. A `ta-vtt` external plugin listens for audio, transcribes with a local ASR model, and feeds the transcription as input to `ta run`, `ta shell`, or any TA command that accepts a text prompt. Parakeet (NVIDIA NeMo) is the default on Linux and macOS; the plugin protocol is open so third-party models (Whisper, faster-whisper) can be swapped in.
 
@@ -11710,7 +11766,7 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 
 ---
 ### v0.18.3.1 - Voice: Text-to-Speech Replies and Wake-Word Policy
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.18.3
 
 **Priority (owner, 2026-10-08): not a launch priority; schedule after the v0.17.12 security release.** Spoken replies are only needed for a hands-free conversation mode; phones already read on-screen text aloud through their screen readers. Until then, apps call the platform voices directly and no plugin protocol is built.
@@ -11728,7 +11784,7 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 #### Version: `0.18.3-alpha.1`
 
 ### v0.18.4 — Studio Frontend Migration (Next.js/React/TS/Tailwind) + Visual Plan Graph
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.7.4 (workflow graph engine + PLAN.md phase-ordering/dependency-wave data this visualizes), v0.17.0.12.34 (`ta plan waves` — the data source for the graph view)
 
 **Goal**: Replace Studio's current single-file vanilla-JS frontend (`crates/ta-daemon/assets/index.html`, ~5000 lines, `include_str!`'d directly into the `ta-daemon` binary, no bundler/package.json anywhere) with a Next.js + React + TypeScript + Tailwind v4 app, and build the interactive visual plan-DAG on top of it — nodes are plan phases/goals/drafts, edges are `depends_on`/`api_impact` overlaps, clicking a wave-group launches it (dispatches the same `execute_swarm`/dependency-wave machinery `ta run` uses today), clicking a node opens/approves its draft inline. Full drag-and-drop workflow-graph *authoring* (editing `depends_on`/`api_impact` visually, building new `.ta/workflows/graphs/*.toml` node graphs visually) is explicitly deferred further, to v0.19+ — this phase ships visualization + launch/approve interactivity for the existing plan-phase pipeline, not a graph editor.
@@ -11757,7 +11813,7 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 ---
 
 ### v0.18.5 - Execution Targets: Remote Runners
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.12 (human-credential gate), v0.17.12.2 (role-bound tokens), v0.17.12.3 (action queue), v0.17.12.4 (rules engine), v0.17.12.10 (default-on isolation), v0.17.11.8 (presence `host_id`)
 
 **Goal**: The owner chooses where a team's work executes: this machine, another machine they control, an office LAN, a private cloud, or the hosted cloud. Design: Untollable spec section 10.1.
@@ -11785,7 +11841,7 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 #### Version: `0.18.5-alpha`
 
 ### v0.18.5.1 - Mobile Device Pairing and Biometric Approval Credential
-<!-- status: pending -->
+<!-- status: deferred -->
 **Depends on**: v0.17.12, v0.17.12.2
 
 **Goal**: A phone can act as a second control channel. The native iOS and Android apps live in the Wayfinder and Untollable repos; TA provides the pairing, the credential check and the event surface. Design: Untollable spec section 10.2.

@@ -12,6 +12,45 @@ use ta_goal::{
 };
 use ta_mcp_gateway::GatewayConfig;
 
+use super::staging_reclaim::assess_staging;
+
+/// Decide whether `goal`'s staging directory may be deleted by garbage
+/// collection pass `pass`. A directory that might hold uncollected work, or
+/// belongs to a goal still being handled, is kept; the reason and the command
+/// that recovers it are logged and printed. Applied, completed, merged and
+/// closed goals are unaffected.
+fn staging_may_be_removed(config: &GatewayConfig, goal: &ta_goal::GoalRun, pass: &str) -> bool {
+    let verdict = assess_staging(config, goal);
+    let Some(message) = verdict.keep_message() else {
+        return true;
+    };
+    tracing::warn!(
+        goal_id = %goal.goal_run_id,
+        state = %goal.state,
+        pass = pass,
+        staging = %goal.workspace_path.display(),
+        decision = "keep_staging",
+        reason = %message,
+        "GC kept staging directory"
+    );
+    eprintln!(
+        "  Skipped staging for {} \"{}\" ({}): {}",
+        &goal.goal_run_id.to_string()[..8],
+        truncate(&goal.title, 40),
+        goal.state,
+        message,
+    );
+    false
+}
+
+/// True when the goal's agent or owning `ta run` process is still alive.
+fn goal_has_live_process(goal: &ta_goal::GoalRun) -> bool {
+    [goal.agent_pid, goal.owner_pid]
+        .into_iter()
+        .flatten()
+        .any(super::daemon::is_process_alive)
+}
+
 /// Minimal GC config loaded from `.ta/daemon.toml` [gc] section.
 ///
 /// Mirrors `ta_daemon::config::GcConfig` but lives in ta-cli so we don't
@@ -115,6 +154,7 @@ pub fn execute(
     let mut staging_bytes = 0u64;
     let mut draft_count = 0u32;
     let mut history_count = 0u32;
+    let mut kept_count = 0u32;
 
     // --delete-stale: confirm then delete all terminal staging.
     if delete_stale {
@@ -131,6 +171,21 @@ pub fn execute(
 
         // 1. Zombie detection: running goals past threshold.
         if goal.state == GoalRunState::Running && goal.updated_at < applied_cutoff {
+            if goal_has_live_process(goal) {
+                tracing::warn!(
+                    goal_id = %goal.goal_run_id,
+                    agent_pid = ?goal.agent_pid,
+                    owner_pid = ?goal.owner_pid,
+                    decision = "keep_running",
+                    "GC did not fail a stale goal: its agent or owning `ta run` is still alive"
+                );
+                eprintln!(
+                    "  Skipped {} \"{}\": its agent or owning `ta run` process is still alive.",
+                    &goal.goal_run_id.to_string()[..8],
+                    truncate(&goal.title, 40),
+                );
+                continue;
+            }
             if dry_run {
                 println!(
                     "[dry-run] Would transition to failed: {} \"{}\" (stale {}d)",
@@ -242,6 +297,10 @@ pub fn execute(
             && !goal.workspace_path.as_os_str().is_empty()
             && goal.workspace_path.exists()
         {
+            if !staging_may_be_removed(config, goal, "gc") {
+                kept_count += 1;
+                continue;
+            }
             let dir_size = walkdir_size(&goal.workspace_path);
 
             if archive {
@@ -446,11 +505,12 @@ pub fn execute(
 
     if compact {
         println!(
-            "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} orphan draft(s), {} event(s) pruned, {} history entries, {} compacted ({}).",
+            "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} kept (uncollected work or in use), {} orphan draft(s), {} event(s) pruned, {} history entries, {} compacted ({}).",
             if dry_run { "[dry-run] " } else { "" },
             zombie_count,
             staging_count,
             format_bytes(staging_bytes),
+            kept_count,
             draft_count,
             event_count,
             history_count,
@@ -459,11 +519,12 @@ pub fn execute(
         );
     } else {
         println!(
-            "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} orphan draft(s), {} event(s) pruned, {} history entries.",
+            "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} kept (uncollected work or in use), {} orphan draft(s), {} event(s) pruned, {} history entries.",
             if dry_run { "[dry-run] " } else { "" },
             zombie_count,
             staging_count,
             format_bytes(staging_bytes),
+            kept_count,
             draft_count,
             event_count,
             history_count,
@@ -583,7 +644,7 @@ fn print_status(config: &GatewayConfig) -> anyhow::Result<()> {
 
 /// `ta gc --delete-stale`: delete staging for all non-running terminal goals.
 fn delete_stale_staging(
-    _config: &GatewayConfig,
+    config: &GatewayConfig,
     _store: &GoalRunStore,
     goals: &[ta_goal::GoalRun],
     dry_run: bool,
@@ -599,7 +660,10 @@ fn delete_stale_staging(
                     | GoalRunState::Merged
                     | GoalRunState::Closed { .. }
             );
-            is_terminal && !g.workspace_path.as_os_str().is_empty() && g.workspace_path.exists()
+            is_terminal
+                && !g.workspace_path.as_os_str().is_empty()
+                && g.workspace_path.exists()
+                && staging_may_be_removed(config, g, "gc --delete-stale")
         })
         .collect();
 
@@ -731,6 +795,7 @@ pub fn run_periodic_gc(
         if past_cutoff
             && !goal.workspace_path.as_os_str().is_empty()
             && goal.workspace_path.exists()
+            && staging_may_be_removed(config, goal, "periodic gc")
         {
             let sz = walkdir_size(&goal.workspace_path);
             if std::fs::remove_dir_all(&goal.workspace_path).is_ok() {
@@ -812,6 +877,7 @@ pub fn enforce_staging_cap(config: &GatewayConfig) -> bool {
     goals.sort_by_key(|g| g.updated_at);
 
     let mut freed = 0u64;
+    let mut kept = 0u32;
     let need_to_free = total.saturating_sub(cap_bytes);
 
     eprintln!(
@@ -838,6 +904,10 @@ pub fn enforce_staging_cap(config: &GatewayConfig) -> bool {
         if goal.workspace_path.as_os_str().is_empty() || !goal.workspace_path.exists() {
             continue;
         }
+        if !staging_may_be_removed(config, goal, "staging cap") {
+            kept += 1;
+            continue;
+        }
         let sz = walkdir_size(&goal.workspace_path);
         if std::fs::remove_dir_all(&goal.workspace_path).is_ok() {
             freed += sz;
@@ -853,6 +923,22 @@ pub fn enforce_staging_cap(config: &GatewayConfig) -> bool {
                 format_bytes(sz),
             );
         }
+    }
+
+    if kept > 0 {
+        eprintln!(
+            "  {} staging dir(s) were kept because they hold uncollected work or are in use. \
+             Recover or discard them (see the commands above), or raise [staging] staging_max_gb.",
+            kept
+        );
+    }
+    if freed < need_to_free {
+        tracing::warn!(
+            freed_bytes = freed,
+            needed_bytes = need_to_free,
+            kept_dirs = kept,
+            "staging cap: could not free enough space without risking uncollected work"
+        );
     }
 
     freed > 0
