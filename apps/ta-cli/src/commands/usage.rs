@@ -255,6 +255,14 @@ pub fn render(s: &UsageSummary) -> String {
                 tok(l.total.tokens),
                 l.total.usd
             ));
+            if l.records > 0 {
+                let un = l.total.unknown_token_records;
+                out.push_str(&format!(
+                    "  tokens_unknown: {un} of {} call(s) ({:.0}%) have no token counts, so the totals above understate real usage by that share\n",
+                    l.records,
+                    100.0 * un as f64 / l.records as f64
+                ));
+            }
         } else {
             out.push_str(&format!(
                 "\nLedger: none yet at {}. It is written when a goal finishes.\n",
@@ -428,6 +436,8 @@ mod tests {
             "By model:",
             "without token counts",
             "could not report tokens",
+            "tokens_unknown: ",
+            "have no token counts",
         ] {
             assert!(text.contains(want), "missing {want:?} in:\n{text}");
         }

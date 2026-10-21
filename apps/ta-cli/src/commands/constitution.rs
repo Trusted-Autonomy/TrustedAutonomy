@@ -1972,7 +1972,13 @@ pub fn try_agent_review(
         rules_json = rules_json,
     );
 
-    let mut args = vec!["--print".to_string()];
+    // JSON output carries token counts for the usage ledger; the recorder
+    // returns the plain `result` text, so the parsing below is unchanged.
+    let mut args = vec![
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+    ];
     if let Some(m) = model {
         args.push(format!("--model={}", m));
     }
@@ -1988,7 +1994,34 @@ pub fn try_agent_review(
         return None;
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ta_goal::usage_ledger::find_project_root(&cwd));
+    review_from_stdout(
+        &String::from_utf8_lossy(&output.stdout),
+        model,
+        root.as_deref(),
+        &ta_goal::usage_ledger::UsageLedger::global(),
+    )
+}
+
+/// Record the review call in the usage ledger, then parse the model's answer.
+/// Split out of [`try_agent_review`] so the ledger hook can be tested without
+/// running `claude`.
+fn review_from_stdout(
+    stdout: &str,
+    model: Option<&str>,
+    root: Option<&std::path::Path>,
+    global: &ta_goal::usage_ledger::UsageLedger,
+) -> Option<AgentReviewResponse> {
+    let text = ta_goal::usage_ledger::record_oneshot_in(
+        root,
+        global,
+        ta_goal::usage_ledger::UsageKind::Constitution,
+        model.unwrap_or("claude"),
+        stdout,
+        "constitution review via `claude --print`",
+    );
     let trimmed = text.trim();
 
     // Strip markdown code fences if the model wrapped the JSON.
@@ -2541,6 +2574,39 @@ fn truncate(s: &str, max: usize) -> &str {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Golden failure: a constitution review call used to leave no usage
+    /// trace. The answer must still parse from the JSON `result` text.
+    #[test]
+    fn constitution_review_call_is_recorded_and_its_answer_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        let global = ta_goal::usage_ledger::UsageLedger::new(dir.path().join("g.jsonl"));
+        let answer =
+            r#"{"duplicates":[{"rule_a":"a","rule_b":"b","canonical":"a"}],"conflicts":[]}"#;
+        let out = serde_json::json!({
+            "type": "result",
+            "result": answer,
+            "usage": {"input_tokens": 200, "output_tokens": 20},
+            "total_cost_usd": 0.02
+        })
+        .to_string();
+        let review = review_from_stdout(&out, Some("claude-sonnet-5-5"), Some(&root), &global)
+            .expect("the review parses from the JSON result text");
+        assert_eq!(review.duplicates.len(), 1);
+        let rows = ta_goal::usage_ledger::UsageLedger::for_project(&root)
+            .read()
+            .records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, ta_goal::usage_ledger::UsageKind::Constitution);
+        assert_eq!(rows[0].total_tokens(), 220);
+        assert_eq!(global.read().records.len(), 1);
+        // Plain text (older CLI): still parsed, recorded as tokens_unknown.
+        let plain = review_from_stdout(answer, None, Some(&root), &global).unwrap();
+        assert_eq!(plain.duplicates.len(), 1);
+        assert!(global.read().records[1].tokens_unknown);
+    }
 
     #[test]
     fn build_constitution_prompt_basic() {

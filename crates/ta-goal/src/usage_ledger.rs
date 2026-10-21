@@ -64,6 +64,16 @@ pub enum UsageKind {
     CosQa,
     /// A `ta golden replay` goal.
     GoldenReplay,
+    /// AI-written release notes (`ta release`).
+    Release,
+    /// Style discovery (`ta style discover`).
+    Style,
+    /// Constitution duplicate and conflict review.
+    Constitution,
+    /// A model call made by a `ta tools` command. No such call exists today
+    /// (`ta tools` only detects and installs); the kind is reserved so a later
+    /// one is not forced into `other`.
+    Tool,
     #[default]
     Other,
 }
@@ -75,6 +85,10 @@ impl UsageKind {
             UsageKind::Advisor => "advisor",
             UsageKind::CosQa => "cos_qa",
             UsageKind::GoldenReplay => "golden_replay",
+            UsageKind::Release => "release",
+            UsageKind::Style => "style",
+            UsageKind::Constitution => "constitution",
+            UsageKind::Tool => "tool",
             UsageKind::Other => "other",
         }
     }
@@ -356,6 +370,190 @@ pub fn record_usage_in(
     ok
 }
 
+// ── One-shot model calls ────────────────────────────────────────────────────
+
+/// What a one-shot `claude --print --output-format json` run reported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OneShotRun {
+    /// The model's answer (the `result` field).
+    pub text: String,
+    /// The model the CLI reported, or empty.
+    pub model: String,
+    pub usage: TokenUsage,
+    /// The cost the CLI itself reported (`total_cost_usd`), if any.
+    pub usd: Option<f64>,
+}
+
+/// Parse the stdout of `claude --print --output-format json`: one `result`
+/// object, or an array of events that ends with one. Returns `None` for plain
+/// text (an older CLI, or another agent), so the caller keeps the raw stdout.
+pub fn parse_claude_json_output(stdout: &str) -> Option<OneShotRun> {
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let events: Vec<serde_json::Value> = match v {
+        serde_json::Value::Array(a) => a,
+        o @ serde_json::Value::Object(_) => vec![o],
+        _ => return None,
+    };
+    let mut tracker = crate::spend::UsageTracker::default();
+    let mut text = None;
+    for e in &events {
+        if e.get("type").and_then(|t| t.as_str()) == Some("result") {
+            text = e.get("result").and_then(|r| r.as_str()).map(String::from);
+        }
+        tracker.observe_line(&e.to_string());
+    }
+    Some(OneShotRun {
+        text: text?,
+        model: tracker.model().to_string(),
+        usage: tracker.usage(),
+        usd: tracker.reported_cost_usd(),
+    })
+}
+
+/// The nearest ancestor of `start` that has a `.ta` directory.
+pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|p| p.join(".ta").is_dir())
+        .map(Path::to_path_buf)
+}
+
+/// The shared recorder for a one-shot model call whose stdout the caller
+/// already captured. Returns the text the caller should use: the `result`
+/// field when `stdout` is the CLI's JSON, else `stdout` unchanged. Real tokens
+/// are recorded when the CLI reported them; otherwise the call is recorded
+/// with `tokens_unknown`, never dropped. Ledger failures are logged and never
+/// change the returned text.
+pub fn record_oneshot_in(
+    project_root: Option<&Path>,
+    global: &UsageLedger,
+    kind: UsageKind,
+    fallback_model: &str,
+    stdout: &str,
+    note: &str,
+) -> String {
+    let project = project_root
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let parsed = parse_claude_json_output(stdout);
+    let (text, mut rec) = match parsed {
+        Some(run) if run.usage.total() > 0 || run.usd.is_some() => {
+            let model = if run.model.is_empty() {
+                fallback_model.to_string()
+            } else {
+                run.model.clone()
+            };
+            let rec = UsageRecord {
+                ts: Utc::now(),
+                kind,
+                model: cap(&model),
+                input_tokens: run.usage.input,
+                output_tokens: run.usage.output,
+                cache_read_tokens: run.usage.cache_read,
+                cache_creation_tokens: run.usage.cache_creation,
+                usd: run
+                    .usd
+                    .filter(|u| u.is_finite() && *u >= 0.0)
+                    .unwrap_or(0.0),
+                note: Some(cap(note)),
+                ..UsageRecord::default()
+            };
+            (run.text, rec)
+        }
+        Some(run) => {
+            let note = format!("{note}; the CLI reported no token usage");
+            (
+                run.text,
+                UsageRecord::unknown_tokens(kind, fallback_model, &project, &note),
+            )
+        }
+        None => {
+            let note = format!("{note}; plain-text output carries no token counts");
+            (
+                stdout.to_string(),
+                UsageRecord::unknown_tokens(kind, fallback_model, &project, &note),
+            )
+        }
+    };
+    rec.project = cap(&project);
+    let project_ledger = project_root.map(UsageLedger::for_project);
+    let mut targets: Vec<(&str, &UsageLedger)> = vec![("global", global)];
+    if let Some(p) = project_ledger.as_ref() {
+        targets.insert(0, ("project", p));
+    }
+    for (label, ledger) in targets {
+        if let Err(e) = ledger.append(&rec) {
+            tracing::warn!(
+                ledger = label,
+                path = %ledger.path().display(),
+                kind = kind.as_str(),
+                error = %e,
+                "could not write the usage ledger line; this call is missing from `ta usage`. \
+                 Check the path is writable (set {USAGE_DIR_ENV} to move the global ledger)"
+            );
+        }
+    }
+    text
+}
+
+/// [`record_oneshot_in`] for the current directory's project and the real
+/// global ledger. Outside a TA project only the global ledger is written.
+pub fn record_oneshot(kind: UsageKind, fallback_model: &str, stdout: &str, note: &str) -> String {
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| find_project_root(&cwd));
+    record_oneshot_in(
+        root.as_deref(),
+        &UsageLedger::global(),
+        kind,
+        fallback_model,
+        stdout,
+        note,
+    )
+}
+
+/// Record a model call that ran with the terminal attached (stdout not
+/// captured), so no token counts exist. It is still counted as a call with
+/// `tokens_unknown`. Project and global ledgers, as for [`record_oneshot`].
+pub fn record_unmeasured_in(
+    project_root: Option<&Path>,
+    global: &UsageLedger,
+    kind: UsageKind,
+    model: &str,
+    note: &str,
+) {
+    let project = project_root
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let rec = UsageRecord::unknown_tokens(kind, model, &project, note);
+    let project_ledger = project_root.map(UsageLedger::for_project);
+    let mut targets: Vec<(&str, &UsageLedger)> = vec![("global", global)];
+    if let Some(p) = project_ledger.as_ref() {
+        targets.insert(0, ("project", p));
+    }
+    for (label, ledger) in targets {
+        if let Err(e) = ledger.append(&rec) {
+            tracing::warn!(
+                ledger = label,
+                path = %ledger.path().display(),
+                kind = kind.as_str(),
+                error = %e,
+                "could not write the usage ledger line; this call is missing from `ta usage`. \
+                 Check the path is writable (set {USAGE_DIR_ENV} to move the global ledger)"
+            );
+        }
+    }
+}
+
+/// [`record_unmeasured_in`] for the given project directory (when it is inside
+/// a TA project) and the real global ledger.
+pub fn record_unmeasured(dir: &Path, kind: UsageKind, model: &str, note: &str) {
+    let root = find_project_root(dir);
+    record_unmeasured_in(root.as_deref(), &UsageLedger::global(), kind, model, note);
+}
+
 /// Totals for one group of records.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -600,5 +798,160 @@ mod tests {
         assert!(!record_usage_in(&bad, &good, &r, false));
         // The healthy ledger still got the line.
         assert_eq!(good.read().records.len(), 1);
+    }
+
+    fn cli_json(result: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "result": result,
+            "total_cost_usd": 0.0421,
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 1000,
+                "cache_creation_input_tokens": 30
+            },
+            "modelUsage": {"claude-opus-5-5": {}}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn claude_json_output_object_and_event_array_both_parse() {
+        let one = parse_claude_json_output(&cli_json("hello")).unwrap();
+        assert_eq!(one.text, "hello");
+        assert_eq!(one.model, "claude-opus-5-5");
+        assert_eq!(one.usage.total(), 120 + 45 + 1000 + 30);
+        assert_eq!(one.usd, Some(0.0421));
+        let arr = format!(
+            "[{{\"type\":\"system\",\"model\":\"x\"}},{}]",
+            cli_json("from array")
+        );
+        let many = parse_claude_json_output(&arr).unwrap();
+        assert_eq!(many.text, "from array");
+        assert_eq!(many.usage.output, 45);
+        assert!(parse_claude_json_output("## plain markdown").is_none());
+        assert!(parse_claude_json_output("{\"type\":\"result\"}").is_none());
+    }
+
+    /// Golden failure for every one-shot path: a model call must leave one
+    /// project row and one global row of its own kind. Before the ledger hook
+    /// these calls vanished without a trace.
+    #[test]
+    fn every_oneshot_kind_leaves_a_row_with_real_tokens() {
+        for kind in [
+            UsageKind::Release,
+            UsageKind::Style,
+            UsageKind::Constitution,
+            UsageKind::Tool,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("proj");
+            std::fs::create_dir_all(root.join(".ta")).unwrap();
+            let global = UsageLedger::new(dir.path().join("g.jsonl"));
+            let text = record_oneshot_in(
+                Some(&root),
+                &global,
+                kind,
+                "claude",
+                &cli_json("notes"),
+                "n",
+            );
+            assert_eq!(text, "notes", "the caller gets the plain result text");
+            for ledger in [UsageLedger::for_project(&root), global.clone()] {
+                let read = ledger.read();
+                assert_eq!(read.records.len(), 1, "{kind:?}");
+                let r = &read.records[0];
+                assert_eq!(r.kind, kind);
+                assert!(!r.tokens_unknown);
+                assert_eq!(r.total_tokens(), 1195);
+                assert_eq!(r.model, "claude-opus-5-5");
+                assert_eq!(r.project, "proj");
+                assert!((r.usd - 0.0421).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn plain_text_output_is_kept_and_recorded_as_tokens_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = UsageLedger::new(dir.path().join("g.jsonl"));
+        let text = record_oneshot_in(
+            None,
+            &global,
+            UsageKind::Release,
+            "codex",
+            "## v1\n- x",
+            "release notes",
+        );
+        assert_eq!(
+            text, "## v1\n- x",
+            "non-JSON output passes through untouched"
+        );
+        let read = global.read();
+        assert_eq!(read.records.len(), 1);
+        assert!(read.records[0].tokens_unknown);
+        assert_eq!(read.records[0].model, "codex");
+        assert!(read.records[0]
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("plain-text"));
+        // No project root: no project ledger is created.
+        assert!(!dir.path().join(".ta").exists());
+    }
+
+    #[test]
+    fn json_without_usage_is_recorded_as_tokens_unknown_with_the_text_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = UsageLedger::new(dir.path().join("g.jsonl"));
+        let out = serde_json::json!({"type":"result","result":"hi"}).to_string();
+        let text = record_oneshot_in(None, &global, UsageKind::Style, "claude", &out, "style");
+        assert_eq!(text, "hi");
+        assert!(global.read().records[0].tokens_unknown);
+    }
+
+    #[test]
+    fn an_unmeasured_terminal_call_is_still_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        let global = UsageLedger::new(dir.path().join("g.jsonl"));
+        record_unmeasured_in(
+            Some(&root),
+            &global,
+            UsageKind::Other,
+            "claude-code",
+            "CI micro-fix",
+        );
+        for ledger in [UsageLedger::for_project(&root), global] {
+            let read = ledger.read();
+            assert_eq!(read.records.len(), 1);
+            assert!(read.records[0].tokens_unknown);
+        }
+    }
+
+    #[test]
+    fn find_project_root_walks_up_to_the_ta_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        assert_eq!(find_project_root(&deep), Some(root));
+    }
+
+    #[test]
+    fn new_kinds_round_trip_and_old_lines_still_load() {
+        for k in [
+            UsageKind::Release,
+            UsageKind::Style,
+            UsageKind::Constitution,
+            UsageKind::Tool,
+        ] {
+            let json = serde_json::to_string(&k).unwrap();
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+            assert_eq!(serde_json::from_str::<UsageKind>(&json).unwrap(), k);
+        }
     }
 }

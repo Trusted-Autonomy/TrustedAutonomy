@@ -15441,7 +15441,7 @@ Windows are UTC: `session` is a rolling 5 hours, `day` the calendar day, `week` 
 
 #### The usage ledger
 
-Every finished goal appends one line to `<project>/.ta/usage-ledger.jsonl` and to a global roll-up at `$TA_USAGE_DIR/ledger.jsonl` (default `~/.config/ta/usage/ledger.jsonl`). Each line has `kind` (`goal`, `advisor`, `cos_qa`, `golden_replay` or `other`), model, input, output and cache tokens, USD, timestamp and goal id. Shell Q&A through `claude --print` returns no token counts, so those calls are recorded with `tokens_unknown: true`: they count as calls, and `ta usage` tells you how many records lack tokens. A ledger line that cannot be parsed is reported in the summary, never dropped silently. Writes are single appends, safe from concurrent processes.
+Every finished goal and every model call TA makes on your behalf (release notes, `ta style discover`, constitution review, daemon Q&A, CI follow-up agents) appends one line to `<project>/.ta/usage-ledger.jsonl` and to a global roll-up at `$TA_USAGE_DIR/ledger.jsonl` (default `~/.config/ta/usage/ledger.jsonl`). Each line has `kind` (`goal`, `advisor`, `cos_qa`, `golden_replay`, `release`, `style`, `constitution`, `tool` or `other`), model, input, output and cache tokens, USD, timestamp and goal id. Calls whose CLI returns no token counts are recorded with `tokens_unknown: true`: they count as calls, and `ta usage` prints the by-kind breakdown plus a `tokens_unknown: N of M call(s)` line so you can see how much of the total is unmeasured. A ledger line that cannot be parsed is reported in the summary, never dropped silently. Writes are single appends, safe from concurrent processes.
 
 #### Field names for other tools
 

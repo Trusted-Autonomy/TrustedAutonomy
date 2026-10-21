@@ -36,11 +36,28 @@ Budget usage comes from the append-only ledger (`<project>/.ta/usage-ledger.json
 
 ## Ledger coverage
 
-Recorded with tokens and USD: finished goals, published through `publish_completion` (kind `goal`; `golden_replay` when the title marks a replay; `cos_qa` when the goal origin is chat).
+One shared recorder (`ta_goal::usage_ledger::record_oneshot_in` for captured output, `record_unmeasured_in` for terminal-attached calls) serves every one-shot site. It writes the project ledger when a `.ta` directory exists and always writes the global ledger. A write failure is logged with `tracing::warn!` and never changes the caller's result. Kinds: `goal`, `advisor`, `cos_qa`, `golden_replay`, `release`, `style`, `constitution`, `tool`, `other`.
 
-Recorded as calls with `tokens_unknown: true`: the daemon shell Q&A path (`QaAgent::ask`, kind `advisor`), because `claude --print` returns no token counts.
+| Path | Kind | Tokens | Why |
+|---|---|---|---|
+| Finished goals (`publish_completion`) | `goal` | real | Cost comes from the goal's own usage accounting. |
+| Golden replay goals (title "Golden replay ") | `golden_replay` | real | A goal, classified by title. |
+| Chat-session goals (origin `chat`, the Chief-of-Staff read-only chat) | `cos_qa` | real | A goal, classified by origin. Not exercised live end to end. |
+| `ta release` AI notes | `release` | real when the agent is `claude` (run with `--output-format json`); `tokens_unknown` for any other agent | Parsed output is unchanged: the recorder returns the plain result text. |
+| `ta style discover` | `style` | real | Switched from `--output-format text` to `json`; the draft is the `result` field. |
+| Constitution review | `constitution` | real | `--output-format json`; the verdict still parses from the result text. |
+| Daemon shell Q&A and `ask_agent` (`PersistentQaAgent::ask`) | `advisor` | `tokens_unknown` | The daemon streams plain text lines to clients; JSON output would change that stream. Recorded on success only. |
+| Draft CI follow-up agent and PR CI micro-fix agent | `other` | `tokens_unknown` | The agent owns the terminal, so stdout is not captured. Recorded when the agent exits successfully. |
+| `tools.rs` | `tool` (reserved) | n/a | Makes no model calls: it only runs plugin list/install commands and a repository clone. Nothing to hook. |
 
-Not covered (no token counts available, no hook added): `ask_agent` paths in the daemon, one-shot `claude --print` callers (release, style, constitution, tools), and CoS read-only chat other than goals. `ta usage` surfaces `unknown_token_records` so the gap is visible, not hidden.
+Still uncovered or caveats:
+
+- `ta dev` (interactive session): not hooked, the terminal is handed to the agent for an open-ended session.
+- Daemon Q&A timeouts and spawn failures: no row, because no answer was produced and no usage is known.
+- Goals with origin `cos` (work the Chief-of-Staff dispatches) are counted as `goal`, not `cos_qa`.
+- Custom non-`claude` release agents are counted with `tokens_unknown`.
+
+`ta usage` shows the by-kind and by-model breakdowns with "(N without token counts)" per row, and a `tokens_unknown: N of M call(s)` line under the total. The JSON carries `unknown_token_records` in each breakdown total.
 
 ## Field contract for Meridian and Wayfinder
 

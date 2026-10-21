@@ -1892,6 +1892,29 @@ fn agent_id_to_command(agent_id: &str) -> &str {
 /// Returns `None` if the agent is unavailable, exits non-zero, or produces
 /// empty/non-Markdown output.
 fn try_ai_notes(agent_id: &str, tag: &str, since: &str, commits: &str) -> Option<String> {
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ta_goal::usage_ledger::find_project_root(&cwd));
+    try_ai_notes_in(
+        agent_id,
+        tag,
+        since,
+        commits,
+        root.as_deref(),
+        &ta_goal::usage_ledger::UsageLedger::global(),
+    )
+}
+
+/// [`try_ai_notes`] with the usage ledgers injected, so the ledger hook is
+/// testable without touching the user's real ledger.
+fn try_ai_notes_in(
+    agent_id: &str,
+    tag: &str,
+    since: &str,
+    commits: &str,
+    root: Option<&std::path::Path>,
+    global: &ta_goal::usage_ledger::UsageLedger,
+) -> Option<String> {
     use std::process::Stdio;
 
     let command = agent_id_to_command(agent_id);
@@ -1913,17 +1936,28 @@ fn try_ai_notes(agent_id: &str, tag: &str, since: &str, commits: &str) -> Option
          Output ONLY the Markdown. No preamble, no explanation.",
     );
 
-    let output = Command::new(command)
-        .args(["--print", &prompt])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    // `--output-format json` lets the usage ledger capture real tokens; the
+    // recorder hands back the plain `result` text (or the raw stdout when the
+    // agent did not emit JSON), so the parsing below is unchanged.
+    let mut cmd = Command::new(command);
+    cmd.arg("--print");
+    if command == "claude" {
+        cmd.args(["--output-format", "json"]);
+    }
+    let output = cmd.arg(&prompt).stdin(Stdio::null()).output().ok()?;
 
     if !output.status.success() {
         return None;
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = ta_goal::usage_ledger::record_oneshot_in(
+        root,
+        global,
+        ta_goal::usage_ledger::UsageKind::Release,
+        command,
+        &String::from_utf8_lossy(&output.stdout),
+        &format!("release notes for {tag} via `{command} --print`"),
+    );
     let trimmed = text.trim().to_string();
 
     // Sanity-check: must look like Markdown with a heading.
@@ -4343,6 +4377,47 @@ steps:
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Golden failure: AI release notes used to leave no usage trace. A fake
+    /// agent that prints the CLI's JSON result stands in for `claude`. Unix
+    /// only because the stand-in is a shell script; the shared recorder is
+    /// covered on every platform in `ta-goal`.
+    #[cfg(unix)]
+    #[test]
+    fn ai_release_notes_call_is_recorded_in_both_ledgers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        let agent = dir.path().join("fake-agent");
+        let json = serde_json::json!({
+            "type": "result",
+            "result": "## v9\n### New Features\n- a",
+            "total_cost_usd": 0.5,
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        })
+        .to_string();
+        std::fs::write(&agent, format!("#!/bin/sh\ncat <<'EOF'\n{json}\nEOF\n")).unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let global = ta_goal::usage_ledger::UsageLedger::new(dir.path().join("g.jsonl"));
+        let notes = try_ai_notes_in(
+            agent.to_str().unwrap(),
+            "v9",
+            "v8",
+            "feat: a",
+            Some(&root),
+            &global,
+        )
+        .expect("notes come back as the plain result text");
+        assert!(notes.starts_with("## v9"));
+        let rows = ta_goal::usage_ledger::UsageLedger::for_project(&root)
+            .read()
+            .records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, ta_goal::usage_ledger::UsageKind::Release);
+        assert_eq!(rows[0].total_tokens(), 150);
+        assert_eq!(global.read().records.len(), 1);
+    }
 
     // git-only: test fixture — exempt from no-direct-git rule (cfg(test))
     /// Initialize a git repo in a temp dir with user config (needed in CI).
