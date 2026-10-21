@@ -67,6 +67,8 @@ pub fn plan_status_to_wayfinder(status: &PlanStatus) -> (&'static str, Option<&'
         PlanStatus::InProgress => (STATUS_IN_PROGRESS, None),
         PlanStatus::Done => (STATUS_DONE, None),
         PlanStatus::Deferred => (STATUS_CANCELLED, None),
+        // Wanted but unstartable: a resumable pause, not a cancellation.
+        PlanStatus::Blocked => (STATUS_ON_HOLD, Some("ta_blocked")),
     }
 }
 
@@ -159,6 +161,10 @@ mod tests {
         assert_eq!(
             plan_status_to_wayfinder(&PlanStatus::Deferred),
             (STATUS_CANCELLED, None)
+        );
+        assert_eq!(
+            plan_status_to_wayfinder(&PlanStatus::Blocked),
+            (STATUS_ON_HOLD, Some("ta_blocked"))
         );
     }
 

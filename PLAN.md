@@ -11141,7 +11141,8 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.11`
 
 ### v0.17.12.12 - Signed Public Releases
-<!-- status: pending -->
+<!-- status: blocked -->
+**Blocked on**: owner actions: an Apple Developer account and Developer ID certificate secrets for macOS signing and notarization, and the owner's Azure Artifact Signing setup for Windows. No agent can progress this until those exist.
 **Depends on**: v0.17.12.2 (so the public build is not shipped with the open Critical findings)
 
 **Goal**: A real end user can install TA and VT without a source checkout and without repeating Keychain prompts on every upgrade.

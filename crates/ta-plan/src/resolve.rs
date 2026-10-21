@@ -191,6 +191,7 @@ pub fn exclusion_reason(phase: &PlanPhase, claims: &[ClaimedPhase]) -> Option<St
     match phase.status {
         PlanStatus::Done => Some("already done".to_string()),
         PlanStatus::Deferred => Some("deferred".to_string()),
+        PlanStatus::Blocked => Some("blocked".to_string()),
         PlanStatus::Pending | PlanStatus::InProgress => None,
     }
 }

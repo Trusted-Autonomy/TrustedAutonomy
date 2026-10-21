@@ -149,10 +149,18 @@ fn print_plan_status_to_terminal(project_root: &Path) {
         .filter(|p| p.status == plan::PlanStatus::Deferred)
         .count();
 
+    let blocked = phases
+        .iter()
+        .filter(|p| p.status == plan::PlanStatus::Blocked)
+        .count();
+
     println!();
     println!("  Plan: {}/{} phases complete", done, total);
     if deferred > 0 {
         println!("  Deferred: {}", deferred);
+    }
+    if blocked > 0 {
+        println!("  Blocked: {}", blocked);
     }
 
     if let Some(next) = plan::find_next_pending(&phases, None) {

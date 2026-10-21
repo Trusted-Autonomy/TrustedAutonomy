@@ -126,6 +126,7 @@ fn checkbox_for(status: &PlanStatus) -> &'static str {
         PlanStatus::Done => "[x]",
         PlanStatus::InProgress => "[~]",
         PlanStatus::Deferred => "[-]",
+        PlanStatus::Blocked => "[!]",
         PlanStatus::Pending => "[ ]",
     }
 }
