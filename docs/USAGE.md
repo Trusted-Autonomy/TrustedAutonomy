@@ -15403,7 +15403,13 @@ ta golden report fix-the-thing-98a823ac
 
 `replay` checks the start commit out into a scratch git worktree and runs a normal `ta run` there, so your working tree, branch and index are never touched. The scratch worktree is removed afterwards. Values given with `--set key=value` are read as JSON where they parse (`3`, `true`, `"x"`) and as plain text otherwise. The replay's draft is never applied for you: review it with `ta draft list` and close it when done. Only committed files are replayed; uncommitted work in your tree is not part of the replay.
 
-`report` shows cost, tokens, outcome, whether the check passes and how similar the diff is, per replay. The verdict is:
+`report` shows, per replay, input, output, cache-read and cache-creation tokens, cost, outcome, the check result (command, exit code, test counts), the files and lines changed, diff similarity and when it ran (`run_index` orders the replays of an entry). Replays under the same optimizer settings are summarised together as mean, min, max and sample count; one sample is printed as "n=1, not a distribution". Tokens are the primary metric. `cost_usd` is as reported by the agent runtime and does not reconcile with tokens at fixed prices, so treat it as secondary.
+
+Each replay record under `.ta/golden/<id>/replays/<run-id>.json` holds its own check result: the command line, start and finish times, exit code, the last 4 KB of stdout and stderr, and parsed `cargo test` counts. Records are keyed by the unique run id and are never overwritten; a collision is an error.
+
+Diffs are stored as real unified diffs with 3 lines of context, and their counts equal `git diff --numstat`. Entries captured before this was fixed hold changed-lines-only diffs whose counts were inflated for files with large test modules. `ta golden recompute <id> --dry-run` shows what would change; without `--dry-run` it writes the corrected numbers to a separate `recomputed` field and leaves the original numbers alone. A diff without context is flagged, not guessed, unless you pass `--reconstruct`, which rebuilds the real changes from the stored changed lines and labels them as reconstructed.
+
+The verdict is:
 
 | Verdict | Meaning |
 |---|---|
