@@ -12,6 +12,10 @@ pub enum PlanStatus {
     Done,
     /// Deferred phases are excluded from "next pending" but still appear in the checklist.
     Deferred,
+    /// Wanted but cannot start until something outside the phase happens (an owner
+    /// decision or external dependency). Never offered by "next pending" and not
+    /// counted as pending.
+    Blocked,
 }
 
 impl PlanStatus {
@@ -49,6 +53,7 @@ impl fmt::Display for PlanStatus {
             PlanStatus::InProgress => write!(f, "in_progress"),
             PlanStatus::Done => write!(f, "done"),
             PlanStatus::Deferred => write!(f, "deferred"),
+            PlanStatus::Blocked => write!(f, "blocked"),
         }
     }
 }
@@ -127,6 +132,7 @@ pub fn default_statuses() -> Vec<String> {
         "in_progress".to_string(),
         "pending".to_string(),
         "deferred".to_string(),
+        "blocked".to_string(),
     ]
 }
 

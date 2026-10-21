@@ -454,6 +454,10 @@ pub fn expected_version_from_plan(phases: &[PlanPhase]) -> ExpectedVersion {
                 }
             }
             (None, PlanStatus::Deferred) => {}
+            // Blocked is deliberately NOT skipped (unlike Deferred): it is
+            // wanted work that has not happened yet, so it holds the version
+            // exactly as Pending does and surfaces as the blocker. Deferred
+            // means "deliberately postponed", which does not hold the run.
             (None, status) => {
                 blocking = Some(BlockingPhase {
                     id: p.id.clone(),
@@ -666,6 +670,29 @@ mod expected_version_tests {
         ]));
         assert_eq!(e.version.as_deref(), Some("0.1.2-alpha"));
         assert!(e.blocking.is_none());
+    }
+
+    #[test]
+    fn blocked_phase_holds_version_like_pending() {
+        let e = expected_version_from_plan(&plan(&[
+            ("v0.1.0", "done"),
+            ("v0.1.1", "blocked"),
+            ("v0.1.2", "done"),
+        ]));
+        assert_eq!(e.version.as_deref(), Some("0.1.0-alpha"));
+        let b = e.blocking.unwrap();
+        assert_eq!(b.id, "v0.1.1");
+        assert_eq!(b.status, PlanStatus::Blocked);
+    }
+
+    #[test]
+    fn blocked_phase_is_not_actionable() {
+        let phases = plan(&[("v0.1.0", "blocked"), ("v0.1.1", "pending")]);
+        let ready: Vec<&str> = next_actionable_phases(&phases)
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(ready, vec!["v0.1.1"]);
     }
 
     #[test]
