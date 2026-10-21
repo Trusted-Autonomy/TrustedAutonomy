@@ -1678,6 +1678,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         git_in(d, &["init", "-q"]);
+        // Windows git defaults to autocrlf, which rewrites line endings on apply.
+        git_in(d, &["config", "core.autocrlf", "false"]);
         git_in(d, &["config", "user.email", "t@example.com"]);
         git_in(d, &["config", "user.name", "t"]);
         git_in(d, &["config", "commit.gpgsign", "false"]);
@@ -1754,6 +1756,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         git_in(d, &["init", "-q"]);
+        // Windows git defaults to autocrlf, which rewrites line endings on apply.
+        git_in(d, &["config", "core.autocrlf", "false"]);
         std::fs::write(d.join("f.rs"), &old).unwrap();
         let patch = render_file_diff("f.rs", Some(&old), Some(&new));
         std::fs::write(d.join("p.diff"), &patch).unwrap();
