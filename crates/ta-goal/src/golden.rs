@@ -227,6 +227,10 @@ pub struct ReplayRecord {
     /// The settings in force when the replay started.
     #[serde(default)]
     pub environment: Option<RunEnvironment>,
+    /// `plan_usage_pct` and `budget_used_pct` before and after the replay, and
+    /// the change. `None` on replays recorded before this existed.
+    #[serde(default)]
+    pub usage: Option<crate::usage::UsageDelta>,
 }
 
 /// Verdict for one replay against its baseline.
@@ -1419,6 +1423,7 @@ mod tests {
             recomputed: None,
             failure: None,
             environment: None,
+            usage: None,
         }
     }
 
@@ -1855,6 +1860,18 @@ mod tests {
         let loaded: ReplayRecord = serde_json::from_str(old).unwrap();
         assert!(loaded.check_run.is_none() && loaded.run_index.is_none());
         assert!(loaded.recomputed.is_none() && loaded.lines_added.is_none());
+        assert!(loaded.usage.is_none(), "records without usage still load");
+
+        // A record carrying the usage delta round-trips.
+        let mut with_usage = replay(Some(1.0), None);
+        with_usage.usage = Some(crate::usage::UsageDelta {
+            plan_usage_pct_delta: Some(2.5),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&with_usage).unwrap();
+        assert!(json.contains("plan_usage_pct_delta"));
+        let back: ReplayRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with_usage);
     }
 
     #[test]

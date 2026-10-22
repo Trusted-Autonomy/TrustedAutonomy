@@ -12544,6 +12544,15 @@ fn draft_follow_up(
         .current_dir(&target_dir)
         .status();
 
+    if status.is_ok() {
+        ta_goal::usage_ledger::record_unmeasured(
+            &target_dir,
+            ta_goal::usage_ledger::UsageKind::Other,
+            agent,
+            &format!("draft follow-up via `{agent} --print` (terminal attached, no token counts)"),
+        );
+    }
+
     match status {
         Ok(s) if s.success() => {
             println!("\nAgent exited successfully.");

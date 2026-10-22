@@ -782,9 +782,27 @@ fn replay(
     );
     tracing::info!(golden_id = %entry.id, tag = %tag, scratch = %scratch.path.display(), "launching golden replay");
     let run_index = store.next_run_index(id)?;
+    // Plan and budget usage around the run. Read-only: a snapshot file and the
+    // usage ledger, never credentials. Token measurement is unchanged.
+    let usage_before = ta_goal::usage::UsageMark::from_summary(&ta_goal::usage::gather_summary(
+        &config.workspace_root,
+        Utc::now(),
+        false,
+        None,
+        None,
+        None,
+    ));
     let run_started_at = Utc::now();
     let status = runner(&mut cmd);
     let run_finished_at = Utc::now();
+    let usage_after = ta_goal::usage::UsageMark::from_summary(&ta_goal::usage::gather_summary(
+        &config.workspace_root,
+        run_finished_at,
+        false,
+        None,
+        None,
+        None,
+    ));
     let status = status.map_err(|e| {
         anyhow::anyhow!(
             "could not launch `{}` for the replay: {e}. Run it by hand to see why: {}",
@@ -837,6 +855,10 @@ fn replay(
             config,
             Some(&overrides),
             "measured at replay start",
+        )),
+        usage: Some(ta_goal::usage::UsageDelta::compute(
+            usage_before,
+            usage_after,
         )),
     };
     let mut diff: Option<String> = None;
@@ -923,6 +945,34 @@ fn replay(
     })
 }
 
+/// `plan 40.0% to 43.5% (+3.5), budget 10.0% to 12.5% (+2.5)`, with `n/a` for
+/// anything unknown (never 0).
+fn usage_delta_line(u: &ta_goal::usage::UsageDelta) -> String {
+    let p = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |x| format!("{x:.1}%"));
+    let d = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |x| format!("{x:+.1}"));
+    let (bp, bb) = u
+        .before
+        .as_ref()
+        .map_or((None, None), |m| (m.plan_usage_pct, m.budget_used_pct));
+    let (ap, ab) = u
+        .after
+        .as_ref()
+        .map_or((None, None), |m| (m.plan_usage_pct, m.budget_used_pct));
+    let mut line = format!(
+        "plan {} to {} ({}), budget {} to {} ({})",
+        p(bp),
+        p(ap),
+        d(u.plan_usage_pct_delta),
+        p(bb),
+        p(ab),
+        d(u.budget_used_pct_delta)
+    );
+    if let Some(n) = &u.note {
+        line.push_str(&format!(" [{n}]"));
+    }
+    line
+}
+
 fn render_replay(o: &ReplayOutcome) -> String {
     let r = &o.record;
     let mut out = format!(
@@ -936,6 +986,9 @@ fn render_replay(o: &ReplayOutcome) -> String {
     );
     for reason in &o.verdict.reasons {
         out.push_str(&format!("  - {reason}\n"));
+    }
+    if let Some(u) = &r.usage {
+        out.push_str(&format!("  usage: {}\n", usage_delta_line(u)));
     }
     if let Some(n) = &o.draft_note {
         out.push_str(&format!("  {n}\n"));
@@ -1214,6 +1267,9 @@ fn render_report(sections: &[(GoldenEntry, Vec<ReplayRecord>)]) -> String {
             ));
             if let Some(env) = &r.environment {
                 out.push_str(&format!("    ran under: {}\n", env.summary()));
+            }
+            if let Some(u) = &r.usage {
+                out.push_str(&format!("    usage: {}\n", usage_delta_line(u)));
             }
             if v.needs_human_review() {
                 review.push(format!(
@@ -2163,6 +2219,11 @@ mod tests {
             std::fs::read_to_string(f.project.path().join("a.txt")).unwrap(),
             "one\ntwo\nlater\n"
         );
+
+        // Usage before/after is recorded on every replay; unknown values stay None, never 0.
+        let usage = out.record.usage.as_ref().expect("usage delta recorded");
+        assert!(usage.before.is_some() && usage.after.is_some());
+        assert!(usage_delta_line(usage).contains("plan"));
 
         // Result: identical diff to the baseline, check passes, saved and reportable.
         assert_eq!(out.record.outcome, "pr_ready");

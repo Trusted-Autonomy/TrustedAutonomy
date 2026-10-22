@@ -481,14 +481,23 @@ fn discover(path: Option<&std::path::Path>, yes: bool) -> anyhow::Result<()> {
 
     println!("Running analysis...");
     let output = Command::new("claude")
-        .args(["--print", "--output-format", "text"])
+        .args(["--print", "--output-format", "json"])
         .arg(&prompt)
         .stdin(Stdio::null())
         .output();
 
     let draft = match output {
         Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            // JSON output carries token counts for the usage ledger; the
+            // recorder returns the plain `result` text for the draft.
+            let root = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| ta_goal::usage_ledger::find_project_root(&cwd));
+            let text = record_discovery_call(
+                &String::from_utf8_lossy(&out.stdout),
+                root.as_deref(),
+                &ta_goal::usage_ledger::UsageLedger::global(),
+            );
             if text.trim().is_empty() {
                 anyhow::bail!(
                     "The analysis agent returned an empty response.\n\
@@ -794,6 +803,23 @@ fn clear(yes: bool) -> anyhow::Result<()> {
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
+/// Record the style-discovery call in the usage ledger and return the draft
+/// text (the `result` of the CLI's JSON, or the raw stdout when it is not JSON).
+fn record_discovery_call(
+    stdout: &str,
+    root: Option<&std::path::Path>,
+    global: &ta_goal::usage_ledger::UsageLedger,
+) -> String {
+    ta_goal::usage_ledger::record_oneshot_in(
+        root,
+        global,
+        ta_goal::usage_ledger::UsageKind::Style,
+        "claude",
+        stdout,
+        "style discovery via `claude --print`",
+    )
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -816,6 +842,32 @@ mod tests {
     /// Override HOME for tests by calling functions with explicit path helpers.
     fn style_path_in(home: &std::path::Path) -> PathBuf {
         home.join(".config").join("ta").join("style.md")
+    }
+
+    /// Golden failure: a style discovery call used to leave no usage trace.
+    #[test]
+    fn style_discovery_call_is_recorded_with_real_tokens_and_the_draft_is_the_result() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        let global = ta_goal::usage_ledger::UsageLedger::new(dir.path().join("g.jsonl"));
+        let out = serde_json::json!({
+            "type": "result",
+            "result": "# Style\n- be terse",
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })
+        .to_string();
+        let draft = record_discovery_call(&out, Some(&root), &global);
+        assert_eq!(draft, "# Style\n- be terse");
+        let rows = ta_goal::usage_ledger::UsageLedger::for_project(&root)
+            .read()
+            .records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, ta_goal::usage_ledger::UsageKind::Style);
+        assert_eq!(rows[0].total_tokens(), 15);
+        assert!(!rows[0].tokens_unknown);
+        assert_eq!(global.read().records.len(), 1);
     }
 
     #[test]

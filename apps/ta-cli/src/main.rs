@@ -1152,6 +1152,14 @@ enum Commands {
         command: commands::cost::CostCommands,
     },
 
+    /// Plan and budget usage: how much of a plan window or budget is used.
+    ///
+    /// `ta usage` shows plan_usage_pct (from the Claude Code statusline
+    /// snapshot), budget_used_pct (from `[budget]` and the usage ledger), the
+    /// headline meter and per-model / per-kind totals. `ta usage capture`
+    /// stores the statusline JSON. No credentials are read.
+    Usage(commands::usage::UsageArgs),
+
     /// Golden set: capture a completed goal, replay it with an override, compare.
     ///
     /// `ta golden capture|list|replay|report`. Replays run in a scratch git
@@ -2311,6 +2319,7 @@ fn dispatch_raw(
         }
         Commands::Stats { command } => commands::stats::execute(command, config),
         Commands::Cost { command } => commands::cost::execute(command, config),
+        Commands::Usage(args) => commands::usage::execute(args, config),
         Commands::Golden { command } => commands::golden::execute(command, config),
         Commands::Experiment { command } => commands::experiment::execute(command, config),
         Commands::Community { command } => {

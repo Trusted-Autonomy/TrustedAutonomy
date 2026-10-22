@@ -534,6 +534,15 @@ fn pr_fix(
         .current_dir(&target_dir)
         .status();
 
+    if status.is_ok() {
+        ta_goal::usage_ledger::record_unmeasured(
+            &target_dir,
+            ta_goal::usage_ledger::UsageKind::Other,
+            agent,
+            &format!("CI micro-fix via `{agent} --print` (terminal attached, no token counts)"),
+        );
+    }
+
     match &status {
         Ok(s) if s.success() => println!("\nAgent completed successfully."),
         Ok(s) => {

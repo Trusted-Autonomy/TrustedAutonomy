@@ -5665,6 +5665,7 @@ version = "0.17.12-alpha.5"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs",
  "rand 0.8.7",
  "schemars",
  "serde",

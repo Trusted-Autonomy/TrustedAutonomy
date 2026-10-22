@@ -405,6 +405,24 @@ impl PersistentQaAgent {
                     "QA agent: subprocess finished"
                 );
 
+                // Usage ledger: `claude --print` returns plain text with no token
+                // counts, so this call is recorded as tokens_unknown (it is still
+                // counted as a call, and `ta usage` says so).
+                if matches!(status, Ok(Ok(_))) {
+                    let rec = ta_goal::usage_ledger::UsageRecord {
+                        ts: chrono::Utc::now(),
+                        kind: ta_goal::usage_ledger::UsageKind::Advisor,
+                        model: self.agent.clone(),
+                        tokens_unknown: true,
+                        note: Some(format!(
+                            "shell Q&A via `{binary} --print`, {:.1}s; no token counts available",
+                            elapsed.as_secs_f64()
+                        )),
+                        ..Default::default()
+                    };
+                    ta_goal::usage_ledger::record_usage(&self.project_root, &rec);
+                }
+
                 match status {
                     Ok(Ok(s)) if !s.success() => {
                         let exit_code = s.code().unwrap_or(-1);

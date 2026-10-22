@@ -15381,6 +15381,86 @@ Each record carries `id`, `title`, `timestamp`, `tokens_input` (uncached input o
 
 Re-running is safe. Records are matched by `id` (`<source>:<session or goal id>`), so a second run updates them in place instead of adding copies, and any other lines already in the file are kept. The file is written to a temporary file and renamed into place, so an interrupted run cannot leave it half-written. If the existing file has a line that is not valid JSON, nothing is changed and the error names the line. With `--json`, the confirmation goes to stderr so stdout stays valid JSON.
 
+### Usage and budget
+
+`ta usage` answers "how much is left?" two ways, kept deliberately separate:
+
+- `plan_usage_pct`: percent (0 to 100) of your subscription window used, as reported by the provider. For Claude Code this is what `/usage` shows. It is `null` on an API key (there is no plan).
+- `budget_used_pct`: percent of a budget you set, from the usage ledger. It is `null` until you configure a budget. It can exceed 100.
+
+```bash
+ta usage                 # headline, meters, by kind and by model
+ta usage --json          # same, machine-readable
+ta usage --project       # this project's ledger instead of all projects
+ta usage --since 2026-10-01 --max-age-minutes 30
+```
+
+Nothing is configured on a fresh install, so the first run prints hints instead of zeros.
+
+#### Feed it your plan usage (Claude Code)
+
+Claude Code passes a JSON object to your statusline command on stdin. That object includes your plan's rate limits. TA never reads credentials, OAuth tokens or the Keychain and calls no endpoint; the statusline JSON is the only source. Chain the capture script from your statusline command (two lines in a Python statusline such as `~/.claude/statusline.py`, right after you parse stdin into `j`):
+
+```python
+import subprocess
+subprocess.run(["python3", "/path/to/TrustedAutonomy/scripts/ta-usage-capture.py"], input=json.dumps(j), text=True, capture_output=True, timeout=5)
+```
+
+In a shell statusline, keep stdin and silence the capture so it never becomes part of the status line:
+
+```bash
+input=$(cat)
+printf '%s' "$input" | ta usage capture >/dev/null 2>&1 || true
+```
+
+`ta usage capture` and the script do the same thing: keep only `rate_limits`, `rate_limits_available` and `subscription_type`, stamp `captured_at`, and write the snapshot atomically to `$TA_USAGE_DIR/plan-usage.json` (default `~/.config/ta/usage/plan-usage.json`; override with `--out`). They print nothing on success. A failure goes to stderr with the reason and a non-zero exit, which the `|| true` above ignores.
+
+Both Claude Code shapes are read: the newer `rate_limits.limits[]` rows (`kind` of `session`, `weekly_all` or `weekly_scoped`, with `percent`, `resets_at` and an optional model or surface `scope`) and the older `five_hour` / `seven_day` / `seven_day_opus` / `seven_day_sonnet` / `model_scoped[]` keys. The newer shape wins when both are present.
+
+**Staleness.** A snapshot older than 15 minutes (change it with `--max-age-minutes` or `[usage] plan_max_age_minutes` in `daemon.toml`), or whose window has already reset, is labelled `STALE`. Stale values stay visible with `stale: true` but are left out of `plan_usage_pct` and the headline, so an old number is never shown as current. Open Claude Code to refresh it.
+
+#### Set a budget
+
+Add a `[budget]` table to `.ta/daemon.toml` (per project) or `~/.config/ta/daemon.toml` (all projects; the project file wins key by key). Per-model entries match the model name as a case-insensitive substring.
+
+```toml
+[budget]
+window = "month"        # session | day | week | month (default) | custom
+usd = 200.0
+tokens = 50000000       # optional; with both, the limit closest to binding counts
+
+[budget.model."opus"]
+window = "week"
+usd = 50.0
+
+[usage]
+plan_max_age_minutes = 15
+```
+
+Windows are UTC: `session` is a rolling 5 hours, `day` the calendar day, `week` starts Monday 00:00, `month` the calendar month, and `custom` a rolling `window_hours`. A limit that is zero, negative or not a number is ignored with a warning that says which key to fix. With no budget, `budget_used_pct` is `null`, not 0. With no plan snapshot, an API-key user with a budget gets `budget_used_pct` as the headline.
+
+#### The usage ledger
+
+Every finished goal and every model call TA makes on your behalf (release notes, `ta style discover`, constitution review, daemon Q&A, CI follow-up agents) appends one line to `<project>/.ta/usage-ledger.jsonl` and to a global roll-up at `$TA_USAGE_DIR/ledger.jsonl` (default `~/.config/ta/usage/ledger.jsonl`). Each line has `kind` (`goal`, `advisor`, `cos_qa`, `golden_replay`, `release`, `style`, `constitution`, `tool` or `other`), model, input, output and cache tokens, USD, timestamp and goal id. Calls whose CLI returns no token counts are recorded with `tokens_unknown: true`: they count as calls, and `ta usage` prints the by-kind breakdown plus a `tokens_unknown: N of M call(s)` line so you can see how much of the total is unmeasured. A ledger line that cannot be parsed is reported in the summary, never dropped silently. Writes are single appends, safe from concurrent processes.
+
+#### Field names for other tools
+
+`ta usage --json` and the `usage` object of `ta cost report --json` share one shape:
+
+| Field | Meaning |
+| --- | --- |
+| `plan_usage_pct` | Whole-plan percent used from fresh provider data, else `null` |
+| `budget_used_pct` | Percent of your budget used, else `null` (may exceed 100) |
+| `headline_pct`, `headline_basis` | The one number to show and whether it is `plan` or `budget` |
+| `plan` | Snapshot `status` (`fresh`, `stale`, `missing`, `not_applicable`, `unreadable`), `captured_at`, `age_secs`, `max_age_minutes`, `message` |
+| `meters[]` | `window`, `scope`, `plan_usage_pct`, `budget_used_pct`, `budget`, `used`, `resets_at`, `source`, `captured_at`, `stale` |
+| `ledger` | Records, `by_kind`, `by_model`, `total`, `unparsable_lines` |
+| `notes[]`, `hints[]` | Things to know and things to do next |
+
+`ta cost report --json` gains the `usage` object; `ta cost report --json --rows` is unchanged. `ta cost report --meridian FILE` adds the string fields `plan_usage_pct`, `budget_used_pct` (two decimals, or `n/a` when unknown) and `usage_captured_at` to every record.
+
+`ta golden replay` records the two percentages before and after each replay in the replay record's `usage` object, with `plan_usage_pct_delta` and `budget_used_pct_delta`. The plan delta is only reported when the statusline snapshot was refreshed during the replay; a headless agent does not refresh it, so expect `null` plus an explanatory `note` unless you replay from an interactive session. The budget delta needs a configured budget.
+
 ### Testing a cost optimization on identical work (golden set)
 
 A golden entry is a finished goal saved as its start commit, its prompt and its result. Replaying it with one setting changed shows what that setting does to cost and outcome on the same work, without a large multi-arm grid.

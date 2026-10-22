@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Subcommand;
-use ta_goal::cost_export::{meridian_command, meridian_records, session_rows, write_jsonl};
+use ta_goal::cost_export::{
+    meridian_command, meridian_records_with_usage, session_rows, write_jsonl,
+};
 use ta_goal::cost_report::{
     build_report, goal_rows, parse_cost_group_by, scan_claude, scan_omp, CostFilter, CostGroup,
     CostGroupRow, CostReport, CostRow, CostTotals, Scan,
@@ -97,18 +99,29 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
                 &claude,
                 &omp,
             )?;
+            // Plan and budget usage, attached to the JSON/text report and to
+            // each Meridian record. Never changes the `--rows` array.
+            let usage = ta_goal::usage::gather_summary(
+                &config.workspace_root,
+                chrono::Utc::now(),
+                false,
+                inputs.filter.since,
+                None,
+                None,
+            );
             // Export first from the same rows the report is built from, so the
             // file and the table cannot disagree.
             let exported = meridian
                 .as_ref()
-                .map(|path| export_meridian(&inputs, path))
+                .map(|path| export_meridian(&inputs, path, Some(&usage)))
                 .transpose()?;
             let rows_json = if *rows {
                 Some(rows_json(&inputs)?)
             } else {
                 None
             };
-            let report = inputs.into_report();
+            let mut report = inputs.into_report();
+            report.usage = Some(usage);
             if let Some(text) = rows_json {
                 println!("{text}");
             } else if *json {
@@ -171,11 +184,15 @@ fn rows_json(inputs: &Inputs) -> anyhow::Result<String> {
 }
 
 /// Write the Meridian file and return the confirmation text.
-fn export_meridian(inputs: &Inputs, path: &Path) -> anyhow::Result<String> {
+fn export_meridian(
+    inputs: &Inputs,
+    path: &Path,
+    usage: Option<&ta_goal::usage::UsageSummary>,
+) -> anyhow::Result<String> {
     let rows = filtered_rows(inputs);
     let kept: Vec<&CostRow> = rows.iter().collect();
     let goals = inputs.goals.as_deref().unwrap_or(&[]);
-    let records = meridian_records(&kept, goals);
+    let records = meridian_records_with_usage(&kept, goals, usage);
     let out = write_jsonl(path, &records)?;
     tracing::info!(
         path = %path.display(),
@@ -406,7 +423,22 @@ pub fn render(r: &CostReport) -> String {
                 .unwrap_or_else(|| "now".into())
         ),
     };
-    out.push_str(&format!("Window: {window}\n\n"));
+    out.push_str(&format!("Window: {window}\n"));
+    if let Some(u) = &r.usage {
+        let p = |v: Option<f64>| v.map_or_else(|| "n/a".to_string(), |x| format!("{x:.1}%"));
+        let stale = u
+            .plan
+            .as_ref()
+            .filter(|pl| pl.status == ta_goal::usage::PlanStatus::Stale)
+            .map(|_| " (plan snapshot STALE)")
+            .unwrap_or("");
+        out.push_str(&format!(
+            "Usage: plan_usage_pct {}, budget_used_pct {}{stale}  (details: `ta usage`)\n",
+            p(u.plan_usage_pct),
+            p(u.budget_used_pct)
+        ));
+    }
+    out.push('\n');
     if t.rows == 0 {
         out.push_str(
             "No usage found in the window. Check the sources above, widen --since/--until, or \
@@ -528,12 +560,49 @@ mod tests {
     }
 
     #[test]
+    fn usage_fields_are_additive_in_the_report_the_text_and_meridian() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, omp) = fixture(dir.path());
+        let inputs = gather(&cfg(dir.path()), None, None, "source", None, &claude, &omp).unwrap();
+        let usage = ta_goal::usage::UsageSummary {
+            plan_usage_pct: Some(61.0),
+            budget_used_pct: None,
+            ..Default::default()
+        };
+        let out = dir.path().join("cost.jsonl");
+        export_meridian(&inputs, &out, Some(&usage)).unwrap();
+        let recs: Vec<serde_json::Value> = fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        for r in &recs {
+            assert_eq!(r["plan_usage_pct"], "61.00");
+            assert_eq!(r["budget_used_pct"], "n/a", "unknown is n/a, never 0");
+            assert_eq!(r["usage_captured_at"], "n/a");
+        }
+        let mut rep = inputs.into_report();
+        assert!(rep.usage.is_none());
+        rep.usage = Some(usage);
+        let text = render(&rep);
+        assert!(
+            text.contains("plan_usage_pct 61.0%, budget_used_pct n/a"),
+            "{text}"
+        );
+        // A report saved before this field existed still loads.
+        let mut v = serde_json::to_value(&rep).unwrap();
+        v.as_object_mut().unwrap().remove("usage");
+        let old: CostReport = serde_json::from_value(v).unwrap();
+        assert!(old.usage.is_none());
+    }
+
+    #[test]
     fn meridian_export_dedupes_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let (claude, omp) = fixture(dir.path());
         let out = dir.path().join("cost.jsonl");
         let inputs = gather(&cfg(dir.path()), None, None, "source", None, &claude, &omp).unwrap();
-        let msg = export_meridian(&inputs, &out).unwrap();
+        let msg = export_meridian(&inputs, &out, None).unwrap();
         assert!(msg.contains("2 record(s)"), "{msg}");
         assert!(
             msg.contains("meridian analyze --source jsonl --path"),
@@ -554,7 +623,7 @@ mod tests {
 
         // Re-running leaves the file byte-identical.
         let again = gather(&cfg(dir.path()), None, None, "source", None, &claude, &omp).unwrap();
-        let msg = export_meridian(&again, &out).unwrap();
+        let msg = export_meridian(&again, &out, None).unwrap();
         assert!(msg.contains("2 updated in place"), "{msg}");
         assert_eq!(fs::read_to_string(&out).unwrap(), text);
     }
@@ -695,7 +764,7 @@ mod tests {
         let (claude, omp) = fixture(dir.path());
         let inputs = gather(&config, None, None, "source", None, &claude, &omp).unwrap();
         let out = dir.path().join("cost.jsonl");
-        export_meridian(&inputs, &out).unwrap();
+        export_meridian(&inputs, &out, None).unwrap();
         let meridian: Vec<serde_json::Value> = fs::read_to_string(&out)
             .unwrap()
             .lines()

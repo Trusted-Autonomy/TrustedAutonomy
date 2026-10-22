@@ -96,6 +96,7 @@ pub(crate) mod test_support;
 pub mod token;
 pub mod tools;
 pub mod upgrade;
+pub mod usage;
 pub mod verb;
 pub mod verify;
 pub mod version_guard;
