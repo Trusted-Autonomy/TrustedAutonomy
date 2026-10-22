@@ -784,14 +784,15 @@ fn replay(
     let run_index = store.next_run_index(id)?;
     // Plan and budget usage around the run. Read-only: a snapshot file and the
     // usage ledger, never credentials. Token measurement is unchanged.
-    let usage_before = ta_goal::usage::UsageMark::from_summary(&ta_goal::usage::gather_summary(
-        &config.workspace_root,
-        Utc::now(),
-        false,
-        None,
-        None,
-        None,
-    ));
+    let mut usage_before =
+        ta_goal::usage::UsageMark::from_summary(&ta_goal::usage::gather_summary(
+            &config.workspace_root,
+            Utc::now(),
+            false,
+            None,
+            None,
+            None,
+        ));
     let run_started_at = Utc::now();
     let status = runner(&mut cmd);
     let run_finished_at = Utc::now();
@@ -803,6 +804,17 @@ fn replay(
         None,
         None,
     ));
+    // A budget that was missing at the start but is configured by the end (added
+    // or rewritten mid-run) would leave the before value unknown and no delta.
+    // Re-resolve it as of the start time so a configured budget always has one.
+    if usage_before.backfill_budget(
+        &config.workspace_root,
+        false,
+        &ta_goal::usage::default_global_config_path(),
+        &ta_goal::usage_ledger::UsageLedger::global(),
+    ) {
+        tracing::info!(golden_id = %entry.id, "budget_used_pct before-value backfilled from the current [budget] config");
+    }
     let status = status.map_err(|e| {
         anyhow::anyhow!(
             "could not launch `{}` for the replay: {e}. Run it by hand to see why: {}",

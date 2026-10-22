@@ -1280,6 +1280,45 @@ impl UsageMark {
     }
 }
 
+impl UsageMark {
+    /// Fill in a missing `budget_used_pct` once the budget is known to exist.
+    ///
+    /// The "before" mark is taken before a run and "after" once it ends. If the
+    /// `[budget]` was absent or unreadable at the start (for example the config
+    /// was added, or rewritten non-atomically, while a long run was in flight)
+    /// the before value is `None` and no delta can be computed, even though the
+    /// budget is configured by the time the run ends. This re-reads the current
+    /// config and ledger as of `self.taken_at` (records stamped later are
+    /// ignored by the meter math), so a configured budget always yields a before
+    /// value (0% when nothing had been used yet). Returns true when it filled it.
+    pub fn backfill_budget(
+        &mut self,
+        project_root: &Path,
+        project_only: bool,
+        global_config: &Path,
+        global_ledger: &crate::usage_ledger::UsageLedger,
+    ) -> bool {
+        let Some(taken_at) = self.taken_at else {
+            return false;
+        };
+        if self.budget_used_pct.is_some() {
+            return false;
+        }
+        let s = gather_summary_with(
+            project_root,
+            taken_at,
+            project_only,
+            None,
+            None,
+            None,
+            global_config,
+            global_ledger,
+        );
+        self.budget_used_pct = s.budget_used_pct;
+        self.budget_used_pct.is_some()
+    }
+}
+
 /// Usage before and after a measured run, plus the change. Every field is
 /// optional and defaulted so records written before this existed still load.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1330,8 +1369,8 @@ impl UsageDelta {
             (Some(b), Some(a)) => Some(round2(a - b)),
             _ => {
                 notes.push(
-                    "budget_used_pct is unavailable (no [budget] configured), so no budget delta \
-                     is reported."
+                    "budget_used_pct is unavailable before or after the run (no [budget] configured, or \
+                     it could not be read), so no budget delta is reported."
                         .to_string(),
                 );
                 None
@@ -1949,5 +1988,90 @@ mod tests {
         assert!(!old.stale);
         let empty: UsageSummary = serde_json::from_str("{}").unwrap();
         assert!(empty.meters.is_empty());
+    }
+    #[test]
+    fn golden_style_before_mark_with_global_budget_and_empty_ledger_is_zero_not_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("daemon.toml");
+        std::fs::write(&cfg, "[budget]\nwindow = \"month\"\nusd = 100.0\n").unwrap();
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let ledger = crate::usage_ledger::UsageLedger::new(dir.path().join("g.jsonl"));
+        let snap = dir.path().join("none.json");
+        let now = Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap();
+        let before = UsageMark::from_summary(&gather_summary_with(
+            &proj,
+            now,
+            false,
+            None,
+            None,
+            Some(&snap),
+            &cfg,
+            &ledger,
+        ));
+        assert_eq!(before.budget_used_pct, Some(0.0), "{before:?}");
+        ledger
+            .append(&rec("claude-opus-5-5", 10, 0.4, now - Duration::minutes(1)))
+            .unwrap();
+        let after = UsageMark::from_summary(&gather_summary_with(
+            &proj,
+            now,
+            false,
+            None,
+            None,
+            Some(&snap),
+            &cfg,
+            &ledger,
+        ));
+        let d = UsageDelta::compute(before, after);
+        assert_eq!(d.budget_used_pct_delta, Some(0.4), "{d:?}");
+    }
+
+    #[test]
+    fn budget_added_during_a_run_still_gives_a_before_value_and_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("daemon.toml");
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let ledger = crate::usage_ledger::UsageLedger::new(dir.path().join("g.jsonl"));
+        let snap = dir.path().join("none.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap();
+        let t1 = t0 + Duration::minutes(20);
+        // No budget at the start of the run.
+        let mut before = UsageMark::from_summary(&gather_summary_with(
+            &proj,
+            t0,
+            false,
+            None,
+            None,
+            Some(&snap),
+            &cfg,
+            &ledger,
+        ));
+        assert_eq!(before.budget_used_pct, None);
+        // The budget appears and the run records usage before it ends.
+        std::fs::write(&cfg, "[budget]\nwindow = \"month\"\nusd = 100.0\n").unwrap();
+        ledger
+            .append(&rec("claude-opus-5-5", 10, 0.4, t0 + Duration::minutes(5)))
+            .unwrap();
+        let after = UsageMark::from_summary(&gather_summary_with(
+            &proj,
+            t1,
+            false,
+            None,
+            None,
+            Some(&snap),
+            &cfg,
+            &ledger,
+        ));
+        assert_eq!(after.budget_used_pct, Some(0.4));
+        assert!(before.backfill_budget(&proj, false, &cfg, &ledger));
+        assert_eq!(
+            before.budget_used_pct,
+            Some(0.0),
+            "usage after t0 not counted"
+        );
+        let d = UsageDelta::compute(before, after);
+        assert_eq!(d.budget_used_pct_delta, Some(0.4), "{d:?}");
     }
 }
