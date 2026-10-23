@@ -11592,6 +11592,32 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 #### Version: `0.18.0-alpha.9`
 
+### v0.18.0.10 - One Daemon Serving Many Projects, Safely, With a Clean Migration
+<!-- status: pending -->
+**Depends on**: v0.17.12.14, v0.18.0.9
+
+**Scope decision (2026-10-22)**: post-launch, not beta. Launch ships one daemon per project (made safe by v0.17.12.14: project check on restart, free-port selection, vault key out of the tree). A shared daemon touches every per-project assumption at once (state directory, locks, credentials, event and output streams, whiteboard, sandbox policy, auth tokens), so it is large (L to XL) and a defect leaks one project's data into another. Only the launch-time pieces that keep the migration clean are required before launch (items 1 and 2); the rest waits.
+
+**Goal**: One TA daemon process serves several projects on one machine with the same isolation guarantees as separate daemons, and a user who launched with per-project daemons moves over without losing goals, drafts, credentials or history.
+
+**Before launch (cheap, keeps migration clean)**
+1. [ ] Every API response, event and log line that names a goal, draft, attention item or output stream also carries `project_id` (stable, from `.ta/project-id`) and `project_root`. No client may rely on "the daemon I reached is the project".
+2. [ ] Daemon address of a project is recorded in one place per project (`.ta/daemon.json`: host, port, pid, project_id) and every client (CLI, poller, MCP gateway, Studio) resolves it through that file, never a literal port. A shared daemon later only changes what is written there.
+
+**Post-launch**
+3. [ ] Design note first: project registry (`ta daemon projects add|remove|list`), request routing (`X-TA-Project` header or path prefix `/api/projects/{id}/...`, with the single-project paths kept as aliases), and the isolation model: per-project state directory, apply lock, goal store, event bus partition, output buffers, whiteboard subject prefix, credential vault and keychain namespace, sandbox policy, and resource limits (concurrent goals per project and total).
+4. [ ] Project-scoped auth: tokens carry a project claim and are refused for other projects (builds on v0.18.0.9). A request with no project on a multi-project daemon is an error naming the registered projects, never a guess.
+5. [ ] Isolation enforcement and tests: two projects with the same goal title, same branch name, same draft id prefix and a `ta_ask_human` pending in each never cross; one project's crash, restart or full disk does not stop the other; restart of the daemon waits on goals of every project and names them.
+6. [ ] Per-project config reload and failure containment: a broken `.ta/daemon.toml` in project A marks A unhealthy and leaves B serving.
+7. [ ] **Migration**: `ta daemon migrate --to-shared [--dry-run]` registers each existing project, stops its daemon only after its running goals finish (or with `--wait`), moves nothing in the project tree (state stays in each project's `.ta/`), copies no secrets (vault and keychain entries stay where they are and are re-bound by project id), rewrites `.ta/daemon.json` to the shared address, and verifies by reading `/api/status` per project. `ta daemon migrate --to-per-project` reverses it. Both are idempotent and print what changed. Rehearsed on a copy with a running goal, a pending draft and a pending attention item.
+8. [ ] **Poller decision**: one poller per project stays the model for launch: the pairing credential, the Wayfinder project binding, the signing key and the claim queue are per project, so a per-project poller has the smallest blast radius and a restart touches one project. Under a shared daemon a poller may serve several projects of the same org only if each project keeps its own credential and binding inside the process and a failing project cannot stall the others (separate tasks, separate backoff). Per org is therefore an optimisation to evaluate after item 5, not a design goal; a poller must never hold credentials of two orgs. Decide with measurements: idle CPU and memory of 3 pollers versus 1, claim latency, restart blast radius. Record the decision here.
+9. [ ] Studio and CLI show the project on every goal and approval; `ta status --all-projects`.
+10. [ ] Docs: USAGE.md "Running several projects" (both modes, how to choose, how to migrate).
+
+**Effort**: XL (items 1 and 2: S).
+
+#### Version: `0.18.0-alpha.10`
+
 ### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
 <!-- status: deferred -->
 
