@@ -2263,6 +2263,33 @@ impl TaGatewayServer {
         );
         tools::wayfinder_task::handle_propose_kpi_create(&self.state, params)
     }
+
+    #[tool(
+        description = "Ask the project manager to create a Wayfinder task (kind create-task: title, verb) or record a KPI \
+        datapoint (kind record-datapoint: metric_id, value) when this goal needs one and cannot act on Wayfinder itself. \
+        Queued, not executed: a human approves any resulting change. Give why_now (one sentence) and blocks_goal. Your goal, \
+        role and project come from the gateway, not from arguments. Identical requests return the existing request_id. \
+        When a cap is hit the reply says `queue full, retry or ask_human`; use ta_human_verify instead of retrying in a loop."
+    )]
+    fn ta_request_task(
+        &self,
+        Parameters(params): Parameters<tools::task_request::RequestTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_request_task", None, None);
+        tools::task_request::handle_request_task(&self.state, params)
+    }
+
+    #[tool(
+        description = "Check a request this goal made with ta_request_task. Returns status `queued` (still in progress) or \
+        `done` (handled, one way or the other). Only the requesting goal can read it."
+    )]
+    fn ta_request_status(
+        &self,
+        Parameters(params): Parameters<tools::task_request::RequestStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_request_status", None, None);
+        tools::task_request::handle_request_status(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -2444,8 +2471,12 @@ mod tests {
         //           ta_propose_task_complete
         //           ta_propose_goal_create, ta_propose_kpi_metric_create,
         //           ta_propose_kpi_datapoint_add, ta_propose_kpi_create
+        //           ta_request_task, ta_request_status (v0.17.12.29)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 69, "expected 69 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 71, "expected 71 tools, got: {:?}", names);
+        for name in ["ta_request_task", "ta_request_status"] {
+            assert!(names.iter().any(|n| n == name), "{name} is not registered");
+        }
         for kind in crate::tools::wayfinder_task::ProposeKind::ALL {
             assert!(
                 names.iter().any(|n| n == kind.tool_name()),
@@ -3960,6 +3991,11 @@ mod tests {
         assert!(
             !names.iter().any(|n| n.starts_with("ta_propose_")),
             "no ta_propose_* tool may be routable in chat mode: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("ta_request_")),
+            "no ta_request_* tool may be routable in chat mode: {:?}",
             names
         );
         // The Chief-of-Staff's outbound channel and its human-question tool
