@@ -428,6 +428,11 @@ pub(crate) fn spawn_headless_and_capture(
     goal_title: &str,
     context_path: &Path,
 ) -> Result<(String, String), String> {
+    if ta_goal::external_agents_blocked!() {
+        return Err(ta_goal::external_agents::blocked_message(&format!(
+            "`ta run --headless` for '{goal_title}'"
+        )));
+    }
     let mut cmd = std::process::Command::new(ta_bin);
     cmd.args([
         "--project-root",

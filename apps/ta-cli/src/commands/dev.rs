@@ -453,6 +453,15 @@ pub fn execute(
         .map(|t| t.replace("{prompt}", &prompt))
         .collect();
 
+    if ta_goal::external_agents_blocked!()
+        && ta_goal::external_agents::is_paid_agent_command(&agent_config.command)
+    {
+        anyhow::bail!(
+            "{}",
+            ta_goal::external_agents::blocked_message("`ta dev` agent session")
+        );
+    }
+
     let mut cmd = std::process::Command::new(&agent_config.command);
     cmd.current_dir(&project_root);
     cmd.args(&args);

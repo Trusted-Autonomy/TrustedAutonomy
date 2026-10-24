@@ -41,11 +41,11 @@ verify: check build test
 # Build and launch the TA shell (starts daemon automatically)
 shell *ARGS:
     cargo build --bin ta-daemon --bin ta
-    cargo run --bin ta -- shell {{ARGS}}
+    TA_TEST_NO_EXTERNAL_AGENTS=0 cargo run --bin ta -- shell {{ARGS}}
 
 # Start the daemon in API mode (no shell)
 daemon *ARGS:
-    cargo run --bin ta-daemon -- --api {{ARGS}}
+    TA_TEST_NO_EXTERNAL_AGENTS=0 cargo run --bin ta-daemon -- --api {{ARGS}}
 
 # Regenerate all icon formats from the master 1024px PNG.
 # Requires: imagemagick (in Nix devShell). On macOS also uses iconutil.
