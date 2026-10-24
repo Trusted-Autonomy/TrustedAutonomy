@@ -20,6 +20,7 @@ pub mod analysis;
 pub mod chat_mode;
 pub mod commit_context;
 pub mod conversation;
+pub mod cost_detail;
 pub mod cost_export;
 pub mod cost_report;
 pub mod error;
