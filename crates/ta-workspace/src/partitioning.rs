@@ -47,6 +47,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "memory.rvf",
     // Runtime directories
     "staging/",
+    "build-cache/", // shared Cargo build output for goal agents (v0.17.12.31): machine-local, GBs, never committed
     "golden/", // golden-set entries and replays (v0.17.12.20): hold project prompts, diffs and per-machine spend, tied to local commits
     "archive/", // `ta cleanup` record archive (compressed goal and draft history + index): per-machine history, never committed
     "cleanup/", // `ta cleanup` runtime state (questions, remembered answers, final PR-state cache): machine-local
