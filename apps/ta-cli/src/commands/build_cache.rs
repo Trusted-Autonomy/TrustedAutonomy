@@ -94,7 +94,7 @@ pub fn plan_cache_use(
         }
     };
     let waiting_on = cache::live_holders(&selection.key_dir, goal_id);
-    let bytes_before = cache::dir_size(&selection.key_dir);
+    let bytes_before = cache::dir_size(&selection.target_dir);
     Ok(CacheUse {
         selection,
         waiting_on,
@@ -300,7 +300,7 @@ pub fn record_agent_exit(
                 (
                     Some(c.selection.key.clone()),
                     c.bytes_before,
-                    cache::dir_size(&c.selection.key_dir),
+                    cache::dir_size(&c.selection.target_dir),
                 )
             }
             None => (None, 0, cache::dir_size(&g.own_target)),
