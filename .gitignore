@@ -203,6 +203,7 @@ memory/work_queue.md
 .ta/daemon-tokens.json
 .ta/tokens/
 .ta/nats-jetstream/
+.ta/task-intake/
 .ta/*.log
 .ta/*.pid
 .ta/*.lock
