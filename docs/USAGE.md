@@ -15347,7 +15347,7 @@ ta cost report --group-by context_bucket --json
 
 It reads three sources, each optional and found automatically: this project's TA goals, Claude Code sessions in `~/.claude/projects/**/*.jsonl`, and OMP sessions in `~/.omp/agent/sessions/**/*.jsonl`. Use `--claude-dir` and `--omp-dir` to read from somewhere else. A source that is not there is named in the header as missing; it is not an error.
 
-`--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket`, `origin_class` and `goal` (`origin_class` and `goal` apply to TA goals; other rows show `n/a`). For a flat list with one row per goal and session instead of groups, use `--json --rows` (see below). `--since` and `--until` take a date or an RFC 3339 time (UTC), and `--project` keeps projects whose name contains the text.
+`--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket`, `origin_class`, `goal`, `session_family` and `entrypoint` (`origin_class` and `goal` apply to TA goals; `session_family` and `entrypoint` apply to interactive and headless transcript sessions; other rows show `n/a`). For a flat list with one row per goal and session instead of groups, use `--json --rows` (see below). `--since` and `--until` take a date or an RFC 3339 time (UTC), and `--project` keeps projects whose name contains the text.
 
 Example output (trimmed):
 
@@ -15375,6 +15375,24 @@ How the numbers are made:
 - OMP's own per-message cost is used and marked **exact**. Claude Code costs are **estimated** from the price table (`.ta/pricing.toml`, then the built-in table); where a transcript splits cache writes by lifetime, the 1 hour part is priced at twice the input rate. A model with no price row is **unpriced**: its tokens are counted, its cost is 0 and nothing is invented. Add a row to `.ta/pricing.toml` to price it.
 - The context-size table groups turns by prompt size (input plus cache-read plus cache-creation tokens): 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k. A long session that keeps re-reading a large context shows up as most of its cost in the top rows. TA goals are many turns each and are not in this table.
 
+#### Where the output tokens go: `--detail`
+
+Output tokens are the expensive ones. `--detail` adds three tables to the text report, and `--json` always carries the same data:
+
+```bash
+ta cost report --since 2026-10-14 --detail
+ta cost report --since 2026-10-14 --detail --group-by session_family,entrypoint
+ta cost report --since 2026-10-14 --json | jq '.session_shape.families'
+```
+
+- **Output tokens by kind.** Each turn's output is split into thinking, assistant text and tool-call arguments (the code and edit instructions the agent writes). Claude Code reports its thinking tokens, so `think-exact` is exact. Every column ending `-est` is an **estimate** from the length of the text and arguments (about 4 characters per token); the parts always add up to the output tokens the runtime reported. OMP reports no split, so all three parts are estimates. `unattrib` is output from turns with no readable blocks.
+- **Edit tool calls and whole-file writes.** Counts of edit calls, failed edits (the tool result was an error), retries (an edit to a file whose previous edit in that session failed), the estimated tokens spent on the failed calls, file writes, and writes that replaced an existing file (`overwrites`; `large-ovw` is 8 KiB or more). Claude Code `Edit`, `MultiEdit`, `NotebookEdit`, `Write` and OMP `edit`, `write` are covered. Claude Code says whether a write replaced a file. OMP does not, so an OMP write counts as an overwrite only when the session already read, edited or wrote that path: for OMP the overwrite count is a lower bound. `write` calls that target `xd://` devices are not file writes.
+- **Sessions that started in the window.** A turns-per-session histogram, the cache write of each session's first turn (the session-start overhead: the context a new session must write before it does any work, with its mean, median, p90, max, share of all cache writes and cost), and the short sessions (5 turns or fewer) grouped by what they were started to do. A session is counted when its first turn is inside `--since`/`--until`, with all its turns.
+
+The family of a session comes from its first user prompt. A known automated job gets a fixed label (`title-extraction`, `supervisor-review`); anything else is `other:` plus 8 hex characters of a hash of the prompt's opening, so equal prompts group together. The prompt text itself is never read into the report, printed or exported. `entrypoint` is `sdk-cli` for a headless `claude -p` run and `cli` for an interactive session. Use `--group-by session_family,entrypoint` to see any cost measure by family.
+
+`--json` reports have `schema_version` (2; a report without the field is version 1). Fields are only added within a version: `detail` on every group and on `totals`, `session_shape`, and `detail_notes` (how to read each number). `detail_notes` is also printed at the end of `--detail`.
+
 ### Exporting the cost report to Meridian
 
 To analyse cost against your KPIs, write the same data to a file [Meridian](#effort--kpi-analytics-meridian) can read:
@@ -15388,7 +15406,7 @@ meridian analyze --source jsonl --path cost.jsonl
 
 #### Exporting cost rows for Meridian and Wayfinder
 
-`ta cost report --json --rows` prints a JSON array with one row per TA goal and per interactive session, instead of the grouped report. `--since`, `--until` and `--project` apply as usual. The `--meridian` file is built from the same rows, so ids and token counts always match.
+`ta cost report --json --rows` prints a JSON array with one row per TA goal and per interactive session, instead of the grouped report. `--since`, `--until` and `--project` apply as usual. The `--meridian` file is built from the same rows, so ids and token counts always match. A session row also has an `instrumentation` object (`turns`, `first_turn_cache_write_tokens`, `first_turn_context_tokens`, `session_family`, `entrypoint` and a `detail` with the output split and edit counts; `_est` fields are estimates). Goal rows do not have it.
 
 ```bash
 ta cost report --since 2026-10-01 --json --rows > cost-rows.json
@@ -15425,7 +15443,7 @@ Each row looks like this:
 
 For Meridian, write the JSONL file with `--meridian` as above. For Wayfinder, or any other tool that reads JSON, pipe the rows array straight in. `--rows` requires `--json`.
 
-Each record carries `id`, `title`, `timestamp`, `tokens_input` (uncached input only), `tokens_output`, `source` and, for goals, `phase`. Meridian keeps these string fields as metadata: `cost_usd`, `cost_exact` (`true` only when every turn's cost was reported rather than estimated), `model` (the model with the most tokens), `cache_read_tokens`, `cache_write_tokens`, `context_peak` (largest prompt in the session; `n/a` for goals) and `workload` (`goal` or `interactive`). Cache reads are kept out of `tokens_input` on purpose: they are most of an interactive session's cost, and folding them in would swamp the effort score.
+Each record carries `id`, `title`, `timestamp`, `tokens_input` (uncached input only), `tokens_output`, `source` and, for goals, `phase`. Meridian keeps these string fields as metadata: `cost_usd`, `cost_exact` (`true` only when every turn's cost was reported rather than estimated), `model` (the model with the most tokens), `cache_read_tokens`, `cache_write_tokens`, `context_peak` (largest prompt in the session; `n/a` for goals) and `workload` (`goal` or `interactive`). Cache reads are kept out of `tokens_input` on purpose: they are most of an interactive session's cost, and folding them in would swamp the effort score. Interactive-session records also carry `turns`, `first_turn_cache_write_tokens`, `session_family`, `entrypoint`, `output_thinking_tokens_reported`, `output_thinking_tokens_est`, `output_text_tokens_est`, `output_tool_arg_tokens_est`, `edit_calls`, `edit_failures`, `edit_retries` and `whole_file_overwrites`; goals do not.
 
 Re-running is safe. Records are matched by `id` (`<source>:<session or goal id>`), so a second run updates them in place instead of adding copies, and any other lines already in the file are kept. The file is written to a temporary file and renamed into place, so an interrupted run cannot leave it half-written. If the existing file has a line that is not valid JSON, nothing is changed and the error names the line. With `--json`, the confirmation goes to stderr so stdout stays valid JSON.
 
@@ -15505,7 +15523,7 @@ Every finished goal and every model call TA makes on your behalf (release notes,
 | `ledger` | Records, `by_kind`, `by_model`, `total`, `unparsable_lines` |
 | `notes[]`, `hints[]` | Things to know and things to do next |
 
-`ta cost report --json` gains the `usage` object; `ta cost report --json --rows` is unchanged. `ta cost report --meridian FILE` adds the string fields `plan_usage_pct`, `budget_used_pct` (two decimals, or `n/a` when unknown) and `usage_captured_at` to every record.
+`ta cost report --json` gains the `usage` object. `ta cost report --meridian FILE` adds the string fields `plan_usage_pct`, `budget_used_pct` (two decimals, or `n/a` when unknown) and `usage_captured_at` to every record.
 
 `ta golden replay` records the two percentages before and after each replay in the replay record's `usage` object, with `plan_usage_pct_delta` and `budget_used_pct_delta`. The plan delta is only reported when the statusline snapshot was refreshed during the replay; a headless agent does not refresh it, so expect `null` plus an explanatory `note` unless you replay from an interactive session. The budget delta needs a configured budget.
 
