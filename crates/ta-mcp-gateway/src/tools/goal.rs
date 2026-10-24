@@ -40,15 +40,22 @@ pub fn handle_goal_start(
     // --origin`) at creation, so a goal started by a CoS or chat agent is never
     // auto-approved. Read before the record exists: an invalid value fails closed
     // rather than silently creating an origin-less goal.
-    let requested_origin = ta_goal::origin::origin_from_env().map_err(|e| {
-        McpError::invalid_params(
-            format!(
-                "ta_goal_start refused: {e}. Unset TA_GOAL_ORIGIN or set it to a valid origin \
-                 (for example `cos`) and retry."
-            ),
-            None,
-        )
-    })?;
+    let requested_origin = ta_goal::origin::origin_from_env()
+        .and_then(|requested| {
+            ta_goal::origin::stamp_launch_origin(
+                ta_goal::origin::team_role_from_env().as_deref(),
+                requested.as_deref(),
+            )
+        })
+        .map_err(|e| {
+            McpError::invalid_params(
+                format!(
+                    "ta_goal_start refused: {e}. Unset TA_GOAL_ORIGIN or set it to a valid origin \
+                     (for example `cos`) and retry."
+                ),
+                None,
+            )
+        })?;
 
     let goal_run = state
         .start_goal(&params.title, &params.objective, &params.agent_id)

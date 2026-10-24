@@ -3417,7 +3417,14 @@ pub fn execute(
         // changed or cleared here: the environment only fills in a record
         // that has none yet (goal creation), so a later `ta run --goal-id`
         // with a different or missing TA_GOAL_ORIGIN cannot relax it.
-        let requested_origin = ta_goal::origin::origin_from_env().map_err(anyhow::Error::msg)?;
+        let requested_origin = ta_goal::origin::origin_from_env()
+            .and_then(|requested| {
+                ta_goal::origin::stamp_launch_origin(
+                    ta_goal::origin::team_role_from_env().as_deref(),
+                    requested.as_deref(),
+                )
+            })
+            .map_err(anyhow::Error::msg)?;
         if let Some(origin) = ta_goal::origin::origin_to_stamp(
             updated_goal.origin.as_deref(),
             requested_origin.as_deref(),

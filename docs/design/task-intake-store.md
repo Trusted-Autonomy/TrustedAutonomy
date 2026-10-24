@@ -63,6 +63,10 @@ Recovery is deterministic from the files and the clock, so a process killed anyw
 
 A consumer acknowledges with `drafted`, `applied`, `rejected` or `expired`. All ids in an acknowledgement are validated against the state machine before any event is written.
 
+## Funnel draft detection
+
+A draft is a *funnel draft* when the ledger holds a request in state `drafted` or `applied` with that `draft_id` (`ta_task_intake::funnel_requests_for_draft`, `is_funnel_draft`). This holds even when the draft's goal record carries no origin. The constitution evaluator treats a funnel draft as origin `project-manager` (auto-approvable only by a rule listing that origin), unless the goal origin is `cos` or `chat`, which always win. The returned views are sanitised but remain untrusted data.
+
 ## Admission
 
 Before appending, the store applies, in order: dedupe against live requests in the same project (returns the existing `request_id`, charges nothing), then the caps. The caps count per goal (all requests ever), per role per rolling hour, and per project outstanding. Defaults and the `[task_intake]` keys that change them are in `docs/USAGE.md`. A refused request reports `queue full, retry or ask_human` and names the cap and its config key.
