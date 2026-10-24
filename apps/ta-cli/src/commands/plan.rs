@@ -4343,10 +4343,19 @@ pub fn resolve_phase_with(
             };
             let outcome = outcome_by_title(text, phases, ctx.claims);
             if let (OutcomeKind::Resolved, Some(chosen)) = (outcome.outcome, &outcome.phase) {
+                // A phase is claimed (PLAN.md edited, daemon claim recorded) only
+                // when the user asked for it. A title match is a suggestion.
+                if !confirm_suggested_phase(text, &chosen.id, &chosen.title, ctx.can_prompt) {
+                    tracing::info!(
+                        title = %text, suggested = %chosen.id,
+                        "title matched a phase but none was linked (no --phase given)"
+                    );
+                    return Ok(None);
+                }
                 if !quiet {
                     println!("[resolved \"{}\" -> {} {}]", text, chosen.id, chosen.title);
                 }
-                tracing::info!(title = %text, phase = %chosen.id, "phase resolved from title");
+                tracing::info!(title = %text, phase = %chosen.id, "phase linked from title match, confirmed by the user");
                 return Ok(Some(ResolvedPhase {
                     id: chosen.id.clone(),
                     source: ResolveSource::TitleMatch,
@@ -4822,6 +4831,40 @@ fn parse_menu_selection(input: &str, count: usize) -> anyhow::Result<Option<usiz
         anyhow::bail!("Selection {} out of range. Enter a number 1-{}.", n, count);
     }
     Ok(Some(n - 1))
+}
+
+/// A title matched exactly one phase but `--phase` was not given. Interactive
+/// runs ask; headless runs and declined questions link nothing and say so, with
+/// the command that would link it. Returns whether to link `phase_id`.
+fn confirm_suggested_phase(
+    title: &str,
+    phase_id: &str,
+    phase_title: &str,
+    can_prompt: bool,
+) -> bool {
+    use std::io::IsTerminal as _;
+
+    if can_prompt && std::io::stdin().is_terminal() {
+        eprint!(
+            "The title {} looks like phase {} ({}). Link this goal to it and mark it in_progress? [y/N] ",
+            shell_quote_title(title),
+            phase_id,
+            phase_title
+        );
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_ok()
+            && matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+        {
+            return true;
+        }
+        eprintln!("[phase] no phase linked (declined). Pass --phase {phase_id} to link it.");
+        return false;
+    }
+    eprintln!(
+        "[phase] no phase linked: no --phase was given, and a title match is only a suggestion. \
+         The title looks like {phase_id} ({phase_title}); pass --phase {phase_id} to link it."
+    );
+    false
 }
 
 /// Ask on a TTY, otherwise fail with [`block_message`]. Never inserts a phase.
@@ -13209,10 +13252,23 @@ mod phase_resolution_tests {
         assert_eq!(r.source, ResolveSource::TitleExtracted);
     }
 
+    /// A title that matches one phase well is only a suggestion: with no
+    /// `--phase`, a headless run (or one that cannot prompt) links nothing, so
+    /// no phase is claimed and no PLAN.md edit follows.
     #[test]
-    fn unique_confident_title_match_resolves() {
+    fn unique_confident_title_match_is_not_linked_without_phase() {
         let r = resolve_phase_with(
             None,
+            Some("Capture and replay for the golden set"),
+            &sample_plan(),
+            true,
+            &strict(),
+        )
+        .unwrap();
+        assert!(r.is_none(), "a title match must not claim a phase: {r:?}");
+        // The same text with the phase named explicitly does link it.
+        let r = resolve_phase_with(
+            Some("v1.0.1"),
             Some("Capture and replay for the golden set"),
             &sample_plan(),
             true,
@@ -13221,7 +13277,7 @@ mod phase_resolution_tests {
         .unwrap()
         .unwrap();
         assert_eq!(r.id, "v1.0.1");
-        assert_eq!(r.source, ResolveSource::TitleMatch);
+        assert_eq!(r.source, ResolveSource::Explicit);
     }
 
     #[test]
