@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::access_filter::AccessFilter;
 use crate::approval_rules::{evaluate_approval_rules, ApprovalAction, ApprovalRule};
+use crate::constitution_v2::{
+    evaluate_items, ConstitutionSet, DraftItem, DraftOutcome, Evaluation, SupervisorInput,
+};
 use crate::document::{AutoApproveDraftConfig, PolicyDocument, SecurityLevel};
 
 /// Minimal draft info needed for auto-approval evaluation.
@@ -168,6 +171,90 @@ pub fn should_auto_approve_with_rules(
                 )],
             },
         },
+    }
+}
+
+/// Outcome of [`should_auto_approve_with_constitution`]: the decision plus
+/// the per-item evaluation (for the audit log and the shadow log). The
+/// evaluation is `None` when the draft was refused before rules were read
+/// (H9) or when no v2 rule exists.
+#[derive(Debug, Clone)]
+pub struct ConstitutionDecision {
+    pub decision: AutoApproveDecision,
+    pub evaluation: Option<Evaluation>,
+}
+
+/// Evaluate a draft against the layered v2 constitution. This is the single
+/// auto-approve entry point for constitution rules; callers stay on the
+/// call-site allowlist enforced by `constitution_16_3_call_site.rs`.
+///
+/// Order (design section 4): H9 origin refusal, agent security level, rule
+/// match per item with layering, supervisor gate, mode. `shadow` rules never
+/// change the outcome: when enforce-mode rules do not decide the whole
+/// draft, the baseline policy decision stands unchanged.
+pub fn should_auto_approve_with_constitution(
+    draft: &DraftInfo,
+    doc: &PolicyDocument,
+    set: &ConstitutionSet,
+    items: &[DraftItem],
+    supervisor: Option<&SupervisorInput>,
+) -> ConstitutionDecision {
+    if let Some(refusal) = origin_refusal(draft) {
+        return ConstitutionDecision {
+            decision: refusal,
+            evaluation: None,
+        };
+    }
+    if set.is_inert() {
+        return ConstitutionDecision {
+            decision: should_auto_approve_draft(draft, doc),
+            evaluation: None,
+        };
+    }
+    let evaluation = evaluate_items(set, items, draft.origin.as_deref(), supervisor);
+
+    let agent_level = doc
+        .agents
+        .get(&draft.agent_id)
+        .and_then(|a| a.security_level)
+        .unwrap_or(doc.security_level);
+    if agent_level >= SecurityLevel::Supervised {
+        return ConstitutionDecision {
+            decision: AutoApproveDecision::Denied {
+                blockers: vec![format!(
+                    "agent '{}' security level is {} (requires human review)",
+                    draft.agent_id, agent_level
+                )],
+            },
+            evaluation: Some(evaluation),
+        };
+    }
+
+    let decision = match evaluation.actual_outcome() {
+        Some(DraftOutcome::AutoApprove) => AutoApproveDecision::Approved {
+            reasons: evaluation
+                .items
+                .iter()
+                .map(|i| format!("{}: {}", i.item_id, i.actual_reason))
+                .collect(),
+        },
+        Some(outcome) => {
+            let mut blockers: Vec<String> = evaluation
+                .items
+                .iter()
+                .filter(|i| i.actual != Some(ApprovalAction::Approve))
+                .map(|i| format!("{}: {}", i.item_id, i.actual_reason))
+                .collect();
+            if blockers.is_empty() {
+                blockers.push(format!("constitution outcome: {outcome:?} (no items)"));
+            }
+            AutoApproveDecision::Denied { blockers }
+        }
+        None => should_auto_approve_draft(draft, doc),
+    };
+    ConstitutionDecision {
+        decision,
+        evaluation: Some(evaluation),
     }
 }
 
@@ -428,6 +515,7 @@ mod tests {
             patterns: vec!["**".to_string()],
             action: ApprovalAction::Approve,
             label: Some("approve all".to_string()),
+            ..Default::default()
         }]
     }
 
