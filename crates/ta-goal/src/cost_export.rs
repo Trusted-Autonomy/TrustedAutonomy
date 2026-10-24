@@ -23,6 +23,7 @@ use anyhow::Context;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+use crate::cost_detail::{session_instrumentation, SessionInstrumentation};
 use crate::cost_report::{CostKind, CostRow, CostSourceKind};
 use crate::GoalRun;
 
@@ -78,6 +79,10 @@ pub struct SessionRow {
     pub cost_exact: bool,
     /// `false` when any turn has no price.
     pub priced: bool,
+    /// Output split, edit behaviour and session-start overhead of a transcript
+    /// session; absent for a TA goal. Additive. Fields ending `_est` are estimates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instrumentation: Option<SessionInstrumentation>,
     #[serde(skip)]
     source: CostSourceKind,
     /// Sum of the known turn costs (unpriced turns add 0), for the Meridian file.
@@ -155,6 +160,7 @@ pub fn session_rows(rows: &[&CostRow], goals: &[(String, GoalRun)]) -> Vec<Sessi
                 usd: all_priced.then_some(usd),
                 cost_exact: all_exact,
                 priced: all_priced,
+                instrumentation: session_instrumentation(&rows),
                 source,
                 usd_known: usd,
                 context_peak: peak,
@@ -223,6 +229,45 @@ pub fn meridian_records_with_usage(
                     "interactive"
                 }),
             );
+            if let Some(i) = &r.instrumentation {
+                let mut put = |k: &str, v: String| {
+                    rec.insert(k.into(), json!(v));
+                };
+                put("turns", i.turns.to_string());
+                put(
+                    "first_turn_cache_write_tokens",
+                    i.first_turn_cache_write_tokens.to_string(),
+                );
+                if let Some(f) = &i.session_family {
+                    put("session_family", f.clone());
+                }
+                if let Some(e) = &i.entrypoint {
+                    put("entrypoint", e.clone());
+                }
+                if let Some(d) = &i.detail {
+                    let o = &d.output_split;
+                    put(
+                        "output_thinking_tokens_reported",
+                        o.thinking_tokens_reported.to_string(),
+                    );
+                    put(
+                        "output_thinking_tokens_est",
+                        o.thinking_tokens_est.to_string(),
+                    );
+                    put("output_text_tokens_est", o.text_tokens_est.to_string());
+                    put(
+                        "output_tool_arg_tokens_est",
+                        o.tool_arg_tokens_est.to_string(),
+                    );
+                    put("edit_calls", d.edits.edit_calls.to_string());
+                    put("edit_failures", d.edits.edit_failures.to_string());
+                    put("edit_retries", d.edits.edit_retries.to_string());
+                    put(
+                        "whole_file_overwrites",
+                        d.edits.whole_file_overwrites.to_string(),
+                    );
+                }
+            }
             if let Some(u) = usage {
                 rec.insert("plan_usage_pct".into(), json!(pct(u.plan_usage_pct)));
                 rec.insert("budget_used_pct".into(), json!(pct(u.budget_used_pct)));
@@ -368,6 +413,9 @@ mod tests {
             kind: CostKind::Estimated,
             context_tokens: Some(ctx + 11),
             origin_class: None,
+            family: None,
+            entrypoint: None,
+            detail: None,
         }
     }
 

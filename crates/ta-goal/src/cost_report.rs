@@ -29,6 +29,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cost_detail::{DetailTotals, Dialect, SessionShape, ToolTracker, TurnDetail};
 use crate::spend::{self, SpendReport};
 use crate::token_cost::{CostSource, PriceTable, TokenUsage};
 use crate::GoalRun;
@@ -80,6 +81,14 @@ pub struct CostRow {
     /// for goals, which are many turns.
     pub context_tokens: Option<u64>,
     pub origin_class: Option<String>,
+    /// Coarse family of the session's first user prompt (a fixed label for a
+    /// known job, else `other:<hash>`). Never the prompt text. Transcripts only.
+    pub family: Option<String>,
+    /// How the session was started (`sdk-cli` headless, `cli` interactive).
+    /// Claude Code transcripts only.
+    pub entrypoint: Option<String>,
+    /// Content-block measurements of the turn. Transcripts only.
+    pub detail: Option<TurnDetail>,
 }
 
 // ── Context buckets ─────────────────────────────────────────────────────────
@@ -203,6 +212,163 @@ fn cost_of(
     }
 }
 
+/// The prompt text of a user message: a plain string, or the first text block.
+/// Used only to classify the session; it is never stored.
+fn prompt_text(content: &Value) -> Option<&str> {
+    let text = match content {
+        Value::String(s) => Some(s.as_str()),
+        Value::Array(blocks) => blocks
+            .iter()
+            .find(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .and_then(|b| b.get("text"))
+            .and_then(Value::as_str),
+        _ => None,
+    };
+    text.filter(|t| !t.trim().is_empty())
+}
+
+/// Identity of a content block of message `mid`, so a block repeated in a later
+/// record or in a copied (resumed) transcript is counted once. `None` for a
+/// tool call with no id, which cannot be told apart and is always counted.
+fn block_key(mid: &str, block: &Value) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let ty = block.get("type").and_then(Value::as_str).unwrap_or("");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    mid.hash(&mut h);
+    ty.hash(&mut h);
+    if ty == "tool_use" || ty == "toolCall" {
+        let id = block
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|i| !i.is_empty())?;
+        id.hash(&mut h);
+    } else {
+        let text = block
+            .get("text")
+            .or_else(|| block.get("thinking"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        text.len().hash(&mut h);
+        text.as_bytes()[..text.len().min(128)].hash(&mut h);
+        block
+            .get("signature")
+            .or_else(|| block.get("thinkingSignature"))
+            .and_then(Value::as_str)
+            .hash(&mut h);
+    }
+    Some(h.finish())
+}
+
+fn chars(s: &str) -> u64 {
+    s.chars().count() as u64
+}
+
+/// Add what the content blocks of one assistant message show to its turn. A
+/// block already counted (same [`block_key`]) adds nothing; `seen` holds the
+/// counted keys.
+fn absorb_blocks(
+    blocks: &[Value],
+    mid: &str,
+    seen: &mut HashSet<u64>,
+    tracker: &mut ToolTracker,
+    session: &str,
+    row: usize,
+    detail: &mut TurnDetail,
+) {
+    for block in blocks {
+        if let Some(key) = block_key(mid, block) {
+            if !seen.insert(key) {
+                continue;
+            }
+        }
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                let t = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                if t.is_empty() {
+                    detail.thinking_hidden_blocks += 1;
+                } else {
+                    detail.thinking_chars += chars(t);
+                }
+            }
+            Some("redacted_thinking") => detail.thinking_hidden_blocks += 1,
+            Some("text") => {
+                detail.text_chars += chars(block.get("text").and_then(Value::as_str).unwrap_or(""));
+            }
+            // Claude Code: tool_use/input. OMP: toolCall/arguments.
+            Some(ty @ ("tool_use" | "toolCall")) => {
+                let input = block
+                    .get(if ty == "tool_use" {
+                        "input"
+                    } else {
+                        "arguments"
+                    })
+                    .unwrap_or(&Value::Null);
+                let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                detail.merge(&tracker.call(session, row, id, name, input));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Apply a tool result to the turn that made the call.
+fn apply_result(
+    rows: &mut [CostRow],
+    tracker: &mut ToolTracker,
+    id: &str,
+    is_error: bool,
+    existing: Option<bool>,
+) {
+    if let Some((row, delta)) = tracker.result(id, is_error, existing) {
+        rows[row]
+            .detail
+            .get_or_insert_with(TurnDetail::default)
+            .merge(&delta);
+    }
+}
+
+/// A Claude `user` record: the session's first prompt (for its family) and the
+/// results of earlier tool calls.
+fn claude_user_record(
+    v: &Value,
+    family: &mut Option<String>,
+    tracker: &mut ToolTracker,
+    rows: &mut [CostRow],
+) {
+    let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
+        return;
+    };
+    if family.is_none() && v.get("isMeta").and_then(Value::as_bool) != Some(true) {
+        if let Some(text) = prompt_text(content) {
+            *family = Some(crate::cost_detail::classify_prompt(text));
+        }
+    }
+    let Value::Array(blocks) = content else {
+        return;
+    };
+    // `toolUseResult.type` is `create` or `update` for a Write.
+    let existing = match v
+        .get("toolUseResult")
+        .and_then(|r| r.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("update") => Some(true),
+        Some("create") => Some(false),
+        _ => None,
+    };
+    for b in blocks {
+        if b.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let Some(id) = b.get("tool_use_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let is_error = b.get("is_error").and_then(Value::as_bool) == Some(true);
+        apply_result(rows, tracker, id, is_error, existing);
+    }
+}
+
 /// Read Claude Code transcripts under `root` (normally `~/.claude/projects`).
 /// A missing `root` is reported in the status, not an error.
 pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
@@ -221,6 +387,8 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
     let files = jsonl_files(root, &mut scan.status);
     // message.id -> index into scan.rows; the last row for an id replaces it.
     let mut by_id: HashMap<String, usize> = HashMap::new();
+    let mut seen_blocks: HashSet<u64> = HashSet::new();
+    let mut tracker = ToolTracker::new(Dialect::Claude);
     for file in files {
         let text = match std::fs::read_to_string(&file) {
             Ok(t) => t,
@@ -237,13 +405,27 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        let mut file_family: Option<String> = None;
+        let mut file_entrypoint: Option<String> = None;
+        let mut file_rows: Vec<usize> = Vec::new();
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 scan.status.unparsable_lines += 1;
                 continue;
             };
-            if v.get("type").and_then(Value::as_str) != Some("assistant") {
-                continue;
+            if file_entrypoint.is_none() {
+                file_entrypoint = v
+                    .get("entrypoint")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            match v.get("type").and_then(Value::as_str) {
+                Some("assistant") => {}
+                Some("user") => {
+                    claude_user_record(&v, &mut file_family, &mut tracker, &mut scan.rows);
+                    continue;
+                }
+                _ => continue,
             }
             let Some(msg) = v.get("message") else {
                 continue;
@@ -278,13 +460,14 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
                 .and_then(Value::as_str)
                 .map(project_from_cwd)
                 .unwrap_or_else(|| dir_project.clone());
-            let row = CostRow {
+            let session = v
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let mut row = CostRow {
                 source: CostSourceKind::Claude,
-                session: v
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
+                session: session.clone(),
                 ts: v.get("timestamp").and_then(parse_ts),
                 project,
                 model: model.to_string(),
@@ -293,20 +476,63 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
                 kind,
                 context_tokens: Some(usage.input + usage.cache_read + usage.cache_creation),
                 origin_class: None,
+                family: file_family.clone(),
+                entrypoint: file_entrypoint.clone(),
+                detail: None,
             };
-            match msg.get("id").and_then(Value::as_str) {
-                Some(id) => match by_id.get(id) {
-                    Some(&i) => {
-                        scan.rows[i] = row;
-                        scan.status.deduplicated += 1;
+            let mid = msg.get("id").and_then(Value::as_str);
+            let idx = match mid.and_then(|id| by_id.get(id).copied()) {
+                Some(i) => {
+                    // The newest row's usage wins; what earlier records of this
+                    // message showed (blocks, tool results) is kept.
+                    row.detail = scan.rows[i].detail.take();
+                    row.family = row.family.or_else(|| scan.rows[i].family.take());
+                    scan.rows[i] = row;
+                    scan.status.deduplicated += 1;
+                    i
+                }
+                None => {
+                    let i = scan.rows.len();
+                    if let Some(id) = mid {
+                        by_id.insert(id.to_string(), i);
                     }
-                    None => {
-                        by_id.insert(id.to_string(), scan.rows.len());
-                        scan.rows.push(row);
-                    }
-                },
-                // No id to deduplicate on: keep the row.
-                None => scan.rows.push(row),
+                    scan.rows.push(row);
+                    i
+                }
+            };
+            file_rows.push(idx);
+            let mut rec = TurnDetail {
+                // Claude Code reports the thinking share of the output exactly.
+                thinking_reported: u
+                    .get("output_tokens_details")
+                    .and_then(|d| d.get("thinking_tokens"))
+                    .and_then(Value::as_u64),
+                ..TurnDetail::default()
+            };
+            if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
+                absorb_blocks(
+                    blocks,
+                    mid.unwrap_or(""),
+                    &mut seen_blocks,
+                    &mut tracker,
+                    &session,
+                    idx,
+                    &mut rec,
+                );
+            }
+            scan.rows[idx]
+                .detail
+                .get_or_insert_with(TurnDetail::default)
+                .merge(&rec);
+        }
+        // A turn can precede the record that names the family or entrypoint.
+        for i in file_rows {
+            let r = &mut scan.rows[i];
+            if r.family.is_none() {
+                r.family = file_family.clone();
+            }
+            if r.entrypoint.is_none() {
+                r.entrypoint = file_entrypoint.clone();
             }
         }
     }
@@ -329,6 +555,8 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
         return scan;
     }
     let files = jsonl_files(root, &mut scan.status);
+    let mut seen_blocks: HashSet<u64> = HashSet::new();
+    let mut tracker = ToolTracker::new(Dialect::Omp);
     for file in files {
         let text = match std::fs::read_to_string(&file) {
             Ok(t) => t,
@@ -349,6 +577,8 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        let mut file_family: Option<String> = None;
+        let first_row = scan.rows.len();
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 scan.status.unparsable_lines += 1;
@@ -367,8 +597,24 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
                     let Some(msg) = v.get("message") else {
                         continue;
                     };
-                    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
-                        continue;
+                    match msg.get("role").and_then(Value::as_str) {
+                        Some("user") => {
+                            if file_family.is_none() {
+                                if let Some(t) = msg.get("content").and_then(prompt_text) {
+                                    file_family = Some(crate::cost_detail::classify_prompt(t));
+                                }
+                            }
+                            continue;
+                        }
+                        Some("toolResult") => {
+                            let id = msg.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+                            let is_error =
+                                msg.get("isError").and_then(Value::as_bool) == Some(true);
+                            apply_result(&mut scan.rows, &mut tracker, id, is_error, None);
+                            continue;
+                        }
+                        Some("assistant") => {}
+                        _ => continue,
                     }
                     let Some(u) = msg.get("usage") else {
                         continue;
@@ -386,6 +632,20 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
                         .and_then(|c| c.get("total"))
                         .and_then(Value::as_f64);
                     let (usd, kind) = cost_of(table, model, &usage, one_hour, reported);
+                    let idx = scan.rows.len();
+                    // OMP reports no thinking/text/tool-argument split.
+                    let mut detail = TurnDetail::default();
+                    if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
+                        absorb_blocks(
+                            blocks,
+                            "",
+                            &mut seen_blocks,
+                            &mut tracker,
+                            &session,
+                            idx,
+                            &mut detail,
+                        );
+                    }
                     scan.rows.push(CostRow {
                         source: CostSourceKind::Omp,
                         session: session.clone(),
@@ -397,9 +657,17 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
                         kind,
                         context_tokens: Some(usage.input + usage.cache_read + usage.cache_creation),
                         origin_class: None,
+                        family: file_family.clone(),
+                        entrypoint: None,
+                        detail: Some(detail),
                     });
                 }
                 _ => {}
+            }
+        }
+        if let Some(f) = &file_family {
+            for r in &mut scan.rows[first_row..] {
+                r.family.get_or_insert_with(|| f.clone());
             }
         }
     }
@@ -432,6 +700,9 @@ pub fn goal_rows(goals: &[(String, GoalRun)]) -> Vec<CostRow> {
             },
             context_tokens: None,
             origin_class: Some(g.effective_origin_class().to_string()),
+            family: None,
+            entrypoint: None,
+            detail: None,
         })
         .collect()
 }
@@ -448,6 +719,11 @@ pub enum CostGroup {
     OriginClass,
     /// One group per TA goal (transcript sessions show `n/a`).
     Goal,
+    /// The coarse family of the session's first user prompt (`n/a` for goals
+    /// and sources with no prompt). See `ta cost report --detail`.
+    SessionFamily,
+    /// How the session was started: `sdk-cli` (headless) or `cli`.
+    Entrypoint,
 }
 
 impl CostGroup {
@@ -460,6 +736,8 @@ impl CostGroup {
             CostGroup::ContextBucket => "context_bucket",
             CostGroup::OriginClass => "origin_class",
             CostGroup::Goal => "goal",
+            CostGroup::SessionFamily => "session_family",
+            CostGroup::Entrypoint => "entrypoint",
         }
     }
 
@@ -485,6 +763,8 @@ impl CostGroup {
             CostGroup::OriginClass => r.origin_class.clone().unwrap_or_else(|| "n/a".to_string()),
             CostGroup::Goal if r.source == CostSourceKind::Goals => r.session.clone(),
             CostGroup::Goal => "n/a".to_string(),
+            CostGroup::SessionFamily => r.family.clone().unwrap_or_else(|| "n/a".to_string()),
+            CostGroup::Entrypoint => r.entrypoint.clone().unwrap_or_else(|| "n/a".to_string()),
         }
     }
 }
@@ -501,10 +781,13 @@ pub fn parse_cost_group_by(s: &str) -> Result<Vec<CostGroup>, String> {
             "context_bucket" => CostGroup::ContextBucket,
             "origin_class" => CostGroup::OriginClass,
             "goal" => CostGroup::Goal,
+            "session_family" => CostGroup::SessionFamily,
+            "entrypoint" => CostGroup::Entrypoint,
             other => {
                 return Err(format!(
                     "unknown --group-by {other:?}: expected a comma-separated list of day, source, \
-                     model, project, context_bucket, origin_class, goal (for example --group-by source,model). \
+                     model, project, context_bucket, origin_class, goal, session_family, entrypoint \
+                     (for example --group-by source,model). \
                      For one typed row per goal and session use --json --rows"
                 ))
             }
@@ -534,6 +817,10 @@ pub struct CostTotals {
     pub exact_rows: u64,
     pub estimated_rows: u64,
     pub unpriced_rows: u64,
+    /// Output split, edit and write measurements of the transcript turns in
+    /// the group. Absent for a group of goals only. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<DetailTotals>,
 }
 
 impl CostTotals {
@@ -551,6 +838,11 @@ impl CostTotals {
             CostKind::Exact => self.exact_rows += 1,
             CostKind::Estimated => self.estimated_rows += 1,
             CostKind::Unpriced => self.unpriced_rows += 1,
+        }
+        if let Some(d) = &r.detail {
+            self.detail
+                .get_or_insert_with(DetailTotals::default)
+                .add(r.usage.output, d);
         }
     }
 }
@@ -642,7 +934,27 @@ pub struct CostReport {
     /// Additive: absent in older reports and filled in by the CLI.
     #[serde(default)]
     pub usage: Option<crate::usage::UsageSummary>,
+    /// JSON schema version of this report. 1: the original report (the field
+    /// is absent). 2: adds `detail` on every group and total, `session_shape`
+    /// and `detail_notes`. Fields are only ever added within a version.
+    #[serde(default = "schema_v1")]
+    pub schema_version: u32,
+    /// Turns-per-session histogram, session-start overhead and short-session
+    /// families for the transcript sessions that started in the window.
+    #[serde(default)]
+    pub session_shape: Option<SessionShape>,
+    /// How to read the `detail` and `session_shape` numbers.
+    #[serde(default)]
+    pub detail_notes: Vec<String>,
 }
+
+/// The version of a report written before `schema_version` existed.
+fn schema_v1() -> u32 {
+    1
+}
+
+/// The current `CostReport.schema_version`.
+pub const COST_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Build the report from already-scanned sources.
 ///
@@ -686,6 +998,10 @@ pub fn build_report(
         .collect();
     let (mut context_buckets, _) =
         group_rows(&bucketed, &[CostGroup::Source, CostGroup::ContextBucket]);
+    // The per-bucket table is about prompt size; the detail lives in `groups`.
+    for g in &mut context_buckets {
+        g.totals.detail = None;
+    }
     // BTreeMap order is alphabetical; present buckets small to large.
     let order = |g: &CostGroupRow| {
         let b = g.group.get("context_bucket").cloned().unwrap_or_default();
@@ -718,7 +1034,51 @@ pub fn build_report(
                 .to_string(),
         ],
         usage: None,
+        schema_version: COST_REPORT_SCHEMA_VERSION,
+        session_shape: Some(crate::cost_detail::session_shape(&rows, |r| {
+            filter.matches(r)
+        })),
+        detail_notes: detail_notes(),
     }
+}
+
+/// How to read the `detail` and `session_shape` numbers (JSON `detail_notes`,
+/// printed by `--detail`).
+fn detail_notes() -> Vec<String> {
+    use crate::cost_detail::{
+        CHARS_PER_TOKEN, LARGE_OVERWRITE_BYTES, MAX_FAMILIES, SHORT_SESSION_MAX_TURNS,
+    };
+    vec![
+        format!(
+            "Output split: thinking is EXACT (`thinking_tokens_reported`) where the runtime \
+             reports it (Claude Code: usage.output_tokens_details.thinking_tokens). Everything \
+             ending `_est` is an ESTIMATE from block length: assistant text and tool-call \
+             arguments share the non-thinking output in proportion to their characters; where \
+             nothing reports thinking (OMP) all three share the reported output total by \
+             characters; where thinking is hidden and unreported it is the output total minus \
+             the estimated text and argument tokens at {CHARS_PER_TOKEN} characters per token. \
+             The parts always sum to the reported output tokens of the turns counted."
+        ),
+        "Edits: a failed edit is an edit tool call whose result was an error; a retry is an edit \
+         call to a file whose previous edit in the same session failed. Tool names: Claude Code \
+         Edit/MultiEdit/NotebookEdit and Write; OMP edit and write. Calls to non-file targets \
+         (such as xd:// devices through `write`) are not counted as writes."
+            .to_string(),
+        format!(
+            "Whole-file overwrites: a successful write over a file that already existed, large \
+             at {LARGE_OVERWRITE_BYTES} bytes or more. Claude Code says so itself (Write result \
+             type `update`). OMP does not, so a write counts as an overwrite only when the \
+             session had already read, edited or written that path: for OMP it is a lower bound."
+        ),
+        format!(
+            "Session shape: a turn is one deduplicated API call. A session is counted when its \
+             first turn is inside the window, with all its turns. Short = at most \
+             {SHORT_SESSION_MAX_TURNS} turns. First-turn cache write is the session-start \
+             overhead. Family is a fixed label for a known automated job, else `other:` and a \
+             hash of the first user prompt's opening; prompt text is never stored. The \
+             {MAX_FAMILIES} costliest families are listed, the rest fold into `(remaining)`."
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -1147,5 +1507,453 @@ mod tests {
         );
         assert_eq!(project_from_cwd("C:\\a\\proj"), "proj");
         assert_eq!(project_from_cwd(""), "unknown");
+    }
+
+    // ── Instrumentation: output split, edit behaviour, session shape ────────
+
+    use serde_json::json;
+
+    /// One Claude assistant record. A real transcript writes one record per
+    /// content block, each repeating the message's usage.
+    fn assistant_rec(
+        session: &str,
+        ts: &str,
+        mid: &str,
+        blocks: Value,
+        out: u64,
+        thinking: Option<u64>,
+        cache_write: u64,
+    ) -> String {
+        let mut usage = json!({"input_tokens": 1, "output_tokens": out,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": cache_write});
+        if let Some(t) = thinking {
+            usage["output_tokens_details"] = json!({"thinking_tokens": t});
+        }
+        json!({"type": "assistant", "timestamp": ts, "sessionId": session,
+            "cwd": "/Users/x/dev/proj", "entrypoint": "sdk-cli",
+            "message": {"id": mid, "model": "claude-sonnet-5-5", "role": "assistant",
+                        "content": blocks, "usage": usage}})
+        .to_string()
+    }
+
+    fn user_rec(session: &str, text: &str) -> String {
+        json!({"type": "user", "sessionId": session, "entrypoint": "sdk-cli",
+            "message": {"role": "user", "content": text}})
+        .to_string()
+    }
+
+    fn result_rec(session: &str, id: &str, is_error: bool, kind: Option<&str>) -> String {
+        let mut v = json!({"type": "user", "sessionId": session, "message": {"role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": id, "is_error": is_error,
+                         "content": "x"}]}});
+        if let Some(k) = kind {
+            v["toolUseResult"] = json!({"type": k});
+        }
+        v.to_string()
+    }
+
+    fn tool_use(id: &str, name: &str, input: Value) -> Value {
+        json!({"type": "tool_use", "id": id, "name": name, "input": input})
+    }
+
+    fn edit_input(path: &str) -> Value {
+        json!({"file_path": path, "old_string": "a", "new_string": "b"})
+    }
+
+    fn one_report(scan: Scan, group_by: &[CostGroup], filter: &CostFilter) -> CostReport {
+        build_report(None, vec![scan], group_by, filter)
+    }
+
+    #[test]
+    fn claude_thinking_is_exact_and_text_and_tool_args_are_estimates_counted_once() {
+        let dir = tempdir().unwrap();
+        let text = "x".repeat(100);
+        let recs = vec![
+            // Thinking hidden by the provider (empty text) but reported in usage.
+            assistant_rec(
+                "s",
+                "2026-10-15T01:00:00Z",
+                "m1",
+                json!([{"type": "thinking", "thinking": "", "signature": "sig"}]),
+                200,
+                Some(100),
+                0,
+            ),
+            assistant_rec(
+                "s",
+                "2026-10-15T01:00:01Z",
+                "m1",
+                json!([{"type": "text", "text": text}]),
+                200,
+                Some(100),
+                0,
+            ),
+            assistant_rec(
+                "s",
+                "2026-10-15T01:00:02Z",
+                "m1",
+                json!([tool_use("tu1", "Bash", json!({"command": "echo hi"}))]),
+                200,
+                Some(100),
+                0,
+            ),
+        ];
+        write(dir.path(), "p/a.jsonl", &recs);
+        // A resumed session copies the history into a second file.
+        write(dir.path(), "p/b.jsonl", &recs);
+        let scan = scan_claude(dir.path(), &PriceTable::builtin());
+        assert_eq!(scan.rows.len(), 1, "one message, one turn");
+        let rep = one_report(scan, &[CostGroup::Source], &CostFilter::default());
+        let d = rep.totals.detail.expect("transcript turns carry detail");
+        let o = &d.output_split;
+        assert_eq!(d.output_tokens, 200, "the copy must not double the output");
+        assert_eq!(o.thinking_tokens_reported, 100);
+        assert_eq!(
+            o.thinking_tokens_est, 0,
+            "reported thinking is never re-estimated"
+        );
+        // 100 text chars vs `{"command":"echo hi"}` (20 chars) share the other 100.
+        assert_eq!((o.text_tokens_est, o.tool_arg_tokens_est), (83, 17));
+        assert_eq!(o.unattributed_tokens, 0);
+        assert_eq!(o.turns_thinking_reported, 1);
+        assert_eq!(d.edits.tool_calls, 1, "the copied tool call counts once");
+    }
+
+    #[test]
+    fn omp_reports_no_split_so_every_part_is_an_estimate_summing_to_the_total() {
+        let dir = tempdir().unwrap();
+        let usage = json!({"input": 1, "output": 400, "cacheRead": 0, "cacheWrite": 0,
+                           "cost": {"total": 0.01}});
+        let lines = vec![
+            json!({"type": "session", "id": "o1", "cwd": "/Users/x/dev/proj"}).to_string(),
+            json!({"type": "message", "timestamp": "2026-10-15T01:00:00Z", "message": {
+                "role": "user", "content": [{"type": "text", "text": "hello"}]}})
+            .to_string(),
+            json!({"type": "message", "timestamp": "2026-10-15T01:00:05Z", "message": {
+                "role": "assistant", "model": "claude-sonnet-5-5", "usage": usage,
+                "content": [
+                    {"type": "thinking", "thinking": "t".repeat(100)},
+                    {"type": "text", "text": "x".repeat(100)},
+                    {"type": "toolCall", "id": "c1", "name": "bash",
+                     "arguments": {"command": "ls"}}]}})
+            .to_string(),
+        ];
+        write(dir.path(), "p/o.jsonl", &lines);
+        let scan = scan_omp(dir.path(), &PriceTable::builtin());
+        let rep = one_report(scan, &[CostGroup::Source], &CostFilter::default());
+        let o = rep.totals.detail.unwrap().output_split;
+        // Visible lengths 100 : 100 : 16 (`{"command":"ls"}`) over 400 tokens.
+        assert_eq!(
+            o.thinking_tokens_reported, 0,
+            "OMP reports no thinking split"
+        );
+        assert_eq!(
+            (
+                o.thinking_tokens_est,
+                o.text_tokens_est,
+                o.tool_arg_tokens_est
+            ),
+            (185, 185, 30)
+        );
+        assert_eq!(o.turns_estimated_from_chars, 1);
+    }
+
+    #[test]
+    fn claude_edit_failures_retries_and_whole_file_overwrites_are_detected() {
+        let dir = tempdir().unwrap();
+        let t = |n: u32| format!("2026-10-15T01:00:{n:02}Z");
+        let call = |n: u32, mid: &str, block: Value| {
+            assistant_rec("s", &t(n), mid, json!([block]), 10, Some(0), 0)
+        };
+        let recs = vec![
+            user_rec("s", "do the edits"),
+            call(1, "m1", tool_use("e1", "Edit", edit_input("/p/a.rs"))),
+            result_rec("s", "e1", true, None),
+            // Same file again after the failure: a retry.
+            call(2, "m2", tool_use("e2", "Edit", edit_input("/p/a.rs"))),
+            result_rec("s", "e2", false, None),
+            // A different file: neither a failure nor a retry.
+            call(3, "m3", tool_use("e3", "Edit", edit_input("/p/b.rs"))),
+            result_rec("s", "e3", false, None),
+            // A large overwrite, a create, a failed write and a small overwrite.
+            call(
+                4,
+                "m4",
+                tool_use(
+                    "w1",
+                    "Write",
+                    json!({"file_path": "/p/a.rs", "content": "x".repeat(10_000)}),
+                ),
+            ),
+            result_rec("s", "w1", false, Some("update")),
+            call(
+                5,
+                "m5",
+                tool_use(
+                    "w2",
+                    "Write",
+                    json!({"file_path": "/p/new.rs", "content": "hi"}),
+                ),
+            ),
+            result_rec("s", "w2", false, Some("create")),
+            call(
+                6,
+                "m6",
+                tool_use(
+                    "w3",
+                    "Write",
+                    json!({"file_path": "/p/c.rs", "content": "x"}),
+                ),
+            ),
+            result_rec("s", "w3", true, None),
+            call(
+                7,
+                "m7",
+                tool_use(
+                    "w4",
+                    "Write",
+                    json!({"file_path": "/p/s.rs", "content": "y".repeat(100)}),
+                ),
+            ),
+            result_rec("s", "w4", false, Some("update")),
+        ];
+        write(dir.path(), "p/a.jsonl", &recs);
+        let scan = scan_claude(dir.path(), &PriceTable::builtin());
+        let rep = one_report(scan, &[CostGroup::Source], &CostFilter::default());
+        let e = rep.totals.detail.unwrap().edits;
+        assert_eq!(e.tool_calls, 7);
+        assert_eq!((e.edit_calls, e.edit_failures, e.edit_retries), (3, 1, 1));
+        assert!(e.failed_edit_arg_tokens_est > 0, "{e:?}");
+        assert_eq!((e.file_writes, e.write_failures), (3, 1));
+        assert_eq!(
+            e.whole_file_overwrites, 2,
+            "w1 and w4 overwrote; w2 created"
+        );
+        assert_eq!(e.overwrite_bytes, 10_100);
+        assert_eq!((e.large_overwrites, e.large_overwrite_bytes), (1, 10_000));
+    }
+
+    #[test]
+    fn omp_retries_follow_the_file_across_relative_and_absolute_paths() {
+        let dir = tempdir().unwrap();
+        let usage = json!({"input": 1, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+                           "cost": {"total": 0.01}});
+        let turn = |calls: Vec<Value>| {
+            json!({"type": "message", "timestamp": "2026-10-15T01:00:00Z", "message": {
+                "role": "assistant", "model": "claude-sonnet-5-5", "usage": usage,
+                "content": calls}})
+            .to_string()
+        };
+        let call = |id: &str, name: &str, args: Value| json!({"type": "toolCall", "id": id, "name": name, "arguments": args});
+        let res = |id: &str, is_error: bool| {
+            json!({"type": "message", "message": {"role": "toolResult", "toolCallId": id,
+                "isError": is_error, "content": [{"type": "text", "text": "r"}]}})
+            .to_string()
+        };
+        let lines = vec![
+            json!({"type": "session", "id": "o1", "cwd": "/w"}).to_string(),
+            turn(vec![
+                call("r1", "read", json!({"path": "src/a.rs:1-20"})),
+                call(
+                    "e1",
+                    "edit",
+                    json!({"input": "[src/a.rs#AAAA]\nPUT 1:\n+x"}),
+                ),
+            ]),
+            res("r1", false),
+            res("e1", true),
+            turn(vec![call(
+                "e2",
+                "edit",
+                json!({"input": "[/w/src/a.rs#BBBB]\nPUT 1:\n+y"}),
+            )]),
+            res("e2", false),
+            turn(vec![
+                call(
+                    "w1",
+                    "write",
+                    json!({"path": "/w/src/a.rs", "content": "zzzz"}),
+                ),
+                call(
+                    "w2",
+                    "write",
+                    json!({"path": "/w/src/new.rs", "content": "zz"}),
+                ),
+                // `write` also carries xd:// device calls: not a file write.
+                call(
+                    "w3",
+                    "write",
+                    json!({"path": "xd://ast_edit", "content": "{}"}),
+                ),
+            ]),
+            res("w1", false),
+            res("w2", false),
+            res("w3", false),
+        ];
+        write(dir.path(), "p/o.jsonl", &lines);
+        let scan = scan_omp(dir.path(), &PriceTable::builtin());
+        let rep = one_report(scan, &[CostGroup::Source], &CostFilter::default());
+        let e = rep.totals.detail.unwrap().edits;
+        assert_eq!(e.tool_calls, 6);
+        assert_eq!((e.edit_calls, e.edit_failures, e.edit_retries), (2, 1, 1));
+        assert_eq!(e.file_writes, 2, "the xd:// call is not a file write");
+        assert_eq!(
+            e.whole_file_overwrites, 1,
+            "a.rs was read and edited earlier; new.rs was never seen"
+        );
+    }
+
+    /// Three sessions after `since` and one before it.
+    fn shape_fixture(dir: &Path) {
+        let turns = |session: &str, day: &str, prompt: &str, n: u32, first_cw: u64| {
+            let mut v = vec![user_rec(session, prompt)];
+            for i in 0..n {
+                let cw = if i == 0 { first_cw } else { 10 };
+                v.push(assistant_rec(
+                    session,
+                    &format!("{day}T01:00:{i:02}Z"),
+                    &format!("{session}-{i}"),
+                    json!([]),
+                    5,
+                    None,
+                    cw,
+                ));
+            }
+            v
+        };
+        let title = "Extract the user's actual work request from hunter2-secret-token";
+        write(
+            dir,
+            "p/a.jsonl",
+            &turns("a", "2026-10-15", title, 3, 17_000),
+        );
+        write(
+            dir,
+            "p/b.jsonl",
+            &turns("b", "2026-10-16", title, 2, 15_000),
+        );
+        write(
+            dir,
+            "p/c.jsonl",
+            &turns(
+                "c",
+                "2026-10-16",
+                "Plan the migration of table users",
+                8,
+                5_000,
+            ),
+        );
+        write(
+            dir,
+            "p/d.jsonl",
+            &turns("d", "2026-10-10", title, 1, 99_000),
+        );
+    }
+
+    fn since_oct_14() -> CostFilter {
+        CostFilter {
+            since: Some(parse_ts(&json!("2026-10-14T00:00:00Z")).unwrap()),
+            ..CostFilter::default()
+        }
+    }
+
+    #[test]
+    fn session_shape_has_a_turns_histogram_first_turn_overhead_and_families() {
+        let dir = tempdir().unwrap();
+        shape_fixture(dir.path());
+        let scan = scan_claude(dir.path(), &PriceTable::builtin());
+        let rep = one_report(scan, &[CostGroup::Source], &since_oct_14());
+        let shape = rep.session_shape.as_ref().unwrap();
+        assert_eq!(shape.sources.len(), 1);
+        let src = &shape.sources[0];
+        let hist: BTreeMap<&str, u64> = src
+            .turns_histogram
+            .iter()
+            .map(|b| (b.turns.as_str(), b.sessions))
+            .collect();
+        assert_eq!(hist["1"], 0, "session d started before the window");
+        assert_eq!((hist["2"], hist["3"], hist["6-10"]), (1, 1, 1));
+        assert!(
+            src.turns_histogram
+                .iter()
+                .filter(|b| b.sessions == 0)
+                .all(|b| b.usd.is_sign_positive()),
+            "an empty bucket must print 0.00, not -0.00"
+        );
+        let class = |name: &str| src.classes.iter().find(|c| c.class == name).unwrap();
+        assert_eq!(class("all").sessions, 3);
+        assert_eq!((class("short").sessions, class("long").sessions), (2, 1));
+        // Short sessions started with 17,000 and 15,000 cache-write tokens.
+        let f = &class("short").first_turn;
+        assert_eq!(f.cache_write_tokens_total, 32_000);
+        assert_eq!(f.cache_write_tokens_mean, 16_000);
+        assert_eq!(f.cache_write_tokens_median, 15_000);
+        assert_eq!(
+            (f.cache_write_tokens_p90, f.cache_write_tokens_max),
+            (17_000, 17_000)
+        );
+        // Only the short sessions are attributed, by label, with their entrypoint.
+        assert_eq!(shape.families.len(), 1);
+        let fam = &shape.families[0];
+        assert_eq!(
+            (
+                fam.family.as_str(),
+                fam.entrypoint.as_str(),
+                fam.sessions,
+                fam.turns
+            ),
+            ("title-extraction", "sdk-cli", 2, 5)
+        );
+        // The prompt text must not reach any output.
+        let json = serde_json::to_string(&rep).unwrap();
+        assert!(
+            !json.contains("hunter2") && !json.contains("secret"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn session_family_and_entrypoint_are_group_by_values() {
+        let dir = tempdir().unwrap();
+        shape_fixture(dir.path());
+        let scan = scan_claude(dir.path(), &PriceTable::builtin());
+        let by = parse_cost_group_by("session_family,entrypoint").unwrap();
+        let rep = one_report(scan, &by, &since_oct_14());
+        let mut keys: Vec<(String, String, u64)> = rep
+            .groups
+            .iter()
+            .map(|g| {
+                (
+                    g.group["session_family"].clone(),
+                    g.group["entrypoint"].clone(),
+                    g.totals.sessions,
+                )
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[1], ("title-extraction".into(), "sdk-cli".into(), 2));
+        assert!(keys[0].0.starts_with("other:"), "{keys:?}");
+    }
+
+    #[test]
+    fn reports_carry_a_schema_version_and_old_reports_read_as_version_1() {
+        let dir = tempdir().unwrap();
+        shape_fixture(dir.path());
+        let scan = scan_claude(dir.path(), &PriceTable::builtin());
+        let rep = one_report(scan, &[CostGroup::Source], &CostFilter::default());
+        assert_eq!(rep.schema_version, COST_REPORT_SCHEMA_VERSION);
+        let mut v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["schema_version"], 2);
+        for k in ["schema_version", "session_shape", "detail_notes"] {
+            v.as_object_mut().unwrap().remove(k);
+        }
+        for g in v["groups"].as_array_mut().unwrap() {
+            g.as_object_mut().unwrap().remove("detail");
+        }
+        v["totals"].as_object_mut().unwrap().remove("detail");
+        let old: CostReport = serde_json::from_value(v).unwrap();
+        assert_eq!(old.schema_version, 1);
+        assert!(old.session_shape.is_none() && old.totals.detail.is_none());
     }
 }
