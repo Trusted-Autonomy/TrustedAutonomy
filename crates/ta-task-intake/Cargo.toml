@@ -1,0 +1,25 @@
+[package]
+name = "ta-task-intake"
+version.workspace = true
+edition = "2021"
+description = "Task intake funnel store for Trusted Autonomy: a flock-protected request queue, a separate status ledger, caps, dedupe and fenced display"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "autonomy", "queue", "intake"]
+categories = ["development-tools"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+libc = { workspace = true }
+ta-audit = { path = "../ta-audit", version = "0.17.12-alpha.5" }
+ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.5" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
