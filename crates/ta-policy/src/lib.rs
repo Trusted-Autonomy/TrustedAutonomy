@@ -56,6 +56,7 @@ pub use context::PolicyContext;
 pub mod access_filter;
 pub mod approval_rules;
 pub mod auto_approve;
+pub mod constitution_shadow;
 pub mod constitution_v2;
 
 pub use access_filter::AccessFilter;

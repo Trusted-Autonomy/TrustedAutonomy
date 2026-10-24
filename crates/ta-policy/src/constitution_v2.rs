@@ -333,6 +333,10 @@ pub struct ConstitutionFileMeta {
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<String>,
+    /// Project file only: `org rule id -> "shadow"`. Moves an org `approve`
+    /// rule toward shadow. Never toward enforce, never a restrictive rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_overrides: Option<std::collections::BTreeMap<String, String>>,
 }
 
 // ── Compiled rules ──────────────────────────────────────────────────────
@@ -397,6 +401,8 @@ pub struct Constitution {
     pub org: Option<String>,
     pub project: Option<String>,
     pub default_mode: Option<Mode>,
+    /// Project file only (see `ConstitutionFileMeta::mode_overrides`).
+    pub mode_overrides: BTreeMap<String, Mode>,
     pub rules: Vec<CompiledRule>,
     /// Hex sha256 of the file text; recorded on every decision.
     pub sha256: String,
@@ -485,6 +491,7 @@ impl Constitution {
                 org: None,
                 project: None,
                 default_mode: None,
+                mode_overrides: BTreeMap::new(),
                 rules: Vec::new(),
                 sha256,
                 legacy: true,
@@ -526,6 +533,28 @@ impl Constitution {
                 None
             }
         };
+        let mut mode_overrides: BTreeMap<String, Mode> = BTreeMap::new();
+        match table.get("mode_overrides") {
+            None => {}
+            Some(_) if expected_layer == Layer::Org => problems.push(
+                "mode_overrides is a project file key (it moves an org rule toward shadow). The org file sets modes on its own rules with `mode`/`default_mode`.".to_string(),
+            ),
+            Some(toml::Value::Table(t)) => {
+                for (id, v) in t {
+                    match v.as_str().and_then(Mode::parse) {
+                        Some(m) => {
+                            mode_overrides.insert(id.clone(), m);
+                        }
+                        None => problems.push(format!(
+                            "mode_overrides.{id} must be \"shadow\" or \"enforce\", found {v}"
+                        )),
+                    }
+                }
+            }
+            Some(other) => problems.push(format!(
+                "mode_overrides must be a table of org-rule-id = \"shadow\", found {other}"
+            )),
+        }
         let string_key = |k: &str| table.get(k).and_then(|v| v.as_str()).map(str::to_string);
 
         let mut rules = Vec::with_capacity(raw_rules.len());
@@ -556,6 +585,7 @@ impl Constitution {
             org: string_key("org"),
             project: string_key("project"),
             default_mode,
+            mode_overrides,
             rules,
             sha256,
             legacy: false,
@@ -952,6 +982,50 @@ impl ConstitutionSet {
                 });
             }
         }
+        let (mut org, project) = (org, project);
+        if let (Some(o), Some(p)) = (org.as_mut(), project.as_ref()) {
+            let mut problems = Vec::new();
+            for (id, mode) in &p.mode_overrides {
+                let Some(rule) = o.rules.iter().position(|r| &r.id == id) else {
+                    problems.push(format!(
+                        "mode_overrides.{id}: there is no org rule with this id. Check the id against `ta constitution show`."
+                    ));
+                    continue;
+                };
+                if *mode != Mode::Shadow {
+                    problems.push(format!(
+                        "mode_overrides.{id} = \"enforce\": a project can only move an org rule toward shadow. Promoting an org rule to enforce is an org-file change."
+                    ));
+                    continue;
+                }
+                if o.rules[rule].action != ApprovalAction::Approve {
+                    problems.push(format!(
+                        "mode_overrides.{id} = \"shadow\": org rule \"{id}\" is a {} rule, and shadowing a restrictive rule would loosen it. A project cannot loosen or disable an org rule; only org `approve` rules can be moved to shadow.",
+                        o.rules[rule].action
+                    ));
+                    continue;
+                }
+                o.rules[rule].mode = Some(Mode::Shadow);
+            }
+            if !problems.is_empty() {
+                return Err(ConstitutionError {
+                    source: format!(
+                        "{PROJECT_CONSTITUTION_PATH} (layered on {ORG_CONSTITUTION_PATH})"
+                    ),
+                    problems,
+                });
+            }
+        } else if let Some(p) = project.as_ref() {
+            if !p.mode_overrides.is_empty() {
+                return Err(ConstitutionError::one(
+                    PROJECT_CONSTITUTION_PATH,
+                    format!(
+                        "mode_overrides names org rules ({}), but there is no org constitution at {ORG_CONSTITUTION_PATH}. Add the org file or remove mode_overrides.",
+                        p.mode_overrides.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+        }
         Ok(Self { org, project })
     }
 
@@ -991,6 +1065,15 @@ impl ConstitutionSet {
 
     pub fn project_sha256(&self) -> Option<&str> {
         self.project.as_ref().map(|c| c.sha256.as_str())
+    }
+
+    /// Every rule of both layers with its resolved mode (project overrides
+    /// applied), org rules first.
+    pub fn rule_refs(&self) -> Vec<RuleRef> {
+        self.layers()
+            .into_iter()
+            .flat_map(|c| c.rules.iter().map(|r| rule_ref(r, c.resolved_mode(r))))
+            .collect()
     }
 
     /// Human-readable summary: one line per layer, one per rule (id, kind,
@@ -2137,6 +2220,86 @@ action = "review"
             TaskOperation::from_tool_name("something_new"),
             TaskOperation::Other
         );
+    }
+
+    // ── Project mode overrides: toward shadow only ─────────────────
+
+    fn layered_err(org_text: &str, project_text: &str) -> String {
+        ConstitutionSet::new(Some(org(org_text)), Some(project(project_text)))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn project_can_move_an_org_approve_rule_to_shadow_and_it_stops_deciding() {
+        let proj = "schema_version = 2\nmode_overrides = { org-notes = \"shadow\" }\n";
+        let s = set(ENFORCED_NOTES, Some(proj));
+        let items = [wiki_update("a", Some("note"), "N", "ok", 1)];
+        let ev = evaluate_items(&s, &items, None, Some(&pass(1.0)));
+        assert_eq!(ev.items[0].would_be, ApprovalAction::Approve);
+        assert_eq!(
+            ev.items[0].actual,
+            Some(ApprovalAction::Review),
+            "shadowed: the item falls to the enforced org default (review), not approve"
+        );
+        assert!(s
+            .describe()
+            .iter()
+            .any(|l| l.contains("org-notes") && l.contains("shadow")));
+    }
+
+    #[test]
+    fn project_cannot_promote_an_org_shadow_rule_to_enforce() {
+        let org_shadow =
+            ENFORCED_NOTES.replace("default_mode = \"enforce\"", "default_mode = \"shadow\"");
+        let err = layered_err(
+            &org_shadow,
+            "schema_version = 2\nmode_overrides = { org-notes = \"enforce\" }\n",
+        );
+        assert!(err.contains("only move an org rule toward shadow"), "{err}");
+    }
+
+    #[test]
+    fn project_cannot_shadow_an_org_review_or_block_rule() {
+        for id in ["org-secrets", "org-default"] {
+            let err = layered_err(
+                ENFORCED_NOTES,
+                &format!("schema_version = 2\nmode_overrides = {{ {id} = \"shadow\" }}\n"),
+            );
+            assert!(err.contains("would loosen it"), "{id}: {err}");
+        }
+    }
+
+    #[test]
+    fn mode_overrides_naming_a_missing_org_rule_or_no_org_file_is_an_error() {
+        let err = layered_err(
+            ENFORCED_NOTES,
+            "schema_version = 2\nmode_overrides = { nope = \"shadow\" }\n",
+        );
+        assert!(err.contains("no org rule with this id"), "{err}");
+        let err = ConstitutionSet::new(
+            None,
+            Some(project(
+                "schema_version = 2\nmode_overrides = { org-notes = \"shadow\" }\n",
+            )),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no org constitution"), "{err}");
+    }
+
+    #[test]
+    fn mode_overrides_in_an_org_file_or_with_a_bad_value_is_an_error() {
+        let err = Constitution::parse(
+            "schema_version = 2\nmode_overrides = { a = \"shadow\" }\n",
+            Layer::Org,
+            "o.toml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("project file key"), "{err}");
+        let err = parse_err("schema_version = 2\nmode_overrides = { a = \"loud\" }\n");
+        assert!(err.contains("must be \"shadow\" or \"enforce\""), "{err}");
     }
 
     // ── Layering ────────────────────────────────────────────────────

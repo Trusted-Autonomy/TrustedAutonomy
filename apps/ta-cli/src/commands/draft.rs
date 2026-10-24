@@ -4067,6 +4067,25 @@ pub(crate) fn goal_origin_for_draft(config: &GatewayConfig, goal_id: &str) -> Op
     store.get(goal_uuid).ok().flatten()?.origin
 }
 
+/// Record what the constitution would do with a freshly built draft, for
+/// `ta draft view` and the shadow report. Observational: a `ta run` draft
+/// always waits for a human to apply it, so this never changes an outcome.
+/// A failure is logged and ignored.
+pub(crate) fn record_constitution_for_built_draft(config: &GatewayConfig, pkg: &DraftPackage) {
+    let origin = goal_origin_for_draft(config, &pkg.goal.goal_id);
+    if let Some(would_be) = ta_mcp_gateway::constitution_gate::record_built_draft(
+        &config.workspace_root,
+        origin.as_deref(),
+        pkg,
+    ) {
+        tracing::info!(
+            draft_id = %pkg.package_id,
+            would_be = %would_be,
+            "constitution evaluated the built draft (observational; the draft still waits for a human)"
+        );
+    }
+}
+
 /// H9: when the draft's goal came from an origin that is never
 /// auto-approved, the refusal line `ta draft view`/`ta draft apply` print.
 pub(crate) fn auto_approve_refusal_for_draft(
@@ -11614,6 +11633,7 @@ pub fn apply_draft_build_context(
     }
 
     save_package(config, &pkg)?;
+    record_constitution_for_built_draft(config, &pkg);
     let _ = fs::remove_file(ctx_path);
     tracing::info!(
         goal_id = goal_id,
@@ -11703,6 +11723,7 @@ pub fn build_draft_inline(
             pkg.supervisor_review = Some(sup);
         }
         let _ = save_package(config, &pkg);
+        record_constitution_for_built_draft(config, &pkg);
 
         // Print the ✓ result line using the canonical display ID.
         let canonical = ta_changeset::draft_resolver::draft_canonical_id(&pkg);
