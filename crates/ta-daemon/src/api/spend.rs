@@ -119,7 +119,16 @@ pub async fn spend_report(
                         "project": name, "goals_dir": dir.display().to_string(),
                         "goals_read": list.len(),
                     }));
-                    goals.extend(list.into_iter().map(|g| (name.clone(), g)));
+                    // <root>/.ta/goals -> <root> for that project's price table.
+                    let table = dir
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .map(ta_goal::PriceTable::load)
+                        .unwrap_or_else(ta_goal::PriceTable::builtin);
+                    goals.extend(list.into_iter().map(|mut g| {
+                        ta_goal::spend::estimate_legacy_goal_cost(&mut g, &table);
+                        (name.clone(), g)
+                    }));
                 }
                 Err(e) => {
                     tracing::warn!(project = %name, dir = %dir.display(), error = %e, "could not read goal records for GET /api/spend");
@@ -193,7 +202,12 @@ mod tests {
             PathBuf::from("/tmp/s"),
         );
         g.origin_class = class;
-        g.agent_model = "claude-sonnet-5-5".into();
+        // A goal with no cost source and no model is genuinely unpriced: nothing
+        // to price it from. (With a model and tokens it would be a legacy goal
+        // priced at report time; see `a_goal_from_before_cost_tracking_...`.)
+        if source != CostSource::None {
+            g.agent_model = "claude-sonnet-5-5".into();
+        }
         g.input_tokens = 10;
         g.output_tokens = 20;
         g.cache_read_input_tokens = 1_000;
@@ -280,6 +294,30 @@ mod tests {
         assert_eq!(v["totals"]["estimated_cost_goals"], 1);
         assert_eq!(v["totals"]["exact_cost_goals"], 2);
         assert_eq!(v["projects"][0]["goals_read"], 4);
+    }
+
+    #[tokio::test]
+    async fn a_goal_from_before_cost_tracking_is_priced_as_an_estimate_in_the_total() {
+        let r = rig();
+        let dir = r.project.path().join(".ta").join("goals");
+        let store = GoalRunStore::new(&dir).unwrap();
+        let mut g = GoalRun::new(
+            "old",
+            "o",
+            "claude-code",
+            PathBuf::from("/tmp/w"),
+            PathBuf::from("/tmp/s"),
+        );
+        // Recorded before cost tracking: model and tokens, no cost source.
+        g.agent_model = "claude-sonnet-5-5".into();
+        g.input_tokens = 1_000_000;
+        g.output_tokens = 100_000;
+        store.save(&g).unwrap();
+        let (st, v) = get(&r, "/api/spend").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["totals"]["unpriced_goals"], 0, "{v}");
+        assert_eq!(v["totals"]["estimated_cost_goals"], 1, "{v}");
+        assert!(v["totals"]["usd"].as_f64().unwrap() > 0.0, "{v}");
     }
 
     #[tokio::test]

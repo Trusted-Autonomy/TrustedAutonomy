@@ -289,7 +289,10 @@ fn gather(
             })?;
         Some(
             list.into_iter()
-                .map(|g| (project_name.clone(), g))
+                .map(|mut g| {
+                    ta_goal::spend::estimate_legacy_goal_cost(&mut g, &table);
+                    (project_name.clone(), g)
+                })
                 .collect::<Vec<_>>(),
         )
     } else {
