@@ -653,7 +653,7 @@ fn launch_wake_on_demand(
         msg_id,
         ta_bin,
         &args,
-        &crate::team_session::role_launch_env(project_root, &state, role),
+        &wake_launch_env(project_root, &state, role),
         launch_timeout,
     )?;
 
@@ -670,6 +670,56 @@ fn launch_wake_on_demand(
     });
     state.save(project_root)?;
     Ok(())
+}
+
+/// The Wayfinder project a wake for `project_root` is for, as the entry the chat session's
+/// Wayfinder read tools pin to (`TA_CHAT_WAYFINDER_PROJECT_ID`).
+///
+/// The project is `[plan.wayfinder].project_id` in THIS project's `.ta/workflow.toml`. The
+/// entry is always emitted: when the project is unknown (no file, no table, a malformed file)
+/// its value is EMPTY, which overrides any value in the daemon's own environment, so a wake for
+/// project B can never inherit project A's pin, and the read tools then refuse (fail closed).
+pub fn wake_wayfinder_pin_env(project_root: &Path) -> (String, String) {
+    let workflow_toml = project_root.join(".ta").join("workflow.toml");
+    let pin = match ta_submit::WorkflowConfig::load(&workflow_toml) {
+        Ok(w) => w
+            .plan
+            .wayfinder
+            .map(|c| c.project_id.trim().to_string())
+            .filter(|id| !id.is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                path = %workflow_toml.display(),
+                error = %e,
+                "wake_listener: could not read the Wayfinder project from workflow.toml"
+            );
+            None
+        }
+    };
+    if pin.is_none() {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            "wake_listener: no [plan.wayfinder] project_id for this project, so the chat \
+             session's ta_wayfinder_* tools will refuse every call. Add project_id to \
+             {}",
+            workflow_toml.display()
+        );
+    }
+    (
+        ta_mcp_gateway::chat_launch::ENV_CHAT_WAYFINDER_PROJECT_ID.to_string(),
+        pin.unwrap_or_default(),
+    )
+}
+
+/// Environment of one wake launch: the role's whiteboard credentials plus the Wayfinder pin.
+fn wake_launch_env(
+    project_root: &Path,
+    state: &TeamSessionState,
+    role: &str,
+) -> Vec<(String, String)> {
+    let mut env = crate::team_session::role_launch_env(project_root, state, role);
+    env.push(wake_wayfinder_pin_env(project_root));
+    env
 }
 
 /// Runs one launch, always saving its full stdout and stderr under
@@ -1303,6 +1353,100 @@ mod tests {
             err.contains("seq-7") && err.contains("chief-of-staff"),
             "{err}"
         );
+    }
+
+    fn project_with_wayfinder(id: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        if let Some(id) = id {
+            std::fs::write(
+                dir.path().join(".ta/workflow.toml"),
+                format!(
+                    "[plan.wayfinder]\nbase_url = \"http://127.0.0.1:3000\"\norg_id = \"org\"\n\
+                     project_id = \"{id}\"\ncredential_name = \"wf\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_wake_pins_the_chat_session_to_its_own_project_and_an_unknown_project_to_nothing() {
+        let key = ta_mcp_gateway::chat_launch::ENV_CHAT_WAYFINDER_PROJECT_ID;
+        let a = project_with_wayfinder(Some("proj-a"));
+        let b = project_with_wayfinder(Some("proj-b"));
+        assert_eq!(
+            wake_wayfinder_pin_env(a.path()),
+            (key.into(), "proj-a".into())
+        );
+        assert_eq!(
+            wake_wayfinder_pin_env(b.path()),
+            (key.into(), "proj-b".into())
+        );
+
+        // No config, a config without the table and a malformed file all fail closed: the
+        // entry is present and empty so it overrides any ambient value.
+        let none = project_with_wayfinder(None);
+        assert_eq!(
+            wake_wayfinder_pin_env(none.path()),
+            (key.into(), String::new())
+        );
+        std::fs::write(
+            none.path().join(".ta/workflow.toml"),
+            "[submit]\nadapter = \"none\"\n",
+        )
+        .unwrap();
+        assert_eq!(wake_wayfinder_pin_env(none.path()).1, "");
+        std::fs::write(none.path().join(".ta/workflow.toml"), "[plan.wayfinder\n").unwrap();
+        assert_eq!(wake_wayfinder_pin_env(none.path()).1, "");
+    }
+
+    /// Two wakes for two projects, each launched through the real launch runner: the child
+    /// process of each sees only its own project's pin, whatever the daemon's own environment
+    /// holds. (The read tools refuse a pin that disagrees with the project's config: see the
+    /// `wayfinder_read` tests.)
+    #[cfg(unix)]
+    #[test]
+    fn two_wakes_for_two_projects_never_cross() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = project_with_wayfinder(Some("proj-a"));
+        let b = project_with_wayfinder(Some("proj-b"));
+        let unknown = project_with_wayfinder(None);
+        let fake_dir = tempfile::tempdir().unwrap();
+        let fake = fake_dir.path().join("fake-ta.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho \"pin=[$TA_CHAT_WAYFINDER_PROJECT_ID]\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let pin_seen_by_child = |project: &tempfile::TempDir, msg: &str| -> String {
+            let out = run_and_record_launch(
+                project.path(),
+                "sess-1",
+                "chief-of-staff",
+                msg,
+                &fake,
+                &[],
+                // A stale value from another project already in the environment must lose.
+                &[
+                    (
+                        ta_mcp_gateway::chat_launch::ENV_CHAT_WAYFINDER_PROJECT_ID.to_string(),
+                        "proj-stale".to_string(),
+                    ),
+                    wake_wayfinder_pin_env(project.path()),
+                ],
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(pin_seen_by_child(&a, "m-a"), "pin=[proj-a]");
+        assert_eq!(pin_seen_by_child(&b, "m-b"), "pin=[proj-b]");
+        assert_eq!(pin_seen_by_child(&a, "m-a2"), "pin=[proj-a]");
+        assert_eq!(pin_seen_by_child(&unknown, "m-u"), "pin=[]");
     }
 
     #[cfg(unix)]
