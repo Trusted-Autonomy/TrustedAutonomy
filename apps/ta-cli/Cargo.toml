@@ -71,6 +71,7 @@ ta-mediation = { path = "../../crates/ta-mediation", version = "0.17.12-alpha.5"
 ta-session = { path = "../../crates/ta-session", version = "0.17.12-alpha.5" }
 ta-events = { path = "../../crates/ta-events", version = "0.17.12-alpha.5" }
 ta-submit = { path = "../../crates/ta-submit", version = "0.17.12-alpha.5" }
+ta-task-intake = { path = "../../crates/ta-task-intake", version = "0.17.12-alpha.5" }
 ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
 ta-lifecycle = { path = "../../crates/ta-lifecycle", version = "0.17.12-alpha.5" }
 ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.12-alpha.5" }
