@@ -759,6 +759,11 @@ enum Commands {
         /// Show what `--fix` would change and change nothing; implies --fix.
         #[arg(long)]
         dry_run: bool,
+        /// Remove the named Cargo `target/` directory (repeatable). Only directories
+        /// that `ta doctor` lists under this workspace are accepted; anything else is
+        /// refused and nothing is removed.
+        #[arg(long, value_name = "PATH")]
+        remove_target: Vec<std::path::PathBuf>,
         /// Optional subcommand: "fix <component>".
         ///
         /// Currently supports:
@@ -2429,8 +2434,12 @@ fn dispatch_raw(
             yes,
             only,
             dry_run,
+            remove_target,
             extra_args,
         } => match extra_args.as_slice() {
+            _ if !remove_target.is_empty() => {
+                commands::doctor::execute_remove_targets(config, remove_target)
+            }
             [sub, comp, ..] if sub == "fix" && comp == "projfs" => {
                 commands::doctor::execute_fix_projfs()
             }

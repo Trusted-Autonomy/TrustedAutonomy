@@ -37,7 +37,7 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
-    fn ok(name: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub(crate) fn ok(name: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             status: CheckStatus::Ok,
@@ -65,6 +65,30 @@ impl CheckResult {
             fix: fix.into(),
         }
     }
+}
+
+/// `ta doctor --remove-target <path>...`: remove exactly the named Cargo
+/// `target/` directories (each must be one `ta doctor` lists) and report what
+/// was freed.
+pub fn execute_remove_targets(
+    config: &GatewayConfig,
+    named: &[std::path::PathBuf],
+) -> anyhow::Result<()> {
+    let found = super::target_audit::find_target_dirs(&config.workspace_root);
+    let removed = super::target_audit::remove_named(named, &found)?;
+    let freed: u64 = removed.iter().map(|(_, b)| *b).sum();
+    for (path, bytes) in &removed {
+        println!("Removed {} ({} bytes)", path.display(), bytes);
+    }
+    println!(
+        "Removed {} target/ director(ies), {:.1} GB freed. Nothing else was touched.",
+        removed.len(),
+        freed as f64 / 1_073_741_824.0
+    );
+    if let Some(w) = super::target_audit::snapshot_warning_now() {
+        println!("Note: {w}");
+    }
+    Ok(())
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -271,6 +295,9 @@ fn run_all_checks_with(
 
     // 10. GC health.
     results.extend(check_gc(config));
+
+    // 10b. Cargo target/ directories under the workspace, and local snapshots.
+    results.extend(super::target_audit::check(&config.workspace_root));
 
     // 11. Version consistency.
     results.extend(check_version_consistency(config));

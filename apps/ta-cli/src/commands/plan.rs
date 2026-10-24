@@ -1016,23 +1016,51 @@ pub fn reset_phase_if_in_progress(
     }
     Ok(did_reset)
 }
-/// Fire-and-forget HTTP call to release the daemon's in-memory phase claim.
+
+/// What the daemon said when asked to release a phase claim.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClaimRelease {
+    /// The daemon held a claim and dropped it.
+    Released,
+    /// The daemon answered and held no claim on the phase.
+    NotClaimed,
+    /// The daemon could not be asked (not running, timed out, bad answer).
+    Unreachable(String),
+}
+
+/// HTTP call to release the daemon's in-memory phase claim.
 ///
 /// The daemon holds phase claims in RAM — resetting PLAN.md alone leaves a
 /// stale entry that blocks the next `ta run` with "already claimed". This
-/// function corrects that. Errors are silently swallowed: the daemon may not
-/// be running, and PLAN.md is already the authoritative source of truth.
-pub(crate) fn release_daemon_phase_claim(project_root: &Path, phase_id: &str) {
-    let Ok(client) = reqwest::blocking::Client::builder()
+/// function corrects that. Callers on automatic paths ignore the answer: the
+/// daemon may not be running, and PLAN.md is already the authoritative source
+/// of truth. `ta plan reset` reports it.
+pub(crate) fn release_daemon_phase_claim(project_root: &Path, phase_id: &str) -> ClaimRelease {
+    let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
-    else {
-        return;
+    {
+        Ok(c) => c,
+        Err(e) => return ClaimRelease::Unreachable(format!("http client: {e}")),
     };
     let daemon_url = super::daemon::resolve_daemon_url(project_root, None);
     let url = format!("{}/api/plan/phase/release", daemon_url);
     let body = serde_json::json!({ "phase_id": phase_id });
-    let _ = client.post(&url).json(&body).send();
+    match client.post(&url).json(&body).send() {
+        Ok(resp) if resp.status().is_success() => {
+            match resp
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v["status"].as_str().map(str::to_string))
+                .as_deref()
+            {
+                Some("released") => ClaimRelease::Released,
+                _ => ClaimRelease::NotClaimed,
+            }
+        }
+        Ok(resp) => ClaimRelease::Unreachable(format!("{url} answered {}", resp.status())),
+        Err(e) => ClaimRelease::Unreachable(format!("{url}: {e}")),
+    }
 }
 
 /// Releases a goal's plan-phase claim for the `ta` process: resets PLAN.md
@@ -1074,7 +1102,86 @@ impl ta_goal::phase_release::PhaseClaimReleaser for CliPhaseClaimReleaser {
     }
 }
 
+/// What `ta plan reset` does for a phase, given what PLAN.md says about it
+/// (`None` = the phase is not in PLAN.md) and what the daemon answered when
+/// asked to release the phase's claim.
+#[derive(Debug, PartialEq, Eq)]
+enum ResetOutcome {
+    /// Print these lines and succeed.
+    Done(Vec<String>),
+    /// Fail with this message.
+    Fail(String),
+}
+
+fn plan_reset_outcome(
+    phase_id: &str,
+    status: Option<&PlanStatus>,
+    reset_plan: bool,
+    claim: &ClaimRelease,
+) -> ResetOutcome {
+    let claim_line = match claim {
+        ClaimRelease::Released => Some(format!(
+            "Released the daemon's claim on phase {phase_id} (no run holds it now)."
+        )),
+        ClaimRelease::NotClaimed => None,
+        ClaimRelease::Unreachable(why) => Some(format!(
+            "Note: the daemon was not asked to release its claim ({why}). If `ta run` still \
+             says phase {phase_id} is already claimed, start the daemon and run \
+             `ta plan reset {phase_id}` again."
+        )),
+    };
+    let run_hint = format!("Run `ta run \"<goal title>\" --phase {phase_id}` to start a new goal.");
+    match status {
+        None => match claim {
+            ClaimRelease::Released => ResetOutcome::Done(vec![
+                format!(
+                    "Phase '{phase_id}' is not in PLAN.md, so there is nothing to reset there."
+                ),
+                claim_line.unwrap_or_default(),
+            ]),
+            ClaimRelease::NotClaimed => ResetOutcome::Fail(format!(
+                "Phase '{phase_id}' is not in PLAN.md and the daemon holds no claim on it. \
+                 Check the id with `ta plan list`."
+            )),
+            ClaimRelease::Unreachable(_) => ResetOutcome::Fail(format!(
+                "Phase '{phase_id}' is not in PLAN.md, and the daemon could not be asked \
+                 whether it holds a claim on it. {} Check the id with `ta plan list`.",
+                claim_line.unwrap_or_default()
+            )),
+        },
+        Some(PlanStatus::Done) => ResetOutcome::Fail(format!(
+            "Phase {phase_id} is marked done and cannot be reset to pending. \
+             If you need to re-open it, edit PLAN.md directly."
+        )),
+        Some(PlanStatus::Pending) => {
+            let mut lines = vec![format!(
+                "Phase {phase_id} is already pending in PLAN.md — nothing to reset there."
+            )];
+            lines.extend(claim_line);
+            ResetOutcome::Done(lines)
+        }
+        Some(PlanStatus::InProgress) => {
+            let mut lines = vec![if reset_plan {
+                format!("Phase {phase_id} reset to pending.")
+            } else {
+                format!("Phase {phase_id} was not in progress in PLAN.md; PLAN.md is unchanged.")
+            }];
+            lines.extend(claim_line);
+            lines.push(run_hint);
+            ResetOutcome::Done(lines)
+        }
+        Some(other) => ResetOutcome::Fail(format!(
+            "Phase {phase_id} has status '{other}' — only in_progress phases can be reset."
+        )),
+    }
+}
+
 /// CLI handler for `ta plan reset <phase-id>`.
+///
+/// Always asks the daemon to release its in-memory claim on the phase, even
+/// when PLAN.md has no such phase or already says `pending`: a claim left by a
+/// run that died answers every later `ta run --phase` with "already claimed"
+/// and PLAN.md is not where it lives.
 fn plan_reset(config: &GatewayConfig, phase_id: &str) -> anyhow::Result<()> {
     let plan_path = config.workspace_root.join("PLAN.md");
     if !plan_path.exists() {
@@ -1082,44 +1189,34 @@ fn plan_reset(config: &GatewayConfig, phase_id: &str) -> anyhow::Result<()> {
     }
     let content = std::fs::read_to_string(&plan_path)?;
     let phases = parse_plan(&content);
-    let phase = phases
+    let status = phases
         .iter()
         .find(|p| phase_ids_match(&p.id, phase_id))
-        .ok_or_else(|| anyhow::anyhow!("Phase '{}' not found in PLAN.md.", phase_id))?;
+        .map(|p| p.status.clone());
 
-    match phase.status {
-        PlanStatus::InProgress => {}
-        PlanStatus::Pending => {
-            println!("Phase {} is already pending — nothing to reset.", phase_id);
-            return Ok(());
-        }
-        PlanStatus::Done => {
-            anyhow::bail!(
-                "Phase {} is marked done and cannot be reset to pending. \
-                 If you need to re-open it, edit PLAN.md directly.",
-                phase_id
-            );
-        }
-        _ => {
-            anyhow::bail!(
-                "Phase {} has status '{}' — only in_progress phases can be reset.",
-                phase_id,
-                phase.status
-            );
-        }
+    let mut reset_plan = false;
+    if matches!(status, Some(PlanStatus::InProgress)) {
+        reset_plan = ta_plan::reset_phase_if_in_progress(
+            &config.workspace_root,
+            phase_id,
+            "manual reset via `ta plan reset`",
+        )?;
     }
-
-    reset_phase_if_in_progress(
-        &config.workspace_root,
-        phase_id,
-        "manual reset via `ta plan reset`",
-    )?;
-    println!("Phase {} reset to pending.", phase_id);
-    println!(
-        "Run `ta run \"<goal title>\" --phase {}` to start a new goal.",
-        phase_id
-    );
-    Ok(())
+    // Never release the claim of a phase that is done: nothing to unblock.
+    let claim = if matches!(status, Some(PlanStatus::Done)) {
+        ClaimRelease::NotClaimed
+    } else {
+        release_daemon_phase_claim(&config.workspace_root, phase_id)
+    };
+    match plan_reset_outcome(phase_id, status.as_ref(), reset_plan, &claim) {
+        ResetOutcome::Done(lines) => {
+            for l in lines {
+                println!("{l}");
+            }
+            Ok(())
+        }
+        ResetOutcome::Fail(msg) => anyhow::bail!("{msg}"),
+    }
 }
 
 // v0.17.11.1: extracted to ta-plan.
@@ -13491,5 +13588,101 @@ mod phase_resolution_tests {
             !missing.exists(),
             "read-only: must not create the goal store"
         );
+    }
+}
+
+#[cfg(test)]
+mod reset_outcome_tests {
+    use super::*;
+
+    fn lines(o: ResetOutcome) -> String {
+        match o {
+            ResetOutcome::Done(l) => l.join("\n"),
+            ResetOutcome::Fail(m) => panic!("expected success, got failure: {m}"),
+        }
+    }
+
+    fn failure(o: ResetOutcome) -> String {
+        match o {
+            ResetOutcome::Fail(m) => m,
+            ResetOutcome::Done(l) => panic!("expected failure, got success: {l:?}"),
+        }
+    }
+
+    /// The 2026-10-16 incident: `ta plan reset v0.17.12.22.1` answered "not
+    /// found" for a phase that is not in PLAN.md while the daemon still held a
+    /// claim on it. A claim held by the daemon is released and reported.
+    #[test]
+    fn phase_missing_from_plan_md_still_releases_the_daemon_claim() {
+        let out = lines(plan_reset_outcome(
+            "v0.17.12.22.1",
+            None,
+            false,
+            &ClaimRelease::Released,
+        ));
+        assert!(out.contains("not in PLAN.md"), "{out}");
+        assert!(out.contains("Released the daemon's claim"), "{out}");
+    }
+
+    #[test]
+    fn phase_missing_from_plan_md_and_unclaimed_is_a_typo_and_says_so() {
+        let msg = failure(plan_reset_outcome(
+            "v9.9.9",
+            None,
+            false,
+            &ClaimRelease::NotClaimed,
+        ));
+        assert!(msg.contains("holds no claim"), "{msg}");
+        assert!(msg.contains("ta plan list"), "{msg}");
+    }
+
+    #[test]
+    fn unreachable_daemon_is_reported_not_silently_ignored() {
+        let why = ClaimRelease::Unreachable("connection refused".into());
+        let msg = failure(plan_reset_outcome("v9.9.9", None, false, &why));
+        assert!(msg.contains("connection refused"), "{msg}");
+        let out = lines(plan_reset_outcome(
+            "v1.0.0",
+            Some(&PlanStatus::Pending),
+            false,
+            &why,
+        ));
+        assert!(out.contains("connection refused"), "{out}");
+        assert!(out.contains("ta plan reset v1.0.0"), "{out}");
+    }
+
+    #[test]
+    fn pending_phase_with_a_stuck_claim_is_unblocked() {
+        let out = lines(plan_reset_outcome(
+            "v1.0.0",
+            Some(&PlanStatus::Pending),
+            false,
+            &ClaimRelease::Released,
+        ));
+        assert!(out.contains("already pending"), "{out}");
+        assert!(out.contains("Released the daemon's claim"), "{out}");
+    }
+
+    #[test]
+    fn in_progress_phase_is_reset_and_the_next_command_is_named() {
+        let out = lines(plan_reset_outcome(
+            "v1.0.0",
+            Some(&PlanStatus::InProgress),
+            true,
+            &ClaimRelease::NotClaimed,
+        ));
+        assert!(out.contains("reset to pending"), "{out}");
+        assert!(out.contains("ta run"), "{out}");
+    }
+
+    #[test]
+    fn done_phase_is_never_reset() {
+        let msg = failure(plan_reset_outcome(
+            "v1.0.0",
+            Some(&PlanStatus::Done),
+            false,
+            &ClaimRelease::NotClaimed,
+        ));
+        assert!(msg.contains("marked done"), "{msg}");
     }
 }
