@@ -290,7 +290,7 @@ impl Requester {
     fn store(&self) -> FileIntakeStore {
         FileIntakeStore::open(
             &self.project_root,
-            self.settings.clone(),
+            self.settings,
             Some(self.project_root.join(".ta").join("audit.jsonl")),
         )
     }
