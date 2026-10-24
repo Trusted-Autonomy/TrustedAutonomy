@@ -11392,18 +11392,20 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.25`
 
 ### v0.17.12.26 - Conversation-Aware Supervisor Review and Constitution v2 Kinds
-<!-- status: pending -->
+<!-- status: done -->
 **Depends on**: v0.17.12.29 (item 5 stamps an origin on funnel drafts, which this phase's task intake produces)
 **Order**: 3
 
 **Goal**: Plug a conversation-aware reviewer into the existing supervisor slot and extend `[[approval_rules]]` with `wiki` and `task` kinds and org+project layering. Design: `docs/design/supervisor-review-and-constitution.md`. Samples: `templates/constitution/`.
 
-1. [ ] `conversation-reviewer` supervisor profile: read-only, independent of the author session, untrusted-input fencing, outputs `intent_match` and per-item `decisions[]`.
-2. [ ] Conversation context pack input (recent turns plus project wiki retrieval; swaps to the per-project RAG-KG when it lands).
-3. [ ] Constitution v2 parsing: `id`, `kind`, `match`, `mode`, `min_confidence`, `origins`, `schema_version`, `layer`. Unknown kind is a loud error.
-4. [ ] Org+project layering: most restrictive wins, project cannot loosen or disable an org rule.
-5. [ ] Gateway-stamped `project-manager` origin for funnel drafts; H9 for `cos` and `chat` unchanged.
-6. [ ] Goes through the existing auto-approve entry point (call-site guard test stays green).
+1. [x] `conversation-reviewer` supervisor profile: read-only, independent of the author session, untrusted-input fencing, outputs `intent_match` and per-item `decisions[]`. (`ta_changeset::conversation_review`; configured by `[supervisor.conversation_review]`, run at gateway draft submit. Refuses the author's own session/persona and any agent that cannot be proven read-only; any failure is a `warn` with low confidence.)
+2. [x] Conversation context pack input (recent turns plus project wiki retrieval; swaps to the per-project RAG-KG when it lands). (`ContextPackSource` trait: conversation log turns, locally cached wiki pages by keyword overlap, and raw funnel requests beside the project manager's decisions.)
+3. [x] Constitution v2 parsing (`ta_policy::constitution_v2`): `id`, `kind`, `match`, `mode`, `min_confidence`, `origins`, `schema_version`, `layer`. Unknown kind is a loud error.
+4. [x] Org+project layering: most restrictive wins, project cannot loosen or disable an org rule. (Org file `.ta/constitution-org.toml`, project file `.ta/constitution.toml`.)
+5. [x] Gateway-stamped `project-manager` origin for funnel drafts; H9 for `cos` and `chat` unchanged. (Stamped from the launching team role; a draft the intake ledger lists is treated as `project-manager` when its goal has no origin. Such drafts are approved only by a rule that lists the origin.)
+6. [x] Goes through the existing auto-approve entry point (call-site guard test stays green). (`should_auto_approve_with_constitution` in `ta-policy/src/auto_approve.rs`, called from the gateway draft submit path.)
+
+**To confirm with the owner/Wayfinder** (TA's side is implemented against the documented shape, nothing is invented on their side): (a) a task proposal cites its source request with `external_id = "intake:<request_id>"`; (b) only wiki writes captured in a draft (`ta_wiki_create`/`ta_wiki_update`) are gated, direct wiki writes are not; (c) the org file location `.ta/constitution-org.toml`.
 
 **Effort**: L.
 
