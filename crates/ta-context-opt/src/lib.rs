@@ -12,6 +12,9 @@
 //! reduction is reversible and auditable via `original_ref`. `none` is always a
 //! valid choice and is the baseline for every comparison.
 //!
+//! First-party input minimizers for `cargo`, `git` and `ta` output live in [`minimize`] and
+//! are registered as `cargo`, `git`, `ta` and the per-command router `first-party`.
+//!
 //! Slots are selected in config (`[optimizers.input] use = "rtk"`) and can be
 //! overridden per golden-set replay (`--set optimizers.input.use=none`); see
 //! [`OptimizersConfig`].
@@ -19,6 +22,7 @@
 mod config;
 mod hook;
 mod metrics;
+pub mod minimize;
 mod registry;
 mod store;
 

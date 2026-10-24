@@ -18796,11 +18796,19 @@ Optimizers sit in three slots, each with the same contract: a name, a kind, a li
 
 | Slot | Acts on | Choices |
 |---|---|---|
-| `input` | command output, files and logs before they enter context | `none`, `headroom`, `proxy`, `rtk` (a hook; usable only once `rtk-oss` is installed, see below) |
+| `input` | command output, files and logs before they enter context | `none`, `headroom`, `proxy`, `rtk` (a hook; usable only once `rtk-oss` is installed, see below), `cargo`, `git`, `ta`, `first-party` (built-in minimizers, see below) |
 | `context` | the accumulated conversation | `none`, `agent-native` |
 | `output` | what the model writes | `none` |
 
 `headroom` and `proxy` are the proxy kind: they run the process from `[compression.plugin]` (headroom by default). `rtk` is the hook kind: TA installs a hook into the goal's own working copy for the length of the goal. It is selectable only when `rtk-oss` is installed on your machine (see "Using rtk-oss" below). If it is selected but cannot be used, `ta golden replay --set optimizers.input.use=rtk` fails before anything launches, and a goal whose config names it runs with no input optimization and says so. Refusing is deliberate: a silent no-op would report the same numbers as `none` and make an A/B comparison conclude it saves nothing.
+
+`cargo`, `git` and `ta` are built-in minimizers that need nothing installed. They reduce the output of the commands TA itself feeds back to an agent: when `[verify] on_failure = "agent"` re-launches the agent with the failing commands' output, each command's output goes through the selected minimizer first. `first-party` picks `cargo`, `git` or `ta` per command (and falls back to recognising the text); a single-kind minimizer leaves other commands' output untouched.
+
+- `cargo`: progress lines (`Compiling ...`) and passing-test lines become one count each; a warning that repeats keeps its headline and `-->` location only. Errors, failing tests, panics and `test result:` lines stay as they were.
+- `git`: removes `(use "git ...")` hints and `index` lines, and shortens full commit hashes to 12 characters. Paths, hunks and messages stay.
+- `ta`: strips colour codes, keeps only the last redraw of a progress line, and collapses repeated lines.
+
+Nothing is thrown away: the full original is stored under `.ta/compression/originals/` first, each use is appended to `.ta/compression/input-metrics.jsonl` (goal, command, bytes and estimated tokens in and out, a reference to the original), and `ta compression status` totals them. The minimized text may use twice the usual line cap, since the same budget now carries more signal. If a minimizer fails, the unminimized output is used and the reason is printed. Try it against the baseline with `ta golden replay <goal> --set optimizers.input.use=first-party --tag first-party`.
 
 Pick one per slot in `.ta/daemon.toml`:
 
@@ -18886,6 +18894,8 @@ On Windows the optimizer process is started with no console window, so a failing
 ```
 
 Fix the cause, then run `ta compression enable` to resume.
+
+The last failure is kept across a daemon restart, so a restart does not hide why the optimizer was disabled. After a restart it is shown as "from before the last daemon restart", with its original notice, and it clears when the optimizer passes a health check. A failure in the new run replaces it.
 
 ### Windows installer
 

@@ -82,6 +82,7 @@ pub fn start(
         // and stale "running" entries from before `ta compression disable` are overwritten.
         let status_dir = project_root.join(".ta").join("compression");
         std::fs::create_dir_all(&status_dir).ok();
+        begin_run(&status_dir);
         write_status(&status_dir, "disabled", None, 0, None);
         tracing::debug!(
             input_slot = ?optimizers.input.use_,
@@ -158,7 +159,8 @@ pub struct OptimizerStatus {
     #[serde(default)]
     pub plugin_name: Option<String>,
     /// Why the optimizer last stopped (spawn error, exit code, failed health
-    /// check). Cleared when the supervisor starts with the daemon.
+    /// check). Survives a daemon restart (see `carried_over`) and is cleared once
+    /// the optimizer passes a health check after that restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
     /// RFC 3339 time of `last_failure`.
@@ -167,6 +169,14 @@ pub struct OptimizerStatus {
     /// One-line, user-facing explanation when the flap guard disabled the optimizer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// True while `last_failure` (and `notice`) were recorded by an earlier daemon run and
+    /// no run since has passed a health check. Shown by `ta compression status`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub carried_over: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 // ─── Flap guard ───────────────────────────────────────────────────────────────
@@ -203,9 +213,9 @@ async fn run_supervisor(
     shutdown: Arc<Notify>,
 ) {
     std::fs::create_dir_all(&status_dir).ok();
-    // A new supervisor run starts with a clean failure history, matching its
-    // restart count of zero.
-    std::fs::remove_file(status_dir.join("status.json")).ok();
+    // A new supervisor run starts with a restart count of zero but keeps the last failure,
+    // so a daemon restart does not hide why the optimizer was disabled.
+    let carried_failure_at = begin_run(&status_dir);
     write_status(&status_dir, "starting", None, 0, Some(&plugin.name));
 
     let mut restart_count: u32 = 0;
@@ -325,7 +335,23 @@ async fn run_supervisor(
             }
         };
 
-        let exit_reason = monitor(&mut child, &client, &plugin.health_endpoint, &shutdown).await;
+        let exit_reason = monitor(
+            &mut child,
+            &client,
+            &plugin.health_endpoint,
+            &shutdown,
+            &mut || {
+                if let Some(at) = &carried_failure_at {
+                    if clear_carried_failure(&status_dir, at) {
+                        tracing::info!(
+                            plugin = %plugin.name,
+                            "PromptOptimizerSupervisor: healthy again — cleared the failure carried over from before the daemon restart"
+                        );
+                    }
+                }
+            },
+        )
+        .await;
         let _ = child.kill().await;
         write_status(
             &status_dir,
@@ -408,6 +434,7 @@ async fn monitor(
     client: &reqwest::Client,
     health_url: &str,
     shutdown: &Arc<Notify>,
+    on_healthy: &mut (dyn FnMut() + Send),
 ) -> ExitReason {
     let poll = Duration::from_secs(HEALTH_POLL_INTERVAL_SECS);
     loop {
@@ -423,7 +450,8 @@ async fn monitor(
             _ = tokio::time::sleep(poll) => {
                 match client.get(health_url).send().await {
                     Ok(r) if r.status().is_success() => {
-                        // healthy — continue the loop
+                        // healthy: a run has now succeeded, so an older failure can clear
+                        on_healthy();
                     }
                     Ok(r) => {
                         tracing::warn!(
@@ -523,7 +551,11 @@ fn write_status(
 ) {
     // Keep the failure history across state changes within one supervisor run.
     let previous = read_status_file(dir);
-    let notice = if status == "suspended" {
+    // A notice describes the current session's flap-guard decision, so it lasts only while
+    // suspended, except when it was carried over a daemon restart (it then stays, flagged,
+    // until a run succeeds).
+    let carried_over = previous.as_ref().is_some_and(|p| p.carried_over);
+    let notice = if status == "suspended" || carried_over {
         previous.as_ref().and_then(|p| p.notice.clone())
     } else {
         None
@@ -540,8 +572,47 @@ fn write_status(
             last_failure: previous.as_ref().and_then(|p| p.last_failure.clone()),
             last_failure_at: previous.as_ref().and_then(|p| p.last_failure_at.clone()),
             notice,
+            carried_over,
         },
     );
+}
+
+/// Start a supervisor run: reset the process fields but keep the previous run's failure.
+/// Returns the carried failure's timestamp, which [`clear_carried_failure`] later matches.
+fn begin_run(dir: &Path) -> Option<String> {
+    let previous = read_status_file(dir)?;
+    previous.last_failure.as_ref()?;
+    let at = previous.last_failure_at.clone();
+    write_record(
+        dir,
+        &OptimizerStatus {
+            status: "starting".to_string(),
+            pid: None,
+            restart_count: 0,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            carried_over: true,
+            ..previous
+        },
+    );
+    Some(at.unwrap_or_default())
+}
+
+/// Forget a failure carried over a daemon restart, once a run has passed a health check.
+/// Only the carried failure (matched by its timestamp) is cleared, never one recorded since.
+fn clear_carried_failure(dir: &Path, carried_at: &str) -> bool {
+    let Some(mut rec) = read_status_file(dir) else {
+        return false;
+    };
+    if !rec.carried_over || rec.last_failure_at.clone().unwrap_or_default() != carried_at {
+        return false;
+    }
+    rec.last_failure = None;
+    rec.last_failure_at = None;
+    rec.notice = None;
+    rec.carried_over = false;
+    rec.updated_at = chrono::Utc::now().to_rfc3339();
+    write_record(dir, &rec);
+    true
 }
 
 /// Store why the optimizer last stopped.
@@ -549,6 +620,8 @@ fn record_failure(dir: &Path, reason: &str) {
     if let Some(mut rec) = read_status_file(dir) {
         rec.last_failure = Some(reason.to_string());
         rec.last_failure_at = Some(chrono::Utc::now().to_rfc3339());
+        // A failure in this run supersedes the one carried from an earlier daemon run.
+        rec.carried_over = false;
         rec.updated_at = chrono::Utc::now().to_rfc3339();
         write_record(dir, &rec);
     }
@@ -708,6 +781,7 @@ mod tests {
             last_failure: None,
             last_failure_at: None,
             notice: None,
+            carried_over: false,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: OptimizerStatus = serde_json::from_str(&json).unwrap();
@@ -823,6 +897,107 @@ mod tests {
             st.notice.is_none(),
             "notice clears once the optimizer restarts"
         );
+    }
+
+    fn failed_run(dir: &Path) {
+        write_status(dir, "running", Some(1), 0, Some("headroom"));
+        record_failure(dir, "process exited with code 3");
+        set_notice(
+            dir,
+            "headroom failed 5 times and is disabled for this session",
+        );
+        write_status(dir, "suspended", None, 5, Some("headroom"));
+    }
+
+    #[test]
+    fn a_daemon_restart_keeps_the_last_failure_and_notice_and_resets_the_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        failed_run(dir.path());
+        let failed = read_status_file(dir.path()).unwrap();
+
+        let carried_at = begin_run(dir.path());
+        assert_eq!(carried_at, failed.last_failure_at);
+        write_status(dir.path(), "starting", None, 0, Some("headroom"));
+        write_status(dir.path(), "running", Some(9), 0, Some("headroom"));
+
+        let st = read_status_file(dir.path()).unwrap();
+        assert_eq!(st.status, "running");
+        assert_eq!(st.restart_count, 0);
+        assert_eq!(
+            st.last_failure.as_deref(),
+            Some("process exited with code 3")
+        );
+        assert_eq!(st.last_failure_at, failed.last_failure_at);
+        assert!(st.carried_over);
+        assert!(
+            st.notice.as_deref().is_some_and(|n| n.contains("disabled")),
+            "the disable notice survives the restart: {st:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_earlier_failure_starts_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        write_status(dir.path(), "running", Some(1), 0, Some("headroom"));
+        assert!(begin_run(dir.path()).is_none());
+        let st = read_status_file(dir.path());
+        assert!(st.is_none_or(|s| s.last_failure.is_none() && !s.carried_over));
+    }
+
+    #[test]
+    fn a_healthy_run_clears_only_the_carried_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        failed_run(dir.path());
+        let at = begin_run(dir.path()).unwrap();
+        write_status(dir.path(), "running", Some(9), 0, Some("headroom"));
+        assert!(clear_carried_failure(dir.path(), &at));
+        let st = read_status_file(dir.path()).unwrap();
+        assert!(st.last_failure.is_none() && st.last_failure_at.is_none() && st.notice.is_none());
+        assert!(!st.carried_over);
+        // Nothing left to clear.
+        assert!(!clear_carried_failure(dir.path(), &at));
+    }
+
+    #[test]
+    fn a_failure_in_the_new_run_is_not_cleared_by_the_old_ones_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        failed_run(dir.path());
+        let at = begin_run(dir.path()).unwrap();
+        write_status(dir.path(), "running", Some(9), 0, Some("headroom"));
+        // The new run fails before any health check succeeds.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        record_failure(dir.path(), "health check failed at http://x/health");
+        assert!(!clear_carried_failure(dir.path(), &at));
+        let st = read_status_file(dir.path()).unwrap();
+        assert_eq!(
+            st.last_failure.as_deref(),
+            Some("health check failed at http://x/health")
+        );
+        assert!(!st.carried_over, "a failure this run is not carried over");
+    }
+
+    #[test]
+    fn the_disabled_status_written_at_daemon_start_keeps_the_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_dir = dir.path().join(".ta").join("compression");
+        std::fs::create_dir_all(&status_dir).unwrap();
+        failed_run(&status_dir);
+        start(
+            dir.path().to_path_buf(),
+            CompressionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            OptimizersConfig::default(),
+            Arc::new(Notify::new()),
+        );
+        let st = read_status(dir.path()).unwrap();
+        assert_eq!(st.status, "disabled");
+        assert_eq!(
+            st.last_failure.as_deref(),
+            Some("process exited with code 3")
+        );
+        assert!(st.carried_over);
     }
 
     #[test]
