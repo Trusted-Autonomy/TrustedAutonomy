@@ -1163,4 +1163,42 @@ mod tests {
         assert_eq!(env[0].0, "CARGO_TARGET_DIR");
         assert_eq!(std::path::Path::new(&env[0].1), dir.path().join("target"));
     }
+
+    /// Reclaim removes the staging `target/` before the draft is built. A gate that
+    /// runs afterwards (a re-run of verification, or any build in staging) must
+    /// rebuild it on demand instead of depending on a kept one.
+    #[cfg(unix)]
+    #[test]
+    fn verification_in_staging_rebuilds_target_after_it_was_reclaimed() {
+        let staging = TempDir::new().unwrap();
+        std::fs::write(
+            staging.path().join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(staging.path().join("src")).unwrap();
+        std::fs::write(staging.path().join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        let cargo = env!("CARGO");
+        let config = simple_config(vec![&format!("'{cargo}' check --offline --quiet")], 300);
+
+        let first = run_verification_in_staging(&config, staging.path());
+        assert!(first.passed, "first gate run failed: {:?}", first.warnings);
+        assert!(goal_target_dir(staging.path()).join("debug").exists());
+
+        let freed = ta_workspace::reclaim_build_output(
+            staging.path(),
+            &ta_workspace::ExcludePatterns::defaults(),
+        );
+        assert!(freed.bytes_freed > 0);
+        assert!(!goal_target_dir(staging.path()).exists());
+        assert!(staging.path().join("src/lib.rs").exists());
+
+        let second = run_verification_in_staging(&config, staging.path());
+        assert!(
+            second.passed,
+            "gate after reclaim failed: {:?}",
+            second.warnings
+        );
+        assert!(goal_target_dir(staging.path()).join("debug").exists());
+    }
 }

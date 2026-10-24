@@ -24,6 +24,7 @@ sha2 = "0.10"
 base64 = { workspace = true }
 ta-changeset = { path = "../ta-changeset", version = "0.17.12-alpha.5" }
 ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.5" }
+ta-lifecycle = { path = "../ta-lifecycle", version = "0.17.12-alpha.5" }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

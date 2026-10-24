@@ -19,7 +19,11 @@ use super::staging_reclaim::assess_staging;
 /// belongs to a goal still being handled, is kept; the reason and the command
 /// that recovers it are logged and printed. Applied, completed, merged and
 /// closed goals are unaffected.
-fn staging_may_be_removed(config: &GatewayConfig, goal: &ta_goal::GoalRun, pass: &str) -> bool {
+pub(super) fn staging_may_be_removed(
+    config: &GatewayConfig,
+    goal: &ta_goal::GoalRun,
+    pass: &str,
+) -> bool {
     let verdict = assess_staging(config, goal);
     let Some(message) = verdict.keep_message() else {
         return true;
@@ -858,9 +862,18 @@ pub fn enforce_staging_cap(config: &GatewayConfig) -> bool {
         return false;
     }
 
-    let cap_bytes = effective_max_gb as u64 * 1_073_741_824;
-    let (total, exceeds) = check_staging_cap(config, effective_max_gb);
-    if !exceeds {
+    enforce_staging_cap_bytes(config, effective_max_gb as u64 * 1_073_741_824)
+}
+
+/// Free staging until it fits `cap_bytes`, skipping every goal whose staging may
+/// hold uncollected work or is in use. Returns `true` if space was freed.
+fn enforce_staging_cap_bytes(config: &GatewayConfig, cap_bytes: u64) -> bool {
+    let total = if config.staging_dir.exists() {
+        walkdir_size(&config.staging_dir)
+    } else {
+        0
+    };
+    if total <= cap_bytes {
         return false;
     }
 
@@ -1110,5 +1123,80 @@ mod tests {
     fn gc_config_default_max_staging_gb_is_5() {
         let cfg = GcConfig::default();
         assert_eq!(cfg.max_staging_gb, 5, "default cap must be 5 GB, not 20 GB");
+    }
+
+    /// Register a failed goal whose staging lives under the project's staging
+    /// directory. `staging_only` is written into staging but not the source,
+    /// standing in for work the agent finished. Every staging copy also holds the
+    /// agent's build output under `target/`, which is never work.
+    fn failed_goal_in_project(
+        root: &std::path::Path,
+        name: &str,
+        age_hours: i64,
+        staging_only: Option<&str>,
+    ) -> ta_goal::GoalRun {
+        let source = root.to_path_buf();
+        std::fs::write(source.join("lib.rs"), "fn a() {}").unwrap();
+        let staging = root.join(".ta/staging").join(name);
+        std::fs::create_dir_all(staging.join("target/debug")).unwrap();
+        std::fs::write(staging.join("lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(staging.join("target/debug/out.bin"), vec![0u8; 8192]).unwrap();
+        if let Some(file) = staging_only {
+            std::fs::write(staging.join(file), "finished work").unwrap();
+        }
+        let store = GoalRunStore::new(root.join(".ta/goals")).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            name,
+            "obj",
+            "agent",
+            staging,
+            root.join(".ta/store").join(name),
+        );
+        goal.source_dir = Some(source);
+        goal.state = GoalRunState::Failed {
+            reason: "Agent process (PID 1) exited without updating goal state".to_string(),
+        };
+        goal.updated_at = chrono::Utc::now() - chrono::Duration::hours(age_hours);
+        store.save(&goal).unwrap();
+        goal
+    }
+
+    /// 2026-10-16: the staging-size cap deleted a failed goal's staging, finished
+    /// work included, so `ta goal recover` had nothing to recover.
+    #[test]
+    fn staging_cap_keeps_failed_goal_with_uncollected_work_and_frees_the_rest() {
+        let dir = tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        // Oldest first: the cap visits the work-holding goal before the empty one.
+        let holding = failed_goal_in_project(dir.path(), "holding", 10, Some("feature.rs"));
+        let empty = failed_goal_in_project(dir.path(), "empty", 5, None);
+
+        let freed = enforce_staging_cap_bytes(&config, 1);
+
+        assert!(freed, "the goal without work should have been reclaimed");
+        assert!(
+            holding.workspace_path.join("feature.rs").exists(),
+            "uncollected work must survive the staging cap"
+        );
+        assert!(!empty.workspace_path.exists());
+    }
+
+    #[test]
+    fn staging_cap_with_only_uncollected_goals_frees_nothing() {
+        let dir = tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let holding = failed_goal_in_project(dir.path(), "holding", 10, Some("feature.rs"));
+
+        assert!(!enforce_staging_cap_bytes(&config, 1));
+        assert!(holding.workspace_path.join("feature.rs").exists());
+    }
+
+    #[test]
+    fn staging_cap_leaves_staging_alone_while_under_the_cap() {
+        let dir = tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let empty = failed_goal_in_project(dir.path(), "empty", 5, None);
+        assert!(!enforce_staging_cap_bytes(&config, u64::MAX));
+        assert!(empty.workspace_path.exists());
     }
 }

@@ -2272,6 +2272,9 @@ fn gc_goals(
             && !goal.workspace_path.as_os_str().is_empty()
             && goal.workspace_path.exists()
         {
+            if !super::gc::staging_may_be_removed(config, &goal, "goal gc") {
+                continue;
+            }
             let dir_size = dir_size_bytes(&goal.workspace_path);
             if dry_run {
                 println!(
