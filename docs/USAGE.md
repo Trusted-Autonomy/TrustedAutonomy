@@ -3125,6 +3125,8 @@ ta run "Complete Phase v0.4.5" --phase v0.4.5
 
 When `--phase` is specified, TA marks the phase `in_progress` in the **source** `PLAN.md` as soon as the staging workspace is ready — before the agent launches. This means `ta plan status` and any open editors immediately reflect that the phase is actively being worked.
 
+That claim lives in your working tree and in TA's own state. `ta run` does not commit it and does not push anything, so it never writes to `main`. If `ta run` ends before the goal exists (a startup error, Ctrl-C), it puts the phase back to `pending` and releases the claim, and says so. If the process is killed outright it cannot do that; the phase then stays `in_progress` locally, and `ta plan reset <phase>` (or `ta doctor --fix`) clears it. `origin/main` is unchanged either way.
+
 Phase status flow:
 - `pending` → `in_progress` when the goal starts (`ta run --phase <id>`)
 - `in_progress` → `done` when the draft is applied (`ta draft apply`)
@@ -3136,14 +3138,20 @@ for work that already merged) accidentally reopening completed plan phases.
 
 #### Letting TA find the phase from the title
 
-You do not have to remember a phase ID. Without `--phase`, `ta run` matches your title against the `pending` and `in_progress` phases in `PLAN.md`:
+You do not have to remember a phase ID, but TA never links a phase you did not ask for. Without `--phase`, `ta run` matches your title against the `pending` and `in_progress` phases in `PLAN.md` and treats the best match as a suggestion:
+
+- **In a terminal** it asks `Link this goal to it and mark it in_progress? [y/N]`. Anything but `y` runs the goal with no phase.
+- **Headless or piped** it links nothing, claims nothing and changes no phase status. It prints `no phase linked` and the `--phase <id>` that would link it.
+
+A version in the title (`v0.17.12.20 ...`) or `--phase` is you naming the phase, so those link it directly. `ta plan resolve "<title>"` shows the match without starting anything.
 
 ```bash
 ta run "golden set capture"
-# [resolved "golden set capture" -> v0.17.12.20 Golden Set: Capture and Replay Goals]
+# [phase] no phase linked: no --phase was given, and a title match is only a suggestion.
+#         The title looks like v0.17.12.20 (Golden Set: Capture and Replay Goals); pass --phase v0.17.12.20 to link it.
 ```
 
-Resolution order: a version in the title (`v0.17.12.20 ...`), then the words of the title (case-insensitive, ignoring stop words, plurals and version tokens). TA only continues when exactly one phase is clearly the best match. If it is not sure, it never guesses and never creates a phase for you:
+Matching uses the words of the title (case-insensitive, ignoring stop words, plurals and version tokens). When it cannot find exactly one clear best match, it never guesses and never creates a phase for you:
 
 - **In a terminal** it shows a numbered list of candidates and asks which one you mean.
 - **Headless or piped** it exits non-zero with the candidates (id, title, status, score) and the exact commands to retry:
@@ -4539,6 +4547,17 @@ ta doctor
 
 Reports each check as ok/warning/failed with actionable suggestions.
 
+The daemon line separates four cases, so a busy daemon is not mistaken for a dead one:
+
+- **ok** — the daemon answered.
+- **slow** — it accepted the connection but did not answer `/api/status` in time (a slow first answer is retried once with a longer wait). The daemon is running; try again, or look at its log.
+- **unhealthy** — it answered with an error status; the message gives the status and where its log is.
+- **not running** — nothing accepted a connection. Start it with `ta daemon start`.
+
+When you run `ta doctor` inside the TA source tree, it also reports whether the Windows build target is installed (`rustup target add x86_64-pc-windows-msvc`), because `scripts/check-windows.sh` needs it.
+
+`scripts/check-windows.sh` runs a compile-only `cargo check --workspace --all-targets` for `x86_64-pc-windows-msvc` with warnings denied, the same check the `Windows Check` CI job runs. Run it before opening a PR that touches `cfg(unix)`/`cfg(windows)` code, paths or process handling. From a Mac or Linux host the crates that build C code for TLS (`ring`, `aws-lc-sys`) need a Windows C toolchain and cannot be checked; the script reports exactly which crates it could not check, and CI covers those.
+
 **Diagnosing and fixing health issues:** `ta doctor --fix` lists every fixable finding once, each with a stable id, and then acts on that same list. The count in "Found N issue(s)" is the number of prompts you are asked, and applying one fix never reorders the others.
 
 ```bash
@@ -4795,6 +4814,8 @@ ta draft watch <draft-id>
 # Or combine apply + watch into one command:
 ta draft apply <draft-id> --submit --watch
 ```
+
+**Auto-merge and a moving `main`.** Auto-merge only merges a PR that is up to date with its target. If `main` moves after the PR is opened, GitHub reports the PR as `BEHIND` and it would wait forever. When auto-merge is enabled, TA checks once and, if the PR is behind, runs `gh pr update-branch`. `ta draft watch` repeats the check on every poll and prints `PR <n> was behind its target branch: branch updated, so auto-merge can proceed.` when it acts. If the update fails (for example a merge conflict), the message says why, and you can run `gh pr update-branch <n>` yourself. This needs `gh`.
 
 `ta draft merge` calls `gh pr merge --auto` (or the configured merge strategy) then runs `ta sync` to fast-forward your local branch. `ta draft watch` polls every 30 seconds (configurable with `--interval`) until the PR state is `merged`, then syncs automatically.
 
@@ -10453,6 +10474,16 @@ Commands that need the daemon (`ta shell`, `ta run`, `ta dev`) automatically sta
 
 #### Updating a running daemon after you install a newer build
 
+`ta daemon check-build` tells you whether the running daemon is on the installed build, and what to do if not:
+
+```bash
+ta daemon check-build             # report only
+ta daemon check-build --restart   # also restart a stale daemon (drain-aware, same as `ta daemon restart`)
+./install_local.sh --restart-daemon   # install, then do the same check and restart
+```
+
+For a stale daemon it prints either `daemon is still <old>; run `ta daemon restart` (macOS may prompt for Keychain access once)` or, when `auto_update = "when_idle"`, that it will restart on its own when idle within the update-check interval. `install_local.sh` runs the report after every install, so you always see the exact next command. It never restarts the daemon unless you pass `--restart-daemon`.
+
 When you install a newer `ta-daemon` (for example with `./install_local.sh`), the running daemon keeps the old build until it restarts. Every 5 minutes it compares its own build hash with `ta-daemon --version` from the installed copy next to it, and what happens next is controlled by one setting in `.ta/daemon.toml`:
 
 ```toml
@@ -15247,7 +15278,7 @@ curl -s 'http://127.0.0.1:7700/api/events?types=goal.completed'   # a goal.compl
 curl -s 'http://127.0.0.1:7700/api/spend?group_by=origin_class,project&since=2026-10-01&until=2026-11-01'
 ```
 
-`group_by` takes any of `origin_class`, `project`, `origin`, `model` (empty gives one total). `since` and `until` take a date or an RFC 3339 time and filter on when the goal was created. Each group carries token totals of all four kinds, `usd`, and the count of goals with an exact cost (`exact_cost_goals`), an estimated cost (`estimated_cost_goals`) and no price (`unpriced_goals`), plus `aborted_budget_goals`. The numbers are read from the goal records, not from the velocity file, because an agent can write to the velocity file. Goals recorded before cost tracking existed count as unpriced.
+`group_by` takes any of `origin_class`, `project`, `origin`, `model` (empty gives one total). `since` and `until` take a date or an RFC 3339 time and filter on when the goal was created. Each group carries token totals of all four kinds, `usd`, and the count of goals with an exact cost (`exact_cost_goals`), an estimated cost (`estimated_cost_goals`) and no price (`unpriced_goals`), plus `aborted_budget_goals`. The numbers are read from the goal records, not from the velocity file, because an agent can write to the velocity file. Goals recorded before cost tracking existed are priced as estimates from the price table when they have a model and token counts, and count as unpriced only if they have neither or the model has no price.
 
 **Prices.** The built-in table covers the Claude 3, 4 and 5 families, with cache read at one tenth of the input price and cache write at 1.25 times it. The `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-fable-5-1` rows are provisional (they use their tier's price and have not been checked against a published price sheet), which is one reason the runtime's reported cost is preferred whenever it exists. To set your own, create `.ta/pricing.toml`; its rows are checked before the built-in table:
 
@@ -15323,6 +15354,7 @@ source / bucket           turns   sess  ...  cache-rd        usd  cost
 
 How the numbers are made:
 
+- Goals recorded before cost tracking existed (no cost source stored) are priced the same way when they carry a model and token counts: the cost is estimated from the price table and counted as **estimated**, not unpriced, and it is included in the total. Only the in-memory report is changed; the goal record is not rewritten. A goal with no model, no tokens or a model with no price row stays unpriced.
 - Claude Code writes an assistant message once per streamed block, all with the same `message.id`. TA keeps the last row for each id, so a message counts once, and skips `<synthetic>` rows. The header says how many duplicates were folded.
 - OMP's own per-message cost is used and marked **exact**. Claude Code costs are **estimated** from the price table (`.ta/pricing.toml`, then the built-in table); where a transcript splits cache writes by lifetime, the 1 hour part is priced at twice the input rate. A model with no price row is **unpriced**: its tokens are counted, its cost is 0 and nothing is invented. Add a row to `.ta/pricing.toml` to price it.
 - The context-size table groups turns by prompt size (input plus cache-read plus cache-creation tokens): 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k. A long session that keeps re-reading a large context shows up as most of its cost in the top rows. TA goals are many turns each and are not in this table.

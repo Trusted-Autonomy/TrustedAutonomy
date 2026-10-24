@@ -288,6 +288,42 @@ jobs:
         run: scripts/ci-linux-sandbox-containers.sh all
         timeout-minutes: 30
 
+  # Fast Windows compile gate (v0.17.12.25 item 6). Compile only, warnings
+  # denied: catches `dead_code` on cfg(unix)-only helpers and other
+  # Windows-only compile failures well before the full Windows Build job
+  # (build + test + clippy) finishes, so a fix commit does not wait for it.
+  windows-check:
+    name: Windows Check
+    needs: version-check
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CODE: ${{ needs.version-check.outputs.code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        timeout-minutes: 5
+
+      - name: Docs-only change, skipping check
+        if: env.CODE != 'true'
+        run: echo "Only docs changed (see Version consistency job); code checks not required."
+        timeout-minutes: 2
+
+      - name: Cache cargo registry and target
+        if: env.CODE == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+        timeout-minutes: 15
+
+      - name: cargo check --all-targets (-D warnings)
+        if: env.CODE == 'true'
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --workspace --all-targets
+        timeout-minutes: 25
+
   # Windows build verification (v0.9.1)
   windows-build:
     name: Windows Build

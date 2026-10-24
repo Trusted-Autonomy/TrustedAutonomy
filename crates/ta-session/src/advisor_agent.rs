@@ -458,6 +458,28 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
     ))
 }
 
+/// Spawn `cmd`, retrying on `ETXTBSY` ("Text file busy", os error 26).
+///
+/// Linux refuses to exec a file that any process still holds open for
+/// writing. That window is real for the `ta` binary (an upgrade just replaced
+/// it) and for a script a concurrent `fork` inherited the write handle of.
+/// Same bounded backoff as `ta-plugin`'s spawn; any other error returns at once.
+fn spawn_retrying_etxtbsy(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    const ETXTBSY: i32 = 26;
+    let mut last = None;
+    for delay_ms in [0u64, 20, 80, 200, 500, 1000] {
+        if delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.expect("loop runs at least once and only falls through on ETXTBSY"))
+}
+
 /// Run `cmd` to completion, bounded by `timeout`. On success returns
 /// captured (stdout, stderr); on a non-zero exit or a timeout, returns a
 /// descriptive `Err` -- never blocks past `timeout` (v0.17.4.1 item 3).
@@ -490,9 +512,8 @@ fn run_bounded(
         cmd.process_group(0);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn {}: {}", what, e))?;
+    let mut child =
+        spawn_retrying_etxtbsy(&mut cmd).map_err(|e| format!("Failed to spawn {}: {}", what, e))?;
     let pid = child.id();
 
     let stdout_pipe = child.stdout.take();
@@ -1163,11 +1184,45 @@ mod tests {
 
     #[cfg(unix)]
     fn make_executable_script(path: &Path, body: &str) {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, body).unwrap();
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
+        // Write a sibling, flush and close it, then rename over the target:
+        // the script is never exec'd through a path whose handle is open.
+        let tmp = path.with_extension("tmp-write");
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    /// Linux refuses to exec a file that still has a writer (ETXTBSY). The
+    /// spawn must wait that out instead of failing the advisor review.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_script_that_is_briefly_busy_is_retried_not_refused() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("busy.sh");
+        let mut w = std::fs::File::create(&p).unwrap();
+        w.write_all(b"#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // `w` is open for writing, so exec fails with ETXTBSY until it drops.
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            drop(w);
+        });
+        let (stdout, _) = run_bounded(
+            std::process::Command::new(&p),
+            Duration::from_secs(10),
+            "busy",
+        )
+        .unwrap();
+        release.join().unwrap();
+        assert_eq!(stdout.trim(), "ok");
     }
 
     /// Item 2: the advisor's own spawned goal must pass `--security` and

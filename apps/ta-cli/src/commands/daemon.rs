@@ -111,6 +111,15 @@ pub enum DaemonCommands {
     /// Reads daemon.toml and shows the resolved values that `ta run` will use,
     /// including the effective default agent framework.
     Config,
+    /// Compare the running daemon's build with this `ta` binary and say what to
+    /// do. `install_local.sh` runs it after installing; it never restarts a
+    /// daemon unless `--restart` is given (a restart can re-trigger the macOS
+    /// Keychain prompt).
+    CheckBuild {
+        /// Restart the daemon when it is on a different build.
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 /// Execute a `ta daemon` subcommand.
@@ -137,7 +146,125 @@ pub fn execute(command: &DaemonCommands, project_root: &Path) -> anyhow::Result<
         DaemonCommands::Health => cmd_health(project_root),
         DaemonCommands::Install { apply } => cmd_install(project_root, *apply),
         DaemonCommands::Config => cmd_config_show(project_root),
+        DaemonCommands::CheckBuild { restart } => cmd_check_build(project_root, *restart),
     }
+}
+
+/// What `ta daemon check-build` found.
+#[derive(Debug, PartialEq, Eq)]
+enum BuildCheck {
+    /// The daemon runs this build.
+    Current,
+    /// The daemon runs another build; the text says what to do.
+    Stale(String),
+}
+
+/// Compare the running daemon's build with the installed one and word the next
+/// step. `mode` is the daemon's own `[daemon] auto_update` value from its status
+/// report; `interval_secs` is `update_check_interval_secs`.
+fn build_check(
+    daemon: &ta_lifecycle::BuildIdentity,
+    installed: &ta_lifecycle::BuildIdentity,
+    mode: &str,
+    interval_secs: u64,
+) -> BuildCheck {
+    if matches!(
+        ta_lifecycle::compare_builds(daemon, installed),
+        ta_lifecycle::BuildComparison::Same
+    ) {
+        return BuildCheck::Current;
+    }
+    let text = if mode == "when_idle" {
+        format!(
+            "daemon is still {} (installed: {}); [daemon] auto_update = \"when_idle\" will restart it on its own when idle, within about {}s. To switch now: ta daemon restart",
+            daemon.describe(),
+            installed.describe(),
+            interval_secs
+        )
+    } else {
+        format!(
+            "daemon is still {} (installed: {}); run `ta daemon restart` to switch (macOS may prompt for Keychain access once)",
+            daemon.describe(),
+            installed.describe()
+        )
+    };
+    BuildCheck::Stale(text)
+}
+
+/// `[daemon] update_check_interval_secs` from `.ta/daemon.toml`, default 300.
+fn update_check_interval_secs(project_root: &Path) -> u64 {
+    std::fs::read_to_string(project_root.join(".ta").join("daemon.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|t| {
+            t.get("daemon")?
+                .get("update_check_interval_secs")?
+                .as_integer()
+        })
+        .and_then(|n| u64::try_from(n).ok())
+        .unwrap_or(300)
+}
+
+fn cmd_check_build(project_root: &Path, restart_now: bool) -> anyhow::Result<()> {
+    let base_url = resolve_daemon_url(project_root, None);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let body = match client.get(format!("{base_url}/api/status")).send() {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().ok(),
+        _ => None,
+    };
+    let Some(body) = body else {
+        println!(
+            "daemon: none answering at {base_url}; the next command that needs it starts the installed build ({}).",
+            installed_build().describe()
+        );
+        return Ok(());
+    };
+    let Some(daemon) = ta_lifecycle::BuildIdentity::from_status_json(&body) else {
+        println!(
+            "daemon: answered at {base_url} but did not report its version; run `ta daemon status`, then `ta daemon restart` to be sure it runs the installed build."
+        );
+        return Ok(());
+    };
+    let installed = installed_build();
+    let mode = body["update"]["mode"].as_str().unwrap_or("ask");
+    match build_check(
+        &daemon,
+        &installed,
+        mode,
+        update_check_interval_secs(project_root),
+    ) {
+        BuildCheck::Current => {
+            println!(
+                "daemon: running the installed build ({}).",
+                daemon.describe()
+            );
+            Ok(())
+        }
+        BuildCheck::Stale(text) if !restart_now => {
+            println!("daemon: {text}");
+            Ok(())
+        }
+        BuildCheck::Stale(_) => {
+            println!(
+                "daemon: restarting {} -> {} (--restart)...",
+                daemon.describe(),
+                installed.describe()
+            );
+            let pid = restart(project_root, None).map_err(|e| {
+                anyhow::anyhow!(
+                    "could not restart the daemon at {base_url}: {e}. Run `ta daemon restart` yourself, or `ta daemon log` for details."
+                )
+            })?;
+            println!("daemon: restarted (pid {pid}); `ta daemon status` shows the new build.");
+            Ok(())
+        }
+    }
+}
+
+fn installed_build() -> ta_lifecycle::BuildIdentity {
+    ta_lifecycle::BuildIdentity::new(env!("CARGO_PKG_VERSION"), Some(env!("TA_GIT_HASH")))
 }
 
 // ─── Shared helpers (used by shell.rs, version_guard.rs, etc.) ───────────────
@@ -2386,6 +2513,41 @@ mod tests {
 
         // cmd_log prints to stdout; we just verify it doesn't error.
         assert!(cmd_log(dir.path(), 10, false, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn build_check_names_the_exact_next_command_for_a_stale_daemon() {
+        use ta_lifecycle::BuildIdentity as B;
+        let old = B::new("0.17.12-alpha.5", Some("aaa1111"));
+        let new = B::new("0.17.12-alpha.5", Some("bbb2222"));
+        match build_check(&old, &new, "ask", 300) {
+            BuildCheck::Stale(t) => {
+                assert!(t.contains("still 0.17.12-alpha.5 (aaa1111)"), "{t}");
+                assert!(t.contains("ta daemon restart"), "{t}");
+                assert!(t.contains("Keychain"), "{t}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match build_check(&old, &new, "when_idle", 120) {
+            BuildCheck::Stale(t) => {
+                assert!(t.contains("on its own when idle, within about 120s"), "{t}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(build_check(&new, &new, "ask", 300), BuildCheck::Current);
+    }
+
+    #[test]
+    fn update_check_interval_reads_daemon_toml_and_defaults_to_300() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(update_check_interval_secs(dir.path()), 300);
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/daemon.toml"),
+            "[daemon]\nupdate_check_interval_secs = 60\n",
+        )
+        .unwrap();
+        assert_eq!(update_check_interval_secs(dir.path()), 60);
     }
 
     #[test]
