@@ -114,6 +114,10 @@ pub const MCP_TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("community_annotate", ToolEffect::Mutating),
     ("community_feedback", ToolEffect::Mutating),
     ("community_suggest", ToolEffect::Mutating),
+    // Task intake funnel: a request is a queued ask for the project manager,
+    // never a direct write; `ta_request_status` only reads the caller's own.
+    ("ta_request_task", ToolEffect::Mutating),
+    ("ta_request_status", ToolEffect::ReadOnly),
     // Unity.
     ("unity_build_trigger", ToolEffect::Mutating),
     ("unity_scene_query", ToolEffect::ReadOnly),
@@ -141,21 +145,26 @@ pub fn is_untrusted_sink(name: &str) -> bool {
 
 /// Name prefixes that are mutating by construction, so a future tool in
 /// the family is fail-closed even before it is added to the table.
-pub const MUTATING_TOOL_PREFIXES: &[&str] = &["ta_propose_"];
+pub const MUTATING_TOOL_PREFIXES: &[&str] = &["ta_propose_", "ta_request_"];
 
 /// Claude Code permission prefix for TA's own MCP server.
 pub const TA_MCP_PREFIX: &str = "mcp__ta__";
 
 /// Classify a bare MCP tool name (e.g. `ta_fs_read`). `None` means the tool
 /// is unknown: callers must treat that as not read-only.
+///
+/// An explicit [`MCP_TOOL_EFFECTS`] entry wins, so a read tool inside a
+/// mutating family (`ta_request_status`) can be declared read-only; any name
+/// in a [`MUTATING_TOOL_PREFIXES`] family that is NOT in the table is
+/// mutating.
 pub fn classify_mcp_tool(name: &str) -> Option<ToolEffect> {
+    if let Some((_, effect)) = MCP_TOOL_EFFECTS.iter().find(|(n, _)| *n == name) {
+        return Some(*effect);
+    }
     if MUTATING_TOOL_PREFIXES.iter().any(|p| name.starts_with(p)) {
         return Some(ToolEffect::Mutating);
     }
-    MCP_TOOL_EFFECTS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, effect)| *effect)
+    None
 }
 
 /// Default harness allow-list (Claude Code permission patterns) for a
@@ -436,5 +445,58 @@ mod tests {
         for t in ["ta_wiki_search", "ta_wiki_get", "ta_wiki_types"] {
             assert_eq!(classify_mcp_tool(t), Some(ToolEffect::ReadOnly), "{t}");
         }
+    }
+
+    #[test]
+    fn task_intake_request_is_mutating_and_denied_to_read_only_roles() {
+        assert_eq!(
+            classify_mcp_tool("ta_request_task"),
+            Some(ToolEffect::Mutating)
+        );
+        // The whole family is fail-closed even for a name nobody listed yet.
+        assert_eq!(
+            classify_mcp_tool("ta_request_brand_new"),
+            Some(ToolEffect::Mutating)
+        );
+        assert!(MUTATING_TOOL_PREFIXES.contains(&"ta_request_"));
+        let deny = mutating_mcp_deny_patterns();
+        assert!(deny.contains(&"mcp__ta__ta_request_task".to_string()));
+        assert!(deny.contains(&"mcp__ta__ta_request_*".to_string()));
+        // ta_request_status only reads the caller's own requests.
+        assert_eq!(
+            classify_mcp_tool("ta_request_status"),
+            Some(ToolEffect::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn read_only_persona_surface_never_contains_or_accepts_ta_request_task() {
+        // Default CoS/read-only allow-list does not list it ...
+        assert!(!READ_ONLY_PERSONA_ALLOWED_TOOLS
+            .iter()
+            .any(|t| t.contains("ta_request_")));
+        // ... a persona that tries to add it is rejected by validation ...
+        let list = strings(&["mcp__ta__ta_request_task"]);
+        let errs = validate_read_only_tool_surface(&list).unwrap_err();
+        assert!(errs[0].contains("mutating"), "{errs:?}");
+        // ... a wildcard that would cover it is rejected ...
+        assert!(validate_read_only_tool_surface(&strings(&["mcp__ta__ta_request_*"])).is_err());
+        // ... and the harness deny list for the default surface names it.
+        let allowed: Vec<String> = READ_ONLY_PERSONA_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let deny = unlisted_ta_mcp_deny_patterns(&allowed);
+        assert!(deny.contains(&"mcp__ta__ta_request_task".to_string()));
+        assert!(deny.contains(&"mcp__ta__ta_request_*".to_string()));
+    }
+
+    #[test]
+    fn goal_agent_allow_list_can_still_reach_ta_request_task() {
+        // An explicit allow is not shadowed by the family deny.
+        let deny = unlisted_ta_mcp_deny_patterns(&strings(&["mcp__ta__ta_request_task"]));
+        assert!(!deny.contains(&"mcp__ta__ta_request_*".to_string()));
+        assert!(!deny.contains(&"mcp__ta__ta_request_task".to_string()));
+        assert!(unlisted_ta_mcp_deny_patterns(&strings(&["mcp__ta__*"])).is_empty());
     }
 }

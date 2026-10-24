@@ -5327,6 +5327,7 @@ dependencies = [
  "ta-runtime",
  "ta-session",
  "ta-submit",
+ "ta-task-intake",
  "ta-workflow",
  "ta-workspace",
  "tempfile",
@@ -5766,6 +5767,7 @@ dependencies = [
  "ta-policy",
  "ta-session",
  "ta-submit",
+ "ta-task-intake",
  "ta-workflow",
  "ta-workspace",
  "tempfile",
@@ -5979,10 +5981,28 @@ dependencies = [
  "ta-changeset",
  "ta-goal",
  "ta-plugin",
+ "ta-task-intake",
  "ta-workspace",
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ta-task-intake"
+version = "0.17.12-alpha.5"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ta-audit",
+ "ta-goal",
+ "tempfile",
+ "thiserror 2.0.20",
  "tracing",
  "uuid",
 ]

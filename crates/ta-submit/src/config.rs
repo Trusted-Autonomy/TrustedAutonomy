@@ -108,6 +108,11 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub wiki: WikiConfig,
 
+    /// Task intake funnel caps and expiry (`ta_request_task`). See
+    /// [`ta_task_intake::TaskIntakeConfig`] for the keys and defaults.
+    #[serde(default)]
+    pub task_intake: ta_task_intake::TaskIntakeConfig,
+
     /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
     ///
     /// Each command is run in the staging workspace. Results are embedded in the
@@ -3280,5 +3285,26 @@ on_max_iterations = "fail"
         let err = wiki_seed(Some("[wiki\nseed_context = false\n")).unwrap_err();
         assert!(err.contains("workflow.toml"), "{err}");
         assert!(err.contains("seed_context"), "{err}");
+    }
+
+    #[test]
+    fn task_intake_defaults_and_overrides_parse() {
+        let defaults: WorkflowConfig = toml::from_str("").unwrap();
+        let s = defaults.task_intake.settings();
+        assert_eq!(s.caps.per_goal, 10);
+        assert_eq!(s.caps.per_role_per_hour, 20);
+        assert_eq!(s.caps.per_project_outstanding, 50);
+        assert_eq!(s.max_claim_attempts, 3);
+        assert_eq!(s.queued_ttl, std::time::Duration::from_secs(14 * 86_400));
+
+        let custom: WorkflowConfig =
+            toml::from_str("[task_intake]\nper_goal_max = 3\nqueued_ttl_days = 1\n").unwrap();
+        let s = custom.task_intake.settings();
+        assert_eq!(s.caps.per_goal, 3);
+        assert_eq!(
+            s.caps.per_role_per_hour, 20,
+            "unset keys keep their defaults"
+        );
+        assert_eq!(s.queued_ttl, std::time::Duration::from_secs(86_400));
     }
 }
