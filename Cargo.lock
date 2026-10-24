@@ -5264,6 +5264,7 @@ dependencies = [
  "ta-changeset",
  "ta-goal",
  "ta-lifecycle",
+ "ta-workspace",
  "tempfile",
  "tracing",
  "uuid",

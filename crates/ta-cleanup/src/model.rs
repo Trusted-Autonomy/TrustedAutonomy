@@ -40,6 +40,8 @@ pub enum Kind {
     StuckGoal,
     Staging,
     TargetDir,
+    /// One toolchain key of the shared goal build cache.
+    BuildCache,
     PidFile,
     ApplyLock,
     LeftoverDecisions,
@@ -59,6 +61,7 @@ impl Kind {
             Kind::StuckGoal => "stuck_goal",
             Kind::Staging => "staging",
             Kind::TargetDir => "target_dir",
+            Kind::BuildCache => "build_cache",
             Kind::PidFile => "pid_file",
             Kind::ApplyLock => "apply_lock",
             Kind::LeftoverDecisions => "leftover_decisions",
@@ -73,7 +76,7 @@ impl Kind {
         match self {
             Kind::StuckDraft | Kind::StaleVcsLabel => Category::Drafts,
             Kind::StuckGoal => Category::Goals,
-            Kind::Staging | Kind::TargetDir => Category::Staging,
+            Kind::Staging | Kind::TargetDir | Kind::BuildCache => Category::Staging,
             Kind::PidFile | Kind::ApplyLock | Kind::LeftoverDecisions | Kind::PhaseClaim => {
                 Category::Locks
             }

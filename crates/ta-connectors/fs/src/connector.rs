@@ -86,6 +86,21 @@ impl<S: ChangeStore> FsConnector<S> {
         source_dir: &Path,
         relative_path: &str,
     ) -> Result<Vec<u8>, FsConnectorError> {
+        // The shared build cache holds every goal's compiled output for this
+        // project. It is not source an agent should read through TA, and a read
+        // would snapshot it into a diff baseline.
+        if ta_workspace::build_cache::is_cache_path(relative_path) {
+            tracing::warn!(
+                path = %relative_path,
+                "fs connector refused a read of the shared build cache"
+            );
+            return Err(FsConnectorError::PathTraversal {
+                path: relative_path.to_string(),
+                reason:
+                    "the shared build cache (.ta/build-cache) is not readable through TA file tools"
+                        .to_string(),
+            });
+        }
         // Reject absolute paths (POSIX and Windows forms, on any host),
         // `..` components, and symlinks resolving outside `source_dir`
         // (H5). Done here, not only in the gateway's check_policy(), so a
@@ -692,6 +707,37 @@ mod tests {
             .read_source(source.path(), "docs/v1..v2.md")
             .unwrap();
         assert_eq!(content, b"migration");
+    }
+
+    #[test]
+    fn read_source_refuses_the_shared_build_cache_in_every_spelling() {
+        let (mut connector, _, _) = setup();
+        let source = tempdir().unwrap();
+        let cached = source.path().join(".ta/build-cache/key/target/debug");
+        fs::create_dir_all(&cached).unwrap();
+        fs::write(cached.join("libdep.rlib"), b"compiled output").unwrap();
+        fs::write(source.path().join(".ta/workflow.toml"), b"[staging]").unwrap();
+
+        for p in [
+            ".ta/build-cache/key/target/debug/libdep.rlib",
+            "./.ta/build-cache/key/target/debug/libdep.rlib",
+            ".ta\\build-cache\\key\\target\\debug\\libdep.rlib",
+        ] {
+            let result = connector.read_source(source.path(), p);
+            match result {
+                Err(FsConnectorError::PathTraversal { reason, .. }) => {
+                    assert!(reason.contains("build cache"), "{reason}")
+                }
+                other => panic!("read of {p:?} must be refused, got {other:?}"),
+            }
+        }
+        // Other `.ta/` files and ordinary sources are unaffected by this rule.
+        assert_eq!(
+            connector
+                .read_source(source.path(), ".ta/workflow.toml")
+                .unwrap(),
+            b"[staging]"
+        );
     }
 
     #[cfg(unix)]
