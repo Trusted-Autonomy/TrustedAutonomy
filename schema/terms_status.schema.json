@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "TermsState": {
+      "description": "Where the current terms document stands for this user.",
+      "oneOf": [
+        {
+          "const": "current",
+          "description": "Accepted, and the accepted text is the text this `ta` shows.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "Accepted before, but the terms document has changed since: re-accept.",
+          "type": "string"
+        },
+        {
+          "const": "not_accepted",
+          "description": "No acceptance record exists.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The home directory (and so the record location) could not be determined.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/terms_status.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "`ta terms-status --json`.",
+  "properties": {
+    "accepted_at": {
+      "description": "When the terms were accepted (RFC 3339).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "accepted_by_ta_version": {
+      "description": "The `ta` version that recorded the acceptance.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "accepted_document_sha256": {
+      "description": "Full SHA-256 recorded at acceptance; null for such a legacy record.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "accepted_document_version": {
+      "description": "Document version recorded when the terms were accepted; null for a\nrecord written before documents were versioned, or when none exists.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "document_sha256": {
+      "description": "Lowercase hex SHA-256 of the embedded terms text, byte for byte\n(`ta view-terms` prints these bytes plus one trailing newline).",
+      "type": "string"
+    },
+    "document_version": {
+      "description": "Version label of the terms document this `ta` embeds (`TERMS_VERSION`).\nUnrelated to the `ta` version.",
+      "type": "string"
+    },
+    "legacy_record": {
+      "description": "The record predates document versions and carries only the 16-hex\nprefix of the hash. It is still honored while that prefix matches the\ncurrent text; `accepted_document_*` are null. A consumer binding\nacceptance to the full hash should have the user accept again.",
+      "type": "boolean"
+    },
+    "next_step": {
+      "description": "What to run next; null when `status` is `current`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "record_path": {
+      "description": "Where the acceptance record lives.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/TermsState"
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "document_version",
+    "document_sha256",
+    "legacy_record"
+  ],
+  "title": "TermsStatusReport",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

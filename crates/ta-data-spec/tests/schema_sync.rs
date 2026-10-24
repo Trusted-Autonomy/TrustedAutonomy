@@ -35,3 +35,48 @@ fn checked_in_schemas_match_generated_output() {
         );
     }
 }
+
+/// Every installer-facing JSON document declares its `schema_version` as a
+/// required field, so a consumer can refuse a shape it does not know.
+#[test]
+fn installer_documents_require_a_schema_version() {
+    for name in [
+        "init_report",
+        "vcs_setup_report",
+        "capabilities",
+        "terms_status",
+        "daemon_report",
+    ] {
+        let entry = ta_data_spec::SPECS
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no spec named {name}"));
+        let schema = ta_data_spec::render(entry);
+        let required = schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} has no `required` list"));
+        assert!(
+            required.iter().any(|r| r == "schema_version"),
+            "{name} must require schema_version: {required:?}"
+        );
+        assert!(
+            schema["properties"]["schema_version"].is_object(),
+            "{name} must declare schema_version"
+        );
+    }
+}
+
+/// The probe document the daemon prints is versioned by `probe_schema`.
+#[test]
+fn the_daemon_probe_requires_its_probe_schema() {
+    let entry = ta_data_spec::SPECS
+        .iter()
+        .find(|e| e.name == "daemon_probe")
+        .unwrap();
+    let schema = ta_data_spec::render(entry);
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "probe_schema"));
+}

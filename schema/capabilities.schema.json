@@ -1,0 +1,186 @@
+{
+  "$defs": {
+    "DaemonProbeState": {
+      "description": "Outcome of asking the installed `ta-daemon` for its own facts.",
+      "oneOf": [
+        {
+          "const": "ok",
+          "description": "The daemon answered; its facts are in the capability fields.",
+          "type": "string"
+        },
+        {
+          "const": "binary_not_found",
+          "description": "No `ta-daemon` binary was found next to `ta` or on PATH.",
+          "type": "string"
+        },
+        {
+          "const": "probe_unsupported",
+          "description": "The binary exists but does not understand `--print-capabilities`: a\ndaemon built before the probe existed. Its capabilities are reported\nfalse because nothing proves them.",
+          "type": "string"
+        },
+        {
+          "const": "probe_failed",
+          "description": "The binary ran but its answer could not be used (crash, timeout,\nunreadable or unsupported probe version).",
+          "type": "string"
+        }
+      ]
+    },
+    "DaemonProbeStatus": {
+      "description": "How the daemon-side capabilities were obtained.",
+      "properties": {
+        "binary": {
+          "description": "The `ta-daemon` binary that was asked, when one was found.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "What happened and what to do about it; empty when `state` is `ok`.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DaemonProbeState"
+        }
+      },
+      "required": [
+        "state",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "Platform": {
+      "description": "Operating system and CPU architecture this `ta` was built for.",
+      "properties": {
+        "arch": {
+          "description": "`std::env::consts::ARCH`: `aarch64`, `x86_64`, ...",
+          "type": "string"
+        },
+        "os": {
+          "description": "`std::env::consts::OS`: `macos`, `linux`, `windows`, ...",
+          "type": "string"
+        }
+      },
+      "required": [
+        "os",
+        "arch"
+      ],
+      "type": "object"
+    },
+    "SandboxProviderFact": {
+      "description": "A sandbox provider usable on this machine and the capabilities it enforces.",
+      "properties": {
+        "enforces": {
+          "description": "Capability names (`fs.deny_ta_tree`, `net.loopback_blocked`, ...) the\nprovider enforces, computed from the same matrix a real launch uses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Provider name, e.g. `macos_sandbox_exec`, `linux_bwrap`,\n`linux_landlock`, `windows_appcontainer`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "enforces"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/capabilities.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "`ta capabilities --json`: what this installation can safely do.\n\nEvery boolean is true only when the code path behind it was exercised and\nworked (see `evidence`); a flag appearing in `--help` never counts.",
+  "properties": {
+    "atomic_apply": {
+      "description": "Apply journals prior values and a failed apply restores them.",
+      "type": "boolean"
+    },
+    "capabilities_schema": {
+      "description": "Version of the capability field set; installers gate on this.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "daemon_passes_restricted_flags": {
+      "description": "The installed daemon launches CoS roles with `--chat-mode` and\n`--origin cos`, and this `ta run` accepts and acts on them. False when\nno daemon could be asked.",
+      "type": "boolean"
+    },
+    "daemon_probe": {
+      "$ref": "#/$defs/DaemonProbeStatus",
+      "description": "How the daemon-side capabilities were obtained."
+    },
+    "evidence": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Per capability, what was run to decide it (or why it is false).",
+      "type": "object"
+    },
+    "nats_credentials": {
+      "description": "The daemon's NATS client enforces credentials for non-loopback servers.",
+      "type": "boolean"
+    },
+    "outcome_roles": {
+      "description": "The daemon grants the outcome right only to the configured roles.",
+      "type": "boolean"
+    },
+    "platform": {
+      "$ref": "#/$defs/Platform"
+    },
+    "rules_engine": {
+      "description": "The compiled rules table decides actions and defaults to deny when unattended.",
+      "type": "boolean"
+    },
+    "sandbox_providers": {
+      "description": "Sandbox providers usable on this machine (empty when none).",
+      "items": {
+        "$ref": "#/$defs/SandboxProviderFact"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "description": "Shape version of this document (same value as `capabilities_schema`).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "supports_chat_mode": {
+      "description": "`ta run --chat-mode` starts a read-only chat-mode launch.",
+      "type": "boolean"
+    },
+    "supports_origin": {
+      "description": "`ta run --origin <name>` validates and stamps the goal origin.",
+      "type": "boolean"
+    },
+    "ta_version": {
+      "description": "`ta` version. NOT a capability signal: builds before and after the CoS\nhardening report the same version.",
+      "type": "string"
+    },
+    "terms_status": {
+      "description": "`ta terms-status --json` reports a document version and content hash.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "capabilities_schema",
+    "ta_version",
+    "platform",
+    "daemon_passes_restricted_flags",
+    "supports_chat_mode",
+    "supports_origin",
+    "rules_engine",
+    "outcome_roles",
+    "nats_credentials",
+    "terms_status",
+    "atomic_apply",
+    "sandbox_providers",
+    "daemon_probe",
+    "evidence"
+  ],
+  "title": "CapabilitiesReport",
+  "type": "object",
+  "x-ta-schema-version": 1
+}
