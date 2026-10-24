@@ -7014,8 +7014,9 @@ fn launch_agent_via_runtime(
     let agent_start = std::time::Instant::now();
 
     // Seatbelt denials from the unified log (v0.17.12.7). Started before the
-    // spawn because `log stream` needs a moment to attach; dropped with this scope.
-    let _violation_tail = sandbox_plan
+    // spawn: the call waits until the stream is proven attached with a denial
+    // TA causes on purpose. Finished after the agent exits (v0.17.12.23).
+    let violation_capture = sandbox_plan
         .as_ref()
         .and_then(|p| p.start_violation_tail(events_dir, goal_id));
 
@@ -7203,6 +7204,12 @@ fn launch_agent_via_runtime(
             exit_code: exit_status.code(),
             duration_secs: agent_start.elapsed().as_secs(),
         }));
+    }
+
+    // Prove the denial capture still works, recover denials the live stream
+    // dropped from the persisted log and record the result (macOS only).
+    if let Some(capture) = violation_capture {
+        capture.finish();
     }
 
     Ok((exit_status, tokens))

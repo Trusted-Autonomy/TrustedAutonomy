@@ -190,7 +190,7 @@
     "Answers: answer_sha256 is sha256 over the exact UTF-8 bytes of the relayed answer text. TA does not trim, normalize or re-encode the answer before hashing, so trailing whitespace and newlines count. An assertion whose hash was computed over trimmed text is refused with answer_changed when the relayed text is not trimmed.",
     "provenance null (no agent-side requester) and provenance with an empty-string excerpt are different values and have different digests.",
     "The signature is over the exact base64url header and claims segments as sent (header.claims). A signer may serialize the JSON with any key order; the verifier parses it. Signatures are Ed25519 and deterministic, so the compact assertions in this file are stable.",
-    "role_order, maintainer_roles and escalation_min_role are the registered key's settings and are published by GET /api/attention metadata (keys[]). escalation_min_role is recorded and published now; the escalated viewer reroute that enforces it is the pending vector below.",
+    "role_order, maintainer_roles and escalation_min_role are the registered key's settings and are published by GET /api/attention metadata (keys[]). escalation_min_role is published by the feed and enforced by rule 7: for an item rerouted away from its named user, TA accepts a different signer only with escalated true, a role claim at or above this floor, and the action approve, deny or answer (the *_rerouted_* vectors).",
     "jti must be 8 to 128 characters. TA keeps used jtis for at least 300 seconds, so a replay inside an assertion's lifetime is always refused."
   ],
   "now": 1800000000,
@@ -1942,27 +1942,440 @@
       "status": "active"
     },
     {
-      "intended": {
-        "accept_for": [
-          "approve",
-          "deny",
-          "answer"
-        ],
-        "assertion_claims": "user_id differs from waiting_on.value, escalated true, role at or above the registered key's escalation_min_role",
-        "audit": "TA records escalated true and the original waiting_on.value",
-        "item_waiting_on": {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZGFuYUBleGFtcGxlLmNvbSIsImVzY2FsYXRlZCI6dHJ1ZSwiZXhwIjoxODAwMDAwMDMwLCJpYXQiOjE4MDAwMDAwMDAsIml0ZW1fZGlnZXN0Ijoic2hhMjU2Ojk1NDhjNzk1NzM2Y2VjNmFkNDFkMzZmZWEyYjVjZDA1NTg3ODg1YTlmYmE5NDg4ZGVhYzkwNzBjZGJkYjkxYTciLCJpdGVtX2lkIjoiYXR0X2RyYWZ0XzM1MjgzOGQ4IiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6Im1lbWJlciIsInVzZXJfaWQiOiJkYW5hIn0.75YhbrPjkrQ76xKJa4COJ-NpNxvCxQm1NuQcmRT1RdQ6ce1jLWLti_ODRfGbzy5ov50lMIWRXSQkfwQ-GWc-BA",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "member",
+        "user_id": "dana"
+      },
+      "description": "Approve an item that was addressed to viewer-9 and rerouted by Wayfinder: the signer is another user (dana), escalated is true, and role 'member' meets the key's escalation_min_role (member). TA accepts and records escalated true.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "approve",
+          "escalated": true,
+          "role": "member",
+          "self_approved": false,
+          "user_id": "dana"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
           "type": "user",
           "value": "viewer-9"
-        },
-        "refuse_when": [
-          "role below escalation_min_role",
-          "role claim absent",
-          "any other action"
+        }
+      },
+      "name": "approve_rerouted_viewer_item",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
         ]
       },
-      "name": "escalated_viewer_reroute",
-      "pending_reason": "Filled in by plan phase v0.17.12.11 item 17 (rule 7: rerouted user-targeted items verify under the escalated claim). Today TA refuses a user-addressed item signed by a different user, with reason not_permitted, even when escalated is true.",
-      "status": "pending"
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJkZW55IiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZGFuYUBleGFtcGxlLmNvbSIsImVzY2FsYXRlZCI6dHJ1ZSwiZXhwIjoxODAwMDAwMDMwLCJpYXQiOjE4MDAwMDAwMDAsIml0ZW1fZGlnZXN0Ijoic2hhMjU2Ojk1NDhjNzk1NzM2Y2VjNmFkNDFkMzZmZWEyYjVjZDA1NTg3ODg1YTlmYmE5NDg4ZGVhYzkwNzBjZGJkYjkxYTciLCJpdGVtX2lkIjoiYXR0X2RyYWZ0XzM1MjgzOGQ4IiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6Im93bmVyIiwidXNlcl9pZCI6ImRhbmEifQ.cfuQdio60gdgQEPE92gsZiA7oa58ujpc6lMy9UTXOFqCwJzfLAOTRMoyutE1cMdbvaXDCEn3fBv00Gige0YRAQ",
+      "claims": {
+        "action": "deny",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "owner",
+        "user_id": "dana"
+      },
+      "description": "Deny a rerouted item under the escalated claim with an owner role.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "deny",
+          "escalated": true,
+          "role": "owner",
+          "self_approved": false,
+          "user_id": "dana"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        }
+      },
+      "name": "deny_rerouted_viewer_item",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "deny",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhbnN3ZXIiLCJhbnN3ZXJfc2hhMjU2Ijoic2hhMjU2OmIyZDE2OWFmNDQ0OWEzZTVlMWZjZjVlYTczMzdkZTI3NmQwZDdiOWNlYmU5OTFlYjVmMzZmODA1MzBhYmI0MDciLCJhdWQiOiJ0YV9pbnN0YWxsXzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZW1haWwiOiJkYW5hQGV4YW1wbGUuY29tIiwiZXNjYWxhdGVkIjp0cnVlLCJleHAiOjE4MDAwMDAwMzAsImlhdCI6MTgwMDAwMDAwMCwiaXRlbV9kaWdlc3QiOiJzaGEyNTY6NjhiYTQ2OTNjY2ZkMGYzNjQ3YmFjMWU4NTcyMzYxYjg5ZWJlN2RhMjRiNmZjNjI1YjY1YjNjZTgyM2JhZmI4MSIsIml0ZW1faWQiOiJhdHRfcXVlc3Rpb25fN2ExZjNjMjAiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDAiLCJwcm9qZWN0X2lkIjoid2F5ZmluZGVyLWRlbW8iLCJyb2xlIjoiYWRtaW4iLCJ1c2VyX2lkIjoiZGFuYSJ9.5rKjs76rqU8foGDcTqfp0DEwVqFyb224qgsuMFWSkEl1yVAs3K9xEk85g6qvRtLGJf_meXJoTQbwVAjcGAP1Dg",
+      "claims": {
+        "action": "answer",
+        "answer_sha256": "sha256:b2d169af4449a3e5e1fcf5ea7337de276d0d7b9cebe991eb5f36f80530abb407",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "item_id": "att_question_7a1f3c20",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "admin",
+        "user_id": "dana"
+      },
+      "description": "Answer an agent question that was rerouted from viewer-9 to dana under the escalated claim. answer_sha256 covers the exact relayed text.",
+      "expect": {
+        "outcome": "accept",
+        "verified": {
+          "action": "answer",
+          "escalated": true,
+          "role": "admin",
+          "self_approved": false,
+          "user_id": "dana"
+        }
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "agent_question",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_question_7a1f3c20",
+        "item_digest": "sha256:68ba4693ccfd0f3647bac1e8572361b89ebe7da24b6fc625b65b3ce823bafb81",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        }
+      },
+      "name": "answer_rerouted_viewer_item",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "answer",
+        "answer": "Use the main branch."
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZGFuYUBleGFtcGxlLmNvbSIsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo5NTQ4Yzc5NTczNmNlYzZhZDQxZDM2ZmVhMmI1Y2QwNTU4Nzg4NWE5ZmJhOTQ4OGRlYWM5MDcwY2RiZGI5MWE3IiwiaXRlbV9pZCI6ImF0dF9kcmFmdF8zNTI4MzhkOCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInJvbGUiOiJvd25lciIsInVzZXJfaWQiOiJkYW5hIn0.uehgsSsur3TZ7EooF5wtLfY90lzvl0vlsOx6-n-T3TTHwL3Rn_ynKzfY0K3wqrSSChRlyT1LQDUissEOo0nTAA",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "owner",
+        "user_id": "dana"
+      },
+      "description": "A different user signs an item addressed to viewer-9 WITHOUT escalated: refused, the exception needs the escalated claim.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_permitted"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        }
+      },
+      "name": "refuse_rerouted_without_escalated_claim",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy1jdXN0b20ifQ.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZXJpbkBleGFtcGxlLmNvbSIsImVzY2FsYXRlZCI6dHJ1ZSwiZXhwIjoxODAwMDAwMDMwLCJpYXQiOjE4MDAwMDAwMDAsIml0ZW1fZGlnZXN0Ijoic2hhMjU2Ojk1NDhjNzk1NzM2Y2VjNmFkNDFkMzZmZWEyYjVjZDA1NTg3ODg1YTlmYmE5NDg4ZGVhYzkwNzBjZGJkYjkxYTciLCJpdGVtX2lkIjoiYXR0X2RyYWZ0XzM1MjgzOGQ4IiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwicm9sZSI6InZpZXdlciIsInVzZXJfaWQiOiJlcmluIn0.v5oyNYLmKZzS82AOB3L05gnWOVxtep_sYCnd29gUUF632fp2-3sGjboBINhys3LUvFAUrovEfRBg8ds4lZWVDw",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "erin@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "viewer",
+        "user_id": "erin"
+      },
+      "description": "Escalated claim with a role below the key's escalation_min_role (custom order viewer < editor < lead, floor editor; claim 'viewer'): refused.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_permitted"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-custom"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        }
+      },
+      "name": "refuse_rerouted_role_below_escalation_floor",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "editor",
+        "kid": "org-custom",
+        "maintainer_roles": [
+          "lead"
+        ],
+        "role_order": [
+          "viewer",
+          "editor",
+          "lead"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHByb3ZlIiwiYXVkIjoidGFfaW5zdGFsbF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImVtYWlsIjoiZGFuYUBleGFtcGxlLmNvbSIsImVzY2FsYXRlZCI6dHJ1ZSwiZXhwIjoxODAwMDAwMDMwLCJpYXQiOjE4MDAwMDAwMDAsIml0ZW1fZGlnZXN0Ijoic2hhMjU2Ojk1NDhjNzk1NzM2Y2VjNmFkNDFkMzZmZWEyYjVjZDA1NTg3ODg1YTlmYmE5NDg4ZGVhYzkwNzBjZGJkYjkxYTciLCJpdGVtX2lkIjoiYXR0X2RyYWZ0XzM1MjgzOGQ4IiwianRpIjoianRpLXZlY3Rvci0wMDAwIiwicHJvamVjdF9pZCI6IndheWZpbmRlci1kZW1vIiwidXNlcl9pZCI6ImRhbmEifQ.Zsk9Zp-4tZ9bMhNgFW_MJA0xfDVJNqkwEdFkbovY_4Ss8SV22rPutjMbRDsahz18DHRni_YBdU2fFo_QV98kDQ",
+      "claims": {
+        "action": "approve",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "user_id": "dana"
+      },
+      "description": "Escalated claim with no role claim at all: refused, the floor cannot be checked.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_permitted"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        }
+      },
+      "name": "refuse_rerouted_role_claim_absent",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "approve",
+        "answer": null
+      },
+      "status": "active"
+    },
+    {
+      "assertion": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZy0xIn0.eyJhY3Rpb24iOiJhcHBseSIsImF1ZCI6InRhX2luc3RhbGxfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJlbWFpbCI6ImRhbmFAZXhhbXBsZS5jb20iLCJlc2NhbGF0ZWQiOnRydWUsImV4cCI6MTgwMDAwMDAzMCwiaWF0IjoxODAwMDAwMDAwLCJpdGVtX2RpZ2VzdCI6InNoYTI1Njo5NTQ4Yzc5NTczNmNlYzZhZDQxZDM2ZmVhMmI1Y2QwNTU4Nzg4NWE5ZmJhOTQ4OGRlYWM5MDcwY2RiZGI5MWE3IiwiaXRlbV9pZCI6ImF0dF9kcmFmdF8zNTI4MzhkOCIsImp0aSI6Imp0aS12ZWN0b3ItMDAwMCIsInByb2plY3RfaWQiOiJ3YXlmaW5kZXItZGVtbyIsInJvbGUiOiJvd25lciIsInVzZXJfaWQiOiJkYW5hIn0.kyDdEDswkDwkhh-w4Y_GU_96w937OdISg0jdbPVVe8m3q7rA1e8KagWmumsTUeVNkj0cc1wWi9X6U5GwMHnaCQ",
+      "claims": {
+        "action": "apply",
+        "aud": "ta_install_0123456789abcdef0123456789abcdef",
+        "email": "dana@example.com",
+        "escalated": true,
+        "exp": 1800000030,
+        "iat": 1800000000,
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "item_id": "att_draft_352838d8",
+        "jti": "jti-vector-0000",
+        "project_id": "wayfinder-demo",
+        "role": "owner",
+        "user_id": "dana"
+      },
+      "description": "The exception covers approve, deny and answer only. A signed 'apply' for a rerouted item is refused even with escalated true and an owner role.",
+      "expect": {
+        "outcome": "refuse",
+        "reason": "not_permitted"
+      },
+      "header": {
+        "alg": "EdDSA",
+        "kid": "org-1"
+      },
+      "install_id": "ta_install_0123456789abcdef0123456789abcdef",
+      "item": "draft_review_with_provenance",
+      "item_state": {
+        "agent_originated": true,
+        "id": "att_draft_352838d8",
+        "item_digest": "sha256:9548c795736cec6ad41d36fea2b5cd05587885a9fba9488deac9070cdbdb91a7",
+        "project": "wayfinder-demo",
+        "requester_id": "user-123",
+        "waiting_on": {
+          "type": "user",
+          "value": "viewer-9"
+        }
+      },
+      "name": "refuse_rerouted_wrong_action",
+      "now": 1800000000,
+      "presented_twice": false,
+      "registered_key": {
+        "escalation_min_role": "member",
+        "kid": "org-1",
+        "maintainer_roles": [
+          "admin",
+          "owner"
+        ],
+        "role_order": [
+          "member",
+          "admin",
+          "owner"
+        ]
+      },
+      "request": {
+        "action": "apply",
+        "answer": null
+      },
+      "status": "active"
     }
   ]
 }

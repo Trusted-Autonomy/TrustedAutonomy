@@ -74,7 +74,7 @@ Rules:
   }]
   ```
 
-  `role_order` is lowest rank first. `escalation_min_role` defaults to `member` and is the floor rule 7 applies to an `escalated` claim; it is published now and enforced when the escalated viewer reroute lands.
+  `role_order` is lowest rank first. `escalation_min_role` defaults to `member` and is the floor rule 7 applies to an `escalated` claim. TA enforces it: a `type=user` assertion for a different user is accepted only under that floor, and the audit record carries `rerouted_from` (the original `waiting_on.value`) beside `escalated: true`.
 - A resolved item carries `accepted_assertions`: `[{ "jti", "user_id", "action", "at", "escalated", "self_approved" }]`, so Wayfinder can flag a forged or unexpected acceptance.
 
 ## 4. Acting on an item: the relay endpoint
