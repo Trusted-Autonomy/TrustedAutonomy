@@ -16632,6 +16632,8 @@ fn run() {
                 agent: "claude-code".to_string(),
                 duration_secs: 1.0,
                 confidence: 0.95,
+                intent_match: None,
+                item_decisions: vec![],
             }),
         };
         let ctx_path = project.path().join("ctx.json");
@@ -19925,6 +19927,8 @@ fn run() {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.2, // below min_confidence — Warn + low confidence => Escalate
+            intent_match: None,
+            item_decisions: vec![],
         });
         save_package(&config, &pkg).unwrap();
         let pkg_id = pkg.package_id.to_string();
@@ -20021,6 +20025,8 @@ fn run() {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.99,
+            intent_match: None,
+            item_decisions: vec![],
         });
         save_package(&config, &pkg).unwrap();
         let pkg_id = pkg.package_id.to_string();
@@ -20182,6 +20188,8 @@ fn run() {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.95,
+            intent_match: None,
+            item_decisions: vec![],
         });
         save_package(&config, &pkg).unwrap();
         let pkg_id = pkg.package_id.to_string();
