@@ -87,6 +87,11 @@ pub enum SetupCommands {
     },
 }
 
+/// True when the command prints a JSON document on stdout (`setup vcs --json`).
+pub fn prints_json(command: &SetupCommands) -> bool {
+    matches!(command, SetupCommands::Vcs { json: true, .. })
+}
+
 pub fn execute(command: &SetupCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
         SetupCommands::Wizard { template } => run_wizard(config, template),
