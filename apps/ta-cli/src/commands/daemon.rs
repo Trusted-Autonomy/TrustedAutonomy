@@ -13,6 +13,10 @@ use std::process::Command;
 
 use super::daemon_ownership::{self, DaemonProbe, HttpProbe, PortHolder};
 use ta_mcp_gateway::daemon_port;
+use ta_workspace::{
+    DaemonAction, DaemonReason, DaemonReport, DaemonState as WsDaemonState,
+    DAEMON_REPORT_SCHEMA_VERSION,
+};
 
 // ─── macOS code signing (self-healing, best-effort) ─────────────────────────
 //
@@ -57,6 +61,10 @@ pub enum DaemonCommands {
         /// at /ui, so this never binds a second port.
         #[arg(long)]
         port: Option<u16>,
+        /// Print one JSON document (state, pid, port, health) instead of text.
+        /// Progress messages stay on stderr. Not valid with --foreground.
+        #[arg(long)]
+        json: bool,
     },
     /// Stop the running daemon gracefully.
     Stop,
@@ -75,9 +83,20 @@ pub enum DaemonCommands {
         /// Active goal runs will be interrupted.
         #[arg(long)]
         force: bool,
+        /// Print one JSON document (state, new and previous pid, port, health)
+        /// instead of text. Progress messages stay on stderr.
+        #[arg(long)]
+        json: bool,
     },
     /// Show daemon status: PID, port, version, uptime, project root, active goals.
-    Status,
+    ///
+    /// With `--json`, prints one document (state, pid, port, url, pid and log
+    /// files, reasons) on stdout for scripts and installers.
+    Status {
+        /// Print a JSON document instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Tail the daemon log file.
     Log {
         /// Number of lines to show (default: 50).
@@ -113,13 +132,29 @@ pub enum DaemonCommands {
     Config,
 }
 
+/// True when the command prints a JSON document on stdout (`start|restart|status --json`).
+pub fn prints_json(command: &DaemonCommands) -> bool {
+    matches!(
+        command,
+        DaemonCommands::Start { json: true, .. }
+            | DaemonCommands::Restart { json: true, .. }
+            | DaemonCommands::Status { json: true }
+    )
+}
+
 /// Execute a `ta daemon` subcommand.
 pub fn execute(command: &DaemonCommands, project_root: &Path) -> anyhow::Result<()> {
     match command {
-        DaemonCommands::Start { foreground, port } => cmd_start(project_root, *foreground, *port),
+        DaemonCommands::Start {
+            foreground,
+            port,
+            json,
+        } => cmd_start(project_root, *foreground, *port, *json),
         DaemonCommands::Stop => cmd_stop(project_root),
-        DaemonCommands::Restart { port, force } => cmd_restart(project_root, *port, *force),
-        DaemonCommands::Status => cmd_status(project_root),
+        DaemonCommands::Restart { port, force, json } => {
+            cmd_restart(project_root, *port, *force, *json)
+        }
+        DaemonCommands::Status { json } => cmd_status(project_root, *json),
         DaemonCommands::Log {
             lines,
             follow,
@@ -993,8 +1028,21 @@ fn wait_out_startup(
 
 // ─── CLI command implementations ─────────────────────────────────────────────
 
-fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow::Result<()> {
+fn cmd_start(
+    project_root: &Path,
+    foreground: bool,
+    port: Option<u16>,
+    json: bool,
+) -> anyhow::Result<()> {
     if foreground {
+        if json {
+            anyhow::bail!(
+                "`ta daemon start --foreground --json` is not supported: a foreground daemon \
+                 holds this terminal until it exits, so there is no point at which to print a \
+                 report. Drop --foreground to start in the background and get the report, or \
+                 drop --json."
+            );
+        }
         // Foreground mode: exec the daemon binary directly, after the same
         // ownership and port checks as a background start.
         let StartPlan { port: chosen, .. } = plan_start(project_root, port, &HttpProbe)?;
@@ -1025,12 +1073,14 @@ fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow
     let effective_port =
         read_pid_port(project_root).unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
-    println!("Daemon started.");
-    println!("  PID:  {}", pid);
-    println!("  Port: {}", effective_port);
-    println!("  Log:  {}", log_path(project_root).display());
-    println!();
-    println!("Use `ta daemon status` to check health, `ta daemon stop` to shut down.");
+    if !json {
+        println!("Daemon started.");
+        println!("  PID:  {}", pid);
+        println!("  Port: {}", effective_port);
+        println!("  Log:  {}", log_path(project_root).display());
+        println!();
+        println!("Use `ta daemon status` to check health, `ta daemon stop` to shut down.");
+    }
 
     // Wait briefly for startup and report health. A daemon waiting for a
     // Keychain approval answers `starting` with the reason; show it.
@@ -1039,6 +1089,16 @@ fn cmd_start(project_root: &Path, foreground: bool, port: Option<u16>) -> anyhow
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
     let last = poll_health(&client, &base_url, 10, true);
+    if json {
+        return print_report(&launch_report(
+            project_root,
+            DaemonAction::Start,
+            port,
+            pid,
+            None,
+            last.as_ref(),
+        ));
+    }
     print_health_after_start(last.as_ref(), &base_url);
     Ok(())
 }
@@ -1056,7 +1116,12 @@ fn cmd_stop(project_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::Result<()> {
+fn cmd_restart(
+    project_root: &Path,
+    port: Option<u16>,
+    force: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let old_pid = read_pid(project_root);
 
     // Refuse before announcing or draining anything when the port belongs to
@@ -1094,14 +1159,16 @@ fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::R
     let effective_port =
         read_pid_port(project_root).unwrap_or_else(|| daemon_toml_bind_port(project_root).1);
 
-    if let Some(old) = old_pid {
-        println!("Daemon restarted (was pid {}, now pid {}).", old, new_pid);
-    } else {
-        println!("Daemon started (pid {}).", new_pid);
-    }
+    if !json {
+        if let Some(old) = old_pid {
+            println!("Daemon restarted (was pid {}, now pid {}).", old, new_pid);
+        } else {
+            println!("Daemon started (pid {}).", new_pid);
+        }
 
-    println!("  Port: {}", effective_port);
-    println!("  Log:  {}", log_path(project_root).display());
+        println!("  Port: {}", effective_port);
+        println!("  Log:  {}", log_path(project_root).display());
+    }
 
     // Wait for health. A daemon waiting for a Keychain approval answers
     // `starting` with the reason; show it with the next step.
@@ -1110,179 +1177,430 @@ fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::R
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
     let last = poll_health(&client, &base_url, 20, true);
+    if json {
+        return print_report(&launch_report(
+            project_root,
+            DaemonAction::Restart,
+            port,
+            new_pid,
+            old_pid,
+            last.as_ref(),
+        ));
+    }
     print_health_after_start(last.as_ref(), &base_url);
     Ok(())
 }
 
-fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
-    let pid = read_pid(project_root);
-    let base_url = resolve_daemon_url(project_root, None);
+/// What `ta daemon status` found. The probe does the checking (and removes a
+/// stale pid file); `print_status` renders it as text and `status_report`
+/// as the `--json` document.
+enum StatusProbe {
+    /// The pid file names a live process and `/api/status` answered.
+    Running {
+        pid: u32,
+        body: serde_json::Value,
+        /// Open MCP/shell agent sessions (from `/api/drain/status`).
+        open_sessions: u64,
+    },
+    /// The pid file names a live process but nothing answers on the URL.
+    Unresponsive { pid: u32 },
+    /// The pid file named a dead process; it was removed.
+    StalePid { pid: u32 },
+    /// No pid file, and the port answers with another project's daemon.
+    OtherProject {
+        reported_root: String,
+        pid: Option<u64>,
+    },
+    /// No pid file, but this project's daemon answers.
+    External { body: serde_json::Value },
+    /// No daemon for this project.
+    NotRunning,
+}
 
+fn probe_status(project_root: &Path, base_url: &str) -> anyhow::Result<StatusProbe> {
+    let pid = read_pid(project_root);
     match pid {
         Some(p) if is_process_alive(p) => {
             // Daemon PID is alive — query for details.
             let client = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
-
             let status_url = format!("{}/api/status", base_url);
             match client.get(&status_url).send() {
                 Ok(resp) if resp.status().is_success() => {
-                    let json: serde_json::Value = resp.json()?;
-                    let version = json["version"].as_str().unwrap_or("?");
-                    let project = json["project"].as_str().unwrap_or("?");
-                    let active_agents = json["active_agents"].as_array();
-                    let active_count = active_agents.map(|a| a.len()).unwrap_or(0);
-                    let active_goals = json["active_goals"].as_u64().unwrap_or(0);
-                    let pending_drafts = json["pending_drafts"].as_u64().unwrap_or(0);
-
-                    if daemon_state(&json) == "starting" {
-                        println!("Daemon is running but still starting.");
-                        println!("  PID:            {}", p);
-                        println!("  URL:            {}", base_url);
-                        println!("  Version:        {}", version);
-                        for line in startup_report_lines(&json) {
-                            println!("{line}");
-                        }
-                        println!("  Log:            {}", log_path(project_root).display());
-                        return Ok(());
-                    }
-                    println!("Daemon is running.");
-                    println!("  PID:            {}", p);
-                    println!("  URL:            {}", base_url);
-                    println!("  Version:        {}", version);
-                    println!("  Project:        {}", project);
-                    println!("  Project root:   {}", project_root.display());
-                    if let Some(reported) = json["project_root"].as_str() {
-                        if !daemon_port::same_project_root(project_root, reported) {
-                            println!(
-                                "  WARNING:        the daemon on {} serves {}, not this project. \
-                                 Run `ta daemon status` there; `ta daemon stop` and `restart` \
-                                 here refuse to touch it.",
-                                base_url, reported
-                            );
-                        }
-                    }
-                    println!("  Active goals:   {}", active_goals);
-                    println!("  Active agents:  {}", active_count);
-                    println!("  Pending drafts: {}", pending_drafts);
-                    println!("  Log:            {}", log_path(project_root).display());
-                    for line in startup_report_lines(&json) {
-                        println!("{line}");
-                    }
-                    if let Some(line) = super::status::outstanding_update_message(&json) {
-                        println!("  Update:         {}", line);
-                    }
-
-                    // Show per-goal details when there are active goals.
-                    if let Some(agents) = active_agents {
-                        if !agents.is_empty() {
-                            println!();
-                            println!("  Active goal runs:");
-                            for a in agents {
-                                let title = a["title"].as_str().unwrap_or("?");
-                                let state = a["state"].as_str().unwrap_or("?");
-                                let secs = a["running_secs"].as_i64().unwrap_or(0);
-                                let goal_id = a["goal_id"].as_str().unwrap_or("?");
-                                let pid_str = a["agent_pid"]
-                                    .as_u64()
-                                    .map(|p| format!(" pid={}", p))
-                                    .unwrap_or_default();
-                                println!(
-                                    "    [{}] {} — {} ({}s{})",
-                                    &goal_id[..8.min(goal_id.len())],
-                                    title,
-                                    state,
-                                    secs,
-                                    pid_str,
-                                );
-                            }
-                        }
-                    }
-
-                    // Also show open agent sessions (MCP/shell connections).
+                    let body: serde_json::Value = resp.json()?;
+                    // Open agent sessions (MCP/shell connections).
                     let drain_url = format!("{}/api/drain/status", base_url);
-                    if let Ok(dr) = client.get(&drain_url).send() {
-                        if let Ok(dj) = dr.json::<serde_json::Value>() {
-                            let sessions = dj["active_sessions"].as_u64().unwrap_or(0);
-                            if sessions > 0 {
-                                println!();
-                                println!("  Open agent sessions (MCP/shell): {}", sessions);
-                            }
-                        }
-                    }
+                    let open_sessions = client
+                        .get(&drain_url)
+                        .send()
+                        .ok()
+                        .and_then(|dr| dr.json::<serde_json::Value>().ok())
+                        .and_then(|dj| dj["active_sessions"].as_u64())
+                        .unwrap_or(0);
+                    Ok(StatusProbe::Running {
+                        pid: p,
+                        body,
+                        open_sessions,
+                    })
                 }
-                _ => {
-                    println!(
-                        "Daemon process is alive (pid {}) but not responding on {}.",
-                        p, base_url
-                    );
-                    println!("  It may still be starting up. Check logs:");
-                    println!("    ta daemon log");
-                    println!("  Or force kill and restart:");
-                    println!("    kill {} && ta daemon start", p);
-                }
+                _ => Ok(StatusProbe::Unresponsive { pid: p }),
             }
         }
         Some(p) => {
             // PID exists but process is not alive — stale.
             remove_pid_file(project_root);
-            println!(
-                "Daemon is not running (stale PID file for pid {} removed).",
-                p
-            );
-            println!("  Start it with: ta daemon start");
+            Ok(StatusProbe::StalePid { pid: p })
         }
         None => {
             // No PID file. Check if daemon is reachable anyway (started externally).
             let client = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()?;
-
             let status_url = format!("{}/api/status", base_url);
             if let Ok(resp) = client.get(&status_url).send() {
                 if resp.status().is_success() {
-                    let json: serde_json::Value = resp.json()?;
-                    if let Some(other) = json["project_root"]
+                    let body: serde_json::Value = resp.json()?;
+                    if let Some(other) = body["project_root"]
                         .as_str()
                         .filter(|r| !daemon_port::same_project_root(project_root, r))
                     {
-                        println!(
-                            "No daemon is running for this project ({}).",
-                            project_root.display()
-                        );
-                        println!(
-                            "  {} answers with the daemon for {}{}, a different project.",
-                            base_url,
-                            other,
-                            json["pid"]
-                                .as_u64()
-                                .map(|p| format!(" (pid {p})"))
-                                .unwrap_or_default()
-                        );
-                        println!(
-                            "  Manage that daemon with `ta daemon status` from {}.",
-                            other
-                        );
-                        println!("  Start this project's own daemon with: ta daemon start");
-                        return Ok(());
+                        return Ok(StatusProbe::OtherProject {
+                            reported_root: other.to_string(),
+                            pid: body["pid"].as_u64(),
+                        });
                     }
-                    let version = json["version"].as_str().unwrap_or("?");
-                    println!("Daemon is running (started externally, no PID file).");
-                    println!("  URL:     {}", base_url);
-                    println!("  Version: {}", version);
-                    for line in startup_report_lines(&json) {
-                        println!("{line}");
+                    return Ok(StatusProbe::External { body });
+                }
+            }
+            Ok(StatusProbe::NotRunning)
+        }
+    }
+}
+
+fn cmd_status(project_root: &Path, json: bool) -> anyhow::Result<()> {
+    let base_url = resolve_daemon_url(project_root, None);
+    let probe = probe_status(project_root, &base_url)?;
+    if json {
+        return print_report(&status_report(project_root, &probe));
+    }
+    print_status(project_root, &base_url, &probe);
+    Ok(())
+}
+
+fn print_status(project_root: &Path, base_url: &str, probe: &StatusProbe) {
+    match probe {
+        StatusProbe::Running {
+            pid: p,
+            body: json,
+            open_sessions,
+        } => {
+            let version = json["version"].as_str().unwrap_or("?");
+            let project = json["project"].as_str().unwrap_or("?");
+            let active_agents = json["active_agents"].as_array();
+            let active_count = active_agents.map(|a| a.len()).unwrap_or(0);
+            let active_goals = json["active_goals"].as_u64().unwrap_or(0);
+            let pending_drafts = json["pending_drafts"].as_u64().unwrap_or(0);
+
+            if daemon_state(json) == "starting" {
+                println!("Daemon is running but still starting.");
+                println!("  PID:            {}", p);
+                println!("  URL:            {}", base_url);
+                println!("  Version:        {}", version);
+                for line in startup_report_lines(json) {
+                    println!("{line}");
+                }
+                println!("  Log:            {}", log_path(project_root).display());
+                return;
+            }
+            println!("Daemon is running.");
+            println!("  PID:            {}", p);
+            println!("  URL:            {}", base_url);
+            println!("  Version:        {}", version);
+            println!("  Project:        {}", project);
+            println!("  Project root:   {}", project_root.display());
+            if let Some(reported) = json["project_root"].as_str() {
+                if !daemon_port::same_project_root(project_root, reported) {
+                    println!(
+                        "  WARNING:        the daemon on {} serves {}, not this project. \
+                         Run `ta daemon status` there; `ta daemon stop` and `restart` \
+                         here refuse to touch it.",
+                        base_url, reported
+                    );
+                }
+            }
+            println!("  Active goals:   {}", active_goals);
+            println!("  Active agents:  {}", active_count);
+            println!("  Pending drafts: {}", pending_drafts);
+            println!("  Log:            {}", log_path(project_root).display());
+            for line in startup_report_lines(json) {
+                println!("{line}");
+            }
+            if let Some(line) = super::status::outstanding_update_message(json) {
+                println!("  Update:         {}", line);
+            }
+
+            // Show per-goal details when there are active goals.
+            if let Some(agents) = active_agents {
+                if !agents.is_empty() {
+                    println!();
+                    println!("  Active goal runs:");
+                    for a in agents {
+                        let title = a["title"].as_str().unwrap_or("?");
+                        let state = a["state"].as_str().unwrap_or("?");
+                        let secs = a["running_secs"].as_i64().unwrap_or(0);
+                        let goal_id = a["goal_id"].as_str().unwrap_or("?");
+                        let pid_str = a["agent_pid"]
+                            .as_u64()
+                            .map(|p| format!(" pid={}", p))
+                            .unwrap_or_default();
+                        println!(
+                            "    [{}] {} — {} ({}s{})",
+                            &goal_id[..8.min(goal_id.len())],
+                            title,
+                            state,
+                            secs,
+                            pid_str,
+                        );
                     }
-                    return Ok(());
                 }
             }
 
+            if *open_sessions > 0 {
+                println!();
+                println!("  Open agent sessions (MCP/shell): {}", open_sessions);
+            }
+        }
+        StatusProbe::Unresponsive { pid: p } => {
+            println!(
+                "Daemon process is alive (pid {}) but not responding on {}.",
+                p, base_url
+            );
+            println!("  It may still be starting up. Check logs:");
+            println!("    ta daemon log");
+            println!("  Or force kill and restart:");
+            println!("    kill {} && ta daemon start", p);
+        }
+        StatusProbe::StalePid { pid: p } => {
+            println!(
+                "Daemon is not running (stale PID file for pid {} removed).",
+                p
+            );
+            println!("  Start it with: ta daemon start");
+        }
+        StatusProbe::OtherProject {
+            reported_root: other,
+            pid,
+        } => {
+            println!(
+                "No daemon is running for this project ({}).",
+                project_root.display()
+            );
+            println!(
+                "  {} answers with the daemon for {}{}, a different project.",
+                base_url,
+                other,
+                pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+            );
+            println!(
+                "  Manage that daemon with `ta daemon status` from {}.",
+                other
+            );
+            println!("  Start this project's own daemon with: ta daemon start");
+        }
+        StatusProbe::External { body: json } => {
+            let version = json["version"].as_str().unwrap_or("?");
+            println!("Daemon is running (started externally, no PID file).");
+            println!("  URL:     {}", base_url);
+            println!("  Version: {}", version);
+            for line in startup_report_lines(json) {
+                println!("{line}");
+            }
+        }
+        StatusProbe::NotRunning => {
             println!("Daemon is not running.");
             println!("  Start it with: ta daemon start");
         }
     }
+}
 
+// ─── Machine-readable reports (`--json`) ─────────────────────────────────────
+
+/// A report with the pid/port contract paths filled in and nothing else known.
+/// `port_override` is the `--port` the command was given.
+fn blank_report(
+    project_root: &Path,
+    action: DaemonAction,
+    port_override: Option<u16>,
+) -> DaemonReport {
+    let (host, port) = resolve_daemon_addr(project_root, port_override);
+    DaemonReport {
+        schema_version: DAEMON_REPORT_SCHEMA_VERSION,
+        action,
+        state: WsDaemonState::NotRunning,
+        running: false,
+        pid: None,
+        previous_pid: None,
+        port: Some(port),
+        url: Some(format!("http://{host}:{port}")),
+        host: Some(host),
+        pid_file: pid_path(project_root).display().to_string(),
+        log_file: log_path(project_root).display().to_string(),
+        project_root: project_root.display().to_string(),
+        version: None,
+        reported_project_root: None,
+        active_goals: None,
+        active_agents: None,
+        pending_drafts: None,
+        reasons: Vec::new(),
+        stale_pid_removed: false,
+        detail: None,
+    }
+}
+
+/// The daemon's own health word as a report state: `ok` is running, `starting`
+/// stays starting, anything else is degraded.
+fn state_of_body(body: &serde_json::Value) -> WsDaemonState {
+    match daemon_state(body) {
+        "ok" => WsDaemonState::Running,
+        "starting" => WsDaemonState::Starting,
+        _ => WsDaemonState::Degraded,
+    }
+}
+
+/// Copy what an answering daemon reports (version, counts, reasons) into `r`.
+fn fill_from_body(r: &mut DaemonReport, body: &serde_json::Value) {
+    r.version = body["version"].as_str().map(str::to_string);
+    r.active_goals = body["active_goals"].as_u64();
+    r.active_agents = body["active_agents"].as_array().map(|a| a.len() as u64);
+    r.pending_drafts = body["pending_drafts"].as_u64();
+    r.reasons = body["reasons"]
+        .as_array()
+        .map(|reasons| {
+            reasons
+                .iter()
+                .map(|x| DaemonReason {
+                    component: x["component"].as_str().unwrap_or("daemon").to_string(),
+                    reason: x["reason"]
+                        .as_str()
+                        .unwrap_or("no reason given")
+                        .to_string(),
+                    next_step: x["next_step"].as_str().map(str::to_string),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if daemon_state(body) != "ok" && r.reasons.is_empty() {
+        r.reasons.push(DaemonReason {
+            component: "daemon".to_string(),
+            reason: "the daemon gave no reason".to_string(),
+            next_step: Some("Check the daemon log: ta daemon log".to_string()),
+        });
+    }
+}
+
+/// The `ta daemon status --json` document for what the probe found.
+fn status_report(project_root: &Path, probe: &StatusProbe) -> DaemonReport {
+    let mut r = blank_report(project_root, DaemonAction::Status, None);
+    let url = r.url.clone().unwrap_or_default();
+    match probe {
+        StatusProbe::Running { pid, body, .. } => {
+            fill_from_body(&mut r, body);
+            r.pid = Some(*pid);
+            r.state = state_of_body(body);
+            r.running = true;
+            if let Some(reported) = body["project_root"].as_str() {
+                r.reported_project_root = Some(reported.to_string());
+                if !daemon_port::same_project_root(project_root, reported) {
+                    r.detail = Some(format!(
+                        "The daemon on {url} serves {reported}, not this project. Run `ta daemon \
+                         status` there; `ta daemon stop` and `restart` here refuse to touch it."
+                    ));
+                }
+            }
+        }
+        StatusProbe::Unresponsive { pid } => {
+            r.state = WsDaemonState::Unresponsive;
+            r.pid = Some(*pid);
+            r.detail = Some(format!(
+                "Process {pid} is alive but nothing answers on {url}. It may still be starting: \
+                 check `ta daemon log`, or force it with `kill {pid} && ta daemon start`."
+            ));
+        }
+        StatusProbe::StalePid { pid } => {
+            r.state = WsDaemonState::StalePid;
+            r.stale_pid_removed = true;
+            r.detail = Some(format!(
+                "{} named pid {pid}, which is not running; the stale file was removed. Start the \
+                 daemon with: ta daemon start",
+                r.pid_file
+            ));
+        }
+        StatusProbe::OtherProject { reported_root, pid } => {
+            r.state = WsDaemonState::OtherProject;
+            r.reported_project_root = Some(reported_root.clone());
+            r.detail = Some(format!(
+                "No daemon is running for this project. {url} answers with the daemon for \
+                 {reported_root}{}, a different project. Manage it with `ta daemon status` from \
+                 there; start this project's own daemon with: ta daemon start",
+                pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+            ));
+        }
+        StatusProbe::External { body } => {
+            fill_from_body(&mut r, body);
+            r.state = WsDaemonState::External;
+            r.running = true;
+            r.reported_project_root = body["project_root"].as_str().map(str::to_string);
+            r.detail = Some(format!(
+                "A daemon for this project answers on {url} but wrote no {}; it was started \
+                 outside `ta daemon start`.",
+                r.pid_file
+            ));
+        }
+        StatusProbe::NotRunning => {
+            r.detail = Some("No daemon is running. Start it with: ta daemon start".to_string());
+        }
+    }
+    r
+}
+
+/// The `start`/`restart --json` document: the pid `start()` returned, and what
+/// `/health` said afterwards (`None` when nothing answered yet).
+fn launch_report(
+    project_root: &Path,
+    action: DaemonAction,
+    port_override: Option<u16>,
+    pid: u32,
+    previous_pid: Option<u32>,
+    health: Option<&serde_json::Value>,
+) -> DaemonReport {
+    let mut r = blank_report(project_root, action, port_override);
+    r.pid = Some(pid);
+    r.previous_pid = previous_pid;
+    r.running = true;
+    match health {
+        Some(body) => {
+            fill_from_body(&mut r, body);
+            r.state = state_of_body(body);
+            if r.state != WsDaemonState::Running {
+                r.detail = Some("Check progress with: ta daemon status".to_string());
+            }
+        }
+        None => {
+            r.state = WsDaemonState::Starting;
+            r.detail = Some(format!(
+                "The daemon (pid {pid}) has not answered on {} yet. Check the log: ta daemon \
+                 log, then ta daemon status.",
+                r.url.clone().unwrap_or_default()
+            ));
+        }
+    }
+    r
+}
+
+/// Print one report as the command's only stdout.
+fn print_report(report: &DaemonReport) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(report)?);
     Ok(())
 }
 
@@ -1979,9 +2297,13 @@ mod tests {
         assert!(!fake.saw("shutdown") && !fake.saw("POST"));
 
         // The CLI commands refuse the same way, before draining anything.
-        let err = cmd_restart(b.path(), None, false).unwrap_err().to_string();
+        let err = cmd_restart(b.path(), None, false, false)
+            .unwrap_err()
+            .to_string();
         assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
-        let err = cmd_restart(b.path(), None, true).unwrap_err().to_string();
+        let err = cmd_restart(b.path(), None, true, false)
+            .unwrap_err()
+            .to_string();
         assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
         let err = cmd_stop(b.path()).unwrap_err().to_string();
         assert_refusal_names_everything(&err, a.path(), b.path(), fake.port);
@@ -2392,7 +2714,7 @@ mod tests {
     fn cmd_status_no_daemon() {
         let dir = tempfile::tempdir().unwrap();
         // No PID file, no daemon running — should report "not running".
-        assert!(cmd_status(dir.path()).is_ok());
+        assert!(cmd_status(dir.path(), false).is_ok());
     }
 
     #[test]
@@ -2455,5 +2777,256 @@ mod tests {
             lines.contains("degraded") && lines.contains("ta daemon log"),
             "{lines}"
         );
+    }
+
+    // ── `--json` reports ────────────────────────────────────────────────────
+
+    fn body(status: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut b = serde_json::json!({
+            "status": status,
+            "version": "1.2.3",
+            "project_root": "",
+            "active_goals": 2,
+            "active_agents": [{"goal_id": "abc"}, {"goal_id": "def"}, {"goal_id": "ghi"}],
+            "pending_drafts": 4,
+        });
+        if let (Some(m), Some(e)) = (b.as_object_mut(), extra.as_object()) {
+            m.extend(e.clone());
+        }
+        b
+    }
+
+    #[test]
+    fn json_flags_are_parsed_and_detected() {
+        assert!(prints_json(&DaemonCommands::Status { json: true }));
+        assert!(!prints_json(&DaemonCommands::Status { json: false }));
+        assert!(prints_json(&DaemonCommands::Restart {
+            port: None,
+            force: false,
+            json: true
+        }));
+        assert!(prints_json(&DaemonCommands::Start {
+            foreground: false,
+            port: None,
+            json: true
+        }));
+        assert!(!prints_json(&DaemonCommands::Stop));
+    }
+
+    #[test]
+    fn status_report_of_a_healthy_daemon_carries_the_pid_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let probe = StatusProbe::Running {
+            pid: 4242,
+            body: body(
+                "ok",
+                serde_json::json!({"project_root": root.display().to_string()}),
+            ),
+            open_sessions: 1,
+        };
+        let r = status_report(&root, &probe);
+        assert_eq!(r.action, DaemonAction::Status);
+        assert_eq!(r.state, WsDaemonState::Running);
+        assert!(r.running);
+        assert_eq!(r.pid, Some(4242));
+        assert_eq!(r.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            (r.active_goals, r.active_agents, r.pending_drafts),
+            (Some(2), Some(3), Some(4))
+        );
+        assert!(r.pid_file.ends_with(".ta/daemon.pid"), "{}", r.pid_file);
+        assert!(r.log_file.ends_with(".ta/daemon.log"), "{}", r.log_file);
+        assert_eq!(r.project_root, root.display().to_string());
+        let url = r.url.clone().unwrap();
+        assert_eq!(
+            url,
+            format!("http://{}:{}", r.host.unwrap(), r.port.unwrap())
+        );
+        assert!(r.detail.is_none(), "{:?}", r.detail);
+        assert_eq!(r.schema_version, DAEMON_REPORT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn status_report_names_why_a_daemon_is_starting_or_degraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let reasons = serde_json::json!({"reasons": [
+            {"component": "keychain", "reason": "waiting for approval", "next_step": "click Always Allow"}
+        ]});
+        let starting = StatusProbe::Running {
+            pid: 1,
+            body: body("starting", reasons.clone()),
+            open_sessions: 0,
+        };
+        let r = status_report(dir.path(), &starting);
+        assert_eq!(r.state, WsDaemonState::Starting);
+        assert!(r.running);
+        assert_eq!(r.reasons.len(), 1);
+        assert_eq!(r.reasons[0].component, "keychain");
+        assert_eq!(
+            r.reasons[0].next_step.as_deref(),
+            Some("click Always Allow")
+        );
+
+        // A degraded daemon that gives no reason still says where to look.
+        let degraded = StatusProbe::External {
+            body: body("degraded", serde_json::json!({})),
+        };
+        let r = status_report(dir.path(), &degraded);
+        assert_eq!(r.state, WsDaemonState::External);
+        assert!(r.running);
+        assert_eq!(r.reasons.len(), 1);
+        assert!(r.reasons[0]
+            .next_step
+            .as_deref()
+            .unwrap()
+            .contains("ta daemon log"));
+    }
+
+    #[test]
+    fn status_report_of_every_not_running_case_says_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                StatusProbe::NotRunning,
+                WsDaemonState::NotRunning,
+                "ta daemon start",
+            ),
+            (
+                StatusProbe::StalePid { pid: 77 },
+                WsDaemonState::StalePid,
+                "ta daemon start",
+            ),
+            (
+                StatusProbe::Unresponsive { pid: 88 },
+                WsDaemonState::Unresponsive,
+                "ta daemon log",
+            ),
+            (
+                StatusProbe::OtherProject {
+                    reported_root: "/elsewhere".to_string(),
+                    pid: Some(5),
+                },
+                WsDaemonState::OtherProject,
+                "/elsewhere",
+            ),
+        ];
+        for (probe, state, needle) in cases {
+            let r = status_report(dir.path(), &probe);
+            assert_eq!(r.state, state);
+            assert!(!r.running, "{state:?}");
+            let detail = r.detail.clone().unwrap();
+            assert!(detail.contains(needle), "{state:?}: {detail}");
+        }
+        let stale = status_report(dir.path(), &StatusProbe::StalePid { pid: 77 });
+        assert!(stale.stale_pid_removed && stale.pid.is_none());
+        let unresponsive = status_report(dir.path(), &StatusProbe::Unresponsive { pid: 88 });
+        assert_eq!(unresponsive.pid, Some(88));
+    }
+
+    #[test]
+    fn status_report_flags_a_daemon_serving_another_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = StatusProbe::Running {
+            pid: 9,
+            body: body(
+                "ok",
+                serde_json::json!({"project_root": "/some/other/project"}),
+            ),
+            open_sessions: 0,
+        };
+        let r = status_report(dir.path(), &probe);
+        assert_eq!(
+            r.reported_project_root.as_deref(),
+            Some("/some/other/project")
+        );
+        assert!(r.detail.unwrap().contains("not this project"));
+    }
+
+    #[test]
+    fn probing_a_stale_pid_file_removes_it_and_reports_it_in_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        write_pid_file(&root, 99_999_999, 7799).unwrap();
+        let url = resolve_daemon_url(&root, None);
+        let probe = probe_status(&root, &url).unwrap();
+        assert!(matches!(probe, StatusProbe::StalePid { pid: 99_999_999 }));
+        assert!(
+            !pid_path(&root).exists(),
+            "the stale pid file must be removed"
+        );
+        let r = status_report(&root, &probe);
+        assert_eq!(r.state, WsDaemonState::StalePid);
+        assert!(r.stale_pid_removed);
+    }
+
+    #[test]
+    fn launch_report_covers_health_ok_starting_and_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = launch_report(
+            dir.path(),
+            DaemonAction::Restart,
+            Some(7788),
+            200,
+            Some(100),
+            Some(&body("ok", serde_json::json!({}))),
+        );
+        assert_eq!(ok.action, DaemonAction::Restart);
+        assert_eq!(ok.state, WsDaemonState::Running);
+        assert_eq!((ok.pid, ok.previous_pid), (Some(200), Some(100)));
+        assert_eq!(ok.port, Some(7788), "--port wins");
+        assert!(ok.running && ok.detail.is_none());
+
+        let starting = launch_report(
+            dir.path(),
+            DaemonAction::Start,
+            None,
+            300,
+            None,
+            Some(&body(
+                "starting",
+                serde_json::json!({"reasons": [{"component": "keychain", "reason": "waiting"}]}),
+            )),
+        );
+        assert_eq!(starting.state, WsDaemonState::Starting);
+        assert_eq!(starting.previous_pid, None);
+        assert!(starting.detail.unwrap().contains("ta daemon status"));
+
+        let silent = launch_report(dir.path(), DaemonAction::Start, None, 400, None, None);
+        assert_eq!(silent.state, WsDaemonState::Starting);
+        assert_eq!(silent.pid, Some(400));
+        assert!(silent.running);
+        assert!(silent.detail.unwrap().contains("ta daemon log"));
+    }
+
+    #[test]
+    fn reports_serialize_with_snake_case_states_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = status_report(dir.path(), &StatusProbe::StalePid { pid: 1 });
+        let text = serde_json::to_string(&r).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["state"], "stale_pid");
+        assert_eq!(v["action"], "status");
+        assert_eq!(v["schema_version"], DAEMON_REPORT_SCHEMA_VERSION);
+        assert!(v["pid"].is_null() && v["version"].is_null());
+        assert_eq!(serde_json::from_str::<DaemonReport>(&text).unwrap(), r);
+    }
+
+    #[test]
+    fn foreground_json_is_refused_with_the_fix_before_anything_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = cmd_start(dir.path(), true, None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--foreground --json"), "{err}");
+        assert!(err.contains("Drop --foreground"), "{err}");
+        assert!(!pid_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn status_json_on_an_empty_project_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_status(dir.path(), true).is_ok());
     }
 }
