@@ -109,6 +109,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "daemon-tokens.json",
     "tokens/",
     "nats-jetstream/",
+    "task-intake/", // task intake queue, batches and ledger (requests carry agent text, per-machine state; never commit)
     // Glob patterns — gitignore prefixes these with .ta/ so they match .ta/*.log etc.
     "*.log",
     "*.pid",
