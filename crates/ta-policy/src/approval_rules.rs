@@ -27,12 +27,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Action assigned to a set of path patterns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+///
+/// `Default` is `Review`, the safe choice, so a rule built with
+/// `..Default::default()` can never silently approve.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalAction {
     /// Auto-approve immediately — no human review needed.
     Approve,
     /// Route to human review (default for unmatched paths).
+    #[default]
     Review,
     /// Block unconditionally — cannot be approved without policy change.
     Block,
@@ -49,9 +55,16 @@ impl std::fmt::Display for ApprovalAction {
 }
 
 /// A single rule in the auto-approve constitution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The first three fields are the original (v1) shape. The remaining fields
+/// are the constitution v2 extension (`crate::constitution_v2` parses and
+/// validates them). They are carried here so a constitution file round-trips
+/// through `ta constitution amend` without losing rule ids, kinds or modes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApprovalRule {
     /// Glob patterns. A path matches this rule when it matches ANY pattern.
+    /// Empty for `wiki` and `task` rules, which use `match` instead.
+    #[serde(default)]
     pub patterns: Vec<String>,
 
     /// What happens when a path matches this rule.
@@ -60,6 +73,32 @@ pub struct ApprovalRule {
     /// Optional human-readable label for display and audit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+
+    /// Stable rule id (v2; required for every rule in a v2 file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Rule kind: `fs` (default), `wiki` or `task` (v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+
+    /// `shadow` or `enforce` (v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+
+    /// Minimum supervisor confidence an `approve` needs (v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
+
+    /// Draft origins this rule applies to (v2). Empty = every origin that is
+    /// not rule-gated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<String>,
+
+    /// Kind-specific match table for `wiki` and `task` rules (v2).
+    /// Kept last so the TOML serializer can emit it as a sub-table.
+    #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
+    pub match_table: Option<toml::Table>,
 }
 
 /// Outcome of evaluating approval rules against a set of changed paths.
@@ -167,7 +206,7 @@ fn match_path_against_rules(rules: &[ApprovalRule], bare_path: &str) -> Approval
 }
 
 /// Return the first pattern in `patterns` that matches `path`, or None.
-fn first_matching_pattern(patterns: &[String], path: &str) -> Option<String> {
+pub(crate) fn first_matching_pattern(patterns: &[String], path: &str) -> Option<String> {
     for pattern in patterns {
         let opts = glob::MatchOptions {
             require_literal_separator: true,
@@ -293,6 +332,7 @@ pub fn default_approval_rules() -> Vec<ApprovalRule> {
             patterns: vec!["docs/**".to_string(), "*.md".to_string()],
             action: ApprovalAction::Approve,
             label: Some("Documentation files".to_string()),
+            ..Default::default()
         },
         ApprovalRule {
             patterns: vec![
@@ -314,11 +354,13 @@ pub fn default_approval_rules() -> Vec<ApprovalRule> {
             ],
             action: ApprovalAction::Block,
             label: Some("Security-sensitive files".to_string()),
+            ..Default::default()
         },
         ApprovalRule {
             patterns: vec!["**".to_string()],
             action: ApprovalAction::Review,
             label: Some("All other files (default)".to_string()),
+            ..Default::default()
         },
     ]
 }
@@ -400,6 +442,7 @@ mod tests {
             patterns: vec!["docs/**".to_string()],
             action: ApprovalAction::Approve,
             label: None,
+            ..Default::default()
         }];
         let result = evaluate_approval_rules(&rules, &["src/main.rs"]).unwrap();
         assert_eq!(result.action, ApprovalAction::Review);
@@ -445,11 +488,13 @@ mod tests {
                 patterns: vec!["docs/**".to_string()],
                 action: ApprovalAction::Approve,
                 label: None,
+                ..Default::default()
             },
             ApprovalRule {
                 patterns: vec!["**".to_string()],
                 action: ApprovalAction::Block,
                 label: None,
+                ..Default::default()
             },
         ];
         let result = evaluate_approval_rules(&rules, &["docs/guide.md"]).unwrap();
@@ -466,11 +511,13 @@ mod tests {
                 patterns: vec!["docs/**".to_string()],
                 action: ApprovalAction::Approve,
                 label: None,
+                ..Default::default()
             },
             ApprovalRule {
                 patterns: vec!["src/**".to_string()],
                 action: ApprovalAction::Review,
                 label: None,
+                ..Default::default()
             },
         ];
         let warnings = validate_approval_rules(&rules);
@@ -484,11 +531,13 @@ mod tests {
                 patterns: vec!["**".to_string()],
                 action: ApprovalAction::Review,
                 label: None,
+                ..Default::default()
             },
             ApprovalRule {
                 patterns: vec!["docs/**".to_string()],
                 action: ApprovalAction::Approve,
                 label: None,
+                ..Default::default()
             },
         ];
         let warnings = validate_approval_rules(&rules);
@@ -505,11 +554,13 @@ mod tests {
                 patterns: vec!["src/auth/**".to_string()],
                 action: ApprovalAction::Block,
                 label: None,
+                ..Default::default()
             },
             ApprovalRule {
                 patterns: vec!["src/auth/**".to_string()],
                 action: ApprovalAction::Review,
                 label: None,
+                ..Default::default()
             },
         ];
         let warnings = validate_approval_rules(&rules);
@@ -523,6 +574,7 @@ mod tests {
             patterns: vec!["**".to_string()],
             action: ApprovalAction::Review,
             label: None,
+            ..Default::default()
         }];
         let warnings = validate_approval_rules(&rules);
         assert!(warnings.is_empty());
@@ -544,6 +596,7 @@ mod tests {
             patterns: vec!["docs/**".to_string(), "*.md".to_string()],
             action: ApprovalAction::Approve,
             label: Some("Documentation".to_string()),
+            ..Default::default()
         };
         let yaml = serde_yaml::to_string(&rule).unwrap();
         let restored: ApprovalRule = serde_yaml::from_str(&yaml).unwrap();
