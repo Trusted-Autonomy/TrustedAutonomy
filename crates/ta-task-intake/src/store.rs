@@ -846,7 +846,8 @@ impl IntakeStore for FileIntakeStore {
             .filter(|t| filter.goal_id.is_none_or(|g| t.requested_by(g)))
             .map(|t| view_of(t, snap.records.get(&t.request_id), now))
             .collect();
-        requests.sort_by(|a, b| (a.created_at, &a.request_id).cmp(&(b.created_at, &b.request_id)));
+        // Stable: requests sharing a timestamp keep ledger (arrival) order.
+        requests.sort_by_key(|r| r.created_at);
         Ok(ListReport {
             requests,
             warnings: snap.warnings,
@@ -863,7 +864,8 @@ impl IntakeStore for FileIntakeStore {
             .iter()
             .filter(|t| t.state == RequestState::Queued && snap.queue_ids.contains(&t.request_id))
             .collect();
-        pending.sort_by(|a, b| (a.created_at, &a.request_id).cmp(&(b.created_at, &b.request_id)));
+        // Stable: requests sharing a timestamp keep ledger (arrival) order.
+        pending.sort_by_key(|t| t.created_at);
         if pending.is_empty() || req.max_records == 0 {
             return Ok(None);
         }
