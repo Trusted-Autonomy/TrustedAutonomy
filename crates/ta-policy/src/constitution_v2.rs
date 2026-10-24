@@ -224,7 +224,7 @@ pub enum WikiScope {
 }
 
 impl WikiScope {
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "project" => Some(Self::Project),
             "org" => Some(Self::Org),
@@ -611,7 +611,8 @@ fn compile_rule(idx: usize, raw: toml::Value, layer: Layer) -> Result<CompiledRu
                     "{at}: unknown kind \"{k}\" (known kinds: {}). An unknown kind is an error, not a skip: a rule that is silently ignored cannot protect anything. Fix the kind or upgrade TA.",
                     RuleKind::KNOWN
                 ));
-                RuleKind::Fs
+                // Nothing else can be checked without knowing the kind.
+                return Err(problems);
             }
         },
     };
@@ -990,6 +991,50 @@ impl ConstitutionSet {
 
     pub fn project_sha256(&self) -> Option<&str> {
         self.project.as_ref().map(|c| c.sha256.as_str())
+    }
+
+    /// Human-readable summary: one line per layer, one per rule (id, kind,
+    /// mode, action). Used by `ta constitution validate` and `show`.
+    pub fn describe(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for c in self.layers() {
+            let path = match c.layer {
+                Layer::Org => ORG_CONSTITUTION_PATH,
+                Layer::Project => PROJECT_CONSTITUTION_PATH,
+            };
+            if c.legacy {
+                lines.push(format!(
+                    "{} layer: {path} (sha256 {}) has no schema_version, so it is a legacy file with no v2 rules",
+                    c.layer.as_str(),
+                    &c.sha256[..12.min(c.sha256.len())]
+                ));
+                continue;
+            }
+            lines.push(format!(
+                "{} layer: {path} (sha256 {}), {} rule(s), default_mode {}",
+                c.layer.as_str(),
+                &c.sha256[..12.min(c.sha256.len())],
+                c.rules.len(),
+                c.default_mode.map_or("(per rule)", |m| m.as_str())
+            ));
+            for r in &c.rules {
+                let mut line = format!(
+                    "  {:<28} {:<5} {:<8} {}",
+                    r.id,
+                    r.kind.as_str(),
+                    c.resolved_mode(r).as_str(),
+                    r.action
+                );
+                if let Some(mc) = r.min_confidence {
+                    line.push_str(&format!("  min_confidence {mc}"));
+                }
+                if !r.origins.is_empty() {
+                    line.push_str(&format!("  origins {}", r.origins.join(",")));
+                }
+                lines.push(line);
+            }
+        }
+        lines
     }
 }
 
@@ -2230,10 +2275,17 @@ min_confidence = 0.8
                 &items,
                 Some(&sup),
             );
-            let baseline = crate::auto_approve::should_auto_approve_draft(&draft_info(None), &d);
+            // An empty constitution is inert: its decision is the baseline policy's.
+            let baseline = should_auto_approve_with_constitution(
+                &draft_info(None),
+                &d,
+                &ConstitutionSet::new(None, None).unwrap(),
+                &items,
+                Some(&sup),
+            );
             assert_eq!(
                 with.decision.is_approved(),
-                baseline.is_approved(),
+                baseline.decision.is_approved(),
                 "shadow must not change the outcome (baseline enabled={enabled})"
             );
             let ev = with.evaluation.expect("evaluation recorded");
