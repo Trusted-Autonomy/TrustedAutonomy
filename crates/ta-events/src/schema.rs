@@ -401,6 +401,32 @@ pub enum SessionEvent {
         detail: String,
     },
 
+    /// How far the macOS denial list of a goal can be trusted (v0.17.12.23 item 6).
+    ///
+    /// Emitted once when the agent has exited, after TA proved (or failed to
+    /// prove) that the unified log delivered denials before and after the run
+    /// and read the persisted log for what the live stream missed. Only macOS
+    /// goals launched under Seatbelt emit it. `ta sandbox explain` prints it so
+    /// an empty denial list is read for what it is.
+    SandboxCapture {
+        /// Goal whose denial capture this describes.
+        goal_id: Uuid,
+        /// Both canary denials came back live and the persisted log was reconciled.
+        verified: bool,
+        /// A canary denial came back through the live stream before the agent started.
+        start_canary: bool,
+        /// A canary denial came back through the live stream after the agent exited.
+        end_canary: bool,
+        /// The persisted log had caught up to the end canary and was read.
+        reconciled: bool,
+        /// Goal denials the live stream delivered.
+        live_denials: u64,
+        /// Goal denials only the persisted log had (the live stream dropped them).
+        recovered_denials: u64,
+        /// What was not verified and what that means; empty when `verified`.
+        detail: String,
+    },
+
     /// A RuntimeAdapter encountered an error spawning or managing an agent (v0.13.3).
     ///
     /// Emitted on spawn failures, unexpected plugin crashes, or transport errors.
@@ -592,6 +618,7 @@ impl SessionEvent {
             Self::RuntimeError { .. } => "runtime_error",
             Self::SandboxDecision { .. } => "sandbox_decision",
             Self::SandboxViolation { .. } => "sandbox_violation",
+            Self::SandboxCapture { .. } => "sandbox_capture",
             Self::VcsPrMerged { .. } => "vcs.pr_merged",
             Self::VcsBranchPushed { .. } => "vcs.branch_pushed",
             Self::VcsChangelistSubmitted { .. } => "vcs.changelist_submitted",
@@ -631,6 +658,7 @@ impl SessionEvent {
             Self::RuntimeError { goal_id, .. } => *goal_id,
             Self::SandboxDecision { goal_id, .. } => Some(*goal_id),
             Self::SandboxViolation { goal_id, .. } => Some(*goal_id),
+            Self::SandboxCapture { goal_id, .. } => Some(*goal_id),
             Self::PrCheckFailed { goal_id, .. } => Some(*goal_id),
             _ => None,
         }
@@ -1155,6 +1183,16 @@ mod tests {
                 count: 1,
                 detail: "denied by the sandbox profile".into(),
             },
+            SessionEvent::SandboxCapture {
+                goal_id: gid,
+                verified: true,
+                start_canary: true,
+                end_canary: true,
+                reconciled: true,
+                live_denials: 2,
+                recovered_denials: 1,
+                detail: String::new(),
+            },
             SessionEvent::VcsPrMerged {
                 repo: "org/repo".into(),
                 branch: "main".into(),
@@ -1191,7 +1229,7 @@ mod tests {
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 35);
+        assert_eq!(events.len(), 36);
     }
 
     #[test]

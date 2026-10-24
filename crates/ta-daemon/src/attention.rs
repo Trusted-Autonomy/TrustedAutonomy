@@ -1382,6 +1382,9 @@ pub async fn act(
         record["jti"] = json!(v.jti);
         record["role"] = json!(v.role);
         record["escalated"] = json!(v.escalated);
+        if let Some(from) = &v.rerouted_from {
+            record["rerouted_from"] = json!(from);
+        }
         if v.self_approved {
             record["self_approved"] = json!(true);
         }
@@ -2923,6 +2926,56 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&answer_file).unwrap()).unwrap();
         assert_eq!(delivered["text"], "postgres");
         assert_eq!(delivered["responder_id"], "olivia");
+    }
+
+    #[tokio::test]
+    async fn a_rerouted_user_item_is_answered_under_the_escalated_claim_and_audits_the_original_assignee(
+    ) {
+        let r = rig();
+        let q = Uuid::new_v4();
+        // The goal's requester is bob, so the question waits on user bob.
+        let goal = write_blocked_goal(r.root(), q);
+        write_question(r.root(), q, Some(goal), "which db?");
+        let item = r.item(AttentionKind::AgentQuestion).await;
+        assert_eq!(item.waiting_on, WaitingOn::user("bob"));
+        let answer_file = r.root().join(format!(".ta/interactions/answers/{q}.json"));
+
+        // Olivia is not bob and does not claim escalation: refused, nothing delivered.
+        let mut plain = r.claims(&item, "answer", "olivia", "owner", "jti-act-0101");
+        plain["answer_sha256"] = sha256_tagged(b"postgres").into();
+        let (st, v) = r
+            .relay(
+                &item.id,
+                json!({"action": "answer", "answer": "postgres", "assertion": r.sign(&plain)}),
+            )
+            .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert_eq!(v["reason"], "not_permitted");
+        assert!(!answer_file.exists());
+
+        // The same person under the escalated claim is accepted.
+        let mut esc = r.claims(&item, "answer", "olivia", "owner", "jti-act-0102");
+        esc["answer_sha256"] = sha256_tagged(b"postgres").into();
+        esc["escalated"] = true.into();
+        let (st, v) = r
+            .relay(
+                &item.id,
+                json!({"action": "answer", "answer": "postgres", "assertion": r.sign(&esc)}),
+            )
+            .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["accepted_assertion"]["escalated"], true);
+        let delivered: Value =
+            serde_json::from_str(&std::fs::read_to_string(&answer_file).unwrap()).unwrap();
+        assert_eq!(delivered["responder_id"], "olivia");
+        let rec = r
+            .audit_lines()
+            .into_iter()
+            .find(|l| l["via"] == "assertion")
+            .expect("audit record");
+        assert_eq!(rec["user_id"], "olivia");
+        assert_eq!(rec["escalated"], true);
+        assert_eq!(rec["rerouted_from"], "bob");
     }
 
     #[tokio::test]

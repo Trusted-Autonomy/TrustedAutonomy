@@ -233,9 +233,24 @@ pub fn goal_records(
     Ok((decision, violations))
 }
 
+/// The macOS denial-capture check recorded for a goal, when there is one.
+pub fn goal_capture(events_dir: &Path, goal_id: uuid::Uuid) -> Option<EventEnvelope> {
+    let filter = EventQueryFilter {
+        goal_id: Some(goal_id),
+        event_types: vec!["sandbox_capture".into()],
+        ..Default::default()
+    };
+    FsEventStore::new(events_dir)
+        .query(&filter)
+        .ok()?
+        .into_iter()
+        .rfind(|e| matches!(e.payload, SessionEvent::SandboxCapture { .. }))
+}
+
 fn explain_goal(root: &Path, goal_id: uuid::Uuid, json: bool) -> anyhow::Result<()> {
     let dir = events_dir(root);
     let (decision, violations) = goal_records(&dir, goal_id)?;
+    let capture = goal_capture(&dir, goal_id);
     let Some(decision) = decision else {
         bail!(
             "no sandbox decision is recorded for goal {goal_id} in {}. Goals started before \
@@ -250,6 +265,7 @@ fn explain_goal(root: &Path, goal_id: uuid::Uuid, json: bool) -> anyhow::Result<
             serde_json::to_string_pretty(&serde_json::json!({
                 "decision": decision.payload,
                 "violations": violations.iter().map(|v| &v.payload).collect::<Vec<_>>(),
+                "capture": capture.as_ref().map(|c| &c.payload),
             }))?
         );
         return Ok(());
@@ -295,23 +311,66 @@ fn explain_goal(root: &Path, goal_id: uuid::Uuid, json: bool) -> anyhow::Result<
         );
     }
     println!();
-    println!("{}", format_violations(provider, &violations));
+    println!(
+        "{}",
+        format_violations(provider, &violations, capture.as_ref())
+    );
     Ok(())
 }
 
-/// Denials as text. An empty list is NOT proof of no denials on macOS, where
-/// violations come from the unified log on a best-effort basis.
-pub fn format_violations(provider: &str, violations: &[EventEnvelope]) -> String {
+/// Denials as text. On macOS the list comes from the unified log, which can
+/// lose entries, so the text says how far this goal's capture was verified:
+/// a `SandboxCapture` record with both canary denials delivered and the
+/// persisted log reconciled makes an empty list strong evidence; without one
+/// (or with a failed check) an empty list is not proof of anything.
+pub fn format_violations(
+    provider: &str,
+    violations: &[EventEnvelope],
+    capture: Option<&EventEnvelope>,
+) -> String {
+    let macos = provider == "macos_sandbox_exec";
+    let verdict = if macos {
+        Some(match capture.map(|c| &c.payload) {
+            Some(SessionEvent::SandboxCapture {
+                verified: true,
+                live_denials,
+                recovered_denials,
+                ..
+            }) => CaptureVerdict::Verified {
+                live: *live_denials,
+                recovered: *recovered_denials,
+            },
+            Some(SessionEvent::SandboxCapture { detail, .. }) => {
+                CaptureVerdict::Unverified(detail.clone())
+            }
+            _ => CaptureVerdict::NotChecked,
+        })
+    } else {
+        None
+    };
     let mut out = String::new();
     if violations.is_empty() {
         out.push_str("Denials:    none recorded\n");
-        if provider == "macos_sandbox_exec" {
-            out.push_str(
+        match &verdict {
+            Some(CaptureVerdict::Verified { recovered, .. }) => out.push_str(&format!(
+                "            Capture was verified for this goal: canary denials came back through \
+                 the unified log before the agent started and after it exited, and the persisted \
+                 log was read ({recovered} denial(s) recovered from it). macOS can still omit a \
+                 single denial under heavy load, so this is strong evidence, not proof. The \
+                 profile is what confines the agent.\n"
+            )),
+            Some(CaptureVerdict::Unverified(why)) => out.push_str(&format!(
+                "            This is not proof that nothing was denied. Capture was NOT verified \
+                 for this goal: {why} The profile, not this list, is what confines the agent.\n"
+            )),
+            Some(CaptureVerdict::NotChecked) => out.push_str(
                 "            This is not proof that nothing was denied. macOS reports Seatbelt \
                  denials through the unified log, which can drop entries under load or when \
-                 log access is unavailable. The profile, not this list, is what confines the \
-                 agent.\n",
-            );
+                 log access is unavailable, and no capture check was recorded for this goal \
+                 (it ran before capture checks existed, or the log tool could not start). The \
+                 profile, not this list, is what confines the agent.\n",
+            ),
+            None => {}
         }
         return out;
     }
@@ -331,10 +390,27 @@ pub fn format_violations(provider: &str, violations: &[EventEnvelope]) -> String
             ));
         }
     }
-    if provider == "macos_sandbox_exec" {
-        out.push_str("  (macOS capture is best-effort; this list may be incomplete.)\n");
+    match verdict {
+        Some(CaptureVerdict::Verified { live, recovered }) => out.push_str(&format!(
+            "  (Capture verified for this goal: {live} live, {recovered} recovered from the \
+             persisted log. An individual denial can still be missing under heavy load.)\n"
+        )),
+        Some(CaptureVerdict::Unverified(why)) => out.push_str(&format!(
+            "  (Capture was NOT verified for this goal, so this list may be incomplete: {why})\n"
+        )),
+        Some(CaptureVerdict::NotChecked) => out.push_str(
+            "  (macOS capture is best-effort and no capture check was recorded for this goal; \
+             this list may be incomplete.)\n",
+        ),
+        None => {}
     }
     out
+}
+
+enum CaptureVerdict {
+    Verified { live: u64, recovered: u64 },
+    Unverified(String),
+    NotChecked,
 }
 
 /// One labelled check in `ta sandbox test` (live probes run on Unix only).
@@ -662,13 +738,76 @@ mod tests {
         assert_eq!(v.len(), 1);
     }
 
+    fn capture_event(goal: uuid::Uuid, verified: bool, detail: &str) -> EventEnvelope {
+        EventEnvelope::new(SessionEvent::SandboxCapture {
+            goal_id: goal,
+            verified,
+            start_canary: true,
+            end_canary: verified,
+            reconciled: verified,
+            live_denials: 2,
+            recovered_denials: 1,
+            detail: detail.into(),
+        })
+    }
+
     #[test]
-    fn empty_macos_violations_are_not_proof() {
-        let text = format_violations("macos_sandbox_exec", &[]);
+    fn empty_macos_violations_are_not_proof_without_a_verified_capture() {
+        let text = format_violations("macos_sandbox_exec", &[], None);
         assert!(text.contains("none recorded"));
         assert!(text.contains("not proof"));
-        let linux = format_violations("linux_bwrap", &[]);
+        assert!(text.contains("no capture check was recorded"), "{text}");
+        let linux = format_violations("linux_bwrap", &[], None);
         assert!(!linux.contains("not proof"));
+        assert!(!linux.contains("Capture"));
+    }
+
+    #[test]
+    fn a_failed_capture_check_is_named_and_keeps_the_caveat() {
+        let goal = uuid::Uuid::new_v4();
+        let failed = capture_event(
+            goal,
+            false,
+            "the live log stream did not deliver a canary denial after the agent exited.",
+        );
+        let text = format_violations("macos_sandbox_exec", &[], Some(&failed));
+        assert!(
+            text.contains("not proof") && text.contains("NOT verified"),
+            "{text}"
+        );
+        assert!(text.contains("did not deliver a canary denial after the agent exited"));
+    }
+
+    #[test]
+    fn a_verified_capture_replaces_the_bare_caveat_with_what_was_checked() {
+        let goal = uuid::Uuid::new_v4();
+        let ok = capture_event(goal, true, "");
+        let text = format_violations("macos_sandbox_exec", &[], Some(&ok));
+        assert!(text.contains("none recorded"));
+        assert!(!text.contains("not proof that nothing"), "{text}");
+        assert!(
+            text.contains("verified") && text.contains("1 denial(s) recovered"),
+            "{text}"
+        );
+        assert!(text.contains("strong evidence, not proof"));
+    }
+
+    #[test]
+    fn goal_capture_returns_the_latest_record_for_that_goal_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let goal = uuid::Uuid::new_v4();
+        let store = FsEventStore::new(tmp.path());
+        store.append(&capture_event(goal, false, "first")).unwrap();
+        store.append(&capture_event(goal, true, "")).unwrap();
+        store
+            .append(&capture_event(uuid::Uuid::new_v4(), false, "other goal"))
+            .unwrap();
+        let got = goal_capture(tmp.path(), goal).expect("a capture record");
+        assert!(matches!(
+            got.payload,
+            SessionEvent::SandboxCapture { verified: true, .. }
+        ));
+        assert!(goal_capture(tmp.path(), uuid::Uuid::new_v4()).is_none());
     }
 
     #[test]
