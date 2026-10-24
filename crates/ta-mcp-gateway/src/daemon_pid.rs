@@ -132,6 +132,8 @@ pub fn read_pid_file(project_root: &Path) -> std::io::Result<Option<DaemonPidFil
 /// Where a resolved daemon endpoint came from, for error and log messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointSource {
+    /// The live daemon's `.ta/daemon.json`.
+    DaemonJson(PathBuf),
     /// The live daemon's `.ta/daemon.pid`.
     PidFile(PathBuf),
     /// `[server]` in `.ta/daemon.toml` (no pid file present).
@@ -160,7 +162,7 @@ impl DaemonEndpoint {
     }
 }
 
-fn connect_host(bind: &str) -> String {
+pub(crate) fn connect_host(bind: &str) -> String {
     match bind.trim() {
         "" | "0.0.0.0" | "::" | "[::]" | "*" => "127.0.0.1".to_string(),
         other => other.to_string(),
@@ -170,6 +172,9 @@ fn connect_host(bind: &str) -> String {
 /// Resolve the daemon API endpoint for `project_root`, failing closed.
 ///
 /// Order:
+/// 0. `.ta/daemon.json` holds a LIVE record for this project (see
+///    [`crate::daemon_json`]): that address wins. A leftover from a crashed
+///    daemon is ignored and the rest of this list applies.
 /// 1. `.ta/daemon.pid` exists: it MUST carry a usable port (`bind=` or
 ///    `port=`). If it does not, this is an error naming the file, never a
 ///    guess.
@@ -180,6 +185,22 @@ fn connect_host(bind: &str) -> String {
 /// 3. Neither file exists: the project's derived default port (see
 ///    [`crate::daemon_port`]), not the shared 7700.
 pub fn resolve_daemon_endpoint(project_root: &Path) -> Result<DaemonEndpoint, String> {
+    // `.ta/daemon.json` is the one place a daemon records its address. It is
+    // used only while it is live and names this project; a crashed daemon's
+    // leftover falls through to the older sources below.
+    match crate::daemon_json::read(project_root) {
+        crate::daemon_json::Lookup::Live(rec) => {
+            return Ok(DaemonEndpoint {
+                host: rec.host,
+                port: rec.port,
+                source: EndpointSource::DaemonJson(crate::daemon_json::path(project_root)),
+            })
+        }
+        crate::daemon_json::Lookup::Ignored { reason } => {
+            tracing::warn!(reason = %reason, "ignoring .ta/daemon.json");
+        }
+        crate::daemon_json::Lookup::Absent => {}
+    }
     let pid = pid_path(project_root);
     match read_pid_file(project_root) {
         Ok(Some(parsed)) => {
@@ -383,5 +404,27 @@ mod tests {
         let parsed = DaemonPidFile::parse("pid=1\nbind=[::1]:7720\n");
         assert_eq!(parsed.host.as_deref(), Some("::1"));
         assert_eq!(parsed.port, Some(7720));
+    }
+
+    #[test]
+    fn a_live_daemon_json_wins_over_the_pid_file_and_daemon_toml() {
+        let dir = project();
+        std::fs::write(pid_path(dir.path()), "pid=1\nbind=127.0.0.1:7710\n").unwrap();
+        std::fs::write(daemon_toml_path(dir.path()), "[server]\nport = 7711\n").unwrap();
+        crate::daemon_json::write(dir.path(), "127.0.0.1", 7733, std::process::id()).unwrap();
+        let ep = resolve_daemon_endpoint(dir.path()).unwrap();
+        assert_eq!(ep.port, 7733);
+        assert!(matches!(ep.source, EndpointSource::DaemonJson(_)), "{ep:?}");
+    }
+
+    #[test]
+    fn a_crashed_daemons_daemon_json_falls_back_to_the_older_sources() {
+        let dir = project();
+        std::fs::write(pid_path(dir.path()), "pid=1\nbind=127.0.0.1:7710\n").unwrap();
+        // A pid that is not running: the daemon crashed and left its record.
+        crate::daemon_json::write(dir.path(), "127.0.0.1", 7733, 2_147_483_646).unwrap();
+        let ep = resolve_daemon_endpoint(dir.path()).unwrap();
+        assert_eq!(ep.port, 7710, "a stale record must not be trusted");
+        assert!(matches!(ep.source, EndpointSource::PidFile(_)), "{ep:?}");
     }
 }

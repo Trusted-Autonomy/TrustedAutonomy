@@ -246,6 +246,7 @@ async fn main() -> Result<()> {
     {
         let h = health.clone();
         let pid_path = project_root.join(".ta").join("daemon.pid");
+        let backstop_root = project_root.clone();
         tokio::spawn(async move {
             let reason = h.refused().await;
             tracing::error!(
@@ -258,6 +259,7 @@ async fn main() -> Result<()> {
                  run `ta daemon start` again, or use the default posture."
             );
             let _ = std::fs::remove_file(&pid_path);
+            ta_mcp_gateway::daemon_json::remove_if_owned(&backstop_root, std::process::id());
             // Give the log a moment to flush, then stop the process.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             std::process::exit(2);
