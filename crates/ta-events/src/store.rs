@@ -10,7 +10,18 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use crate::error::EventError;
+use crate::identity::ProjectIdentity;
 use crate::schema::EventEnvelope;
+
+/// Fill an envelope's missing project fields. Fields already set are kept.
+fn stamp(envelope: &mut EventEnvelope, id: &ProjectIdentity) {
+    if envelope.project_id.is_none() {
+        envelope.project_id = id.project_id.clone();
+    }
+    if envelope.project_root.is_none() {
+        envelope.project_root = Some(id.project_root.clone());
+    }
+}
 
 /// Trait for event persistence backends.
 pub trait EventStore: Send + Sync {
@@ -78,8 +89,14 @@ impl FsEventStore {
         Ok(files)
     }
 
-    /// Read all envelopes from a single log file.
-    fn read_file(&self, path: &Path) -> Result<Vec<EventEnvelope>, EventError> {
+    /// Read all envelopes from a single log file. Events written before
+    /// envelopes carried a project identity get this store's project filled
+    /// in, so every event a consumer sees names its project.
+    fn read_file(
+        &self,
+        path: &Path,
+        identity: Option<&ProjectIdentity>,
+    ) -> Result<Vec<EventEnvelope>, EventError> {
         let file = fs::File::open(path)?;
         let reader = BufReader::new(file);
         let mut events = Vec::new();
@@ -89,13 +106,23 @@ impl FsEventStore {
                 continue;
             }
             match serde_json::from_str::<EventEnvelope>(&line) {
-                Ok(envelope) => events.push(envelope),
+                Ok(mut envelope) => {
+                    if let Some(id) = identity {
+                        stamp(&mut envelope, id);
+                    }
+                    events.push(envelope)
+                }
                 Err(e) => {
                     tracing::warn!("skipping malformed event line: {}", e);
                 }
             }
         }
         Ok(events)
+    }
+
+    /// The project this store belongs to (`<root>/.ta/events` layout only).
+    fn identity(&self) -> Option<ProjectIdentity> {
+        ProjectIdentity::from_events_dir(&self.events_dir)
     }
 }
 
@@ -108,13 +135,22 @@ impl EventStore for FsEventStore {
 
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
-        let json = serde_json::to_string(event)?;
+        // The single place every persisted event gets its project identity.
+        let json = match self.identity() {
+            Some(id) if event.project_id.is_none() || event.project_root.is_none() => {
+                let mut stamped = event.clone();
+                stamp(&mut stamped, &id);
+                serde_json::to_string(&stamped)?
+            }
+            _ => serde_json::to_string(event)?,
+        };
         writeln!(file, "{}", json)?;
         Ok(())
     }
 
     fn query(&self, filter: &EventQueryFilter) -> Result<Vec<EventEnvelope>, EventError> {
         let files = self.log_files()?;
+        let identity = self.identity();
         let mut results = Vec::new();
 
         for path in &files {
@@ -134,7 +170,7 @@ impl EventStore for FsEventStore {
                 }
             }
 
-            let events = self.read_file(path)?;
+            let events = self.read_file(path, identity.as_ref())?;
             for envelope in events {
                 // Apply type filter.
                 if !filter.event_types.is_empty()
@@ -424,5 +460,89 @@ mod tests {
         assert_eq!(lines.len(), 1);
         // Each line should be valid JSON.
         let _: EventEnvelope = serde_json::from_str(lines[0]).unwrap();
+    }
+
+    const ID_A: &str = "p_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ID_B: &str = "p_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn project(id: &str) -> tempfile::TempDir {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join(".ta")).unwrap();
+        fs::write(d.path().join(".ta/project-id"), id).unwrap();
+        d
+    }
+
+    fn mem_event() -> EventEnvelope {
+        make_envelope(SessionEvent::MemoryStored {
+            key: "k".into(),
+            category: None,
+            source: "cli".into(),
+        })
+    }
+
+    #[test]
+    fn every_appended_event_carries_its_projects_identity_on_disk_and_on_read() {
+        let a = project(ID_A);
+        let b = project(ID_B);
+        let sa = FsEventStore::new(a.path().join(".ta/events"));
+        let sb = FsEventStore::new(b.path().join(".ta/events"));
+        sa.append(&mem_event()).unwrap();
+        sb.append(&mem_event()).unwrap();
+
+        let raw = fs::read_to_string(&sa.log_files().unwrap()[0]).unwrap();
+        assert!(raw.contains(ID_A) && !raw.contains(ID_B), "{raw}");
+
+        let ea = sa.query(&EventQueryFilter::default()).unwrap();
+        let eb = sb.query(&EventQueryFilter::default()).unwrap();
+        assert_eq!(ea[0].project_id.as_deref(), Some(ID_A));
+        assert_eq!(eb[0].project_id.as_deref(), Some(ID_B));
+        let root_a = fs::canonicalize(a.path()).unwrap().display().to_string();
+        assert_eq!(ea[0].project_root.as_deref(), Some(root_a.as_str()));
+        assert_ne!(ea[0].project_root, eb[0].project_root);
+    }
+
+    #[test]
+    fn events_written_before_the_fields_existed_are_filled_on_read() {
+        let a = project(ID_A);
+        let store = FsEventStore::new(a.path().join(".ta/events"));
+        // Old shape on disk: no project fields at all.
+        let old = serde_json::to_value(mem_event()).unwrap();
+        assert!(old.get("project_id").is_none());
+        fs::create_dir_all(a.path().join(".ta/events")).unwrap();
+        let day = chrono::Utc::now().format("%Y-%m-%d");
+        fs::write(
+            a.path().join(format!(".ta/events/{day}.jsonl")),
+            format!("{old}\n"),
+        )
+        .unwrap();
+        let got = store.query(&EventQueryFilter::default()).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].project_id.as_deref(), Some(ID_A));
+    }
+
+    #[test]
+    fn an_envelope_without_project_fields_still_parses_and_a_set_identity_is_kept() {
+        let mut v = serde_json::to_value(mem_event()).unwrap();
+        v.as_object_mut().unwrap().remove("actions");
+        let e: EventEnvelope = serde_json::from_value(v).unwrap();
+        assert!(e.project_id.is_none() && e.project_root.is_none());
+
+        let a = project(ID_A);
+        let store = FsEventStore::new(a.path().join(".ta/events"));
+        let mut preset = mem_event();
+        preset.project_id = Some(ID_B.into());
+        preset.project_root = Some("/elsewhere".into());
+        store.append(&preset).unwrap();
+        let got = store.query(&EventQueryFilter::default()).unwrap();
+        assert_eq!(got[0].project_id.as_deref(), Some(ID_B));
+    }
+
+    #[test]
+    fn a_store_outside_the_standard_layout_invents_no_project() {
+        let dir = tempdir().unwrap();
+        let store = FsEventStore::new(dir.path());
+        store.append(&mem_event()).unwrap();
+        let got = store.query(&EventQueryFilter::default()).unwrap();
+        assert!(got[0].project_id.is_none() && got[0].project_root.is_none());
     }
 }

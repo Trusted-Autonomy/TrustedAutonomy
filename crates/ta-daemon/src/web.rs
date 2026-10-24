@@ -1366,7 +1366,12 @@ pub fn build_full_router(
     // the rest of the authenticated API. Apply the exact same middleware
     // `api_routes` already gets, from the same `app_state`, so both route
     // groups are gated by one consistent auth decision.
-    let web_routes = build_web_routes(web_state).layer(middleware::from_fn_with_state(
+    let web_routes = crate::api::identity::layer_for_state(
+        build_web_routes(web_state),
+        &app_state,
+        crate::api::identity::Exposure::Full,
+    )
+    .layer(middleware::from_fn_with_state(
         app_state.clone(),
         crate::api::auth::auth_middleware,
     ));
@@ -1435,7 +1440,12 @@ pub async fn serve_web_ui(
         hosts: crate::human_gate::HostPolicy::loopback_default(),
         auth,
     });
-    let app = build_router(pr_packages_dir).layer(middleware::from_fn_with_state(
+    let app = crate::api::identity::layer_for_root(
+        build_router(pr_packages_dir),
+        project_root.clone(),
+        crate::api::identity::Exposure::Full,
+    )
+    .layer(middleware::from_fn_with_state(
         auth_state,
         legacy_web_auth_middleware,
     ));
@@ -1468,6 +1478,10 @@ pub async fn serve_daemon_api(
         daemon_config.server.bind, daemon_config.server.port
     );
 
+    // A project's id is minted here, at start, so every response and event
+    // carries it from the first request (read paths never mint one).
+    ensure_project_id(&project_root);
+
     // Write PID file for daemon discovery (v0.10.16).
     let pid_path = project_root.join(".ta").join("daemon.pid");
     write_pid_file(&pid_path, &daemon_config.server);
@@ -1478,10 +1492,13 @@ pub async fn serve_daemon_api(
 
     // Clean up PID file on shutdown.
     let pid_path_clone = pid_path.clone();
+    let root_clone = project_root.clone();
+    let exit_root = project_root.clone();
     let sd_cleanup = shutdown.clone();
     tokio::spawn(async move {
         sd_cleanup.notified().await;
         let _ = std::fs::remove_file(&pid_path_clone);
+        ta_mcp_gateway::daemon_json::remove_if_owned(&root_clone, std::process::id());
         tracing::debug!("Removed daemon PID file");
     });
 
@@ -1500,10 +1517,27 @@ pub async fn serve_daemon_api(
              `ta daemon status`, or set [server] port in .ta/daemon.toml"
         )
     })?;
+    // The port is ours: record the address where every client resolves it.
+    // Written only now, so a daemon that failed to bind never overwrites the
+    // record of the daemon that holds the port.
+    write_daemon_record(
+        &project_root,
+        &daemon_config.server.bind,
+        listener
+            .local_addr()
+            .map(|a| a.port())
+            .unwrap_or(daemon_config.server.port),
+    );
     let gate = StartupGate::new(project_root.clone(), health.clone());
-    let gate_app = Router::new()
-        .fallback(startup_gate_handler)
-        .with_state(gate.clone());
+    // While starting, answer with the project's id (the path is already in the
+    // unauthenticated `/health` body and nowhere else).
+    let gate_app = crate::api::identity::layer_for_root(
+        Router::new()
+            .fallback(startup_gate_handler)
+            .with_state(gate.clone()),
+        project_root.clone(),
+        crate::api::identity::Exposure::IdOnly,
+    );
     tracing::info!(
         "Daemon API listening on http://{} (startup in progress)",
         bind
@@ -1527,6 +1561,7 @@ pub async fn serve_daemon_api(
         shutdown.notify_waiters();
         server.abort();
         let _ = std::fs::remove_file(&pid_path);
+        ta_mcp_gateway::daemon_json::remove_if_owned(&project_root, std::process::id());
         anyhow::bail!(
             "Refusing to start: {reason}. The strict posture does not start without its \
              keychain secrets. Approve the Keychain dialog (Always Allow) and run \
@@ -1580,6 +1615,7 @@ pub async fn serve_daemon_api(
 
     // Clean up PID file on normal exit too.
     let _ = std::fs::remove_file(&pid_path);
+    ta_mcp_gateway::daemon_json::remove_if_owned(&exit_root, std::process::id());
 
     Ok(())
 }
@@ -1653,6 +1689,58 @@ async fn startup_gate_handler(
         Json(body),
     )
         .into_response()
+}
+
+/// Make sure the project has a `.ta/project-id`, minting it when this is the
+/// project's first daemon start. Failure is logged, not fatal: the daemon then
+/// reports `project_id: null` until `ta doctor` repairs the state directory.
+fn ensure_project_id(project_root: &std::path::Path) {
+    if ta_events::identity::read_project_id(project_root).is_some() {
+        return;
+    }
+    let locator = ta_credentials::state::StateLocator::from_env();
+    if let Err(e) = ta_credentials::state::ProjectState::open(project_root, &locator) {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            error = %e,
+            "could not mint .ta/project-id; API responses and events will report project_id null \
+             until it exists. Run `ta doctor` to see why, then `ta daemon restart`."
+        );
+    }
+}
+
+/// Record this daemon's address in `.ta/daemon.json` (see
+/// `ta_mcp_gateway::daemon_json`). Called once the port is bound.
+fn write_daemon_record(project_root: &std::path::Path, bind_host: &str, port: u16) {
+    use ta_mcp_gateway::daemon_json::{self, Lookup};
+    let me = std::process::id();
+    match daemon_json::read(project_root) {
+        Lookup::Live(old) if old.pid != me => tracing::warn!(
+            old_pid = old.pid,
+            old_port = old.port,
+            new_port = port,
+            "another daemon for this project is recorded as running; replacing its \
+             .ta/daemon.json (two daemons for one project: run `ta daemon status`)"
+        ),
+        Lookup::Ignored { reason } => {
+            tracing::info!(reason = %reason, "replacing stale .ta/daemon.json")
+        }
+        _ => {}
+    }
+    match daemon_json::write(project_root, bind_host, port, me) {
+        Ok(rec) => tracing::info!(
+            project_id = rec.project_id.as_deref().unwrap_or("none"),
+            project_root = %rec.project_root,
+            bind = %rec.bind,
+            "recorded daemon address in .ta/daemon.json"
+        ),
+        Err(e) => tracing::warn!(
+            path = %daemon_json::path(project_root).display(),
+            error = %e,
+            "could not write .ta/daemon.json. Clients fall back to .ta/daemon.pid and \
+             .ta/daemon.toml. Check that .ta/ is writable, then run `ta daemon restart`."
+        ),
+    }
 }
 
 /// Write `.ta/daemon.pid` through the shared writer
@@ -3567,6 +3655,83 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// A running daemon records its bound address and identity in
+    /// `.ta/daemon.json`, clients resolve it from there, every answer names the
+    /// project, and a clean shutdown removes the record.
+    #[tokio::test]
+    async fn the_daemon_records_its_address_and_removes_it_on_shutdown() {
+        // A fresh id: parallel tests must not share one (credential state
+        // treats two live directories with one id as a copy).
+        let id = format!("p_{}", uuid::Uuid::new_v4().simple());
+        let id = id.as_str();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(dir.path().join(".ta/project-id"), id).unwrap();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut config = crate::config::DaemonConfig::default();
+        config.server.bind = "127.0.0.1".into();
+        config.server.port = port;
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let server = tokio::spawn(serve_daemon_api(
+            dir.path().to_path_buf(),
+            config,
+            shutdown.clone(),
+            crate::startup::DaemonHealth::ready(),
+        ));
+
+        let mut health = None;
+        for _ in 0..100 {
+            if let Some((200, head, b)) = raw_get(port, "/health").await {
+                if b["status"] == "ok" {
+                    health = Some((head, b));
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let (head, body) = health.expect("/health should answer ok");
+        assert_eq!(body["project_id"], id);
+        assert!(head.contains(&format!("x-ta-project-id: {id}")), "{head}");
+        assert!(
+            !head.contains("x-ta-project-root"),
+            "unauthenticated /health must not add the path header: {head}"
+        );
+
+        let rec = match ta_mcp_gateway::daemon_json::read(dir.path()) {
+            ta_mcp_gateway::daemon_json::Lookup::Live(r) => r,
+            other => panic!("daemon.json must be live while the daemon runs: {other:?}"),
+        };
+        assert_eq!((rec.port, rec.pid), (port, std::process::id()));
+        assert_eq!(rec.project_id.as_deref(), Some(id));
+        let ep = ta_mcp_gateway::daemon_pid::resolve_daemon_endpoint(dir.path()).unwrap();
+        assert_eq!(ep.port, port);
+        assert!(matches!(
+            ep.source,
+            ta_mcp_gateway::daemon_pid::EndpointSource::DaemonJson(_)
+        ));
+
+        let (code, head, status) = raw_get(port, "/api/status").await.unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(status["project_id"], id);
+        assert_eq!(status["project_root"], rec.project_root.as_str());
+        assert!(head.contains("x-ta-project-root"), "{head}");
+
+        for _ in 0..50 {
+            shutdown.notify_waiters();
+            if server.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            !ta_mcp_gateway::daemon_json::path(dir.path()).exists(),
+            "a clean shutdown removes .ta/daemon.json"
+        );
     }
 
     /// The strict posture refuses to start when keychain loading is refused.

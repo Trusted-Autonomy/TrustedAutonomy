@@ -58,6 +58,16 @@ pub struct EventEnvelope {
     /// Most events have an empty list; key lifecycle events populate this.
     #[serde(default)]
     pub actions: Vec<EventAction>,
+    /// Stable id of the project that emitted this event (`.ta/project-id`).
+    /// Stamped by the event store on write, and filled on read for events
+    /// written before this field existed, so no consumer has to assume "the
+    /// daemon I reached is the project". Absent only when the project has no
+    /// id yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Canonical absolute root of the project that emitted this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
 }
 
 impl EventEnvelope {
@@ -72,6 +82,8 @@ impl EventEnvelope {
             event_type: event.event_type().to_string(),
             payload: event,
             actions,
+            project_id: None,
+            project_root: None,
         }
     }
 }

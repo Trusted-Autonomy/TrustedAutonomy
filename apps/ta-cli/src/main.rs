@@ -615,7 +615,7 @@ enum Commands {
         /// Attach to an existing agent session (ID or prefix). Implies --tui.
         #[arg(long)]
         attach: Option<String>,
-        /// Daemon URL override (default: from .ta/daemon.toml or http://127.0.0.1:7700).
+        /// Daemon URL override (default: the address in .ta/daemon.json, else .ta/daemon.toml).
         #[arg(long)]
         url: Option<String>,
     },
@@ -914,7 +914,8 @@ enum Commands {
     /// Open the TA Studio setup wizard in your browser.
     ///
     /// Starts the daemon if not already running, then opens the web UI at
-    /// http://localhost:7700/setup so you can complete the 5-step wizard:
+    /// the project's own daemon address (see `ta daemon config`) at /setup so you can
+    /// complete the 5-step wizard:
     /// agent system, VCS, notifications, first project, and summary.
     ///
     /// Run this once after installation to get started.
