@@ -7,6 +7,138 @@ use clap::Subcommand;
 use ta_credentials::{CredentialVault, CredentialsConfig, FileVault};
 use ta_mcp_gateway::GatewayConfig;
 
+/// Where a credential's secret comes from. Exactly one source is required.
+///
+/// `--secret-stdin` and `--secret-env` keep the secret out of the process
+/// list and the shell history; `--secret` still works but warns, because its
+/// value is visible in `ps` to every user on the machine.
+#[derive(clap::Args)]
+#[command(group(
+    clap::ArgGroup::new("secret_source")
+        .required(true)
+        .multiple(false)
+        .args(["secret", "secret_stdin", "secret_env"])
+))]
+pub struct SecretInput {
+    /// The secret on the command line (API key, token, etc.). Visible in
+    /// `ps` and shell history; prefer --secret-stdin or --secret-env.
+    #[arg(long, value_name = "SECRET")]
+    secret: Option<String>,
+    /// Read the secret from standard input (to end of input; one trailing
+    /// newline is dropped). Example: `printf %s "$TOKEN" | ta credentials add ...`
+    #[arg(long)]
+    secret_stdin: bool,
+    /// Read the secret from the environment variable NAME.
+    #[arg(long, value_name = "NAME")]
+    secret_env: Option<String>,
+}
+
+// A secret must not leak through `{:?}` of a parsed command line.
+impl std::fmt::Debug for SecretInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretInput")
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("secret_stdin", &self.secret_stdin)
+            .field("secret_env", &self.secret_env)
+            .finish()
+    }
+}
+
+/// The variable name to show in a message. Only a conventional UPPER_SNAKE
+/// name is echoed: a user who mistakenly passes the secret itself as the name
+/// (`--secret-env ghp_abc...`) must not see it printed back into logs.
+fn env_name_for_message(name: &str) -> String {
+    let conventional = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if conventional {
+        name.to_string()
+    } else {
+        "<name not shown: it is not an UPPER_CASE variable name>".to_string()
+    }
+}
+
+impl SecretInput {
+    /// Resolve the secret from the chosen source, warning on stderr when it
+    /// came from argv. Errors name the source, never the value.
+    pub fn resolve(&self) -> anyhow::Result<String> {
+        use std::io::IsTerminal;
+        let stdin = std::io::stdin();
+        if self.secret_stdin && stdin.is_terminal() {
+            eprintln!("Reading the secret from standard input; finish with Ctrl-D.");
+        }
+        self.resolve_with(
+            &mut stdin.lock(),
+            &|name| std::env::var(name).ok(),
+            &mut std::io::stderr(),
+        )
+    }
+
+    fn resolve_with(
+        &self,
+        stdin: &mut dyn std::io::Read,
+        env: &dyn Fn(&str) -> Option<String>,
+        warn: &mut dyn std::io::Write,
+    ) -> anyhow::Result<String> {
+        let secret = if let Some(value) = &self.secret {
+            let _ = writeln!(
+                warn,
+                "warning: --secret puts the secret in the process list (visible in `ps`) and \
+                 your shell history. Use --secret-stdin (printf %s \"$TOKEN\" | ta credentials \
+                 ...) or --secret-env NAME instead."
+            );
+            value.clone()
+        } else if self.secret_stdin {
+            let mut raw = String::new();
+            stdin.read_to_string(&mut raw).map_err(|e| {
+                anyhow::anyhow!(
+                    "Could not read the secret from standard input ({}). The input must be \
+                     valid UTF-8 text; pipe it in, e.g. `printf %s \"$TOKEN\" | ta credentials \
+                     add ... --secret-stdin`.",
+                    e.kind()
+                )
+            })?;
+            if raw.ends_with('\n') {
+                raw.pop();
+                if raw.ends_with('\r') {
+                    raw.pop();
+                }
+            }
+            raw
+        } else if let Some(name) = &self.secret_env {
+            let shown = env_name_for_message(name);
+            env(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--secret-env {shown}: the environment variable is not set (or is not valid \
+                     UTF-8). Export it in the shell that runs this command, e.g. \
+                     `export NAME=...`, then retry. (Pass the variable's NAME, not the secret.)"
+                )
+            })?
+        } else {
+            anyhow::bail!(
+                "No secret source given. Use --secret-stdin or --secret-env NAME (or, less \
+                 safely, --secret VALUE)."
+            );
+        };
+        if secret.is_empty() {
+            let source = if self.secret_stdin {
+                "standard input".to_string()
+            } else if let Some(name) = &self.secret_env {
+                env_name_for_message(name)
+            } else {
+                "--secret".to_string()
+            };
+            anyhow::bail!(
+                "The secret from {source} is empty, so nothing was stored. Supply the secret \
+                 value, e.g. `printf %s \"$TOKEN\" | ta credentials add ... --secret-stdin`."
+            );
+        }
+        Ok(secret)
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum CredentialsCommands {
     /// Add a credential to the vault.
@@ -17,9 +149,8 @@ pub enum CredentialsCommands {
         /// Service identifier (e.g., "gmail", "slack").
         #[arg(long)]
         service: String,
-        /// The secret value (API key, token, etc.).
-        #[arg(long)]
-        secret: String,
+        #[command(flatten)]
+        secret: SecretInput,
         /// Scopes this credential grants (repeatable).
         #[arg(long)]
         scope: Vec<String>,
@@ -35,9 +166,8 @@ pub enum CredentialsCommands {
     Update {
         /// Credential ID (UUID) or prefix.
         id: String,
-        /// The new secret value.
-        #[arg(long)]
-        secret: String,
+        #[command(flatten)]
+        secret: SecretInput,
     },
     /// Revoke (delete) a credential by ID.
     Revoke {
@@ -78,9 +208,15 @@ pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Res
             service,
             secret,
             scope,
-        } => add_credential(config, name, service, secret, scope),
+        } => {
+            let secret = secret.resolve()?;
+            add_credential(config, name, service, &secret, scope)
+        }
         CredentialsCommands::List => list_credentials(config),
-        CredentialsCommands::Update { id, secret } => update_credential(config, id, secret),
+        CredentialsCommands::Update { id, secret } => {
+            let secret = secret.resolve()?;
+            update_credential(config, id, &secret)
+        }
         CredentialsCommands::Revoke { id } => revoke_credential(config, id),
         CredentialsCommands::Grant {
             id,
@@ -123,7 +259,9 @@ fn list_credentials(config: &GatewayConfig) -> anyhow::Result<()> {
     if creds.is_empty() {
         println!("No credentials stored.");
         println!();
-        println!("Add one with: ta credentials add --name <name> --service <svc> --secret <token>");
+        println!(
+            "Add one with: printf %s \"$TOKEN\" | ta credentials add --name <name> --service <svc> --secret-stdin"
+        );
         return Ok(());
     }
 
@@ -390,5 +528,201 @@ mod tests {
 
         let vault = FileVault::open(&cred_config(&config)).unwrap();
         assert!(vault.list().unwrap().is_empty());
+    }
+
+    // ── secret input (stdin / env / argv) ───────────────────────────────────
+
+    #[derive(clap::Parser, Debug)]
+    struct Wrap {
+        #[command(subcommand)]
+        cmd: CredentialsCommands,
+    }
+
+    fn parse(args: &[&str]) -> Result<CredentialsCommands, clap::Error> {
+        use clap::Parser;
+        let argv: Vec<&str> = ["ta"].iter().chain(args).copied().collect();
+        Wrap::try_parse_from(argv).map(|w| w.cmd)
+    }
+
+    fn secret_of(cmd: CredentialsCommands) -> SecretInput {
+        match cmd {
+            CredentialsCommands::Add { secret, .. }
+            | CredentialsCommands::Update { secret, .. } => secret,
+            other => panic!("not add/update: {other:?}"),
+        }
+    }
+
+    const ADD: [&str; 5] = ["add", "--name", "n", "--service", "s"];
+
+    fn add_with(extra: &[&str]) -> Result<SecretInput, clap::Error> {
+        let args: Vec<&str> = ADD.iter().chain(extra).copied().collect();
+        parse(&args).map(secret_of)
+    }
+
+    fn resolve(
+        input: &SecretInput,
+        stdin: &str,
+        env: &[(&str, &str)],
+    ) -> (anyhow::Result<String>, String) {
+        let mut warn = Vec::new();
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let result = input.resolve_with(
+            &mut stdin.as_bytes(),
+            &|name| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()),
+            &mut warn,
+        );
+        (result, String::from_utf8(warn).unwrap())
+    }
+
+    #[test]
+    fn exactly_one_secret_source_is_required() {
+        assert!(add_with(&[]).is_err(), "no source must be rejected");
+        assert!(add_with(&["--secret-stdin"]).is_ok());
+        assert!(add_with(&["--secret-env", "TOKEN"]).is_ok());
+        assert!(add_with(&["--secret", "x"]).is_ok());
+        assert!(add_with(&["--secret-stdin", "--secret-env", "TOKEN"]).is_err());
+        let err = add_with(&["--secret", "hunter2-do-not-print", "--secret-stdin"])
+            .expect_err("conflicting sources must be rejected");
+        assert!(
+            !err.to_string().contains("hunter2-do-not-print"),
+            "clap's conflict error must not echo the value: {err}"
+        );
+        // `update` takes the same sources.
+        assert!(parse(&["update", "abcd1234", "--secret-stdin"]).is_ok());
+        assert!(parse(&["update", "abcd1234"]).is_err());
+    }
+
+    #[test]
+    fn stdin_secret_is_read_to_the_end_with_one_trailing_newline_dropped() {
+        let input = add_with(&["--secret-stdin"]).unwrap();
+        for (fed, want) in [
+            ("tok-123", "tok-123"),
+            ("tok-123\n", "tok-123"),
+            ("tok-123\r\n", "tok-123"),
+            ("tok-123\n\n", "tok-123\n"),
+            ("a b\nc", "a b\nc"),
+        ] {
+            let (got, warn) = resolve(&input, fed, &[]);
+            assert_eq!(got.unwrap(), want, "fed {fed:?}");
+            assert!(
+                warn.is_empty(),
+                "stdin must not trigger the argv warning: {warn}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stdin_secret_never_reaches_stdout_stderr_logs_or_error_text() {
+        const SECRET: &str = "s3cr3t-from-stdin-7f3a";
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let input = add_with(&["--secret-stdin"]).unwrap();
+        let (secret, warn) = resolve(&input, &format!("{SECRET}\n"), &[]);
+        let secret = secret.unwrap();
+        assert_eq!(secret, SECRET);
+
+        add_credential(&config, "svc", "svc", &secret, &[]).unwrap();
+        // It is stored...
+        let vault = FileVault::open(&cred_config(&config)).unwrap();
+        let id = vault.list().unwrap()[0].id;
+        assert_eq!(vault.get(id).unwrap().secret, SECRET);
+        // ...and appears nowhere a human or a log would see it.
+        assert!(!warn.contains(SECRET), "warning leaked it: {warn}");
+        let parsed_debug = format!("{input:?}");
+        assert!(
+            !parsed_debug.contains(SECRET),
+            "Debug leaked it: {parsed_debug}"
+        );
+        let on_disk = std::fs::read_to_string(dir.path().join(".ta").join("credentials.json"))
+            .unwrap_or_default();
+        assert!(
+            !on_disk.contains(SECRET),
+            "the vault file holds it in clear text"
+        );
+        // The error for a failed resolve names the source, not the value.
+        let (empty, _) = resolve(&input, "\n", &[]);
+        let msg = format!("{:#}", empty.unwrap_err());
+        assert!(
+            msg.contains("standard input") && msg.contains("empty"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn an_argv_secret_warns_without_echoing_the_value() {
+        const SECRET: &str = "argv-secret-9c1d";
+        let input = add_with(&["--secret", SECRET]).unwrap();
+        let (got, warn) = resolve(&input, "", &[]);
+        assert_eq!(got.unwrap(), SECRET);
+        assert!(warn.contains("warning") && warn.contains("`ps`"), "{warn}");
+        assert!(
+            warn.contains("--secret-stdin") && warn.contains("--secret-env"),
+            "{warn}"
+        );
+        assert!(
+            !warn.contains(SECRET),
+            "the warning must not repeat the secret: {warn}"
+        );
+        let debug = format!("{input:?}");
+        assert!(
+            !debug.contains(SECRET) && debug.contains("redacted"),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn env_secret_is_read_from_the_named_variable_only() {
+        let input = add_with(&["--secret-env", "MY_TOKEN"]).unwrap();
+        let (got, warn) = resolve(
+            &input,
+            "ignored",
+            &[("MY_TOKEN", "from-env"), ("OTHER", "x")],
+        );
+        assert_eq!(got.unwrap(), "from-env");
+        assert!(warn.is_empty());
+
+        let (missing, _) = resolve(&input, "", &[("OTHER", "x")]);
+        let msg = format!("{:#}", missing.unwrap_err());
+        assert!(msg.contains("MY_TOKEN") && msg.contains("not set"), "{msg}");
+
+        let (empty, _) = resolve(&input, "", &[("MY_TOKEN", "")]);
+        let msg = format!("{:#}", empty.unwrap_err());
+        assert!(msg.contains("MY_TOKEN") && msg.contains("empty"), "{msg}");
+    }
+
+    /// `--secret-env ghp_realtoken...` is a plausible slip; the error must not
+    /// print the token back.
+    #[test]
+    fn a_secret_passed_as_the_variable_name_is_not_echoed() {
+        const SLIP: &str = "ghp_RealLookingToken123";
+        let input = add_with(&["--secret-env", SLIP]).unwrap();
+        let (got, _) = resolve(&input, "", &[]);
+        let msg = format!("{:#}", got.unwrap_err());
+        assert!(!msg.contains(SLIP), "{msg}");
+        assert!(
+            msg.contains("NAME"),
+            "the fix must still be actionable: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_empty_argv_secret_is_refused() {
+        let input = add_with(&["--secret", ""]).unwrap();
+        let (got, _) = resolve(&input, "", &[]);
+        assert!(format!("{:#}", got.unwrap_err()).contains("empty"));
+    }
+
+    #[test]
+    fn invalid_utf8_on_stdin_is_a_clear_error() {
+        let input = add_with(&["--secret-stdin"]).unwrap();
+        let mut warn = Vec::new();
+        let bytes: &[u8] = &[0xff, 0xfe, 0x41];
+        let err = input
+            .resolve_with(&mut &*bytes, &|_| None, &mut warn)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("UTF-8"), "{err:#}");
     }
 }
