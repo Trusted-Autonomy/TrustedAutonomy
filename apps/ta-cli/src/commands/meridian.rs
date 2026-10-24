@@ -8,6 +8,9 @@
 // meridian_suggest as native tool calls.
 //
 // Binary resolution order:
+//   0. None at all under the test guard (TA_TEST_NO_EXTERNAL_AGENTS / cfg(test)):
+//      `meridian summarize-title` spawns a real paid `claude --print`, so a
+//      test run must never resolve it. See `ta_goal::external_agents`.
 //   1. TA_MERIDIAN_BINARY env var
 //   2. [meridian] binary in .ta/daemon.toml
 //   3. which::which("meridian") — full cross-platform path (handles PATHEXT on Windows)
@@ -86,7 +89,11 @@ pub enum MeridianCommands {
 
 /// Resolve the `meridian` binary path using a cross-platform priority chain.
 ///
-/// Checks in order:
+/// Returns `None` immediately when external agents are blocked
+/// (`TA_TEST_NO_EXTERNAL_AGENTS` set, or a unit-test build): automated test
+/// runs must never reach the installed `meridian`, which spawns a paid model.
+///
+/// Otherwise checks in order:
 /// 1. `TA_MERIDIAN_BINARY` env var — explicit override for non-PATH installs.
 /// 2. `[meridian] binary` in `.ta/daemon.toml` — per-project config.
 /// 3. `which::which("meridian")` — cross-platform PATH search (handles Windows PATHEXT).
@@ -94,6 +101,15 @@ pub enum MeridianCommands {
 ///
 /// Returns `None` when meridian is not available by any of the above means.
 pub fn resolve_meridian_binary(workspace_root: &Path) -> Option<String> {
+    // 0. Test guard: never resolve (or even probe) the real binary.
+    if ta_goal::external_agents_blocked!() {
+        tracing::debug!(
+            guard = ta_goal::external_agents::NO_EXTERNAL_AGENTS_ENV,
+            "meridian binary resolution skipped: external agents are blocked"
+        );
+        return None;
+    }
+
     // 1. Env var override.
     if let Ok(val) = std::env::var("TA_MERIDIAN_BINARY") {
         let val = val.trim().to_string();
@@ -158,6 +174,12 @@ fn read_meridian_binary_from_config(workspace_root: &Path) -> Option<String> {
 
 /// Find the `meridian` binary or return an error with install instructions.
 fn find_meridian_binary(workspace_root: &Path) -> Result<String> {
+    if ta_goal::external_agents_blocked!() {
+        bail!(
+            "{}",
+            ta_goal::external_agents::blocked_message("`meridian`")
+        );
+    }
     resolve_meridian_binary(workspace_root).ok_or_else(|| {
         anyhow::anyhow!(
             "The `meridian` binary was not found on PATH.\n\
@@ -544,29 +566,52 @@ mod tests {
     }
 
     #[test]
-    fn find_meridian_binary_returns_sensible_result() {
-        // Call the real function and assert the result matches its contract,
-        // regardless of whether meridian is installed on this machine.
+    fn find_meridian_binary_is_blocked_under_the_test_guard_with_an_actionable_message() {
         let tmp = tempdir().unwrap();
-        let result = find_meridian_binary(tmp.path());
-        match result {
-            Ok(name) => {
-                // Found: must be a non-empty string.
-                assert!(!name.is_empty(), "resolved binary name must be non-empty");
-            }
-            Err(e) => {
-                // Not found: error message must contain install instructions.
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("cargo install meridian"),
-                    "error message should include install instructions, got: {msg}"
-                );
-                assert!(
-                    msg.contains("Trusted-Autonomy/meridian"),
-                    "error message should include git install URL, got: {msg}"
-                );
-            }
-        }
+        let msg = find_meridian_binary(tmp.path()).unwrap_err().to_string();
+        assert!(
+            msg.contains(ta_goal::external_agents::NO_EXTERNAL_AGENTS_ENV),
+            "the refusal must name the guard, got: {msg}"
+        );
+        assert!(
+            msg.contains("=0"),
+            "the refusal must say how to opt out, got: {msg}"
+        );
+    }
+
+    /// Regression: `cargo test -p ta-cli` used to reach the real installed
+    /// `meridian` through `ta draft apply` -> `summarize_title`, which spawns a
+    /// paid `claude --print` per call. Even when a project's `daemon.toml`
+    /// points at a runnable meridian, a test run must never execute it.
+    #[cfg(unix)]
+    #[test]
+    fn test_runs_never_execute_a_configured_meridian_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let marker = tmp.path().join("meridian-was-invoked");
+        let stub = tmp.path().join("meridian");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ntouch '{}'\necho 'Paid Title'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ta")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ta/daemon.toml"),
+            format!("[meridian]\nbinary = \"{}\"\n", stub.display()),
+        )
+        .unwrap();
+
+        assert_eq!(resolve_meridian_binary(tmp.path()), None);
+        assert_eq!(summarize_title(tmp.path(), "Test git commit"), None);
+        assert!(
+            !marker.exists(),
+            "summarize_title executed the configured meridian during a test run"
+        );
     }
 
     #[test]

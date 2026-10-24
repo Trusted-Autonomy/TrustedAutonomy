@@ -528,6 +528,17 @@ fn pr_fix(
         "claude-code" => vec!["claude".into(), "--print".into(), objective],
         other => vec![other.into(), objective],
     };
+    if ta_goal::external_agents_blocked!()
+        && ta_goal::external_agents::is_paid_agent_command(&agent_args[0])
+    {
+        anyhow::bail!(
+            "{}",
+            ta_goal::external_agents::blocked_message(&format!(
+                "micro-fix agent `{}`",
+                agent_args[0]
+            ))
+        );
+    }
 
     let status = std::process::Command::new(&agent_args[0])
         .args(&agent_args[1..])

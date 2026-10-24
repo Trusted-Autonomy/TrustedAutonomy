@@ -19006,6 +19006,24 @@ The team coordinator (`ta intake coordinate --dispatch`, above) uses the identic
 
 ---
 
+## Developer Notes
+
+### Tests never reach a paid agent
+
+`cargo test` must never spend money. Several code paths shell out to a paid agent: `ta draft apply` derives a goal title through `meridian summarize-title` (which spawns a real `claude --print`), `ta_goal_start` launches `ta run --headless --agent claude-code`, and the constitution, style, release-notes, `ta dev`, and follow-up commands run `claude --print`. All of them check one guard, `TA_TEST_NO_EXTERNAL_AGENTS`:
+
+- `.cargo/config.toml` `[env]` sets `TA_TEST_NO_EXTERNAL_AGENTS=1` for every `cargo test`, `cargo run` and `cargo build` in the workspace, and child processes (for example the `ta` binary a test spawns) inherit it.
+- Code compiled with `cfg(test)` is blocked even if the variable is missing.
+- When blocked, the meridian resolver returns "not found" (so no derived title is written), agent launches report `launched: false`, and `claude --print` commands refuse with a message that names the guard.
+- An installed `ta`/`ta-daemon` never sees the variable, so real `ta draft apply` still derives titles and real goals still launch.
+- To run a real agent from a cargo run on purpose (the `just shell` and `just daemon` recipes do this), set `TA_TEST_NO_EXTERNAL_AGENTS=0` in the shell; the config entry does not override your value. Never do this for `cargo test`.
+
+New code that can spawn `claude`, `codex`, `ollama`, `meridian` or `ta run` must check `ta_goal::external_agents_blocked!()` before spawning. `apps/ta-cli/tests/no_external_agents.rs` fails if the guard is no longer exported to tests.
+
+To confirm a test run spent nothing, run `ta cost report --detail --group-by session_family --since <time>` after `cargo test -p ta-cli` and check that no new title-extraction sessions appear.
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)

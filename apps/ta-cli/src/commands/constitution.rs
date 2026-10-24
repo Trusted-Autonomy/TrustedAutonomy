@@ -1984,6 +1984,13 @@ pub fn try_agent_review(
     }
     args.push(prompt);
 
+    if ta_goal::external_agents_blocked!() {
+        tracing::warn!(
+            "{}",
+            ta_goal::external_agents::blocked_message("constitution review via `claude --print`")
+        );
+        return None;
+    }
     let output = Command::new("claude")
         .args(&args)
         .stdin(Stdio::null())
