@@ -338,10 +338,7 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
 
 /// Canonical absolute form of a project root, as the daemon reports it.
 pub fn canonical_root_string(root: &std::path::Path) -> String {
-    std::fs::canonicalize(root)
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string()
+    ta_events::identity::canonical_root_string(root)
 }
 
 /// Count community resources with stale or missing caches.

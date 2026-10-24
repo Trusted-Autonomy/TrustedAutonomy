@@ -10,6 +10,7 @@ pub mod bus;
 pub mod channel;
 pub mod error;
 pub mod hooks;
+pub mod identity;
 pub mod notification;
 pub mod router;
 pub mod schema;

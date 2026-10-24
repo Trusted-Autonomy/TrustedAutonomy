@@ -5760,6 +5760,7 @@ dependencies = [
  "ta-credentials",
  "ta-events",
  "ta-goal",
+ "ta-lifecycle",
  "ta-memory",
  "ta-plan",
  "ta-plan-wayfinder",
