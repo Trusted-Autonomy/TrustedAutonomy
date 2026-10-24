@@ -697,15 +697,45 @@ pub struct ClaimPhaseRequest {
     pub goal_id: Option<String>,
 }
 
+/// How long a claim made without a goal id is trusted to belong to a run that
+/// is still starting. `ta run` claims the phase before it copies staging and
+/// creates the goal record, so a young goal-less claim is not yet evidence of
+/// a dead run. Staging a large project can take minutes.
+pub(crate) const PRE_GOAL_CLAIM_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Release the in-memory claim on `phase_id` when no live goal holds it.
+/// Returns `true` when a claim was released. Logs the release with the goal id
+/// the claim named and how old it was.
+pub(crate) fn release_stale_claim(state: &AppState, phase_id: &str) -> bool {
+    let Some((goal_id, age)) = state.phase_claims.claim_info(phase_id) else {
+        return false;
+    };
+    if goal_id.is_none() && age < PRE_GOAL_CLAIM_GRACE {
+        return false;
+    }
+    if !claim_is_stale(&state.goals_dir, phase_id, goal_id.as_deref()) {
+        return false;
+    }
+    state.phase_claims.release(phase_id);
+    tracing::warn!(
+        phase = %phase_id,
+        claimed_by_goal = goal_id.as_deref().unwrap_or("unknown"),
+        claim_age_secs = age.as_secs(),
+        "released a phase claim with no live goal behind it so a new run can claim the phase"
+    );
+    true
+}
+
 /// `POST /api/plan/phase/claim` — Atomically claim a plan phase.
 ///
 /// Flow:
 ///   1. Acquire the in-memory `PhaseClaims` mutex — serialises concurrent requests.
-///   2. If the phase is already in the claim registry → 409.
-///   3. Read PLAN.md and check the phase status:
+///   2. A claim with no live goal behind it is released ([`release_stale_claim`]).
+///   3. If the phase is still in the claim registry → 409.
+///   4. Read PLAN.md and check the phase status:
 ///      - `done` or `in_progress` → release memory claim + 409.
 ///      - `pending` → write `in_progress` marker + record history.
-///   4. Return 200 with `{ "status": "claimed" }`.
+///   5. Return 200 with `{ "status": "claimed" }`.
 ///
 /// If `ta run` calls this endpoint and receives 409, it must NOT launch the agent.
 /// If the daemon is unreachable, `ta run` falls back to a direct file-write with
@@ -745,6 +775,11 @@ pub async fn claim_phase(
     } else {
         None
     };
+
+    // A claim whose run ended without releasing it (killed `ta run`, deleted
+    // goal, a phase that is not in PLAN.md at all) never blocks a new run:
+    // release it here, whatever PLAN.md says about the phase.
+    release_stale_claim(&state, &phase_id);
 
     if let Some(ref content) = plan_content {
         let phases = parse_plan_phases(content);
@@ -2100,6 +2135,106 @@ Future work.
         store.save(&g).unwrap();
         assert!(super::claim_is_stale(&goals_dir, "v1.2.3", Some(&id)));
         assert!(super::claim_is_stale(&goals_dir, "v1.2.3", None));
+    }
+
+    // ── stale phase claims never block a run (v0.17.12.25 item 15) ─────────
+
+    async fn claim(state: &Arc<AppState>, phase: &str) -> (StatusCode, String) {
+        let resp = claim_phase(
+            State(state.clone()),
+            Json(ClaimPhaseRequest {
+                phase_id: phase.to_string(),
+                goal_id: None,
+            }),
+        )
+        .await
+        .into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    fn state_with_plan(plan: &str) -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PLAN.md"), plan).unwrap();
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            crate::config::DaemonConfig::default(),
+        ));
+        (dir, state)
+    }
+
+    const PLAN_WITHOUT_22_1: &str = "### v0.17.12.23 - Next\n<!-- status: pending -->\n\n\
+        ### v0.17.12.24 - Later\n<!-- status: in_progress -->\n";
+
+    /// The 2026-10-16 incident: a claim for a phase that is not in PLAN.md,
+    /// left by a run that died before its goal existed, answered every later
+    /// claim with "already claimed (goal: unknown)", and only a direct
+    /// `POST /api/plan/phase/release` cleared it.
+    #[tokio::test]
+    async fn orphaned_claim_for_a_phase_missing_from_plan_md_does_not_block_a_new_run() {
+        let (_dir, state) = state_with_plan(PLAN_WITHOUT_22_1);
+        state.phase_claims.try_claim("v0.17.12.22.1", None).unwrap();
+        state
+            .phase_claims
+            .backdate("v0.17.12.22.1", PRE_GOAL_CLAIM_GRACE * 2);
+
+        let (status, body) = claim(&state, "v0.17.12.22.1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains("already claimed"), "{body}");
+        assert!(state.phase_claims.is_claimed("v0.17.12.22.1"));
+    }
+
+    #[tokio::test]
+    async fn claim_whose_goal_record_is_gone_does_not_block_an_in_progress_phase() {
+        let (_dir, state) = state_with_plan(PLAN_WITHOUT_22_1);
+        let ghost = uuid::Uuid::new_v4().to_string();
+        state
+            .phase_claims
+            .try_claim("v0.17.12.24", Some(&ghost))
+            .unwrap();
+
+        let (status, body) = claim(&state, "v0.17.12.24").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn claim_held_by_a_live_goal_still_blocks_and_stays() {
+        let (_dir, state) = state_with_plan(PLAN_WITHOUT_22_1);
+        let store = ta_goal::GoalRunStore::new(&state.goals_dir).unwrap();
+        let mut g = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "a",
+            state.project_root.join("ws"),
+            state.project_root.join("store"),
+        );
+        g.plan_phase = Some("v0.17.12.24".into());
+        g.state = ta_goal::GoalRunState::Running;
+        store.save(&g).unwrap();
+        state
+            .phase_claims
+            .try_claim("v0.17.12.24", Some(&g.goal_run_id.to_string()))
+            .unwrap();
+
+        let (status, body) = claim(&state, "v0.17.12.24").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains(&g.goal_run_id.to_string()), "{body}");
+        assert!(state.phase_claims.is_claimed("v0.17.12.24"));
+    }
+
+    /// `ta run` claims before it copies staging and creates the goal, so a young
+    /// claim with no goal id yet is a run that is starting, not a dead one.
+    #[tokio::test]
+    async fn young_claim_without_a_goal_id_is_a_run_that_is_still_starting() {
+        let (_dir, state) = state_with_plan(PLAN_WITHOUT_22_1);
+        state.phase_claims.try_claim("v0.17.12.24", None).unwrap();
+
+        let (status, body) = claim(&state, "v0.17.12.24").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(state.phase_claims.is_claimed("v0.17.12.24"));
     }
 }
 
