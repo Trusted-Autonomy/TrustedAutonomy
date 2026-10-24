@@ -56,6 +56,34 @@ pub struct SupervisorReview {
     /// shared Decision gate (`ta-decision::decide`) alongside `risk_score`.
     #[serde(default = "default_confidence")]
     pub confidence: f64,
+    /// Whether the work matches the intent the human expressed in conversation.
+    /// Set only by the conversation-reviewer profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_match: Option<IntentMatch>,
+    /// Per-item verdicts (e.g. per queued request). Set only by the
+    /// conversation-reviewer profile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_decisions: Vec<ItemDecision>,
+}
+
+/// Whether the delivered work matches the human's expressed intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IntentMatch {
+    /// `true` when the work matches the intent.
+    pub matches: bool,
+    /// Why (or why not), capped and sanitized by the parser.
+    pub reason: String,
+}
+
+/// The reviewer's verdict on one reviewed item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ItemDecision {
+    /// Identifier of the reviewed item, as supplied in the review input.
+    pub item_id: String,
+    /// The reviewer's verdict for this item.
+    pub verdict: SupervisorVerdict,
+    /// Why, capped and sanitized by the parser.
+    pub reason: String,
 }
 
 fn default_confidence() -> f64 {
@@ -228,6 +256,20 @@ fn invoke_claude_cli_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
+    let text = run_claude_cli_read_only(prompt, config)?;
+    let mut review = parse_supervisor_response_or_text(&text, "claude-code");
+    apply_hedging_quality_gate(&mut review);
+    Ok(review)
+}
+
+/// Run the `claude` CLI headless with read-only tools (`Read`, `Grep`, `Glob`)
+/// and return the assistant's text. Shared by the diff supervisor and the
+/// conversation reviewer; the tool allow-list here is the read-only guarantee
+/// callers rely on.
+pub(crate) fn run_claude_cli_read_only(
+    prompt: &str,
+    config: &SupervisorRunConfig,
+) -> anyhow::Result<String> {
     let staging = config.staging_path.as_deref();
 
     // When --allowedTools is passed, the claude CLI does not accept the prompt as a
@@ -269,10 +311,7 @@ fn invoke_claude_cli_supervisor(
         )
     })?;
 
-    let text = extract_claude_stream_json_text(&stdout);
-    let mut review = parse_supervisor_response_or_text(&text, "claude-code");
-    apply_hedging_quality_gate(&mut review);
-    Ok(review)
+    Ok(extract_claude_stream_json_text(&stdout))
 }
 
 /// Invoke the `codex` CLI in headless mode.
@@ -780,6 +819,8 @@ fn parse_supervisor_response_or_text(text: &str, agent: &str) -> SupervisorRevie
         agent: agent.to_string(),
         duration_secs: 0.0,
         confidence,
+        intent_match: None,
+        item_decisions: vec![],
     }
 }
 
@@ -945,6 +986,8 @@ pub fn fallback_supervisor_review(
         // Deliberately low, not the formula's ~0.55: this review never actually
         // happened, so it must never be trusted enough to auto-approve.
         confidence: 0.1,
+        intent_match: None,
+        item_decisions: vec![],
     }
 }
 
@@ -1075,11 +1118,13 @@ fn parse_supervisor_response(text: &str) -> anyhow::Result<SupervisorReview> {
         agent: "builtin".to_string(),
         duration_secs: 0.0, // Will be overwritten by caller
         confidence,
+        intent_match: None,
+        item_decisions: vec![],
     })
 }
 
 /// Extract a JSON object from text that might contain markdown or prose.
-fn extract_json(text: &str) -> &str {
+pub(crate) fn extract_json(text: &str) -> &str {
     // Look for ```json ... ``` blocks
     if let Some(start) = text.find("```json") {
         let after = &text[start + 7..];
@@ -1657,6 +1702,8 @@ mod tests {
             agent: "claude-code".to_string(),
             duration_secs: 0.0,
             confidence: 0.95,
+            intent_match: None,
+            item_decisions: vec![],
         };
         let fired = apply_hedging_quality_gate(&mut review);
         assert!(fired, "quality gate should fire on 'cannot be verified'");
@@ -1688,6 +1735,8 @@ mod tests {
             agent: "claude-code".to_string(),
             duration_secs: 0.0,
             confidence: 0.9,
+            intent_match: None,
+            item_decisions: vec![],
         };
         let fired = apply_hedging_quality_gate(&mut review);
         assert!(
@@ -1709,6 +1758,8 @@ mod tests {
             agent: "claude-code".to_string(),
             duration_secs: 0.0,
             confidence: 0.9,
+            intent_match: None,
+            item_decisions: vec![],
         };
         apply_hedging_quality_gate(&mut review);
         // Block should not be downgraded — only Pass is upgraded to Warn

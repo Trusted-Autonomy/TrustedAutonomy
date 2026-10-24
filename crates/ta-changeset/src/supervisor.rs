@@ -914,6 +914,8 @@ mod tests {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.95,
+            intent_match: None,
+            item_decisions: vec![],
         };
 
         let downgraded = apply_artifact_consistency_gate(&mut review, &artifacts);
@@ -944,6 +946,8 @@ mod tests {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.95,
+            intent_match: None,
+            item_decisions: vec![],
         };
 
         let downgraded = apply_artifact_consistency_gate(&mut review, &artifacts);

@@ -56,6 +56,7 @@ pub use context::PolicyContext;
 pub mod access_filter;
 pub mod approval_rules;
 pub mod auto_approve;
+pub mod constitution_v2;
 
 pub use access_filter::AccessFilter;
 pub use approval_rules::{
@@ -63,7 +64,8 @@ pub use approval_rules::{
     ApprovalRule, ApprovalRuleDecision, OverlapWarning,
 };
 pub use auto_approve::{
-    should_auto_approve_draft, should_auto_approve_with_rules, AutoApproveDecision, DraftInfo,
+    should_auto_approve_draft, should_auto_approve_with_constitution,
+    should_auto_approve_with_rules, AutoApproveDecision, ConstitutionDecision, DraftInfo,
 };
 pub use document::{
     AgentPolicyOverride, AutoApproveConditions, AutoApproveConfig, AutoApproveDraftConfig,

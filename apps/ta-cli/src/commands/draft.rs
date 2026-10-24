@@ -4467,6 +4467,20 @@ fn view_package(
         }
         println!("  Scope OK: {}", if review.scope_ok { "yes" } else { "no" });
         println!("  Summary:  {}", review.summary);
+        if let Some(m) = &review.intent_match {
+            println!(
+                "  Intent:   {} — {}",
+                if m.matches {
+                    "matches the conversation"
+                } else {
+                    "DOES NOT match the conversation"
+                },
+                m.reason
+            );
+        }
+        for d in &review.item_decisions {
+            println!("  Item {}: {:?} — {}", d.item_id, d.verdict, d.reason);
+        }
         if !review.findings.is_empty() {
             let show_full = effective_detail != DetailLevel::Top;
             let max_findings = if show_full {
@@ -4494,6 +4508,20 @@ fn view_package(
             println!(
                 "  Use `ta draft approve --override` if you want to approve despite the block verdict."
             );
+        }
+    }
+
+    // Constitution evaluation recorded when the draft was submitted: which rule
+    // decided each item, in which mode, and the conversation reviewer's findings.
+    if let Some(record) = ta_mcp_gateway::constitution_gate::load_record(
+        &config.workspace_root,
+        &package_id.to_string(),
+    ) {
+        println!();
+        println!("CONSTITUTION:");
+        println!("{}", "=".repeat(60));
+        for line in ta_mcp_gateway::constitution_gate::render_record(&record) {
+            println!("{line}");
         }
     }
 
@@ -16521,6 +16549,8 @@ fn run() {
                 agent: "claude-code".to_string(),
                 duration_secs: 1.0,
                 confidence: 0.95,
+                intent_match: None,
+                item_decisions: vec![],
             }),
         };
         let ctx_path = project.path().join("ctx.json");
@@ -19814,6 +19844,8 @@ fn run() {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.2, // below min_confidence — Warn + low confidence => Escalate
+            intent_match: None,
+            item_decisions: vec![],
         });
         save_package(&config, &pkg).unwrap();
         let pkg_id = pkg.package_id.to_string();
@@ -19910,6 +19942,8 @@ fn run() {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.99,
+            intent_match: None,
+            item_decisions: vec![],
         });
         save_package(&config, &pkg).unwrap();
         let pkg_id = pkg.package_id.to_string();
@@ -20071,6 +20105,8 @@ fn run() {
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
             confidence: 0.95,
+            intent_match: None,
+            item_decisions: vec![],
         });
         save_package(&config, &pkg).unwrap();
         let pkg_id = pkg.package_id.to_string();

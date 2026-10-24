@@ -378,6 +378,17 @@ The project name is: **{name}**"#,
 }
 
 fn show_constitution(config: &GatewayConfig) -> anyhow::Result<()> {
+    // v2 layers (org file plus project file), if any.
+    let v2 = ta_policy::constitution_v2::ConstitutionSet::load(&config.workspace_root)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !v2.is_inert() {
+        println!("=== Constitution v2 (org layer under project layer; most restrictive wins) ===");
+        println!();
+        for line in v2.describe() {
+            println!("  {line}");
+        }
+        println!();
+    }
     // Show approval_rules from constitution.toml first (v0.15.25).
     let toml_path = config.workspace_root.join(".ta/constitution.toml");
     if toml_path.exists() {
@@ -611,6 +622,11 @@ fn default_checklist_gate() -> bool {
 /// [`ProjectConstitutionConfig::ta_default`] to get TA's built-in rule set.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProjectConstitutionConfig {
+    /// v2 file-level keys (`schema_version`, `layer`, `default_mode`, ...).
+    /// Declared first so the TOML serializer writes these plain values before
+    /// any table; kept so `ta constitution amend` does not drop them.
+    #[serde(flatten)]
+    pub file_meta: ta_policy::constitution_v2::ConstitutionFileMeta,
     /// Optional parent profile to inherit from ("ta-default" is built-in).
     #[serde(default)]
     pub extends: Option<String>,
@@ -638,6 +654,7 @@ pub struct ProjectConstitutionConfig {
 impl Default for ProjectConstitutionConfig {
     fn default() -> Self {
         ProjectConstitutionConfig {
+            file_meta: Default::default(),
             extends: None,
             rules: std::collections::HashMap::new(),
             scan: ConstitutionScan::default(),
@@ -667,6 +684,12 @@ impl ProjectConstitutionConfig {
             .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
         let mut config: ProjectConstitutionConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("constitution.toml parse error: {}", e))?;
+
+        // v2 rules (kinds, ids, modes, org layering) are validated by the policy
+        // crate. An unknown kind or a bad rule is a loud error here, not a rule
+        // that is silently ignored.
+        ta_policy::constitution_v2::ConstitutionSet::load(project_root)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // v0.13.15: Apply `extends` inheritance at load time.
         // Currently only "ta-default" is supported as a base profile.
@@ -818,6 +841,7 @@ impl ProjectConstitutionConfig {
             },
         );
         ProjectConstitutionConfig {
+            file_meta: Default::default(),
             extends: None,
             rules,
             scan: ConstitutionScan {
@@ -901,6 +925,7 @@ fn apply_extends_ta_default(project: ProjectConstitutionConfig) -> ProjectConsti
     };
 
     ProjectConstitutionConfig {
+        file_meta: project.file_meta,
         extends: None, // consumed
         rules: merged_rules,
         scan: merged_scan,
@@ -1349,7 +1374,23 @@ fn amend_constitution(config: &GatewayConfig, dry_run: bool) -> anyhow::Result<(
 
 /// Validate the `[[approval_rules]]` section for schema errors and overlapping patterns.
 fn validate_constitution_cmd(project_root: &Path) -> anyhow::Result<()> {
+    let v2 = ta_policy::constitution_v2::ConstitutionSet::load(project_root)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let v2_active = !v2.is_inert();
+    if !v2.layers().is_empty() {
+        println!(
+            "Constitution v2 (org file layered under the project file, most restrictive wins):"
+        );
+        for line in v2.describe() {
+            println!("  {line}");
+        }
+        println!();
+    }
     let config = ProjectConstitutionConfig::load(project_root)?;
+    if config.is_none() && v2_active {
+        println!("OK: the org constitution parsed with no errors.");
+        return Ok(());
+    }
 
     let approval_rules = match &config {
         Some(c) if !c.approval_rules.is_empty() => &c.approval_rules,
@@ -2135,6 +2176,7 @@ fn generate_merged_toml(
 
     // Build the merged config.
     let merged_config = ProjectConstitutionConfig {
+        file_meta: config.file_meta.clone(),
         extends: config.extends.clone(),
         rules: merged_rules.clone(),
         scan: config.scan.clone(),

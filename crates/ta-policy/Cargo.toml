@@ -17,6 +17,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 glob = { workspace = true }
+regex = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.5" }
 

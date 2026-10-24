@@ -2868,6 +2868,84 @@ Consider reordering rules so more specific patterns appear before catch-alls.
 
 Exit code 0 = valid; exit code 1 = overlap warnings found.
 
+### Constitution v2: Wiki, Task and Layered Rules
+
+A v2 constitution extends `[[approval_rules]]` beyond files. The same rules decide whether a draft that carries wiki writes or task proposals is auto-approved, sent to review, or blocked.
+
+#### Files and layering
+
+| File | Layer |
+|---|---|
+| `.ta/constitution-org.toml` | `org` (shared across projects; committed alongside the project, distributed by your org) |
+| `.ta/constitution.toml` | `project` |
+
+Both are optional. When both exist, the org file is evaluated first and the project file adds to it. **The most restrictive outcome wins** (`block` over `review` over `approve`), so a project can add rules and tighten, but it can never loosen or disable an org rule. A project rule that reuses an org rule's `id` is an error. A layer in which no rule matches an item abstains.
+
+Starter files are in `templates/constitution/`. Copy one, keep `mode = "shadow"` until the agreement report supports promotion, and amend it through `ta constitution amend` (a draft), never by silent edit.
+
+#### File keys
+
+```toml
+schema_version = 2          # required once any v2 key is used
+layer = "org"               # optional; must match the file's location when present
+default_mode = "shadow"     # optional: shadow | enforce, for rules that set no mode
+
+[[approval_rules]]
+id = "org-wiki-notes"       # required, unique across both layers
+kind = "wiki"               # fs (default) | wiki | task
+match = { operations = ["update"], page_types = ["note"], max_changed_lines = 40 }
+action = "approve"          # approve | review | block
+min_confidence = 0.85       # required on wiki/task approve rules
+origins = ["project-manager"]   # optional: the rule applies only to drafts with these origins
+```
+
+| Kind | `match` keys |
+|---|---|
+| `fs` | `patterns = [globs]` (the existing key, outside `match`) |
+| `wiki` | `operations` (`create`, `update`, `delete`, `rename`), `page_types`, `scopes` (`project`, `org`), `title_patterns`, `body_patterns` (regex), `max_changed_lines` |
+| `task` | `operations` (`create`, `update`, `complete`, `on_hold`, `needs_revision`, `reassign`, `record_datapoint`, `create_goal`, `create_kpi`, `create_kpi_metric`), `max_items_per_draft`, `requires_source_request` |
+
+For updates, `page_types` is checked against the page TA has stored, never the type the draft claims. A title change is a `rename`. If the stored page cannot be resolved from the local wiki cache (or the cache is older than the `if_sha` the write was made against), approve rules do not match and restrictive rules do.
+
+An unknown `kind`, `action`, `mode`, `match` key or `operations` value, a missing or duplicate `id`, an invalid regex, or an `approve` rule without `min_confidence` is a loud error: `ta constitution validate` prints every problem with the file and rule index, and a draft submitted while the constitution is invalid goes to human review. Nothing is silently skipped.
+
+#### What a rule needs before it approves
+
+An `approve` rule on wiki or task items only approves when all of these hold; otherwise the item goes to review:
+
+- a supervisor review exists, its verdict is `pass` (a `block` anywhere demotes), and its confidence is at least `min_confidence`;
+- the conversation reviewer says the work matches the conversation (`intent_match`), and has not given the item a worse verdict;
+- the draft's origin is allowed. `cos` and `chat` drafts are refused before any rule is read. A draft from the project-manager funnel carries the origin `project-manager` (stamped by the gateway for the `project-manager` team role, or inferred when the intake ledger lists the draft). It is approved only by a rule whose `origins` lists `project-manager`. A task `create` with `requires_source_request = true` must carry `external_id = "intake:<request_id>"` for a request in this draft's ledger entries.
+
+An item an `enforce`-mode rule does not approve goes to review. Pending actions that are not file, wiki or task items (for example an outbound email) are never auto-approved by a constitution.
+
+Which wiki writes are gated: wiki writes captured in a draft (`ta_wiki_create` / `ta_wiki_update`). Direct wiki writes made outside a draft are not gated by this feature.
+
+#### Conversation reviewer
+
+An independent, read-only reviewer compares the draft with what the human actually asked for. It runs at draft submit when enabled (`.ta/workflow.toml`):
+
+```toml
+[supervisor.conversation_review]
+enabled = true
+agent_profile = "reviewer"          # from [agent_profiles]; prefer a different model than the author's
+persona = "conversation-reviewer"   # must differ from the author's persona
+context_turns = 20                  # recent conversation turns given to the reviewer
+wiki_snippets = 5                   # cached wiki pages most related to the objective
+```
+
+It only runs under `builtin`/`claude-code` agents (Read, Grep, Glob only). It never runs in the author's session. Its inputs are the goal objective, the recent conversation (`.ta/conversations/<goal>.jsonl`), related cached wiki pages, and for funnel drafts the raw queued requests next to the project manager's decisions. All of that text is data: it is fenced and quoted, and instructions inside it do not change the review. The reviewer returns `intent_match` and one decision per item. A reply that cannot be parsed, or items it forgets, count as `warn`: it can only tighten.
+
+#### Checking and viewing
+
+```bash
+ta constitution validate    # parses org + project files, lists every rule with its layer, kind, mode
+ta constitution show        # same layers and rules
+ta draft view <id>          # CONSTITUTION section: per item, rule, layer, mode, reviewer verdict
+```
+
+Every evaluation appends a line to `.ta/audit/constitution-decisions.jsonl` (rule ids, layers, modes, verdicts, confidence and the sha256 of both constitution files).
+
 ### Desktop Notifications
 
 TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.

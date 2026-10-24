@@ -79,6 +79,91 @@ pub fn origin_blocks_auto_approve(origin: Option<&str>) -> bool {
     }
 }
 
+/// The origin stamped on drafts produced by the virtual-team project manager
+/// (the funnel consumer). It is NOT in [`NO_AUTO_APPROVE_ORIGINS`]: such a
+/// draft is auto-approvable only when a constitution rule lists it in
+/// `origins = [...]` (see [`RULE_GATED_ORIGINS`]).
+pub const PROJECT_MANAGER_ORIGIN: &str = "project-manager";
+
+/// The team role name whose launches the gateway stamps with
+/// [`PROJECT_MANAGER_ORIGIN`].
+pub const PROJECT_MANAGER_ROLE: &str = "project-manager";
+
+/// Environment variable the launcher sets to the launching team role.
+pub const TEAM_ROLE_ENV_VAR: &str = "TA_WHITEBOARD_TEAM_ROLE";
+
+/// Origins whose drafts can be auto-approved only by a constitution rule that
+/// lists them in `origins`. Never auto-approved by any other path.
+pub const RULE_GATED_ORIGINS: &[&str] = &[PROJECT_MANAGER_ORIGIN];
+
+/// Whether a goal with this origin is auto-approvable only through a
+/// constitution rule naming the origin. Case-insensitive and trimmed, like
+/// [`origin_blocks_auto_approve`].
+pub fn origin_is_rule_gated(origin: Option<&str>) -> bool {
+    match origin {
+        Some(o) => {
+            let o = o.trim().to_ascii_lowercase();
+            RULE_GATED_ORIGINS.iter().any(|g| *g == o)
+        }
+        None => false,
+    }
+}
+
+/// The launching team role from [`TEAM_ROLE_ENV_VAR`]; unset or blank is `None`.
+pub fn team_role_from_env() -> Option<String> {
+    match std::env::var(TEAM_ROLE_ENV_VAR) {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// Decide the origin a launch carries, given the launching team role and the
+/// origin requested (`--origin` / `TA_GOAL_ORIGIN`). Fails closed.
+///
+/// - Role `project-manager`, nothing requested: stamped `project-manager`.
+/// - Role `project-manager`, `project-manager` requested: same.
+/// - Role `project-manager`, `cos`/`chat` requested: that origin is kept
+///   (the more restrictive one wins; H9 is unchanged).
+/// - Role `project-manager`, any other origin requested: error naming both.
+/// - Any other role (or none) requesting `project-manager`: error, the origin
+///   is gateway-stamped for the project-manager role only.
+/// - Everything else: the requested origin unchanged.
+pub fn stamp_launch_origin(
+    team_role: Option<&str>,
+    requested: Option<&str>,
+) -> Result<Option<String>, String> {
+    let is_pm_role = team_role
+        .map(|r| r.trim().eq_ignore_ascii_case(PROJECT_MANAGER_ROLE))
+        .unwrap_or(false);
+    let requested_trimmed = requested.map(str::trim).filter(|r| !r.is_empty());
+    let requests_pm = origin_is_rule_gated(requested_trimmed);
+    if is_pm_role {
+        match requested_trimmed {
+            None => Ok(Some(PROJECT_MANAGER_ORIGIN.to_string())),
+            Some(_) if requests_pm => Ok(Some(PROJECT_MANAGER_ORIGIN.to_string())),
+            Some(r) if origin_blocks_auto_approve(Some(r)) => Ok(Some(r.to_ascii_lowercase())),
+            Some(r) => Err(format!(
+                "team role `{PROJECT_MANAGER_ROLE}` was launched with origin `{r}`, which conflicts \
+                 with the `{PROJECT_MANAGER_ORIGIN}` origin the gateway stamps for that role; \
+                 remove --origin/{ORIGIN_ENV_VAR} (only `{PROJECT_MANAGER_ORIGIN}`, `cos` or `chat` \
+                 are accepted for this role)"
+            )),
+        }
+    } else if requests_pm {
+        Err(format!(
+            "the {PROJECT_MANAGER_ORIGIN} origin is stamped by the gateway for the \
+             {PROJECT_MANAGER_ROLE} role only (launching role: {}); remove \
+             --origin/{ORIGIN_ENV_VAR}",
+            team_role
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("none")
+        ))
+    } else {
+        Ok(requested.map(str::to_string))
+    }
+}
+
 /// Whether a goal must stay out of the plan entirely: no auto-linked phase,
 /// no ad-hoc stub in `PLAN.md`, no `in_progress` marker, no claim.
 ///
@@ -604,5 +689,79 @@ mod tests {
             assert!(!origin_blocks_auto_approve(Some("cli")));
             assert!(!origin_blocks_auto_approve(None));
         }
+    }
+
+    #[test]
+    fn project_manager_origin_is_rule_gated_not_blocked() {
+        assert!(!origin_blocks_auto_approve(Some(PROJECT_MANAGER_ORIGIN)));
+        assert!(!NO_AUTO_APPROVE_ORIGINS.contains(&PROJECT_MANAGER_ORIGIN));
+        assert!(origin_is_rule_gated(Some("project-manager")));
+        assert!(origin_is_rule_gated(Some("  Project-Manager ")));
+        assert!(!origin_is_rule_gated(Some("cos")));
+        assert!(!origin_is_rule_gated(Some("chat")));
+        assert!(!origin_is_rule_gated(Some("cli")));
+        assert!(!origin_is_rule_gated(None));
+    }
+
+    fn stamp(role: Option<&str>, req: Option<&str>) -> Result<Option<String>, String> {
+        stamp_launch_origin(role, req)
+    }
+
+    #[test]
+    fn stamp_launch_origin_truth_table() {
+        let pm = Some("project-manager".to_string());
+        // PM role: stamped, with case/whitespace tolerated on the role.
+        for role in ["project-manager", " Project-Manager ", "PROJECT-MANAGER"] {
+            assert_eq!(stamp(Some(role), None).unwrap(), pm);
+            assert_eq!(stamp(Some(role), Some("project-manager")).unwrap(), pm);
+            assert_eq!(stamp(Some(role), Some(" Project-Manager")).unwrap(), pm);
+            // More restrictive origin wins.
+            assert_eq!(
+                stamp(Some(role), Some("cos")).unwrap().as_deref(),
+                Some("cos")
+            );
+            assert_eq!(
+                stamp(Some(role), Some("chat")).unwrap().as_deref(),
+                Some("chat")
+            );
+            assert_eq!(
+                stamp(Some(role), Some("COS")).unwrap().as_deref(),
+                Some("cos")
+            );
+            // Any other origin conflicts, and the error names both.
+            let err = stamp(Some(role), Some("cli")).unwrap_err();
+            assert!(
+                err.contains("project-manager") && err.contains("`cli`"),
+                "{err}"
+            );
+        }
+        // Non-PM roles and no role: forgery refused, everything else unchanged.
+        for role in [
+            None,
+            Some("engineer"),
+            Some("cos"),
+            Some("  "),
+            Some("project-manager-2"),
+        ] {
+            let err = stamp(role, Some("project-manager")).unwrap_err();
+            assert!(err.contains("project-manager origin is stamped by the gateway"));
+            assert!(err.contains("remove --origin/TA_GOAL_ORIGIN"));
+            assert!(stamp(role, Some("PROJECT-MANAGER")).is_err());
+            assert_eq!(stamp(role, None).unwrap(), None);
+            for o in ["cos", "chat", "cli"] {
+                assert_eq!(stamp(role, Some(o)).unwrap().as_deref(), Some(o));
+            }
+        }
+    }
+
+    #[test]
+    fn team_role_from_env_reads_and_trims() {
+        std::env::remove_var(TEAM_ROLE_ENV_VAR);
+        assert_eq!(team_role_from_env(), None);
+        std::env::set_var(TEAM_ROLE_ENV_VAR, "   ");
+        assert_eq!(team_role_from_env(), None);
+        std::env::set_var(TEAM_ROLE_ENV_VAR, " project-manager ");
+        assert_eq!(team_role_from_env().as_deref(), Some("project-manager"));
+        std::env::remove_var(TEAM_ROLE_ENV_VAR);
     }
 }
