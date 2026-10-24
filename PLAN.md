@@ -11422,10 +11422,12 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 
 **Goal**: Every auto-approval rule starts in shadow: the supervisor decides, the human still approves, agreement is recorded.
 
-1. [ ] `mode = shadow|enforce` at file, rule and project level (project can only move toward shadow).
-2. [ ] `.ta/audit/auto-approve-shadow.jsonl` with draft, item, rule, would-be action, human action, agreement.
-3. [ ] `ta constitution shadow report` per rule: count, agreement, disagreements; recommendation threshold configurable (default 50 decisions, at most 2 percent disagreement, no machine-approve of a human-rejected item). Reaching it only shows a recommendation with a link to the setting, or raises an ask-human; it never switches a rule automatically.
+1. [x] `mode = shadow|enforce` at file, rule and project level (project can only move toward shadow).
+2. [x] `.ta/audit/auto-approve-shadow.jsonl` with draft, item, rule, would-be action, human action, agreement.
+3. [x] `ta constitution shadow report` per rule: count, agreement, disagreements; recommendation threshold configurable (default 50 decisions, at most 2 percent disagreement, no machine-approve of a human-rejected item). Reaching it only shows a recommendation with a link to the setting, or raises an ask-human; it never switches a rule automatically.
 4. [ ] Mode setting and report exposed to Wayfinder (message 013).
+
+Status note: items 1 to 3 are built and tested; the report only shows a recommendation (the optional ask-human is not implemented). Item 4 is half built: `ta constitution shadow report --wayfinder` produces the snapshot in the shape of Wayfinder message 018, but nothing pushes it (the push is the poller's job and needs Wayfinder to confirm the shape, route and credential), and TA does not yet read the mode from Wayfinder's stored document. The phase stays pending until those are done or moved.
 
 **Effort**: M.
 
