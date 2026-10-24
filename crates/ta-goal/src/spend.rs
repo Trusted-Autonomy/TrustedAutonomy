@@ -355,6 +355,33 @@ pub fn record_usage_on_goal(goal: &mut GoalRun, tracker: &UsageTracker, table: &
     }
 }
 
+/// Price a goal recorded before cost tracking existed, for a report.
+///
+/// Such a goal has real tokens and a model name but `cost_source` `none`, so a
+/// report would count it unpriced and leave its spend out of the total. When it
+/// has tokens, a model the `table` prices and no `cost_source`, set its cost
+/// from the table and label it `estimated` (`cost_source` `table`). Goals with
+/// no tokens, no model or an unpriced model stay unpriced. Returns whether the
+/// goal was priced. Only the in-memory copy changes: the goal record on disk is
+/// never rewritten by a report.
+pub fn estimate_legacy_goal_cost(goal: &mut GoalRun, table: &PriceTable) -> bool {
+    if goal.cost_source != CostSource::None || goal.agent_model.is_empty() {
+        return false;
+    }
+    let tokens = goal.token_usage();
+    if tokens.total() == 0 {
+        return false;
+    }
+    let r = resolve_cost(table, &goal.agent_model, &tokens, None);
+    if r.source != CostSource::Table {
+        return false;
+    }
+    goal.cost_usd = r.usd;
+    goal.cost_estimated = true;
+    goal.cost_source = CostSource::Table;
+    true
+}
+
 // ── Aggregation behind GET /api/spend ───────────────────────────────────────
 
 /// A dimension to group spend by.
@@ -538,7 +565,10 @@ pub fn aggregate(
              from a price table (.ta/pricing.toml or built in). unpriced_goals: no price; their \
              tokens are counted and their usd is 0."
                 .to_string(),
-            "Goals recorded before cost tracking existed count as unpriced.".to_string(),
+            "Goals recorded before cost tracking existed, with tokens and a priced model, are \
+             priced from the table at report time and counted as estimated; goals with no \
+             tokens or no priced model stay unpriced."
+                .to_string(),
         ],
     }
 }
@@ -864,6 +894,48 @@ mod tests {
             ("beta".to_string(), c),
             ("beta".to_string(), d),
         ]
+    }
+
+    #[test]
+    fn a_goal_recorded_before_cost_tracking_is_priced_as_an_estimate() {
+        let table = PriceTable::builtin();
+        // Tokens and a priced model, but cost_source null: the real shape of
+        // goals recorded 2026-10-10 to 12.
+        let mut legacy = goal("claude-sonnet-5-5", None, 0.0, CostSource::None);
+        legacy.input_tokens = 1_000_000;
+        legacy.output_tokens = 0;
+        legacy.cache_read_input_tokens = 0;
+        legacy.cache_creation_input_tokens = 0;
+        assert!(estimate_legacy_goal_cost(&mut legacy, &table));
+        assert_eq!(legacy.cost_source, CostSource::Table);
+        assert!(legacy.cost_estimated);
+        assert!(legacy.cost_usd > 0.0);
+
+        let r = aggregate(&[("p".to_string(), legacy.clone())], &[], None, None);
+        assert_eq!(r.totals.unpriced_goals, 0);
+        assert_eq!(r.totals.estimated_cost_goals, 1);
+        assert!((r.totals.usd - legacy.cost_usd).abs() < 1e-12);
+    }
+
+    #[test]
+    fn legacy_pricing_leaves_goals_without_tokens_or_a_priced_model_unpriced() {
+        let table = PriceTable::builtin();
+        let mut no_tokens = goal("claude-sonnet-5-5", None, 0.0, CostSource::None);
+        no_tokens.input_tokens = 0;
+        no_tokens.output_tokens = 0;
+        no_tokens.cache_read_input_tokens = 0;
+        no_tokens.cache_creation_input_tokens = 0;
+        let mut unknown_model = goal("qwen3.5:9b", None, 0.0, CostSource::None);
+        let mut no_model = goal("", None, 0.0, CostSource::None);
+        for g in [&mut no_tokens, &mut unknown_model, &mut no_model] {
+            assert!(!estimate_legacy_goal_cost(g, &table));
+            assert_eq!(g.cost_source, CostSource::None);
+            assert_eq!(g.cost_usd, 0.0);
+        }
+        // A runtime-priced goal is never repriced.
+        let mut exact = goal("claude-sonnet-5-5", None, 9.0, CostSource::Runtime);
+        assert!(!estimate_legacy_goal_cost(&mut exact, &table));
+        assert_eq!(exact.cost_usd, 9.0);
     }
 
     #[test]
