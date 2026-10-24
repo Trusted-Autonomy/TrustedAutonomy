@@ -4209,6 +4209,16 @@ pub fn execute(
         agent_config
             .env
             .extend(super::chat_launch::chat_mode_agent_env(plan, &staging_path));
+        // Pin the read tools to the project this launch is for, never to whatever Wayfinder
+        // project happens to be in the ambient environment.
+        agent_config
+            .env
+            .extend([super::chat_launch::chat_mode_wayfinder_env(
+                &config.workspace_root,
+                std::env::var(ta_mcp_gateway::chat_launch::ENV_CHAT_WAYFINDER_PROJECT_ID)
+                    .ok()
+                    .as_deref(),
+            )?]);
     }
 
     // VCS environment isolation (v0.13.17.3).
