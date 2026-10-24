@@ -422,6 +422,14 @@ fn dirs_path() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// What chat-mode planning reads from the built-in claude-code agent: its
+/// framework name and whether it injects harness permission settings.
+/// `ta capabilities` feeds these to the real planner instead of hard-coding them.
+pub(crate) fn builtin_claude_code_chat_facts() -> (Option<String>, bool) {
+    let config = builtin_agent_config("claude-code");
+    (config.name, config.injects_settings)
+}
+
 /// Hard-coded built-in agent configs (fallback when no YAML file is found).
 fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
     match agent_id {
