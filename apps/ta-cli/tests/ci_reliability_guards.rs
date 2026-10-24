@@ -58,8 +58,8 @@ fn every_job_and_step_with_a_command_is_time_bounded() {
     let ci = read(".github/workflows/ci.yml");
     assert_eq!(
         ci.matches("\n    timeout-minutes:").count(),
-        4,
-        "each of the four jobs needs a job-level timeout"
+        5,
+        "each of the five jobs needs a job-level timeout"
     );
     // Every `run:`/`uses:` step carries timeout-minutes within its block.
     let mut blocks: Vec<&str> = ci.split("\n      - ").skip(1).collect();
