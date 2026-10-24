@@ -3246,23 +3246,25 @@ pub fn execute(
         check_vcs_clean(&check_root, headless)?;
     }
 
-    // v0.15.28.2: Atomic pre-staging phase claim + commit+push.
+    // v0.15.28.2 / v0.17.12.25: pre-staging phase claim.
     //
-    // Mark the plan phase in_progress and commit+push that change BEFORE
-    // OverlayWorkspace::create() copies the source to staging. This ensures
-    // the staging base SHA matches the committed HEAD so the 3-way merge at
-    // apply time has a clean, non-stale base.
+    // Mark the plan phase in_progress BEFORE OverlayWorkspace::create() copies
+    // the source to staging, so the staging copy carries the claim. The claim is
+    // NOT committed or pushed: `ta run` must never write to the protected
+    // branch, and a run killed at startup used to leave `in_progress` on
+    // `origin/main` with no goal behind it. If this run ends before the goal
+    // exists, the claim is released (see `PreStagingPhaseClaim`).
     //
     // Flow:
-    //   1. Mark phase in_progress (daemon or direct write).
-    //   2. Commit PLAN.md + plan_history.jsonl with a dedicated commit.
-    //   3. Push to the tracking remote (abort if push fails).
-    //   4. Create overlay — staging base now == committed HEAD.
+    //   1. Mark phase in_progress (daemon or direct write; working tree only).
+    //   2. Create overlay: staging includes the claim.
+    //   3. Goal exists -> it owns the claim; the guard is disarmed.
     //
     // Skipped when: no phase is specified, this is a --goal-id reuse (the
     // goal + phase were already claimed by an earlier `ta goal start`), or
     // this is a follow-up run (the phase is already in_progress from the
     // parent goal — re-claiming produces a fatal "already claimed" error).
+    let mut pre_staging_claim: Option<PreStagingPhaseClaim> = None;
     let pre_staging_phase_claimed = if follow_up.is_none() && !skip_plan_phase {
         if let (Some(phase_id), None) = (phase, existing_goal_id) {
             let source_root = source
@@ -3314,10 +3316,10 @@ pub fn execute(
                 }
             };
 
-            // Step 2+3: commit + push only if the claim succeeded.
-            if claimed {
-                commit_and_push_plan_status(&source_root, phase_id, quiet)?;
-            }
+            // The claim stays in the working tree and `.ta/` state: it is never
+            // committed or pushed (a push would land on the protected branch).
+            // Released again if this run ends before the goal exists.
+            pre_staging_claim = Some(PreStagingPhaseClaim::new(&source_root, phase_id, claimed));
             claimed
         } else {
             false
@@ -3406,6 +3408,11 @@ pub fn execute(
             .ok_or_else(|| anyhow::anyhow!("Failed to find created goal"))?
             .clone()
     };
+
+    // The goal record exists and owns the phase claim from here on.
+    if let Some(claim) = pre_staging_claim.as_mut() {
+        claim.disarm();
+    }
 
     // v0.17.10.2 item 3: staging + pre-staging phase claim are done — release
     // the source-stage lock so other goals against this source can proceed.
@@ -9247,6 +9254,15 @@ Rules:
 - Never mark an item `[x]` if you have not actually implemented it.
 - Unimplemented items must stay `[ ]` — the reviewer will check these for code coverage.
 
+## Windows Pitfalls (this project builds on Windows in CI)
+
+Local macOS/Linux clippy cannot catch these; each has cost a 20-25 minute CI cycle:
+- A helper whose only caller is under `#[cfg(unix)]` fails `dead_code` under `-D warnings` on Windows. Put the helper under the same `#[cfg(unix)]`, or use it on both platforms.
+- Tests that assert on text read from a git-tracked file break when `core.autocrlf` turns it into CRLF. Compare with `\r\n` normalised, or build the text in the test.
+- Tests that hardcode Unix paths (`/tmp`, `/home/...`, `a/b` joined with `/`) fail on Windows. Use `tempfile::tempdir()` and `Path::join`.
+- A test that runs a shell script or `sh`/`chmod`/symlinks needs `#[cfg(unix)]`.
+- If the Windows target is installed, `scripts/check-windows.sh` runs the same compile-only check CI runs.
+
 ## Plan Updates (REQUIRED if PLAN.md exists)
 
 As you complete planned work items, update PLAN.md to reflect progress:
@@ -10280,168 +10296,60 @@ fn try_daemon_claim_phase(
     }
 }
 
-// ── Atomic pre-staging plan-status commit (v0.15.28.2) ─────────────────────
+// ── Pre-staging phase claim (v0.17.12.25 item 10) ──────────────────────────
 
-/// Commit PLAN.md and plan_history.jsonl after marking a phase `in_progress`,
-/// then push the commit to the tracking remote.
+/// The phase claim taken before a goal exists, released again unless the goal
+/// gets created.
 ///
-/// This ensures the staging base SHA matches committed HEAD so the 3-way merge
-/// at apply time has a clean, non-stale base.
-///
-/// Returns `Err` (aborting the run) when:
-/// - The `git commit` fails (staged changes exist but commit failed).
-/// - The `git push` fails (commit was made but could not be pushed).
-///
-/// Silently skips (returns `Ok`) when:
-/// - Not a git repo, or `git` is not on PATH.
-/// - PLAN.md does not exist (no plan-based workflow).
-/// - Nothing was staged (phase already in_progress, content unchanged).
-/// - No remote tracking branch configured (local-only repos).
-fn commit_and_push_plan_status(
-    project_root: &std::path::Path,
-    phase_id: &str,
-    quiet: bool,
-) -> anyhow::Result<()> {
-    let run_git = |args: &[&str]| -> Option<std::process::Output> {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(project_root)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .output()
-            .ok()
-    };
+/// The claim is recorded in the working tree's PLAN.md and `.ta/` state only:
+/// it is never committed and never pushed, so a run that dies at startup cannot
+/// leave `in_progress` on a protected branch with no goal behind it. Once the
+/// goal record exists, the goal owns the claim and its normal release paths
+/// (denied, failed, closed) apply, so the guard is disarmed then. If `ta run`
+/// returns an error between the claim and the goal, dropping the guard resets
+/// the phase to `pending` and releases the daemon's claim. A process killed
+/// outright (SIGKILL) cannot run this; `ta plan reset <phase>` or `ta doctor`
+/// clears that.
+struct PreStagingPhaseClaim {
+    project_root: std::path::PathBuf,
+    phase_id: String,
+    armed: bool,
+}
 
-    // Skip if not a git repo.
-    if run_git(&["rev-parse", "--is-inside-work-tree"]).map(|o| o.status.success()) != Some(true) {
-        return Ok(());
-    }
-
-    // Stage PLAN.md if it exists and is modified.
-    if project_root.join("PLAN.md").exists() {
-        if let Some(out) = run_git(&["add", "PLAN.md"]) {
-            if !out.status.success() {
-                anyhow::bail!(
-                    "Failed to stage PLAN.md for in_progress commit (phase {}).\n\
-                     Git error: {}",
-                    phase_id,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
+impl PreStagingPhaseClaim {
+    fn new(project_root: &Path, phase_id: &str, armed: bool) -> Self {
+        Self {
+            project_root: project_root.to_path_buf(),
+            phase_id: phase_id.to_string(),
+            armed,
         }
     }
 
-    // Stage plan_history.jsonl if it exists (updated by mark_phase_in_source).
-    let history_path = project_root.join(".ta/plan_history.jsonl");
-    if history_path.exists() {
-        let _ = run_git(&["add", ".ta/plan_history.jsonl"]);
+    /// The goal now exists and owns the claim.
+    fn disarm(&mut self) {
+        self.armed = false;
     }
+}
 
-    // Bail out early if nothing was staged.
-    let has_staged = run_git(&["diff", "--cached", "--name-only"])
-        .map(|o| !o.stdout.is_empty() && o.status.success())
-        .unwrap_or(false);
-    if !has_staged {
-        tracing::debug!(
-            phase = %phase_id,
-            "no staged changes for in_progress commit — already clean"
-        );
-        return Ok(());
-    }
-
-    // Commit with a clear, traceable message.
-    let commit_msg = format!("chore: mark phase {} in_progress (pre-staging)", phase_id);
-    match run_git(&["commit", "-m", &commit_msg]) {
-        Some(out) if out.status.success() => {
-            if !quiet {
-                println!("Plan: committed in_progress status for phase {}", phase_id);
-            }
-            tracing::info!(phase = %phase_id, "committed in_progress PLAN.md before staging");
+impl Drop for PreStagingPhaseClaim {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
         }
-        Some(out) => {
-            anyhow::bail!(
-                "Failed to commit PLAN.md in_progress status before staging (phase {}).\n\
-                 The phase is marked in_progress on disk but the commit failed.\n\
-                 Fix the git state and retry, or roll back with:\n  \
-                 git reset HEAD~1   # undo the staged changes\n  \
-                 ta plan reset {}   # revert phase to pending\n\
-                 Git error: {}",
-                phase_id,
-                phase_id,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        None => {
-            anyhow::bail!(
-                "Failed to run `git commit` for PLAN.md in_progress (phase {}).\n\
-                 Ensure git is installed and accessible on PATH.",
-                phase_id
-            );
+        let note = "phase reset to pending (ta run ended before the goal was created)";
+        match super::plan::reset_phase_if_in_progress(&self.project_root, &self.phase_id, note) {
+            Ok(true) => eprintln!(
+                "Plan: phase {} released (ta run ended before the goal was created); it is pending again.",
+                self.phase_id
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "[warn] ta run ended before the goal was created and phase {} could not be \
+                 released automatically: {e}. Run `ta plan reset {}`.",
+                self.phase_id, self.phase_id
+            ),
         }
     }
-
-    // Push to the tracking remote. Skip gracefully if no upstream is configured.
-    let has_upstream = run_git(&[
-        "rev-parse",
-        "--abbrev-ref",
-        "--symbolic-full-name",
-        "@{upstream}",
-    ])
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-
-    if !has_upstream {
-        if !quiet {
-            println!(
-                "Plan: no remote tracking branch — skipping push for in_progress commit \
-                 (phase {})",
-                phase_id
-            );
-        }
-        tracing::info!(
-            phase = %phase_id,
-            "no upstream configured — skipping push of in_progress commit"
-        );
-        return Ok(());
-    }
-
-    match run_git(&["push"]) {
-        Some(out) if out.status.success() => {
-            if !quiet {
-                println!("Plan: pushed in_progress commit for phase {}", phase_id);
-            }
-            tracing::info!(phase = %phase_id, "pushed in_progress commit before staging");
-        }
-        Some(out) => {
-            anyhow::bail!(
-                "Failed to push in_progress commit for phase {}.\n\
-                 The local commit was created but could not be pushed — the run is aborted \
-                 to prevent a staging base that diverges from the remote.\n\
-                 Fix the push issue (check remote connectivity, branch protection, or \
-                 run `git pull --rebase` if the remote has new commits), then retry:\n  \
-                 ta run \"<same title>\" --phase {}\n\
-                 To roll back the local commit first:\n  \
-                 git reset HEAD~1\n  \
-                 ta plan reset {}\n\
-                 Git push error: {}",
-                phase_id,
-                phase_id,
-                phase_id,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        None => {
-            anyhow::bail!(
-                "Failed to run `git push` for in_progress commit (phase {}).\n\
-                 Ensure git is installed and accessible on PATH.",
-                phase_id
-            );
-        }
-    }
-
-    Ok(())
 }
 
 /// Silently skips when:
@@ -15402,88 +15310,89 @@ plan_pending_window = 7
         auto_commit_ta_jsonl(dir.path()); // must not panic
     }
 
-    // ── commit_and_push_plan_status tests (v0.15.28.2) ────────────────────────
+    // ── pre-staging phase claim (v0.17.12.25 item 10) ──────────────────────────
 
-    #[test]
-    fn commit_and_push_plan_status_commits_plan_md() {
-        let dir = tempfile::tempdir().unwrap();
-        init_test_git(dir.path());
-
-        // Write PLAN.md with in_progress status (simulates mark_phase_in_source).
-        std::fs::write(
-            dir.path().join("PLAN.md"),
-            "### v0.1.0\n<!-- status: in_progress -->\n",
-        )
-        .unwrap();
-
-        let before = git_log_count(dir.path());
-        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
-        let after = git_log_count(dir.path());
-
-        assert_eq!(after, before + 1, "should have committed PLAN.md");
-    }
-
-    #[test]
-    fn commit_and_push_plan_status_skips_when_nothing_staged() {
-        let dir = tempfile::tempdir().unwrap();
-        init_test_git(dir.path());
-        // PLAN.md doesn't exist — nothing to commit.
-        let before = git_log_count(dir.path());
-        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
-        assert_eq!(
-            git_log_count(dir.path()),
-            before,
-            "no commit when PLAN.md absent"
-        );
-    }
-
-    #[test]
-    fn commit_and_push_plan_status_no_op_outside_git() {
-        let dir = tempfile::tempdir().unwrap();
-        // No git repo — must succeed silently.
-        std::fs::write(dir.path().join("PLAN.md"), "### v0.1.0\n").unwrap();
-        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
-    }
-
-    #[test]
-    fn commit_and_push_plan_status_also_stages_plan_history() {
-        let dir = tempfile::tempdir().unwrap();
-        init_test_git(dir.path());
-
-        // Write both PLAN.md and plan_history.jsonl.
-        std::fs::write(
-            dir.path().join("PLAN.md"),
-            "### v0.1.0\n<!-- status: in_progress -->\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
-        std::fs::write(
-            dir.path().join(".ta/plan_history.jsonl"),
-            "{\"phase_id\":\"v0.1.0\",\"new_status\":\"in_progress\"}\n",
-        )
-        .unwrap();
-
-        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
-
-        // Both files should appear in the HEAD commit.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
-            .args(["show", "--name-only", "--format=", "HEAD"])
-            .current_dir(dir.path())
+            .args(args)
+            .current_dir(dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_COMMON_DIR")
             .output()
             .unwrap();
-        let committed_files = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            committed_files.contains("PLAN.md"),
-            "PLAN.md should be in the commit"
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A project whose PLAN.md has one pending phase, with a bare `origin`.
+    fn project_with_origin() -> (tempfile::TempDir, tempfile::TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        git_out(origin.path(), &["init", "--bare", "-q", "-b", "main"]);
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+        std::fs::write(
+            dir.path().join("PLAN.md"),
+            "### v0.1.0 - First\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+        git_out(dir.path(), &["add", "."]);
+        git_out(dir.path(), &["commit", "-q", "-m", "plan"]);
+        git_out(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &origin.path().display().to_string(),
+            ],
         );
-        assert!(
-            committed_files.contains("plan_history.jsonl"),
-            "plan_history.jsonl should be in the commit"
+        git_out(dir.path(), &["push", "-q", "-u", "origin", "HEAD:main"]);
+        (dir, origin)
+    }
+
+    #[test]
+    fn claiming_a_phase_before_staging_commits_and_pushes_nothing() {
+        let (dir, origin) = project_with_origin();
+        let local_before = git_out(dir.path(), &["rev-parse", "HEAD"]);
+        let remote_before = git_out(origin.path(), &["rev-parse", "main"]);
+
+        // What `ta run --phase v0.1.0` does before staging (daemon absent).
+        crate::commands::plan::mark_phase_in_source(dir.path(), "v0.1.0").unwrap();
+        let _claim = PreStagingPhaseClaim::new(dir.path(), "v0.1.0", true);
+
+        assert_eq!(git_out(dir.path(), &["rev-parse", "HEAD"]), local_before);
+        assert_eq!(
+            git_out(origin.path(), &["rev-parse", "main"]),
+            remote_before
         );
+        let remote_plan = git_out(origin.path(), &["show", "main:PLAN.md"]);
+        assert!(remote_plan.contains("status: pending"), "{remote_plan}");
+    }
+
+    #[test]
+    fn a_run_that_ends_before_the_goal_exists_releases_the_phase() {
+        let (dir, _origin) = project_with_origin();
+        crate::commands::plan::mark_phase_in_source(dir.path(), "v0.1.0").unwrap();
+        let plan = || std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert!(plan().contains("status: in_progress"));
+        {
+            let _claim = PreStagingPhaseClaim::new(dir.path(), "v0.1.0", true);
+            // `?` returns early here: guard dropped while armed.
+        }
+        assert!(plan().contains("status: pending"), "{}", plan());
+    }
+
+    #[test]
+    fn once_the_goal_exists_the_guard_leaves_the_claim_alone() {
+        let (dir, _origin) = project_with_origin();
+        crate::commands::plan::mark_phase_in_source(dir.path(), "v0.1.0").unwrap();
+        {
+            let mut claim = PreStagingPhaseClaim::new(dir.path(), "v0.1.0", true);
+            claim.disarm();
+        }
+        let plan = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert!(plan.contains("status: in_progress"), "{plan}");
     }
 
     // ── read_context_input tests (v0.15.30.7) ────────────────────────────────
