@@ -18,8 +18,8 @@ pub struct StartState {
     /// Checked-out branch; `None` for a detached `HEAD`.
     pub branch: Option<String>,
     /// Tracked files had uncommitted changes (untracked files are ignored:
-    /// they do not change what `commit` checks out, and `.ta/` is routinely
-    /// untracked).
+    /// they do not change what `commit` checks out). Tracked `.ta/` files are
+    /// TA's own state and are ignored.
     pub dirty: bool,
 }
 
@@ -66,9 +66,21 @@ pub fn capture_git_start_state(root: &Path) -> anyhow::Result<Option<StartState>
     let commit = git(root, &["rev-parse", "--verify", "HEAD"])?.filter(|s| !s.is_empty());
     let branch =
         git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?.filter(|s| !s.is_empty());
-    let dirty = git(root, &["status", "--porcelain", "--untracked-files=no"])?
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
+    // `.ta/` is TA's own runtime state: repos that track it see it rewritten by
+    // TA itself, which must not make every goal look like it started dirty.
+    let dirty = git(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+            "--",
+            ".",
+            ":(exclude).ta",
+        ],
+    )?
+    .map(|s| !s.is_empty())
+    .unwrap_or(false);
     Ok(Some(StartState {
         commit,
         branch,
@@ -136,6 +148,22 @@ mod tests {
         let dir = repo();
         std::fs::write(dir.path().join("new.txt"), "x").unwrap();
         assert!(!capture_git_start_state(dir.path()).unwrap().unwrap().dirty);
+        std::fs::write(dir.path().join("a.txt"), "two").unwrap();
+        assert!(capture_git_start_state(dir.path()).unwrap().unwrap().dirty);
+    }
+
+    #[test]
+    fn modified_tracked_ta_state_is_not_dirty_but_source_is() {
+        let dir = repo();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(dir.path().join(".ta/state.json"), "{}").unwrap();
+        run_git(dir.path(), &["add", "-f", ".ta/state.json"]);
+        run_git(dir.path(), &["commit", "-q", "-m", "track ta state"]);
+        std::fs::write(dir.path().join(".ta/state.json"), "{\"n\":1}").unwrap();
+        assert!(
+            !capture_git_start_state(dir.path()).unwrap().unwrap().dirty,
+            "a modified tracked .ta/ file is TA state, not a dirty source tree"
+        );
         std::fs::write(dir.path().join("a.txt"), "two").unwrap();
         assert!(capture_git_start_state(dir.path()).unwrap().unwrap().dirty);
     }
