@@ -57,6 +57,7 @@ members = [
     "crates/ta-init",
     "crates/ta-governed-paths",
     "crates/ta-intake",
+    "crates/ta-task-intake",
     "crates/ta-brain",
     "crates/ta-context-opt",
     "crates/ta-release",
