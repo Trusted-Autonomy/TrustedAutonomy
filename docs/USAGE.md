@@ -2946,6 +2946,40 @@ ta draft view <id>          # CONSTITUTION section: per item, rule, layer, mode,
 
 Every evaluation appends a line to `.ta/audit/constitution-decisions.jsonl` (rule ids, layers, modes, verdicts, confidence and the sha256 of both constitution files).
 
+#### Shadow mode and the promotion report
+
+A rule's `mode` is `shadow` or `enforce` (rule key, else the file's `default_mode`, else `shadow` for `approve` rules and `enforce` for `review`/`block`). A shadow rule **never changes an outcome**: it only records what it would have done. Start every new `approve` rule in shadow.
+
+A project may move an org `approve` rule toward shadow, never the other way, and never a `review` or `block` rule (that would loosen it):
+
+```toml
+# .ta/constitution.toml (project file)
+schema_version = 2
+mode_overrides = { org-wiki-append-notes = "shadow" }
+```
+
+Anything else (`"enforce"`, a restrictive org rule, an unknown id, no org file) is a loud error.
+
+Each evaluated draft appends one line per item to `.ta/audit/auto-approve-shadow.jsonl` (draft, item, rule, mode, would-be action, supervisor verdict and confidence). Drafts submitted through the gateway and drafts built by `ta draft build` are both recorded. When a human approves or rejects a draft, the next report adds the human action and whether it agreed.
+
+```bash
+ta constitution shadow report                 # per rule: decisions, agree, disagree, machine-approved-human-rejected
+ta constitution shadow report --json          # same data, machine-readable
+ta constitution shadow report --since-days 14
+ta constitution shadow report --wayfinder     # snapshot in the shape Wayfinder documents for its receiver
+```
+
+Agreement: an `approve` rule agrees with a human approval, a `block` rule with a human rejection; a `review` rule hands the call to a human and is not compared. A rule is **recommended for promotion** only when it has at least 50 decisions with a human outcome, at most 2 percent disagreement, and no item it would have approved was rejected by a human. Tune the first two:
+
+```toml
+# .ta/workflow.toml
+[supervisor.shadow_promotion]
+min_decisions = 50
+max_disagreement = 0.02
+```
+
+The report only shows the recommendation and where to change the setting. It never switches a rule: promote by setting `mode = "enforce"` on the rule through `ta constitution amend`.
+
 ### Desktop Notifications
 
 TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.
