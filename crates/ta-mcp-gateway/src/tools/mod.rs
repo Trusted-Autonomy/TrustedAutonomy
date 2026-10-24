@@ -13,6 +13,7 @@ pub mod human;
 pub mod human_verify;
 pub mod plan;
 pub mod sync_bridge;
+pub mod task_request;
 pub mod unity;
 pub mod unreal;
 pub mod wayfinder_read;
