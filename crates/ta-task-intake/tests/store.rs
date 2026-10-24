@@ -459,6 +459,89 @@ fn ack_after_the_lease_was_recovered_is_an_invalid_transition() {
 }
 
 #[test]
+fn funnel_draft_lookup_matches_only_drafted_or_applied_requests_of_that_draft_and_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path(), big_caps());
+    let g = Uuid::new_v4();
+    let drafted = queued_id(
+        s.enqueue(sub("p1", g, "eng", task("drafted")), t0())
+            .unwrap(),
+    );
+    let applied = queued_id(
+        s.enqueue(sub("p1", g, "eng", task("applied")), t0())
+            .unwrap(),
+    );
+    let other_draft = queued_id(s.enqueue(sub("p1", g, "eng", task("other")), t0()).unwrap());
+    let other_project = queued_id(s.enqueue(sub("p2", g, "eng", task("p2")), t0()).unwrap());
+    // A fifth request that stays queued: it must never count as drafted.
+    s.enqueue(sub("p1", g, "eng", task("still queued")), t0())
+        .unwrap();
+    // Claim the first four (all projects share one queue), then ack by project.
+    s.drain(&drain_req(t0(), 4, 30)).unwrap().unwrap();
+    let ack = |project: &str, ids: Vec<String>, ack: Ack| {
+        s.acknowledge(&AckRequest {
+            project_id: project.into(),
+            request_ids: ids,
+            ack,
+            actor: "pm".into(),
+            now: t0(),
+        })
+        .unwrap();
+    };
+    ack(
+        "p1",
+        vec![drafted.clone(), applied.clone()],
+        Ack::Drafted {
+            draft_id: "d1".into(),
+        },
+    );
+    ack(
+        "p1",
+        vec![applied.clone()],
+        Ack::Applied {
+            draft_id: Some("d1".into()),
+        },
+    );
+    ack(
+        "p1",
+        vec![other_draft],
+        Ack::Drafted {
+            draft_id: "d2".into(),
+        },
+    );
+    ack(
+        "p2",
+        vec![other_project],
+        Ack::Drafted {
+            draft_id: "d1".into(),
+        },
+    );
+
+    let found = funnel_requests_for_draft(&s, "p1", "d1", t0()).unwrap();
+    let mut ids: Vec<_> = found.iter().map(|r| r.request_id.clone()).collect();
+    ids.sort();
+    let mut want = vec![drafted, applied];
+    want.sort();
+    assert_eq!(ids, want);
+    assert!(is_funnel_draft(&s, "p1", "d1", t0()).unwrap());
+    assert!(is_funnel_draft(&s, "p2", "d1", t0()).unwrap());
+    assert!(!is_funnel_draft(&s, "p1", "d-unknown", t0()).unwrap());
+    assert!(!is_funnel_draft(&s, "p3", "d1", t0()).unwrap());
+}
+
+#[test]
+fn a_queued_request_does_not_make_a_funnel_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path(), big_caps());
+    s.enqueue(sub("p1", Uuid::new_v4(), "eng", task("a")), t0())
+        .unwrap();
+    assert!(!is_funnel_draft(&s, "p1", "d1", t0()).unwrap());
+    assert!(funnel_requests_for_draft(&s, "p1", "d1", t0())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn kill_right_after_the_rename_restores_unclaimed_requests_to_the_queue() {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path(), big_caps());
