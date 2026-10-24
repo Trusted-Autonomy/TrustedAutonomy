@@ -264,6 +264,18 @@ pub trait SourceAdapter: Send + Sync {
         Ok(None)
     }
 
+    /// Bring an open review's branch up to date with its target when the host
+    /// says it is `BEHIND`.
+    ///
+    /// Auto-merge only merges a review that is up to date, so when the target
+    /// branch moves after the review is opened the review stalls until someone
+    /// updates the branch. Git: `gh pr view --json mergeStateStatus`, then
+    /// `gh pr update-branch` when it is `BEHIND`.
+    /// Default: `Unsupported`.
+    fn update_review_branch_if_behind(&self, _review_id: &str) -> Result<ReviewBranchUpdate> {
+        Ok(ReviewBranchUpdate::Unsupported)
+    }
+
     /// Every review/PR whose head is the branch `branch`, in any state.
     ///
     /// Branch cleanup asks this instead of `git branch -d` / `git cherry`, because a squash
@@ -492,6 +504,20 @@ pub struct ReviewStatus {
     pub state: String,
     /// Whether CI checks are passing.
     pub checks_passing: Option<bool>,
+}
+
+/// What `SourceAdapter::update_review_branch_if_behind` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewBranchUpdate {
+    /// The adapter cannot say or cannot update (no `gh`, not a git review).
+    Unsupported,
+    /// The review is open and not behind its target; nothing to do. Carries the
+    /// merge state the host reported (e.g. "CLEAN", "BLOCKED").
+    NotBehind(String),
+    /// The review was behind its target and its branch was brought up to date.
+    Updated,
+    /// The review was behind but the update failed; carries the reason.
+    Failed(String),
 }
 
 /// One review/PR opened from a branch, as reported by `SourceAdapter::reviews_for_branch`.

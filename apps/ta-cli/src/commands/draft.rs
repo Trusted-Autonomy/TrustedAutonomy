@@ -10105,11 +10105,18 @@ fn apply_package(
                     }
                     println!();
                     println!("  ta draft pr-status {}    — check PR/CI status", short_id);
-                    if vcs.review_url.is_some() && !auto_merge {
-                        println!(
-                            "  ta draft watch {}        — poll until merged + auto-sync",
-                            short_id
-                        );
+                    if vcs.review_url.is_some() {
+                        if auto_merge {
+                            println!(
+                                "  ta draft watch {}        — keep the PR up to date with its target until it merges + auto-sync",
+                                short_id
+                            );
+                        } else {
+                            println!(
+                                "  ta draft watch {}        — poll until merged + auto-sync",
+                                short_id
+                            );
+                        }
                     }
                 }
             }
@@ -13061,6 +13068,15 @@ fn watch_package(
                     }
                 );
 
+                // Auto-merge only merges an up-to-date branch: when main moved
+                // after the PR was opened, bring the branch up to date and say so.
+                if status.state == "open" {
+                    report_branch_update(
+                        review_id,
+                        adapter.update_review_branch_if_behind(review_id),
+                    );
+                }
+
                 if status.state == "merged" {
                     println!("\n[ok] PR merged!");
 
@@ -13140,6 +13156,26 @@ fn watch_package(
         interval,
         &package_id.to_string()[..8]
     )
+}
+
+/// Say what `update_review_branch_if_behind` did. Silent when there was
+/// nothing to do, loud when the PR was behind (updated or not).
+fn report_branch_update(
+    review_id: &str,
+    result: std::result::Result<ta_submit::ReviewBranchUpdate, ta_submit::SubmitError>,
+) {
+    use ta_submit::ReviewBranchUpdate;
+    match result {
+        Ok(ReviewBranchUpdate::Updated) => println!(
+            "  [update] PR {review_id} was behind its target branch: branch updated, so auto-merge can proceed."
+        ),
+        Ok(ReviewBranchUpdate::Failed(why)) => eprintln!(
+            "  [warn] PR {review_id} is behind its target branch and updating it failed: {why}. \
+             Retrying on the next poll; or run `gh pr update-branch {review_id}` yourself."
+        ),
+        Ok(ReviewBranchUpdate::Unsupported) | Ok(ReviewBranchUpdate::NotBehind(_)) => {}
+        Err(e) => eprintln!("  [warn] could not check whether PR {review_id} is behind: {e}."),
+    }
 }
 
 fn draft_pr_list(config: &GatewayConfig) -> anyhow::Result<()> {
