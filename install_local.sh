@@ -5,6 +5,11 @@
 #   ./install_local.sh              # Build ta + ta-daemon + channel plugins and install
 #   ./install_local.sh --debug      # Build debug binaries (faster compile)
 #   ./install_local.sh --no-daemon  # Build only the ta CLI, skip ta-daemon and plugins
+#   ./install_local.sh --restart-daemon  # Also restart a running daemon onto the new build
+#
+# A running daemon keeps the old build after an install. The script never
+# restarts it by default (a restart can re-trigger the macOS Keychain prompt);
+# it compares the build and prints the exact next command instead.
 #
 # After running, either:
 #   1. Restart your shell, or
@@ -34,12 +39,14 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.local/bin"
 PROFILE="${CARGO_BUILD_PROFILE:-release}"
 BUILD_DAEMON=true
+RESTART_DAEMON=false
 
 # Parse arguments.
 for arg in "$@"; do
     case "$arg" in
         --debug)     PROFILE="dev" ;;
         --no-daemon) BUILD_DAEMON=false ;;
+        --restart-daemon) RESTART_DAEMON=true ;;
         *)           echo "Unknown option: $arg"; exit 1 ;;
     esac
 done
@@ -188,6 +195,16 @@ if [[ "$BUILD_DAEMON" == true ]]; then
     install -m 755 "$DAEMON_BINARY" "$INSTALL_DIR/ta-daemon"
     ta_codesign "$INSTALL_DIR/ta-daemon" "com.trustedautonomy.ta-daemon"
     echo "Installed: $INSTALL_DIR/ta-daemon"
+
+    # A daemon that was already running still has the old build in memory.
+    # Say so, with the exact next step (or restart it when asked).
+    if [[ "$RESTART_DAEMON" == true ]]; then
+        "$INSTALL_DIR/ta" --project-root "$SCRIPT_DIR" daemon check-build --restart \
+            || echo "daemon: restart did not complete; run: ta daemon restart"
+    else
+        "$INSTALL_DIR/ta" --project-root "$SCRIPT_DIR" daemon check-build \
+            || echo "daemon: could not compare builds; run: ta daemon status"
+    fi
 
     # Build and install channel plugins so the plugin binary version always
     # matches the installed daemon. Version skew between the main binary and a
