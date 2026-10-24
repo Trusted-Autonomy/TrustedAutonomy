@@ -40,6 +40,7 @@ pub mod governed_workflow;
 pub mod health_signals;
 pub mod human_auth;
 pub mod init;
+pub mod input_minimizer;
 pub mod install;
 pub mod intake;
 pub mod intake_prompt;
