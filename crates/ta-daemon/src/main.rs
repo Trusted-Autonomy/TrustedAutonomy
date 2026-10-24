@@ -37,6 +37,7 @@ pub mod actor_context;
 mod api;
 pub mod assertion;
 pub mod attention;
+pub mod capability_probe;
 pub mod channel_dispatcher;
 pub mod channel_listener_manager;
 pub mod cleanup_pass;
@@ -115,6 +116,13 @@ struct Cli {
     /// Can also be set via TA_OFFICE_CONFIG env var.
     #[arg(long)]
     office_config: Option<PathBuf>,
+
+    /// Print what this daemon binary can do (launch flags, role-bound
+    /// outcomes, NATS credential policy) as one JSON document and exit. Each
+    /// fact comes from running the daemon's own code. Used by
+    /// `ta capabilities`; starts nothing.
+    #[arg(long)]
+    print_capabilities: bool,
 }
 
 #[tokio::main]
@@ -136,6 +144,15 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.print_capabilities {
+        // Read by `ta capabilities`: one JSON document on stdout, then exit.
+        // No server is started and no project state is read or written.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&capability_probe::run_probe())?
+        );
+        return Ok(());
+    }
     let project_root = cli.project_root.canonicalize()?;
 
     tracing::info!("Starting Trusted Autonomy daemon");
