@@ -69,6 +69,7 @@ result-*
 
 # Ephemeral state — never committed
 .ta/staging/
+.ta/build-cache/
 .ta/goals/
 .ta/store/
 .ta/backups/

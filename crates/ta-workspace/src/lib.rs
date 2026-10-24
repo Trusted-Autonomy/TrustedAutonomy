@@ -17,6 +17,7 @@
 //!   append-optimized, survives process restarts.
 
 pub mod advisor_patch;
+pub mod build_cache;
 pub mod conflict;
 pub mod copy_strategy;
 pub mod error;

@@ -314,6 +314,11 @@ enum Commands {
         /// reclaimed (see `[staging] reclaim_build_output` in workflow.toml).
         #[arg(long)]
         keep_build_output: bool,
+        /// Build in this goal's own `target/` inside staging instead of the
+        /// project's shared build cache (see `[staging] build_cache` in
+        /// workflow.toml). Use it to rule the cache out when a build misbehaves.
+        #[arg(long)]
+        no_build_cache: bool,
         /// Suppress streaming agent output; still print completion/failure summary.
         /// Default for daemon-dispatched and channel-dispatched goals.
         /// Inverse: omit --quiet (current interactive default) shows full output.
@@ -1909,6 +1914,7 @@ fn dispatch_raw(
             persona,
             chat_mode,
             keep_build_output,
+            no_build_cache,
             quiet,
             goal_id,
             workflow,
@@ -1979,6 +1985,9 @@ fn dispatch_raw(
             // `--keep-build-output`: carried the same way.
             let _keep_build_output_guard =
                 commands::staging_reclaim::KeepBuildOutputGuard::set(*keep_build_output);
+            // `--no-build-cache`: carried the same way.
+            let _no_build_cache_guard =
+                commands::build_cache::NoBuildCacheGuard::set(*no_build_cache);
             // `--new-phase`: carried the same way (keeps `execute`'s parameter list stable).
             let _new_phase_guard = commands::plan::CliNewPhaseGuard::set(*new_phase);
             // `--intake-file`: carried the same way. Multi-goal workflows would

@@ -4263,31 +4263,39 @@ pub fn execute(
         }
     }
 
-    // Give the goal its own cargo target directory inside its staging directory.
+    // Point the goal's cargo builds at a target directory.
     //
-    // This used to redirect `CARGO_TARGET_DIR` to the SOURCE project's `target/` so agent
-    // builds reused its warm cache. That shared directory is the bug: artifacts compiled in
-    // staging bake the staging path into test binaries (`env!("CARGO_MANIFEST_DIR")`) and
-    // cargo fingerprints, so once staging was auto-cleaned the next `cargo test` in the
-    // source tree failed. A per-goal target dir is removed together with staging and never
-    // touches the source tree's `target/` (cold first build, correct artifacts). `target/` is
-    // excluded from the staging diff, so it never appears in a draft.
+    // By default that is the project's shared build cache
+    // (`.ta/build-cache/<toolchain-key>/target`, see `build_cache.rs`): dependencies
+    // compiled by one goal are reused by the next, and the output never lands in
+    // staging. The key separates toolchains and dependency sets, and cargo's
+    // fingerprints include each package's path, so a goal's own crates (built at
+    // its staging path) never reuse another goal's artifacts. It is never the SOURCE
+    // tree's `target/`: artifacts compiled in staging bake the staging path into test
+    // binaries (`env!("CARGO_MANIFEST_DIR")`), and sharing that directory once broke
+    // the next `cargo test` in the source tree.
+    //
+    // With the cache off (`--no-build-cache`, `[staging] build_cache = false`, or no
+    // identifiable toolchain) the goal builds in `<staging>/target`, which is
+    // reclaimed when the agent exits. `target/` is excluded from the staging diff
+    // either way, so it never appears in a draft.
     //
     // Gated on: (1) workspace has a Cargo.toml, (2) CARGO_TARGET_DIR not already set.
     // Config override: set CARGO_TARGET_DIR explicitly in workflow.toml [agent_env] (e.g. a
     // shared sccache dir) and that value is used as is.
-    if let Some(ref src_dir) = goal.source_dir {
+    if let Some(src_dir) = &goal.source_dir {
         let has_cargo_toml =
             src_dir.join("Cargo.toml").exists() || staging_path.join("Cargo.toml").exists();
         if has_cargo_toml && !agent_config.env.contains_key("CARGO_TARGET_DIR") {
-            let goal_target = super::verify::goal_target_dir(&staging_path);
+            let goal_target = super::build_cache::start_goal_build(
+                config,
+                goal.goal_run_id,
+                &staging_path,
+                src_dir,
+            );
             agent_config.env.insert(
                 "CARGO_TARGET_DIR".to_string(),
                 goal_target.display().to_string(),
-            );
-            tracing::debug!(
-                target_dir = %goal_target.display(),
-                "Using a per-goal CARGO_TARGET_DIR inside staging"
             );
         }
     }
@@ -4708,6 +4716,14 @@ pub fn execute(
 
     match launch_result {
         Ok((exit, guidance_log)) => {
+            // Record what this goal's agent builds cost (wall time, build output
+            // before and after) for `ta doctor`.
+            super::build_cache::record_agent_exit(
+                config,
+                goal.goal_run_id,
+                &staging_path,
+                agent_start.elapsed(),
+            );
             // Atomically clear agent PID and transition to Finalizing (v0.13.14).
             //
             // This single write closes the watchdog race: by transitioning from
@@ -5511,6 +5527,8 @@ pub fn execute(
             reclaim_source,
         );
     }
+    // The goal's builds are over; it no longer holds the shared build cache.
+    super::build_cache::release_goal_build(&staging_path);
 
     // 7. Build draft package from the diff.
     set_post_agent_phase(
@@ -6905,6 +6923,13 @@ fn launch_agent_via_runtime(
                 "Launch refused by the sandbox policy (goal {goal_id}): {}",
                 plan.decision.detail
             )));
+        }
+    }
+    // A wrapped (sandboxed) agent may not write under `.ta/`, where the shared build
+    // cache lives, so it builds in its own staging `target/` instead.
+    if let (Some(root), Some(plan)) = (project_root_opt.as_deref(), &sandbox_plan) {
+        if plan.wraps {
+            super::build_cache::use_own_target_in_sandbox(&mut env, root, staging_path, goal_id);
         }
     }
 
