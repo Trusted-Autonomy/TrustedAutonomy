@@ -8404,7 +8404,11 @@ pub(crate) fn write_stable_agent_mcp_config(
             "TA_IS_STAGING": "1",
             "TA_WHITEBOARD_TOKEN": "${TA_WHITEBOARD_TOKEN:-}",
             "TA_WHITEBOARD_TEAM_SESSION": "${TA_WHITEBOARD_TEAM_SESSION:-}",
-            "TA_WHITEBOARD_SOURCE_DIR": "${TA_WHITEBOARD_SOURCE_DIR:-}"
+            "TA_WHITEBOARD_SOURCE_DIR": "${TA_WHITEBOARD_SOURCE_DIR:-}",
+            // The requester's team role, so the task intake funnel
+            // (`ta_request_task`) can key its per-role cap and refuse
+            // read-only personas. A role name is not a secret.
+            "TA_WHITEBOARD_TEAM_ROLE": "${TA_WHITEBOARD_TEAM_ROLE:-}"
         }
     });
 
@@ -11114,6 +11118,7 @@ mod tests {
             "TA_WHITEBOARD_TOKEN",
             "TA_WHITEBOARD_TEAM_SESSION",
             "TA_WHITEBOARD_SOURCE_DIR",
+            "TA_WHITEBOARD_TEAM_ROLE",
         ] {
             assert!(env[k].as_str().unwrap().starts_with("${"), "{k}");
         }

@@ -1160,6 +1160,16 @@ enum Commands {
     /// stores the statusline JSON. No credentials are read.
     Usage(commands::usage::UsageArgs),
 
+    /// Task intake funnel: requests goal agents queued for the project manager.
+    ///
+    /// `ta task-intake list` shows what agents asked for with the
+    /// `ta_request_task` tool (new Wayfinder tasks, KPI datapoints) and where
+    /// each request stands. Read-only; request text is printed as fenced data.
+    TaskIntake {
+        #[command(subcommand)]
+        command: commands::task_intake::TaskIntakeCommands,
+    },
+
     /// Golden set: capture a completed goal, replay it with an override, compare.
     ///
     /// `ta golden capture|list|replay|report`. Replays run in a scratch git
@@ -2320,6 +2330,7 @@ fn dispatch_raw(
         Commands::Stats { command } => commands::stats::execute(command, config),
         Commands::Cost { command } => commands::cost::execute(command, config),
         Commands::Usage(args) => commands::usage::execute(args, config),
+        Commands::TaskIntake { command } => commands::task_intake::execute(command, config),
         Commands::Golden { command } => commands::golden::execute(command, config),
         Commands::Experiment { command } => commands::experiment::execute(command, config),
         Commands::Community { command } => {
