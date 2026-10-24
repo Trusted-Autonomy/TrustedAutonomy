@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Subcommand;
+use ta_goal::cost_detail::DetailTotals;
 use ta_goal::cost_export::{
     meridian_command, meridian_records_with_usage, session_rows, write_jsonl,
 };
@@ -37,8 +38,8 @@ pub enum CostCommands {
         #[arg(long)]
         until: Option<String>,
         /// Group by a comma-separated list of: day, source, model, project,
-        /// context_bucket, origin_class, goal. For one typed row per goal and
-        /// session use `--json --rows` instead.
+        /// context_bucket, origin_class, goal, session_family, entrypoint.
+        /// For one typed row per goal and session use `--json --rows` instead.
         #[arg(long, default_value = "source")]
         group_by: String,
         /// Only projects whose name contains this text (case-insensitive).
@@ -62,6 +63,12 @@ pub enum CostCommands {
         /// file. Re-running updates records by id and never duplicates them.
         #[arg(long, value_name = "FILE.jsonl")]
         meridian: Option<PathBuf>,
+        /// Also print the output-token split (thinking / text / tool-call
+        /// arguments), edit and whole-file-write counts, the turns-per-session
+        /// histogram, session-start overhead and short-session families.
+        /// `--json` always includes them.
+        #[arg(long)]
+        detail: bool,
     },
 }
 
@@ -77,6 +84,7 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
             claude_dir,
             omp_dir,
             meridian,
+            detail,
         } => {
             let home = dirs::home_dir();
             let claude = claude_dir
@@ -128,6 +136,9 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", render(&report));
+                if *detail {
+                    print!("{}", render_detail(&report));
+                }
             }
             if let Some(msg) = exported {
                 // stderr under --json keeps stdout parseable.
@@ -463,6 +474,257 @@ pub fn render(r: &CostReport) -> String {
     out
 }
 
+/// Right-align every column but the first `lead`.
+fn grid(header: &[&str], lead: usize, rows: &[Vec<String>]) -> String {
+    let mut width: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
+    for r in rows {
+        for (i, c) in r.iter().enumerate() {
+            width[i] = width[i].max(c.chars().count());
+        }
+    }
+    let line = |cells: &[String]| {
+        let mut s = String::new();
+        for (i, c) in cells.iter().enumerate() {
+            if i > 0 {
+                s.push_str("  ");
+            }
+            if i < lead {
+                s.push_str(&format!("{:<w$}", c, w = width[i]));
+            } else {
+                s.push_str(&format!("{:>w$}", c, w = width[i]));
+            }
+        }
+        s.push('\n');
+        s
+    };
+    let head: Vec<String> = header.iter().map(|h| h.to_string()).collect();
+    let mut out = line(&head);
+    for r in rows {
+        out.push_str(&line(r));
+    }
+    out
+}
+
+fn pct1(part: u64, whole: u64) -> String {
+    if whole == 0 {
+        "n/a".to_string()
+    } else {
+        format!("{:.1}%", part as f64 / whole as f64 * 100.0)
+    }
+}
+
+/// The `--detail` sections: output split, edit behaviour, session shape.
+/// Printed after [`render`]; every `-est` column is an estimate.
+pub fn render_detail(r: &CostReport) -> String {
+    let mut out = String::from("\nDetail\n");
+    let label = |g: &CostGroupRow| {
+        if g.group.is_empty() {
+            "all".to_string()
+        } else {
+            g.group.values().cloned().collect::<Vec<_>>().join(" / ")
+        }
+    };
+    let header = if r.group_by.is_empty() {
+        "group".to_string()
+    } else {
+        r.group_by.join(" / ")
+    };
+    let mut with: Vec<(String, &DetailTotals)> = r
+        .groups
+        .iter()
+        .filter_map(|g| g.totals.detail.as_ref().map(|d| (label(g), d)))
+        .collect();
+    if let Some(d) = &r.totals.detail {
+        with.push(("TOTAL".to_string(), d));
+    }
+    if with.is_empty() {
+        out.push_str(
+            "No transcript turns in the window, so there is no output split or edit data.\n",
+        );
+    } else {
+        out.push_str(
+            "\nOutput tokens by kind of the transcript turns (think-exact: reported by the \
+             runtime; every -est column is an ESTIMATE from block length):\n",
+        );
+        let rows: Vec<Vec<String>> = with
+            .iter()
+            .map(|(l, d)| {
+                let o = &d.output_split;
+                let think = o.thinking_tokens_reported + o.thinking_tokens_est;
+                vec![
+                    l.clone(),
+                    tok(d.output_tokens),
+                    tok(o.thinking_tokens_reported),
+                    tok(o.thinking_tokens_est),
+                    tok(o.text_tokens_est),
+                    tok(o.tool_arg_tokens_est),
+                    tok(o.unattributed_tokens),
+                    pct1(think, d.output_tokens),
+                    pct1(o.tool_arg_tokens_est, d.output_tokens),
+                ]
+            })
+            .collect();
+        out.push_str(&grid(
+            &[
+                &header,
+                "output",
+                "think-exact",
+                "think-est",
+                "text-est",
+                "args-est",
+                "unattrib",
+                "think%",
+                "args%",
+            ],
+            1,
+            &rows,
+        ));
+        out.push_str("\nEdit tool calls and whole-file writes:\n");
+        let rows: Vec<Vec<String>> = with
+            .iter()
+            .map(|(l, d)| {
+                let e = &d.edits;
+                vec![
+                    l.clone(),
+                    e.tool_calls.to_string(),
+                    e.edit_calls.to_string(),
+                    e.edit_failures.to_string(),
+                    pct1(e.edit_failures, e.edit_calls),
+                    e.edit_retries.to_string(),
+                    tok(e.edit_arg_tokens_est),
+                    tok(e.failed_edit_arg_tokens_est),
+                    e.file_writes.to_string(),
+                    e.whole_file_overwrites.to_string(),
+                    e.large_overwrites.to_string(),
+                    tok(e.overwrite_bytes),
+                ]
+            })
+            .collect();
+        out.push_str(&grid(
+            &[
+                &header,
+                "calls",
+                "edits",
+                "failed",
+                "fail%",
+                "retries",
+                "edit-arg-est",
+                "failed-arg-est",
+                "writes",
+                "overwrites",
+                "large-ovw",
+                "ovw-bytes",
+            ],
+            1,
+            &rows,
+        ));
+    }
+    match &r.session_shape {
+        Some(s) if !s.sources.is_empty() => {
+            out.push_str(&format!(
+                "\nSessions that started in the window (short = at most {} turns):\n",
+                s.short_max_turns
+            ));
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            for src in &s.sources {
+                for b in &src.turns_histogram {
+                    rows.push(vec![
+                        src.source.clone(),
+                        b.turns.clone(),
+                        b.sessions.to_string(),
+                        format!("{:.2}", b.usd),
+                    ]);
+                }
+            }
+            out.push_str("Turns per session:\n");
+            out.push_str(&grid(&["source", "turns", "sessions", "usd"], 2, &rows));
+            out.push_str("\nSession-start overhead (cache write of each session's first turn):\n");
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            for src in &s.sources {
+                for c in &src.classes {
+                    let f = &c.first_turn;
+                    rows.push(vec![
+                        format!("{} / {}", src.source, c.class),
+                        c.sessions.to_string(),
+                        c.turns.to_string(),
+                        format!("{:.2}", c.usd),
+                        format!("{:.1}%", c.usd_share_pct),
+                        tok(f.cache_write_tokens_mean),
+                        tok(f.cache_write_tokens_median),
+                        tok(f.cache_write_tokens_p90),
+                        tok(f.cache_write_tokens_max),
+                        format!("{:.1}%", f.share_of_cache_write_pct),
+                        format!("{:.2}", f.usd_total),
+                        format!("{:.1}%", f.usd_share_pct),
+                    ]);
+                }
+            }
+            out.push_str(&grid(
+                &[
+                    "source / class",
+                    "sessions",
+                    "turns",
+                    "usd",
+                    "usd%",
+                    "1st-cw-mean",
+                    "median",
+                    "p90",
+                    "max",
+                    "1st-cw%",
+                    "1st-turn-usd",
+                    "1st-usd%",
+                ],
+                1,
+                &rows,
+            ));
+            if !s.families.is_empty() {
+                out.push_str(
+                    "\nShort sessions by first-prompt family (a label for a known job, else \
+                     other:<hash>; prompt text is never shown):\n",
+                );
+                let rows: Vec<Vec<String>> = s
+                    .families
+                    .iter()
+                    .map(|f| {
+                        vec![
+                            format!("{} / {} / {}", f.source, f.entrypoint, f.family),
+                            f.sessions.to_string(),
+                            f.turns.to_string(),
+                            format!("{:.2}", f.usd),
+                            format!("{:.1}%", f.usd_share_of_short_pct),
+                            tok(f.first_turn_cache_write_tokens_mean),
+                        ]
+                    })
+                    .collect();
+                out.push_str(&grid(
+                    &[
+                        "source / entrypoint / family",
+                        "sessions",
+                        "turns",
+                        "usd",
+                        "short-usd%",
+                        "1st-cw-mean",
+                    ],
+                    1,
+                    &rows,
+                ));
+                if s.families_folded > 0 {
+                    out.push_str(&format!(
+                        "({} more families folded into the (remaining) row)\n",
+                        s.families_folded
+                    ));
+                }
+            }
+        }
+        _ => out.push_str("\nNo transcript sessions started in the window.\n"),
+    }
+    out.push('\n');
+    for n in &r.detail_notes {
+        out.push_str(&format!("Note: {n}\n"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +778,33 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("TOTAL"), "{text}");
+    }
+
+    #[test]
+    fn detail_tables_are_separate_from_the_unchanged_report_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, omp) = fixture(dir.path());
+        let rep = run_report(&cfg(dir.path()), None, None, "source", None, &claude, &omp).unwrap();
+        let base = render(&rep);
+        assert!(!base.contains("Output tokens by kind"), "{base}");
+        let detail = render_detail(&rep);
+        for want in [
+            "Output tokens by kind",
+            "think-exact",
+            "Edit tool calls and whole-file writes",
+            "Turns per session",
+            "Session-start overhead",
+            "ESTIMATE",
+        ] {
+            assert!(detail.contains(want), "missing {want:?} in:\n{detail}");
+        }
+        // The new --group-by values are accepted from the CLI path.
+        let by = "session_family,entrypoint";
+        let rep = run_report(&cfg(dir.path()), None, None, by, None, &claude, &omp).unwrap();
+        assert!(rep
+            .groups
+            .iter()
+            .all(|g| g.group.contains_key("entrypoint")));
     }
 
     #[test]
