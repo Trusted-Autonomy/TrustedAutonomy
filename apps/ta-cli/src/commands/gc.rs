@@ -818,22 +818,6 @@ pub fn run_periodic_gc(
     (removed, freed_bytes)
 }
 
-/// Check if total staging usage exceeds `max_staging_gb`.
-///
-/// Returns `(total_bytes, exceeds_cap)`.
-pub fn check_staging_cap(config: &GatewayConfig, max_staging_gb: u32) -> (u64, bool) {
-    if max_staging_gb == 0 {
-        return (0, false);
-    }
-    let staging_dir = &config.staging_dir;
-    if !staging_dir.exists() {
-        return (0, false);
-    }
-    let total = walkdir_size(staging_dir);
-    let cap_bytes = max_staging_gb as u64 * 1_073_741_824;
-    (total, total > cap_bytes)
-}
-
 /// Enforce the staging size cap before starting a new goal.
 ///
 /// If total staging exceeds `max_staging_gb`, GC the oldest failed/completed
@@ -1066,17 +1050,6 @@ mod tests {
         assert!(
             updated_5h_ago > applied_cutoff,
             "5h-old goal should NOT be past 7d applied cutoff"
-        );
-    }
-
-    #[test]
-    fn check_staging_cap_returns_false_when_zero() {
-        let dir = tempdir().unwrap();
-        let config = GatewayConfig::for_project(dir.path());
-        let (_total, exceeds) = check_staging_cap(&config, 0);
-        assert!(
-            !exceeds,
-            "cap=0 means disabled — should never report exceeds"
         );
     }
 
