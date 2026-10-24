@@ -149,7 +149,7 @@ pub fn assess_staging(config: &GatewayConfig, goal: &GoalRun) -> StagingVerdict 
     ta_workspace::assess_staging(&config.pr_packages_dir, &config.workspace_root, goal)
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
     } else if bytes >= 1_048_576 {

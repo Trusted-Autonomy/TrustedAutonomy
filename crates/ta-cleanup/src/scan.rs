@@ -289,6 +289,7 @@ pub fn scan(e: &Engine, only: Option<&[Category]>) -> anyhow::Result<Vec<Finding
     }
     if want(Category::Staging) {
         staging(&s, &mut out);
+        build_cache(&s, &mut out);
     }
     if want(Category::Locks) {
         locks(&s, &mut out);
@@ -1005,6 +1006,72 @@ fn staging(s: &Scan, out: &mut Vec<Finding>) {
             t.bytes = tsize;
             out.push(t);
         }
+    }
+}
+
+/// Keys of the shared goal build cache. One key a live goal builds in is never
+/// touched; a key unused for the staleness threshold is proposed for removal
+/// (it rebuilds on demand). `[staging] build_cache_max_gb` is enforced separately
+/// when a goal starts.
+fn build_cache(s: &Scan, out: &mut Vec<Finding>) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(s.e.settings.stale_days * 86_400);
+    for entry in ta_workspace::build_cache::list_entries(&s.e.paths.root) {
+        let size = entry.bytes;
+        let title = format!("build cache {} ({})", entry.key, human_bytes(size));
+        let ev = vec![Evidence::new(
+            "build cache",
+            format!(
+                "{} uses {}, last used {} ago",
+                entry.dir.display(),
+                human_bytes(size),
+                ta_workspace::build_cache::human_age(entry.last_used)
+            ),
+        )];
+        let facts = [("kind", "build_cache".to_string())];
+        let id = format!("build-cache:{}", entry.key);
+        let mut f = if let Some((goal, pid)) = entry.holders.first() {
+            mk(
+                Kind::BuildCache,
+                id,
+                title,
+                ev,
+                Verdict::Skip,
+                format!("kept: goal {goal} (process {pid}) is building in it"),
+                Action::None,
+                &facts,
+            )
+        } else if entry.last_used <= cutoff {
+            mk(
+                Kind::BuildCache,
+                id,
+                title,
+                ev,
+                Verdict::Propose,
+                format!(
+                    "not used for {} day(s); the next goal that needs this toolchain rebuilds it",
+                    s.e.settings.stale_days
+                ),
+                Action::RemoveDir {
+                    path: entry.dir.clone(),
+                },
+                &facts,
+            )
+        } else {
+            mk(
+                Kind::BuildCache,
+                id,
+                title,
+                ev,
+                Verdict::Skip,
+                "kept: used recently",
+                Action::None,
+                &facts,
+            )
+        };
+        f.bytes = size;
+        f.manual_command = Some(format!("rm -r {}", entry.dir.display()));
+        out.push(f);
     }
 }
 
