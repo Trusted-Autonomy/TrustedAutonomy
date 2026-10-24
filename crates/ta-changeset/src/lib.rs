@@ -13,6 +13,7 @@ pub mod artifact_type;
 pub mod asset_diff;
 pub mod changeset;
 pub mod channel_registry;
+pub mod conversation_review;
 pub mod coverage;
 pub mod diff;
 pub mod diff_handlers;
@@ -58,6 +59,12 @@ pub use channel_registry::{
     ChannelCapabilitySet, ChannelFactory, ChannelRegistry, ChannelRouteConfig,
     ChannelRoutingConfig, EscalationRouteConfig, NotifyRouteConfig, ReviewRouteConfig, TaConfig,
 };
+pub use conversation_review::{
+    build_conversation_review_prompt, check_independence, invoke_conversation_reviewer,
+    parse_conversation_review, AuthorIdentity, ContextPack, ContextPackSource, ContextQuery,
+    ConversationLogSource, ConversationReviewInput, FunnelEntry, PackTurn, ReviewItemSpec,
+    ReviewerIdentity, WikiSnippet,
+};
 pub use diff::DiffContent;
 pub use diff_handlers::{DiffHandlerError, DiffHandlersConfig, HandlerRule};
 pub use draft_package::{
@@ -95,7 +102,8 @@ pub use supervisor::{
 };
 pub use supervisor_review::{
     build_supervisor_prompt, fallback_supervisor_review, invoke_supervisor_agent,
-    load_constitution, SupervisorReview, SupervisorRunConfig, SupervisorVerdict,
+    load_constitution, IntentMatch, ItemDecision, SupervisorReview, SupervisorRunConfig,
+    SupervisorVerdict,
 };
 pub use terminal_channel::{AutoApproveChannel, TerminalChannel, TerminalSessionChannel};
 pub use tool_classify::{classify_tool_name, ToolCallCategory};
