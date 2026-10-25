@@ -8,7 +8,8 @@ use ta_goal::CommitContext;
 
 use crate::adapter::{
     BranchReviewInfo, CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult, Result,
-    ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SubmitError, SyncResult,
+    ReviewBranchUpdate, ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SubmitError,
+    SyncResult,
 };
 use crate::config::SubmitConfig;
 use crate::config::SyncConfig;
@@ -1045,6 +1046,21 @@ impl SourceAdapter for GitAdapter {
                     );
                     tracing::info!("GitAdapter: auto-merge enabled for PR #{}", pr_number);
                     auto_merge_active = true;
+                    // Auto-merge waits for an up-to-date branch. If the target
+                    // already moved, bring the branch up to date now; later
+                    // moves are handled by `ta draft watch`.
+                    match self.update_review_branch_if_behind(&pr_number) {
+                        Ok(ReviewBranchUpdate::Updated) => eprintln!(
+                            "[!] PR #{} was behind '{}': branch updated so auto-merge can proceed.",
+                            pr_number, target_branch
+                        ),
+                        Ok(ReviewBranchUpdate::Failed(why)) => eprintln!(
+                            "[warn] PR #{} is behind '{}' and updating its branch failed: {}. \
+                             Run `gh pr update-branch {}` or `ta draft watch` to retry.",
+                            pr_number, target_branch, why, pr_number
+                        ),
+                        _ => {}
+                    }
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -1570,6 +1586,49 @@ impl SourceAdapter for GitAdapter {
                 }))
             }
             _ => Ok(None),
+        }
+    }
+
+    fn update_review_branch_if_behind(&self, review_id: &str) -> Result<ReviewBranchUpdate> {
+        if !self.has_gh_cli() {
+            return Ok(ReviewBranchUpdate::Unsupported);
+        }
+        let view = Command::new(&self.gh_program)
+            .args(["pr", "view", review_id, "--json", "state,mergeStateStatus"])
+            .current_dir(&self.work_dir)
+            .output();
+        let json: serde_json::Value = match view {
+            Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).map_err(|e| {
+                SubmitError::VcsError(format!("Failed to parse gh pr view output: {}", e))
+            })?,
+            _ => return Ok(ReviewBranchUpdate::Unsupported),
+        };
+        let state = json.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let merge_state = json
+            .get("mergeStateStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN");
+        if !state.eq_ignore_ascii_case("open") || merge_state != "BEHIND" {
+            return Ok(ReviewBranchUpdate::NotBehind(merge_state.to_string()));
+        }
+        match Command::new(&self.gh_program)
+            .args(["pr", "update-branch", review_id])
+            .current_dir(&self.work_dir)
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                tracing::info!(
+                    pr = review_id,
+                    "GitAdapter: updated PR branch that was BEHIND"
+                );
+                Ok(ReviewBranchUpdate::Updated)
+            }
+            Ok(o) => {
+                let reason = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                tracing::warn!(pr = review_id, error = %reason, "GitAdapter: gh pr update-branch failed");
+                Ok(ReviewBranchUpdate::Failed(reason))
+            }
+            Err(e) => Ok(ReviewBranchUpdate::Failed(e.to_string())),
         }
     }
 
@@ -3216,5 +3275,99 @@ mod tests {
         let adapter = GitAdapter::new(dir.path()).with_gh_program(dir.path().join("no-such-gh"));
         let result = adapter.check_failures("not-a-real-review-id");
         assert!(result.is_ok());
+    }
+
+    /// A stub `gh` that answers `pr view` with `view_json` and records every
+    /// invocation in `calls.log` next to it.
+    #[cfg(unix)]
+    fn stub_gh(dir: &Path, view_json: &str, update_exit: i32) -> std::path::PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join("calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1 $2\" in\n  \"pr view\") echo '{view_json}' ;;\n  \"pr update-branch\") echo update-failed >&2; exit {update_exit} ;;\nesac\nexit 0\n",
+            log = log.display(),
+        );
+        let tmp = dir.join("gh.tmp-write");
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let gh = dir.join("gh");
+        std::fs::rename(&tmp, &gh).unwrap();
+        gh
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pr_that_is_behind_main_gets_its_branch_updated() {
+        let dir = tempdir().unwrap();
+        let gh = stub_gh(
+            dir.path(),
+            r#"{"state":"OPEN","mergeStateStatus":"BEHIND"}"#,
+            0,
+        );
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(gh);
+        assert_eq!(
+            adapter.update_review_branch_if_behind("42").unwrap(),
+            ReviewBranchUpdate::Updated
+        );
+        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert!(calls.contains("pr update-branch 42"), "{calls}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pr_that_is_not_behind_is_left_alone() {
+        for (json, shown) in [
+            (r#"{"state":"OPEN","mergeStateStatus":"CLEAN"}"#, "CLEAN"),
+            (
+                r#"{"state":"OPEN","mergeStateStatus":"BLOCKED"}"#,
+                "BLOCKED",
+            ),
+            // A merged PR can still report BEHIND; it must not be touched.
+            (
+                r#"{"state":"MERGED","mergeStateStatus":"BEHIND"}"#,
+                "BEHIND",
+            ),
+        ] {
+            let dir = tempdir().unwrap();
+            let gh = stub_gh(dir.path(), json, 0);
+            let adapter = GitAdapter::new(dir.path()).with_gh_program(gh);
+            assert_eq!(
+                adapter.update_review_branch_if_behind("7").unwrap(),
+                ReviewBranchUpdate::NotBehind(shown.to_string())
+            );
+            let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+            assert!(!calls.contains("update-branch"), "{calls}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_branch_update_reports_the_reason() {
+        let dir = tempdir().unwrap();
+        let gh = stub_gh(
+            dir.path(),
+            r#"{"state":"OPEN","mergeStateStatus":"BEHIND"}"#,
+            1,
+        );
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(gh);
+        assert_eq!(
+            adapter.update_review_branch_if_behind("42").unwrap(),
+            ReviewBranchUpdate::Failed("update-failed".to_string())
+        );
+    }
+
+    #[test]
+    fn branch_update_is_unsupported_without_gh() {
+        let dir = tempdir().unwrap();
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(dir.path().join("no-such-gh"));
+        assert_eq!(
+            adapter.update_review_branch_if_behind("42").unwrap(),
+            ReviewBranchUpdate::Unsupported
+        );
     }
 }

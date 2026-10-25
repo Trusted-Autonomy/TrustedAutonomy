@@ -35,7 +35,8 @@ pub mod vcs_plugin_protocol;
 // Primary exports (v0.11.1+)
 pub use adapter::{
     BranchReviewInfo, CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult,
-    ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SyncResult,
+    ReviewBranchUpdate, ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SubmitError,
+    SyncResult,
 };
 
 // Backward-compatible re-export: SubmitAdapter is a type alias for SourceAdapter.

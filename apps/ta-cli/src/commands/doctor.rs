@@ -329,7 +329,49 @@ fn run_all_checks_with(
     // and causes a confusing "re-entrant call" refusal (v0.17.9 item 1a).
     results.push(check_missing_project_mcp_config_with_staging_global(config));
 
+    // Windows compile gate (Rust workspaces only).
+    results.extend(check_windows_target(&config.workspace_root));
+
     results
+}
+
+/// The Windows target a Rust workspace is checked against before a PR.
+const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
+
+/// A `ta doctor` line saying whether `scripts/check-windows.sh` can run.
+///
+/// Only for a Rust workspace (`Cargo.toml` at the project root) that ships the
+/// script; `None` elsewhere, and `None` when `rustup` is absent (nothing to
+/// install into, so nothing actionable to say).
+fn check_windows_target(project_root: &Path) -> Option<CheckResult> {
+    if !project_root.join("Cargo.toml").is_file()
+        || !project_root.join("scripts/check-windows.sh").is_file()
+    {
+        return None;
+    }
+    let out = std::process::Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(windows_target_result(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn windows_target_result(installed: &str) -> CheckResult {
+    if installed.lines().any(|l| l.trim() == WINDOWS_TARGET) {
+        CheckResult::ok(
+            "Windows target",
+            format!("{WINDOWS_TARGET} installed; run scripts/check-windows.sh before opening a PR"),
+        )
+    } else {
+        CheckResult::warn(
+            "Windows target",
+            format!("{WINDOWS_TARGET} is not installed, so Windows-only compile errors (such as dead_code on cfg(unix) helpers) are only found in CI, 20-25 minutes later"),
+            format!("Run: rustup target add {WINDOWS_TARGET}, then scripts/check-windows.sh"),
+        )
+    }
 }
 
 fn check_cli_version() -> CheckResult {
@@ -402,25 +444,83 @@ fn check_daemon_body(daemon_url: &str, body: &serde_json::Value) -> CheckResult 
     }
 }
 
-fn check_daemon(daemon_url: &str) -> CheckResult {
-    let result = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()
-        .and_then(|c| c.get(format!("{}/api/status", daemon_url)).send().ok())
-        .and_then(|r| {
-            if r.status().is_success() {
-                r.json::<serde_json::Value>().ok()
-            } else {
-                None
-            }
-        });
+/// How long the first `/api/status` probe waits before doctor retries.
+const DAEMON_FIRST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long the retry waits. The daemon's first status call after a cold start
+/// has been seen taking about 3 s while later calls take 1 ms.
+const DAEMON_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-    match result {
-        Some(body) => check_daemon_body(daemon_url, &body),
-        None => CheckResult::warn(
+/// What one `/api/status` probe found.
+enum DaemonProbe {
+    /// 2xx with a JSON body.
+    Up(serde_json::Value),
+    /// Nothing accepted the connection (closed port, wrong host, DNS failure).
+    Unreachable(String),
+    /// Connected but no answer within the timeout.
+    Slow,
+    /// Answered, but not with a healthy status response (non-2xx, bad body).
+    Unhealthy(String),
+}
+
+fn probe_daemon(daemon_url: &str, timeout: std::time::Duration) -> DaemonProbe {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        // Connecting gets half the budget: a connect that never completes (a
+        // refused port on Windows takes ~2 s to fail) is "not reachable", while
+        // "slow" means the TCP connection was made and the answer did not come.
+        .connect_timeout(timeout / 2)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return DaemonProbe::Unreachable(format!("could not build HTTP client: {e}")),
+    };
+    match client.get(format!("{}/api/status", daemon_url)).send() {
+        Err(e) if e.is_timeout() && !e.is_connect() => DaemonProbe::Slow,
+        Err(e) => DaemonProbe::Unreachable(e.to_string()),
+        Ok(r) if !r.status().is_success() => {
+            DaemonProbe::Unhealthy(format!("HTTP {} from /api/status", r.status()))
+        }
+        Ok(r) => match r.json::<serde_json::Value>() {
+            Ok(body) => DaemonProbe::Up(body),
+            Err(e) => DaemonProbe::Unhealthy(format!("unparsable /api/status body: {e}")),
+        },
+    }
+}
+
+fn check_daemon(daemon_url: &str) -> CheckResult {
+    check_daemon_with(daemon_url, DAEMON_FIRST_TIMEOUT, DAEMON_RETRY_TIMEOUT)
+}
+
+/// Probe the daemon; a slow first answer is retried once with `retry` before
+/// being reported, and "slow" is never reported as "not running".
+fn check_daemon_with(
+    daemon_url: &str,
+    first: std::time::Duration,
+    retry: std::time::Duration,
+) -> CheckResult {
+    let mut probe = probe_daemon(daemon_url, first);
+    if matches!(probe, DaemonProbe::Slow) {
+        probe = probe_daemon(daemon_url, retry);
+    }
+    match probe {
+        DaemonProbe::Up(body) => check_daemon_body(daemon_url, &body),
+        DaemonProbe::Slow => CheckResult::warn(
             "Daemon",
-            "not running".to_string(),
+            format!(
+                "slow: {daemon_url} accepted the connection but did not answer /api/status within {}s (retried once after {}s)",
+                retry.as_secs(),
+                first.as_secs()
+            ),
+            "The daemon is probably running but busy. Check `ta daemon status` and `ta daemon log`; restart with `ta daemon restart` only if it stays unresponsive",
+        ),
+        DaemonProbe::Unhealthy(why) => CheckResult::warn(
+            "Daemon",
+            format!("unhealthy: {daemon_url} answered but not usefully: {why}"),
+            "Check `ta daemon log`; if the URL belongs to another service fix `[daemon]` in .ta/daemon.toml, otherwise `ta daemon restart`",
+        ),
+        DaemonProbe::Unreachable(why) => CheckResult::warn(
+            "Daemon",
+            format!("not running: could not connect to {daemon_url} ({why})"),
             "Start the daemon: ta daemon start",
         ),
     }
@@ -3343,5 +3443,109 @@ mod tests {
             check_daemon_body("http://127.0.0.1:7700", &body).status,
             CheckStatus::Ok
         );
+    }
+
+    /// One-shot HTTP server: waits `delay`, then answers `response`.
+    fn serve_once(delay: std::time::Duration, response: impl Into<String>) -> String {
+        let response: std::sync::Arc<str> = std::sync::Arc::from(response.into());
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            // Serve every connection: the doctor may retry after its first
+            // probe gave up.
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let response = std::sync::Arc::clone(&response);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(delay);
+                    let _ = stream.write_all(response.as_bytes());
+                });
+            }
+        });
+        url
+    }
+
+    fn ok_response() -> String {
+        let body = format!("{{\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION"));
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    #[test]
+    fn doctor_reports_a_slow_daemon_as_slow_not_as_not_running() {
+        // Never answers within the 200ms first probe or the 400ms retry.
+        let url = serve_once(std::time::Duration::from_millis(1500), ok_response());
+        let c = check_daemon_with(
+            &url,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(400),
+        );
+        assert_eq!(c.status, CheckStatus::Warn);
+        assert!(c.detail.starts_with("slow"), "{}", c.detail);
+        assert!(!c.detail.contains("not running"), "{}", c.detail);
+    }
+
+    #[test]
+    fn doctor_retries_a_slow_first_answer_and_accepts_the_daemon() {
+        // 600ms answer: misses the 200ms first probe, makes the 3s retry.
+        let url = serve_once(std::time::Duration::from_millis(600), ok_response());
+        let c = check_daemon_with(
+            &url,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_secs(3),
+        );
+        assert_eq!(c.status, CheckStatus::Ok, "{}", c.detail);
+    }
+
+    #[test]
+    fn doctor_reports_a_closed_port_as_not_running() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let c = check_daemon_with(
+            &format!("http://127.0.0.1:{port}"),
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(500),
+        );
+        assert_eq!(c.status, CheckStatus::Warn);
+        assert!(c.detail.starts_with("not running"), "{}", c.detail);
+        assert!(c.fix.contains("ta daemon start"), "{}", c.fix);
+    }
+
+    #[test]
+    fn doctor_reports_a_non_2xx_answer_as_unhealthy() {
+        let url = serve_once(
+            std::time::Duration::ZERO,
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let c = check_daemon_with(
+            &url,
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(2),
+        );
+        assert!(c.detail.starts_with("unhealthy"), "{}", c.detail);
+        assert!(c.detail.contains("500"), "{}", c.detail);
+    }
+
+    #[test]
+    fn windows_target_line_tells_the_user_how_to_install_a_missing_target() {
+        let c = windows_target_result("aarch64-apple-darwin\nx86_64-apple-darwin\n");
+        assert_eq!(c.status, CheckStatus::Warn);
+        assert!(c.fix.contains("rustup target add x86_64-pc-windows-msvc"));
+        let c = windows_target_result("aarch64-apple-darwin\nx86_64-pc-windows-msvc\n");
+        assert_eq!(c.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn windows_target_line_is_absent_outside_a_rust_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_windows_target(dir.path()).is_none());
     }
 }
