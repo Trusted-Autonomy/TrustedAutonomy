@@ -343,6 +343,60 @@ fn handle_draft_build(
         })?]))
 }
 
+/// Evaluate a submitted draft against the layered constitution (v2) through the
+/// constitution entry point. `None` means the constitution has no v2 rule and the
+/// caller applies the legacy policy decision. A constitution that fails to load or
+/// a draft whose origin cannot be established returns a denial (human review).
+fn constitution_gate_for_submit(
+    state: &GatewayState,
+    goal: &ta_goal::GoalRun,
+    pkg_id: uuid::Uuid,
+    policy: &ta_policy::PolicyDocument,
+) -> Option<auto_approve::AutoApproveDecision> {
+    use crate::constitution_gate as gate;
+    let root = &state.config.workspace_root;
+    let pkg = state.pr_packages.get(&pkg_id)?;
+    let workflow = ta_submit::WorkflowConfig::load_or_default(&root.join(".ta/workflow.toml"));
+    let draft_id = pkg_id.to_string();
+    let funnel = gate::load_funnel(root, &workflow, &draft_id);
+    let stored = gate::cache_lookup(root);
+    let params = gate::GateParams {
+        project_root: root,
+        draft_id: draft_id.clone(),
+        goal_id: goal.goal_run_id,
+        goal_origin: goal.origin.clone(),
+        agent_id: goal.agent_id.clone(),
+        plan_phase: goal.plan_phase.clone(),
+        policy,
+    };
+    let mut outcome = gate::run_gate(&params, pkg, &funnel, None, &stored);
+    // Only a draft the evaluator actually looked at (not an H9 refusal) is worth
+    // an independent conversation review.
+    let looked_at = outcome
+        .record
+        .as_ref()
+        .is_some_and(|r| r.evaluation.is_some());
+    if looked_at {
+        if let Ok(views) = &funnel {
+            if let Some(review) = gate::run_conversation_review(
+                root,
+                &workflow,
+                pkg,
+                goal.goal_run_id,
+                &goal.agent_id,
+                views,
+                &stored,
+            ) {
+                outcome = gate::run_gate(&params, pkg, &funnel, Some(&review), &stored);
+            }
+        }
+    }
+    if let Some(record) = &outcome.record {
+        gate::record_gate(root, record);
+    }
+    outcome.decision
+}
+
 fn handle_draft_submit(
     state: &mut GatewayState,
     params: &DraftToolParams,
@@ -419,35 +473,43 @@ fn handle_draft_submit(
                 None
             } else {
                 let policy_path = state.config.workspace_root.join(".ta/policy.yaml");
-                if policy_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&policy_path) {
-                        if let Ok(doc) = serde_yaml::from_str::<ta_policy::PolicyDocument>(&content)
-                        {
-                            let changed_paths: Vec<String> = state
-                                .pr_packages
-                                .get(&pkg_id)
-                                .map(|p| {
-                                    p.changes
-                                        .artifacts
-                                        .iter()
-                                        .map(|a| a.resource_uri.clone())
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let draft_info = DraftInfo {
-                                changed_paths,
-                                lines_changed: 0, // approximate — not available from artifacts
-                                plan_phase: goal.plan_phase.clone(),
-                                agent_id: goal.agent_id.clone(),
-                                origin: goal.origin.clone(),
-                            };
-                            Some(auto_approve::should_auto_approve_draft(&draft_info, &doc))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+                let policy_doc: Option<ta_policy::PolicyDocument> =
+                    std::fs::read_to_string(&policy_path)
+                        .ok()
+                        .and_then(|content| serde_yaml::from_str(&content).ok());
+
+                // Constitution v2 rules go first: they are consulted through the
+                // one constitution entry point, and when the constitution has no
+                // v2 rule the legacy policy.yaml decision below stands unchanged.
+                let default_doc = ta_policy::PolicyDocument::default();
+                let gate = constitution_gate_for_submit(
+                    state,
+                    &goal,
+                    pkg_id,
+                    policy_doc.as_ref().unwrap_or(&default_doc),
+                );
+                if let Some(decision) = gate {
+                    Some(decision)
+                } else if let Some(doc) = policy_doc {
+                    let changed_paths: Vec<String> = state
+                        .pr_packages
+                        .get(&pkg_id)
+                        .map(|p| {
+                            p.changes
+                                .artifacts
+                                .iter()
+                                .map(|a| a.resource_uri.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let draft_info = DraftInfo {
+                        changed_paths,
+                        lines_changed: 0, // approximate — not available from artifacts
+                        plan_phase: goal.plan_phase.clone(),
+                        agent_id: goal.agent_id.clone(),
+                        origin: goal.origin.clone(),
+                    };
+                    Some(auto_approve::should_auto_approve_draft(&draft_info, &doc))
                 } else {
                     None
                 }

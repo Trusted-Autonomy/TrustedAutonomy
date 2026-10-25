@@ -996,6 +996,47 @@
       ],
       "type": "object"
     },
+    "IntentMatch": {
+      "description": "Whether the delivered work matches the human's expressed intent.",
+      "properties": {
+        "matches": {
+          "description": "`true` when the work matches the intent.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why (or why not), capped and sanitized by the parser.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "matches",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ItemDecision": {
+      "description": "The reviewer's verdict on one reviewed item.",
+      "properties": {
+        "item_id": {
+          "description": "Identifier of the reviewed item, as supplied in the review input.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why, capped and sanitized by the parser.",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/SupervisorVerdict",
+          "description": "The reviewer's verdict for this item."
+        }
+      },
+      "required": [
+        "item_id",
+        "verdict",
+        "reason"
+      ],
+      "type": "object"
+    },
     "Iteration": {
       "description": "Which iteration of the goal this package represents.",
       "properties": {
@@ -1594,6 +1635,24 @@
           "description": "Specific findings from the review (concerns, observations).",
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "intent_match": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentMatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether the work matches the intent the human expressed in conversation.\nSet only by the conversation-reviewer profile."
+        },
+        "item_decisions": {
+          "description": "Per-item verdicts (e.g. per queued request). Set only by the\nconversation-reviewer profile.",
+          "items": {
+            "$ref": "#/$defs/ItemDecision"
           },
           "type": "array"
         },

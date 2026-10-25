@@ -29,10 +29,12 @@
 
 pub mod fence;
 mod fs;
+pub mod funnel;
 pub mod model;
 pub mod settings;
 pub mod store;
 
+pub use funnel::{funnel_requests_for_draft, is_funnel_draft};
 pub use model::{
     normalize_text, Duplicate, IntakeRecord, LedgerEvent, ListReport, Origin, RequestBody,
     RequestKind, RequestState, RequestView, Submission, Transition, MAX_BODY_BYTES, MAX_LINE_BYTES,

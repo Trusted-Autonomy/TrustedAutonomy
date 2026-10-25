@@ -882,6 +882,65 @@ pub struct SupervisorConfig {
     /// `true` only if a custom hook must run during supervisor invocations.
     #[serde(default)]
     pub enable_hooks: bool,
+
+    /// The `conversation-reviewer` profile: an independent, read-only review of
+    /// a draft's wiki, task and file items against the conversation that asked
+    /// for them, run when the draft is submitted. Off by default.
+    #[serde(default)]
+    pub conversation_review: ConversationReviewConfig,
+}
+
+/// `[supervisor.conversation_review]` in `workflow.toml`.
+///
+/// ```toml
+/// [supervisor.conversation_review]
+/// enabled = true
+/// agent_profile = "reviewer"   # from [agent_profiles]; falls back to [supervisor] agent
+/// persona = "conversation-reviewer"
+/// context_turns = 20
+/// wiki_snippets = 5
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationReviewConfig {
+    /// Run the conversation reviewer at draft submit. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Agent profile for the reviewer (`[agent_profiles]`). Unset: the
+    /// `[supervisor]` agent. The reviewer must be a different session and
+    /// persona from the author; a different model tier is preferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profile: Option<String>,
+    /// Persona name of the reviewer. It must differ from the author's.
+    #[serde(default = "default_reviewer_persona")]
+    pub persona: String,
+    /// How many recent conversation turns go into the context pack.
+    #[serde(default = "default_review_context_turns")]
+    pub context_turns: usize,
+    /// How many wiki snippets go into the context pack.
+    #[serde(default = "default_review_wiki_snippets")]
+    pub wiki_snippets: usize,
+}
+
+fn default_reviewer_persona() -> String {
+    "conversation-reviewer".to_string()
+}
+fn default_review_context_turns() -> usize {
+    20
+}
+fn default_review_wiki_snippets() -> usize {
+    5
+}
+
+impl Default for ConversationReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent_profile: None,
+            persona: default_reviewer_persona(),
+            context_turns: default_review_context_turns(),
+            wiki_snippets: default_review_wiki_snippets(),
+        }
+    }
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -913,6 +972,7 @@ impl Default for SupervisorConfig {
             api_key_env: None,
             agent_profile: None,
             enable_hooks: false,
+            conversation_review: ConversationReviewConfig::default(),
         }
     }
 }

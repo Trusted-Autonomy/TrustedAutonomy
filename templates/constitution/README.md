@@ -1,10 +1,10 @@
 # Auto-approval constitution templates
 
 These are starting samples for the rule-based auto-approval constitution described in
-`docs/design/supervisor-review-and-constitution.md`. They define the target format. The
-`kind = "fs"` rules are what `ta-policy` parses today. The `wiki` and `task` kinds, `id`, `mode`,
-`min_confidence`, `schema_version` and the layering are the proposed extension (phases
-v0.17.12.26 and v0.17.12.27) and are ignored by today's parser, so the files are safe to commit.
+`docs/design/supervisor-review-and-constitution.md`. `ta-policy` parses all of it: the `fs`,
+`wiki` and `task` kinds, `id`, `mode`, `min_confidence`, `origins`, `schema_version` and the
+org/project layering (see "Constitution v2" in `docs/USAGE.md`). An unknown kind or key is a
+loud error, not a skipped rule.
 
 Layers: one org file plus one file per project. The project adds to the org file and never
 supersedes it. Every sample starts in `mode = "shadow"`: the supervisor decides, a human still
@@ -17,7 +17,7 @@ approves, and agreement is measured before a rule is promoted to `enforce`.
 | `project-wayfinder.toml` | project | Wayfinder repo drafts, wiki, tasks |
 | `project-virtual-team.toml` | project | VT repo drafts, wiki, tasks |
 
-Copy a project file to `.ta/constitution.toml` (or merge its `[[approval_rules]]` into the
+Copy the org file to `.ta/constitution-org.toml` and a project file to `.ta/constitution.toml` (or merge its `[[approval_rules]]` into the
 existing file). Changes to a constitution go through draft review (`ta constitution amend`),
 never silent edits.
 
