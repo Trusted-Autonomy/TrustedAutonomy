@@ -1470,6 +1470,7 @@ pub fn startup_gc_pass(
 
     let mut removed = 0u32;
     let mut freed_bytes = 0u64;
+    let mut kept = 0u32;
 
     // Load the pr_packages dir once for denied-draft checks below.
     let pr_packages_dir = project_root.join(".ta").join("pr_packages");
@@ -1504,6 +1505,25 @@ pub fn startup_gc_pass(
             && !goal.workspace_path.as_os_str().is_empty()
             && goal.workspace_path.exists()
         {
+            // A failed goal may be one the watchdog failed by mistake, or one whose
+            // agent finished and whose work was never collected. Deleting its staging
+            // loses that work for good (the 2026-10-16 incident), so keep it and say
+            // how to recover it. Applied/completed/closed goals assess as reclaimable.
+            if is_failed {
+                let verdict = ta_workspace::assess_staging(&pr_packages_dir, project_root, goal);
+                if let Some(message) = verdict.keep_message() {
+                    kept += 1;
+                    tracing::warn!(
+                        goal_id = %goal.goal_run_id,
+                        state = %goal.state,
+                        staging = %goal.workspace_path.display(),
+                        decision = "keep_staging",
+                        reason = %message,
+                        "startup_gc_pass: kept staging directory"
+                    );
+                    continue;
+                }
+            }
             let sz = walkdir_size_wd(&goal.workspace_path);
             if std::fs::remove_dir_all(&goal.workspace_path).is_ok() {
                 removed += 1;
@@ -1522,6 +1542,15 @@ pub fn startup_gc_pass(
                 );
             }
         }
+    }
+    if kept > 0 {
+        tracing::warn!(
+            kept_dirs = kept,
+            "startup_gc_pass: {} failed goal(s) kept their staging because it holds uncollected \
+             work or is in use. Run `ta goal recover --list` to see them, `ta goal recover <id>` \
+             to collect or cancel one; staging of a cancelled goal is then reclaimed",
+            kept
+        );
     }
 
     (removed, freed_bytes)
@@ -2369,5 +2398,87 @@ mod tests {
             GoalRunState::Running,
             "live goal should remain Running"
         );
+    }
+
+    /// A project with one source file and a failed goal whose staging copy was
+    /// last touched `hours_ago` hours ago. `extra_file` is written into staging
+    /// only, standing in for work the agent finished.
+    fn failed_goal_with_staging(
+        project: &Path,
+        hours_ago: i64,
+        extra_file: Option<(&str, &str)>,
+    ) -> (GoalRun, GoalRunStore) {
+        let goals_dir = project.join(".ta").join("goals");
+        let store = GoalRunStore::new(&goals_dir).unwrap();
+        let source = project.join("source");
+        let staging = project.join("staging");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(source.join("lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(staging.join("lib.rs"), "fn a() {}").unwrap();
+        // The agent's own build output: large, excluded, never work.
+        std::fs::create_dir_all(staging.join("target/debug")).unwrap();
+        std::fs::write(staging.join("target/debug/out.bin"), vec![0u8; 4096]).unwrap();
+        if let Some((name, body)) = extra_file {
+            std::fs::write(staging.join(name), body).unwrap();
+        }
+        let mut goal = GoalRun::new(
+            "Finished goal",
+            "obj",
+            "agent",
+            staging,
+            project.join(".ta").join("store").join("x"),
+        );
+        goal.source_dir = Some(source);
+        goal.state = GoalRunState::Failed {
+            reason: "Agent process (PID 1) exited without updating goal state".to_string(),
+        };
+        goal.updated_at = Utc::now() - chrono::Duration::hours(hours_ago);
+        store.save(&goal).unwrap();
+        (goal, store)
+    }
+
+    /// 2026-10-16: the goal had been failed by the watchdog while its `ta run` was
+    /// finishing, and the daemon's GC pass then deleted its staging, taking the
+    /// finished work with it. The GC pass must keep staging that holds work no
+    /// draft contains.
+    #[test]
+    fn startup_gc_pass_keeps_failed_goal_staging_with_uncollected_work() {
+        let project = tempfile::tempdir().unwrap();
+        let (goal, _store) = failed_goal_with_staging(
+            project.path(),
+            5, // older than the 4h failed-goal retention
+            Some(("feature.rs", "finished work the agent wrote")),
+        );
+
+        let (removed, freed) = startup_gc_pass(project.path(), 4, 7);
+
+        assert_eq!((removed, freed), (0, 0));
+        assert!(
+            goal.workspace_path.join("feature.rs").exists(),
+            "the finished work must survive the GC pass"
+        );
+    }
+
+    #[test]
+    fn startup_gc_pass_removes_failed_goal_staging_that_holds_no_work() {
+        let project = tempfile::tempdir().unwrap();
+        // Only `target/` differs from the source, and it is excluded build output.
+        let (goal, _store) = failed_goal_with_staging(project.path(), 5, None);
+
+        let (removed, freed) = startup_gc_pass(project.path(), 4, 7);
+
+        assert_eq!(removed, 1);
+        assert!(freed >= 4096, "freed {freed}");
+        assert!(!goal.workspace_path.exists());
+    }
+
+    #[test]
+    fn startup_gc_pass_leaves_recent_failed_goal_alone() {
+        let project = tempfile::tempdir().unwrap();
+        let (goal, _store) = failed_goal_with_staging(project.path(), 1, None);
+        let (removed, _) = startup_gc_pass(project.path(), 4, 7);
+        assert_eq!(removed, 0);
+        assert!(goal.workspace_path.exists());
     }
 }

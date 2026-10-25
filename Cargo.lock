@@ -6027,6 +6027,7 @@ dependencies = [
  "sha2 0.10.9",
  "ta-changeset",
  "ta-goal",
+ "ta-lifecycle",
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",

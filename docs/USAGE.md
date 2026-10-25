@@ -4222,6 +4222,7 @@ GC and the staging size cap never delete a staging directory that might hold wor
 - A goal that is running, finalizing, or whose `ta run` or agent process is still alive is kept.
 - If GC cannot tell (the source project is missing, the drafts cannot be read), it keeps the directory.
 - Applied, completed, merged and closed goals, and goals you cancelled yourself, are reclaimed as before.
+- The same rules apply to every path that removes staging: the staging size cap, `ta gc`, `ta goal gc --include-staging`, and the daemon's startup pass that removes old failed goals after `failed_staging_retention_hours`. The daemon logs each directory it keeps (`decision = "keep_staging"`, with the goal id and path) and a one-line count.
 
 The GC summary counts these directories (`N kept (uncollected work or in use)`). When the staging cap cannot free enough space for this reason, it says so. Recover or discard those goals, then run `ta gc` again:
 

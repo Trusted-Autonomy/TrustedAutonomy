@@ -32,6 +32,7 @@ pub mod path_safety;
 pub mod projfs_strategy;
 pub mod shared_files;
 pub mod staging;
+pub mod staging_assess;
 pub mod store;
 pub mod vcs_detect;
 pub mod vcs_report;
@@ -64,6 +65,7 @@ pub use partitioning::{
 };
 pub use shared_files::{is_shared_file, SharedFileBase};
 pub use staging::StagingWorkspace;
+pub use staging_assess::{assess_staging, StagingVerdict};
 pub use store::{ChangeStore, JsonFileStore};
 pub use vcs_detect::{
     detect_vcs, detect_vcs_with, DetectContext, PluginMarkers, VcsDetection, VcsEvidence, VcsKind,
