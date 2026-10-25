@@ -95,15 +95,21 @@
             imagemagick    # icon generation (convert PNG → ICO, resize)
           ];
 
+          # The banner goes to STDERR on purpose: `nix develop --command ...`
+          # runs this hook first, and stdout must carry only the command's own
+          # output so scripts and CI can capture it (e.g. version-sync.yml
+          # reads `scripts/plan-version.sh` stdout as a version number).
           shellHook = ''
-            echo "Trusted Autonomy dev environment loaded"
-            echo "  Rust: $(rustc --version)"
-            echo "  Cargo: $(cargo --version)"
-            echo ""
-            echo "Quick start:"
-            echo "  just build   — build all crates"
-            echo "  just test    — run all tests"
-            echo "  just check   — lint + format check"
+            {
+              echo "Trusted Autonomy dev environment loaded"
+              echo "  Rust: $(rustc --version)"
+              echo "  Cargo: $(cargo --version)"
+              echo ""
+              echo "Quick start:"
+              echo "  just build   — build all crates"
+              echo "  just test    — run all tests"
+              echo "  just check   — lint + format check"
+            } >&2
           '';
         };
       }

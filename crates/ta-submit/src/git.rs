@@ -120,6 +120,53 @@ fn truncate_log_excerpt(full: &str) -> String {
     }
 }
 
+/// Backoff before each spawn attempt when the kernel answers `ETXTBSY`
+/// ("Text file busy", os error 26): a short, fixed, bounded ladder.
+///
+/// Linux refuses to `exec` a file that any process still holds open for
+/// writing. When a script was just written (a freshly installed `gh`, a test
+/// stub), another thread that forked while our write handle was open keeps a
+/// copy of that descriptor until its own `exec`, so the exec of the new file
+/// fails for a few milliseconds. That is a brief race, not contention, so the
+/// ladder does not grow or jitter. Same ladder as `ta-plugin`'s
+/// `transport.rs`, `ta-memory`'s `external_adapter.rs` and `ta-session`'s
+/// `advisor_agent.rs` (`ta-session` extends it); those helpers are private to
+/// their crates and spawn differently, so this crate keeps its own copy.
+const ETXTBSY_BACKOFF_MS: [u64; 4] = [0, 20, 80, 200];
+
+/// True for `ETXTBSY`. Only Linux/Unix report it; on Windows raw error 26 is
+/// an unrelated code, so it is never treated as busy there.
+fn is_etxtbsy(e: &std::io::Error) -> bool {
+    cfg!(unix) && e.raw_os_error() == Some(26)
+}
+
+/// Run `attempt` (a process spawn), retrying only on `ETXTBSY` along
+/// [`ETXTBSY_BACKOFF_MS`]. Any other error returns at once; if the file is
+/// still busy after the last attempt the final `ETXTBSY` error is returned.
+fn retry_etxtbsy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut last = None;
+    for delay_ms in ETXTBSY_BACKOFF_MS {
+        if delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        match attempt() {
+            Err(e) if is_etxtbsy(&e) => last = Some(e),
+            other => return other,
+        }
+    }
+    Err(last.expect("the ladder is non-empty and only falls through on ETXTBSY"))
+}
+
+/// Run `program args` in `cwd` to completion and capture its output
+/// (stdin closed), waiting out a transient `ETXTBSY` on spawn.
+fn run_gh(
+    program: &std::ffi::OsStr,
+    args: &[std::ffi::OsString],
+    cwd: &Path,
+) -> std::io::Result<std::process::Output> {
+    retry_etxtbsy(|| Command::new(program).args(args).current_dir(cwd).output())
+}
+
 /// Runs a `gh` subcommand with a hard wall-clock deadline, never blocking
 /// indefinitely. `gh` can hang (slow/unreachable network, or -- on Windows,
 /// where GitHub-hosted runners preinstall `gh` -- interaction with a
@@ -129,23 +176,28 @@ fn truncate_log_excerpt(full: &str) -> String {
 /// the caller. Output is drained concurrently on reader threads while
 /// polling for the deadline, which also avoids a full-pipe-buffer deadlock
 /// if `gh` produces enough output before the process exits (a real risk for
-/// `--log-failed`, which can be many KB). Returns `None` on spawn failure
-/// or timeout (in which case the child is killed).
+/// `--log-failed`, which can be many KB).
+///
+/// `Err` is a spawn failure (after waiting out `ETXTBSY`) with the real OS
+/// error, so the caller can tell "no `gh`" (`NotFound`) from a `gh` that is
+/// there but cannot be started. `Ok(None)` means the process was started but
+/// timed out (the child is killed) or could not be waited on.
 fn run_gh_bounded(
     program: &std::ffi::OsStr,
     args: &[&str],
     cwd: &Path,
     timeout: Duration,
-) -> Option<std::process::Output> {
+) -> std::io::Result<Option<std::process::Output>> {
     use std::io::Read;
 
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+    let mut child = retry_etxtbsy(|| {
+        Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })?;
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -171,18 +223,30 @@ fn run_gh_bounded(
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     ta_goal::process::kill_process_tree(&mut child);
-                    return None;
+                    return Ok(None);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         }
     };
 
-    Some(std::process::Output {
+    Ok(Some(std::process::Output {
         status,
         stdout: stdout_handle.join().unwrap_or_default(),
         stderr: stderr_handle.join().unwrap_or_default(),
+    }))
+}
+
+/// Collapse a bounded `gh` run to `Option` for the best-effort diagnostic
+/// paths, logging (not hiding) a spawn failure.
+fn best_effort_gh(
+    result: std::io::Result<Option<std::process::Output>>,
+    what: &str,
+) -> Option<std::process::Output> {
+    result.unwrap_or_else(|e| {
+        tracing::warn!(operation = what, error = %e, "GitAdapter: could not run gh");
+        None
     })
 }
 
@@ -338,27 +402,74 @@ impl GitAdapter {
         Ok(())
     }
 
-    /// Check if gh CLI is available
-    fn has_gh_cli(&self) -> bool {
-        run_gh_bounded(
+    /// Whether the GitHub CLI can be used.
+    ///
+    /// `Ok(false)` means "gh is not available": the program does not exist
+    /// (`NotFound`), exited non-zero for `--version`, or hung past the probe
+    /// deadline. Any other failure to start it (a `gh` that exists but is not
+    /// executable, an exhausted `ETXTBSY`, ...) is NOT "not installed": it
+    /// is returned as an error carrying the real OS error, so a broken `gh`
+    /// is reported instead of being silently treated as absent.
+    fn gh_available(&self) -> Result<bool> {
+        match run_gh_bounded(
             &self.gh_program,
             &["--version"],
             &self.work_dir,
             Duration::from_secs(5),
-        )
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        ) {
+            Ok(Some(o)) => Ok(o.status.success()),
+            Ok(None) => {
+                tracing::warn!(
+                    gh = %self.gh_program.to_string_lossy(),
+                    "GitAdapter: `gh --version` timed out after 5s; treating gh as unavailable"
+                );
+                Ok(false)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(self.gh_spawn_error("gh --version", &e)),
+        }
+    }
+
+    /// Error for a `gh` invocation that could not be started although the
+    /// program was found (anything but `NotFound`), naming the OS error.
+    fn gh_spawn_error(&self, what: &str, e: &std::io::Error) -> SubmitError {
+        SubmitError::VcsError(format!(
+            "could not start `{}` for `{}`: {} (kind {:?}). This is not the same as gh \
+             being missing: check that it is an executable file (e.g. `chmod +x`) or \
+             reinstall the GitHub CLI, then retry.",
+            self.gh_program.to_string_lossy(),
+            what,
+            e,
+            e.kind()
+        ))
+    }
+
+    /// Run `gh <args>` in the work dir, capturing output, waiting out a
+    /// transient `ETXTBSY`. The `Err` is the raw spawn error.
+    fn gh_output<I, S>(&self, args: I) -> std::io::Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let args: Vec<std::ffi::OsString> = args
+            .into_iter()
+            .map(|a| a.as_ref().to_os_string())
+            .collect();
+        run_gh(&self.gh_program, &args, &self.work_dir)
     }
 
     /// Fetch and truncate the failed-step log for one Actions run, used by
     /// `check_failures()`. Returns `None` on any failure — the caller
     /// degrades to a manual-lookup hint rather than propagating an error.
     fn fetch_failed_run_log(&self, run_id: &str) -> Option<String> {
-        let output = run_gh_bounded(
-            &self.gh_program,
-            &["run", "view", run_id, "--log-failed"],
-            &self.work_dir,
-            Duration::from_secs(10),
+        let output = best_effort_gh(
+            run_gh_bounded(
+                &self.gh_program,
+                &["run", "view", run_id, "--log-failed"],
+                &self.work_dir,
+                Duration::from_secs(10),
+            ),
+            "gh run view --log-failed",
         )?;
         if !output.status.success() {
             return None;
@@ -834,7 +945,7 @@ impl SourceAdapter for GitAdapter {
     }
 
     fn open_review(&self, ctx: &CommitContext, pr: &DraftPackage) -> Result<ReviewResult> {
-        if !self.has_gh_cli() {
+        if !self.gh_available()? {
             return Err(SubmitError::ReviewError(
                 "gh CLI not found - install GitHub CLI to create PRs".to_string(),
             ));
@@ -857,21 +968,18 @@ impl SourceAdapter for GitAdapter {
         // Idempotency check: if a PR already exists for this branch (e.g., from
         // a prior apply attempt that failed after push), return the existing URL
         // rather than failing with "already exists".
-        let existing = Command::new(&self.gh_program)
-            .args([
-                "pr",
-                "list",
-                "--head",
-                &head_branch,
-                "--state",
-                "open",
-                "--json",
-                "url,number",
-                "--limit",
-                "1",
-            ])
-            .current_dir(&self.work_dir)
-            .output();
+        let existing = self.gh_output([
+            "pr",
+            "list",
+            "--head",
+            &head_branch,
+            "--state",
+            "open",
+            "--json",
+            "url,number",
+            "--limit",
+            "1",
+        ]);
         if let Ok(out) = existing {
             if out.status.success() {
                 let json = String::from_utf8_lossy(&out.stdout);
@@ -903,10 +1011,8 @@ impl SourceAdapter for GitAdapter {
                                     "merge" => "--merge",
                                     _ => "--squash",
                                 };
-                                let _ = Command::new(&self.gh_program)
-                                    .args(["pr", "merge", "--auto", merge_flag, &number])
-                                    .current_dir(&self.work_dir)
-                                    .output();
+                                let _ =
+                                    self.gh_output(["pr", "merge", "--auto", merge_flag, &number]);
                             }
                             return Ok(ReviewResult {
                                 review_url: url.clone(),
@@ -928,8 +1034,8 @@ impl SourceAdapter for GitAdapter {
         // 256-character limit (prefix is 12 chars, leaving 240 for the body).
         let clean = truncate_title(&strip_ansi_controls(&ctx.title), 240);
         let pr_title = format!("[{}] {}", ctx.shortref(), clean);
-        let output = Command::new(&self.gh_program)
-            .args([
+        let output = self
+            .gh_output([
                 "pr",
                 "create",
                 "--head",
@@ -941,8 +1047,7 @@ impl SourceAdapter for GitAdapter {
                 "--body",
                 &body,
             ])
-            .current_dir(&self.work_dir)
-            .output()?;
+            .map_err(|e| self.gh_spawn_error("gh pr create", &e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -971,24 +1076,17 @@ impl SourceAdapter for GitAdapter {
         if let Some(label) = &self.config.git.build_milestone_label {
             // `--force` makes label creation idempotent (updates color/desc
             // if it already exists instead of erroring).
-            let _ = Command::new(&self.gh_program)
-                .args([
-                    "label",
-                    "create",
-                    label,
-                    "--color",
-                    "0E8A16",
-                    "--description",
-                    "Applied by TA build-milestone automation",
-                    "--force",
-                ])
-                .current_dir(&self.work_dir)
-                .output();
-            match Command::new(&self.gh_program)
-                .args(["pr", "edit", &pr_number, "--add-label", label])
-                .current_dir(&self.work_dir)
-                .output()
-            {
+            let _ = self.gh_output([
+                "label",
+                "create",
+                label,
+                "--color",
+                "0E8A16",
+                "--description",
+                "Applied by TA build-milestone automation",
+                "--force",
+            ]);
+            match self.gh_output(["pr", "edit", &pr_number, "--add-label", label]) {
                 Ok(o) if o.status.success() => {
                     tracing::info!("GitAdapter: applied label '{}' to PR #{}", label, pr_number);
                 }
@@ -1016,7 +1114,25 @@ impl SourceAdapter for GitAdapter {
 
         // Enable auto-merge if configured (v0.11.2.3).
         let auto_merge_active;
-        if self.config.git.auto_merge && self.has_gh_cli() {
+        // The PR already exists at this point, so a gh that cannot be started
+        // must not lose its URL: report it and skip auto-merge.
+        let gh_ready = self.config.git.auto_merge
+            && match self.gh_available() {
+                Ok(ready) => ready,
+                Err(e) => {
+                    eprintln!(
+                        "[warn] PR #{} was created but auto-merge was not enabled: {}",
+                        pr_number, e
+                    );
+                    tracing::warn!(
+                        error = %e,
+                        pr = %pr_number,
+                        "GitAdapter: gh unusable, auto-merge skipped"
+                    );
+                    false
+                }
+            };
+        if gh_ready {
             let merge_strategy = &self.config.git.merge_strategy;
             let merge_flag = match merge_strategy.as_str() {
                 "rebase" => "--rebase",
@@ -1034,10 +1150,8 @@ impl SourceAdapter for GitAdapter {
                 pr_number = pr_number,
                 target = target_branch,
             );
-            let auto_merge_output = Command::new(&self.gh_program)
-                .args(["pr", "merge", "--auto", merge_flag, &pr_number])
-                .current_dir(&self.work_dir)
-                .output();
+            let auto_merge_output =
+                self.gh_output(["pr", "merge", "--auto", merge_flag, &pr_number]);
             match auto_merge_output {
                 Ok(o) if o.status.success() => {
                     eprintln!(
@@ -1550,14 +1664,11 @@ impl SourceAdapter for GitAdapter {
     }
 
     fn check_review(&self, review_id: &str) -> Result<Option<ReviewStatus>> {
-        if !self.has_gh_cli() {
+        if !self.gh_available()? {
             return Ok(None);
         }
 
-        let output = Command::new(&self.gh_program)
-            .args(["pr", "view", review_id, "--json", "state,statusCheckRollup"])
-            .current_dir(&self.work_dir)
-            .output();
+        let output = self.gh_output(["pr", "view", review_id, "--json", "state,statusCheckRollup"]);
 
         match output {
             Ok(o) if o.status.success() => {
@@ -1585,23 +1696,24 @@ impl SourceAdapter for GitAdapter {
                     checks_passing,
                 }))
             }
-            _ => Ok(None),
+            Ok(_) => Ok(None),
+            Err(e) => Err(self.gh_spawn_error("gh pr view", &e)),
         }
     }
 
     fn update_review_branch_if_behind(&self, review_id: &str) -> Result<ReviewBranchUpdate> {
-        if !self.has_gh_cli() {
+        if !self.gh_available()? {
             return Ok(ReviewBranchUpdate::Unsupported);
         }
-        let view = Command::new(&self.gh_program)
-            .args(["pr", "view", review_id, "--json", "state,mergeStateStatus"])
-            .current_dir(&self.work_dir)
-            .output();
+        let view = self.gh_output(["pr", "view", review_id, "--json", "state,mergeStateStatus"]);
         let json: serde_json::Value = match view {
             Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).map_err(|e| {
                 SubmitError::VcsError(format!("Failed to parse gh pr view output: {}", e))
             })?,
-            _ => return Ok(ReviewBranchUpdate::Unsupported),
+            // gh ran but `pr view` failed (unauthenticated, unknown PR, ...).
+            Ok(_) => return Ok(ReviewBranchUpdate::Unsupported),
+            // gh could not be started: that is a failure, not "unsupported".
+            Err(e) => return Err(self.gh_spawn_error("gh pr view", &e)),
         };
         let state = json.get("state").and_then(|v| v.as_str()).unwrap_or("");
         let merge_state = json
@@ -1611,11 +1723,7 @@ impl SourceAdapter for GitAdapter {
         if !state.eq_ignore_ascii_case("open") || merge_state != "BEHIND" {
             return Ok(ReviewBranchUpdate::NotBehind(merge_state.to_string()));
         }
-        match Command::new(&self.gh_program)
-            .args(["pr", "update-branch", review_id])
-            .current_dir(&self.work_dir)
-            .output()
-        {
+        match self.gh_output(["pr", "update-branch", review_id]) {
             Ok(o) if o.status.success() => {
                 tracing::info!(
                     pr = review_id,
@@ -1633,24 +1741,21 @@ impl SourceAdapter for GitAdapter {
     }
 
     fn reviews_for_branch(&self, branch: &str) -> Result<Option<Vec<BranchReviewInfo>>> {
-        if !self.has_gh_cli() {
+        if !self.gh_available()? {
             return Ok(None);
         }
-        let output = Command::new(&self.gh_program)
-            .args([
-                "pr",
-                "list",
-                "--head",
-                branch,
-                "--state",
-                "all",
-                "--limit",
-                "30",
-                "--json",
-                "number,state,headRefOid",
-            ])
-            .current_dir(&self.work_dir)
-            .output();
+        let output = self.gh_output([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--limit",
+            "30",
+            "--json",
+            "number,state,headRefOid",
+        ]);
         match output {
             Ok(o) if o.status.success() => {
                 let json: serde_json::Value = serde_json::from_slice(&o.stdout).map_err(|e| {
@@ -1678,27 +1783,25 @@ impl SourceAdapter for GitAdapter {
                         .collect(),
                 ))
             }
-            _ => Ok(None),
+            Ok(_) => Ok(None),
+            Err(e) => Err(self.gh_spawn_error("gh pr list", &e)),
         }
     }
 
     fn closed_unmerged_branches(&self) -> Result<Option<Vec<String>>> {
-        if !self.has_gh_cli() {
+        if !self.gh_available()? {
             return Ok(None);
         }
-        let output = Command::new(&self.gh_program)
-            .args([
-                "pr",
-                "list",
-                "--state",
-                "closed",
-                "--limit",
-                "200",
-                "--json",
-                "headRefName,mergedAt",
-            ])
-            .current_dir(&self.work_dir)
-            .output();
+        let output = self.gh_output([
+            "pr",
+            "list",
+            "--state",
+            "closed",
+            "--limit",
+            "200",
+            "--json",
+            "headRefName,mergedAt",
+        ]);
         match output {
             Ok(o) if o.status.success() => {
                 let json: serde_json::Value = serde_json::from_slice(&o.stdout).map_err(|e| {
@@ -1713,12 +1816,13 @@ impl SourceAdapter for GitAdapter {
                         .collect(),
                 ))
             }
-            _ => Ok(None),
+            Ok(_) => Ok(None),
+            Err(e) => Err(self.gh_spawn_error("gh pr list", &e)),
         }
     }
 
     fn merge_review(&self, review_id: &str) -> Result<MergeResult> {
-        if !self.has_gh_cli() {
+        if !self.gh_available()? {
             return Err(SubmitError::ReviewError(
                 "gh CLI not found — install GitHub CLI to merge PRs automatically. \
                  Merge manually at the PR URL, then run `ta sync`."
@@ -1739,10 +1843,9 @@ impl SourceAdapter for GitAdapter {
             "GitAdapter: merging PR"
         );
 
-        let output = Command::new(&self.gh_program)
-            .args(["pr", "merge", review_id, "--auto", merge_flag])
-            .current_dir(&self.work_dir)
-            .output()?;
+        let output = self
+            .gh_output(["pr", "merge", review_id, "--auto", merge_flag])
+            .map_err(|e| self.gh_spawn_error("gh pr merge", &e))?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1795,19 +1898,29 @@ impl SourceAdapter for GitAdapter {
     }
 
     fn check_failures(&self, review_id: &str) -> Result<Vec<CheckFailure>> {
-        if !self.has_gh_cli() {
-            return Ok(vec![]);
+        match self.gh_available() {
+            Ok(true) => {}
+            Ok(false) => return Ok(vec![]),
+            // Read-only diagnostic: never a hard error (see below), but a gh
+            // that exists yet cannot be started is logged, not hidden.
+            Err(e) => {
+                tracing::warn!(review = review_id, error = %e, "GitAdapter: check_failures skipped");
+                return Ok(vec![]);
+            }
         }
 
         // Step 1: list this PR's checks with their pass/fail bucket + a link
         // we can pull an Actions run ID out of. Degrades to an empty vec on
         // any failure here (best-effort, matching check_review's style) —
         // check_failures is read-only diagnostic detail, never a hard error.
-        let output = run_gh_bounded(
-            &self.gh_program,
-            &["pr", "checks", review_id, "--json", "name,bucket,link"],
-            &self.work_dir,
-            Duration::from_secs(10),
+        let output = best_effort_gh(
+            run_gh_bounded(
+                &self.gh_program,
+                &["pr", "checks", review_id, "--json", "name,bucket,link"],
+                &self.work_dir,
+                Duration::from_secs(10),
+            ),
+            "gh pr checks",
         );
         let checks: Vec<serde_json::Value> = match output {
             Some(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
@@ -3369,5 +3482,118 @@ mod tests {
             adapter.update_review_branch_if_behind("42").unwrap(),
             ReviewBranchUpdate::Unsupported
         );
+    }
+
+    /// Only `ETXTBSY` is retried: it is retried until it clears, and any
+    /// other error (including `PermissionDenied`) returns at once, untouched.
+    #[cfg(unix)]
+    #[test]
+    fn retry_waits_out_etxtbsy_and_returns_other_errors_at_once() {
+        let mut calls = 0;
+        let ok = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::from_raw_os_error(26))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(ok.unwrap(), 3, "two ETXTBSY answers then success");
+
+        let mut calls = 0;
+        let err = retry_etxtbsy(|| -> std::io::Result<()> {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1, "a non-ETXTBSY error must not be retried");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let mut calls = 0;
+        let err = retry_etxtbsy(|| -> std::io::Result<()> {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(26))
+        })
+        .unwrap_err();
+        assert_eq!(calls, ETXTBSY_BACKOFF_MS.len(), "bounded ladder");
+        assert_eq!(err.raw_os_error(), Some(26), "the real error is kept");
+    }
+
+    /// Linux refuses to exec a file that still has a writer (ETXTBSY). A
+    /// `gh` that is busy for ~100ms must be waited out, not reported as
+    /// "gh not installed" (`Unsupported`). Linux-only: macOS does not
+    /// refuse to exec a file with an open writer.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_briefly_busy_gh_is_waited_out_not_treated_as_missing() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        let script = "#!/bin/sh\ncase \"$1 $2\" in\n  \"pr view\") echo '{\"state\":\"OPEN\",\"mergeStateStatus\":\"CLEAN\"}' ;;\nesac\nexit 0\n";
+        let mut w = std::fs::File::create(&gh).unwrap();
+        w.write_all(script.as_bytes()).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // `w` is open for writing, so exec fails with ETXTBSY until it drops.
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(w);
+        });
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(&gh);
+        let result = adapter.update_review_branch_if_behind("42");
+        release.join().unwrap();
+        assert_eq!(
+            result.unwrap(),
+            ReviewBranchUpdate::NotBehind("CLEAN".to_string())
+        );
+    }
+
+    /// Same wait for the capturing path (`gh_output`) used after the probe.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_briefly_busy_gh_is_waited_out_when_capturing_output() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        let mut w = std::fs::File::create(&gh).unwrap();
+        w.write_all(b"#!/bin/sh\necho hello\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(w);
+        });
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(&gh);
+        let out = adapter.gh_output(["anything"]);
+        release.join().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.unwrap().stdout).trim(),
+            "hello"
+        );
+    }
+
+    /// A `gh` that exists but cannot be executed is a broken install, not a
+    /// missing one: it must surface the real OS error, never `Unsupported`.
+    #[cfg(unix)]
+    #[test]
+    fn a_gh_that_cannot_be_executed_is_an_error_not_unsupported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let adapter = GitAdapter::new(dir.path()).with_gh_program(&gh);
+
+        let err = adapter
+            .update_review_branch_if_behind("42")
+            .expect_err("a non-executable gh must not read as `Unsupported`");
+        let msg = err.to_string();
+        assert!(msg.contains("Permission denied"), "real OS error: {msg}");
+        assert!(msg.contains("chmod +x"), "actionable: {msg}");
+        assert!(adapter.check_review("1").is_err());
+        assert!(adapter.reviews_for_branch("b").is_err());
+        assert!(adapter.closed_unmerged_branches().is_err());
+        // Read-only diagnostics still degrade rather than error.
+        assert!(adapter.check_failures("1").unwrap().is_empty());
     }
 }
