@@ -1939,6 +1939,15 @@ fn try_ai_notes_in(
     // `--output-format json` lets the usage ledger capture real tokens; the
     // recorder hands back the plain `result` text (or the raw stdout when the
     // agent did not emit JSON), so the parsing below is unchanged.
+    if ta_goal::external_agents_blocked!()
+        && ta_goal::external_agents::is_paid_agent_command(command)
+    {
+        tracing::warn!(
+            "{}",
+            ta_goal::external_agents::blocked_message("release-notes agent review")
+        );
+        return None;
+    }
     let mut cmd = Command::new(command);
     cmd.arg("--print");
     if command == "claude" {

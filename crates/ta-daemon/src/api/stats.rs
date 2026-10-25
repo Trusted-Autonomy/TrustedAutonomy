@@ -232,6 +232,14 @@ async fn meridian_kpis_if_configured(
         return None;
     }
 
+    if ta_goal::external_agents_blocked!() {
+        tracing::debug!(
+            guard = ta_goal::external_agents::NO_EXTERNAL_AGENTS_ENV,
+            "skipping `meridian analyze` for the Stats tab: external agents are blocked"
+        );
+        return None;
+    }
+
     let binary = resolve_meridian_binary(daemon_config);
     let project_root = project_root.to_path_buf();
 

@@ -3,3 +3,13 @@
 # and on any Mac without the local cert. See scripts/codesign-runner.sh.
 [target.'cfg(target_os = "macos")']
 runner = "scripts/codesign-runner.sh"
+
+# Tests must never reach a paid external agent (claude, codex, ollama, the
+# installed `meridian`, a real `ta run` launch). This guard is read by
+# `ta_goal::external_agents` and inherited by every child process a test
+# spawns (e.g. the `ta` binary). `force = false` lets a shell value win, so
+# `TA_TEST_NO_EXTERNAL_AGENTS=0 cargo run ...` opts out deliberately.
+# Installed binaries (`ta`, `ta-daemon`) never see this: it only applies under
+# cargo. See CLAUDE.md "Testing rules" and docs/USAGE.md "Developer notes".
+[env]
+TA_TEST_NO_EXTERNAL_AGENTS = { value = "1", force = false }

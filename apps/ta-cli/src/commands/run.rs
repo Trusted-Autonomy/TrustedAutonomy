@@ -6807,6 +6807,16 @@ fn launch_agent_via_runtime(
     use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
     use ta_runtime::{RuntimeRegistry, SpawnRequest, StdinMode, StdoutMode};
 
+    // Test guard: a test run must never launch a real paid agent. Fake agents
+    // (`echo`, `sh`, ...) are unaffected; only claude/codex/ollama/... are refused.
+    if ta_goal::external_agents_blocked!()
+        && ta_goal::external_agents::is_paid_agent_command(&config.command)
+    {
+        return Err(std::io::Error::other(
+            ta_goal::external_agents::blocked_message(&format!("agent `{}`", config.command)),
+        ));
+    }
+
     // Build the environment map with template variables already applied.
     //
     // v0.17.6.1: when `credential_scopes` is declared, this spawn does not

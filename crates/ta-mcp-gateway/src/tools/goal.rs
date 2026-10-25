@@ -430,6 +430,15 @@ fn launch_goal_agent(
         );
     }
 
+    if ta_goal::external_agents_blocked!() {
+        tracing::warn!(
+            goal_id = %goal_id,
+            "{}",
+            ta_goal::external_agents::blocked_message("`ta run --headless` agent launch")
+        );
+        return false;
+    }
+
     let mut cmd = std::process::Command::new("ta");
     cmd.arg("run")
         .arg(title)
@@ -523,6 +532,15 @@ fn launch_sub_goal_agent(
     };
 
     // Spawn `ta run --headless` as a background process.
+    if ta_goal::external_agents_blocked!() {
+        tracing::warn!(
+            sub_goal_id = %sub_id,
+            "{}",
+            ta_goal::external_agents::blocked_message("`ta run --headless` sub-goal agent launch")
+        );
+        return false;
+    }
+
     let mut cmd = std::process::Command::new("ta");
     cmd.arg("run")
         .arg(title)

@@ -3177,6 +3177,33 @@ mod tests {
         assert_eq!(state.goal_store.list().unwrap()[0].origin, None);
     }
 
+    /// Regression: these tests used to shell out to the installed `ta run
+    /// --headless --agent claude-code` (a real, paid agent launch) every time
+    /// `ta_goal_start` ran. A test-run goal start must record the goal but
+    /// report `launched: false` and spawn nothing.
+    #[test]
+    fn ta_goal_start_does_not_launch_an_agent_in_test_runs() {
+        let (server, _dir) = test_server();
+        let result = with_origin_env(None, || {
+            crate::tools::goal::handle_goal_start(&server.state, goal_start_params()).unwrap()
+        });
+        let wire = serde_json::to_value(&result).unwrap();
+        let text = wire["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected a text content item, got {wire}"));
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["launched"], false, "{body}");
+        // The goal itself is still recorded and stays un-failed.
+        let state = server.state.lock().unwrap();
+        let goals = state.goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        assert!(
+            !matches!(goals[0].state, GoalRunState::Failed { .. }),
+            "a blocked launch must not fail the goal: {:?}",
+            goals[0].state
+        );
+    }
+
     #[test]
     fn ta_goal_start_refuses_an_invalid_origin_and_creates_no_goal() {
         let (server, _dir) = test_server();

@@ -25,6 +25,7 @@ pub mod cost_report;
 pub mod error;
 pub mod events;
 pub mod experiment;
+pub mod external_agents;
 pub mod goal_run;
 pub mod golden;
 pub mod history;

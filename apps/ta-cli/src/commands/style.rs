@@ -479,6 +479,12 @@ fn discover(path: Option<&std::path::Path>, yes: bool) -> anyhow::Result<()> {
         metrics
     );
 
+    if ta_goal::external_agents_blocked!() {
+        anyhow::bail!(
+            "{}",
+            ta_goal::external_agents::blocked_message("style analysis via `claude --print`")
+        );
+    }
     println!("Running analysis...");
     let output = Command::new("claude")
         .args(["--print", "--output-format", "json"])

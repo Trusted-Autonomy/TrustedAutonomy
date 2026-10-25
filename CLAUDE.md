@@ -72,6 +72,7 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 - Commit in logical working units
 - All work stays within ~/development/TrustedAutonomy/
 - Use `tempfile::tempdir()` for all test fixtures that need filesystem access
+- **Tests must never reach a paid agent.** No test may spawn (directly or through a child `ta`) a real `claude`, `codex`, `ollama`, the installed `meridian` (`meridian summarize-title` spawns a paid `claude --print`; `ta draft apply` calls it), or a real `ta run`/goal launch. The guard is `TA_TEST_NO_EXTERNAL_AGENTS=1`, exported to every cargo run by `.cargo/config.toml` `[env]` and inherited by child processes; code is also blocked under `cfg(test)`. Any new code path that can spawn a paid agent MUST check `ta_goal::external_agents_blocked!()` and refuse with `ta_goal::external_agents::blocked_message(..)`. Tests that need a "fake agent" use a script in a tempdir, never the real binary. Do not run tests with `TA_TEST_NO_EXTERNAL_AGENTS=0`. `apps/ta-cli/tests/no_external_agents.rs` fails if the guard is dropped.
 - **Never run interactive TUI commands and capture their output into goal titles, PR titles, or summaries.** Commands like `ta onboard`, `ta shell`, or anything that renders to a terminal produce ANSI escape sequences that corrupt metadata (branch names, PR titles). GitHub enforces a 256-character PR title limit. If you need to test a TUI flow, run it in isolation and do not include its output in any structured field.
 
 ## Release Rules
