@@ -146,6 +146,9 @@ pub struct VerifiedAssertion {
     pub action: String,
     pub role: Option<String>,
     pub escalated: bool,
+    /// Set when rule 7's reroute exception accepted a signer other than the
+    /// user the item names: the original `waiting_on.value`, for the audit log.
+    pub rerouted_from: Option<String>,
     /// The signer is the requester of an agent-originated item and the
     /// signer's system said that is permitted.
     pub self_approved: bool,
@@ -542,13 +545,15 @@ impl AssertionVerifier for Ed25519RegistryVerifier {
             .filter(|r| !r.is_empty());
         let escalated = opt_bool(claims, "escalated");
         let item = req.item;
+        let mut rerouted_from = None;
         match item.waiting_on_type.as_str() {
             "user" => {
                 let want = item.waiting_on_value.as_deref().unwrap_or("");
                 if user_id != want {
-                    return Err(AssertionError::NotPermitted(
-                        "this item is waiting on a specific other user".into(),
-                    ));
+                    // Rule 7 exception: a viewer's item rerouted by Wayfinder is
+                    // acted on by someone else under the `escalated` claim.
+                    check_reroute(&key, req.action, escalated, role, want)?;
+                    rerouted_from = Some(want.to_string());
                 }
             }
             "role" => {
@@ -630,9 +635,54 @@ impl AssertionVerifier for Ed25519RegistryVerifier {
             action: req.action.to_string(),
             role: role.map(str::to_string),
             escalated,
+            rerouted_from,
             self_approved,
             at: now,
         })
+    }
+}
+
+/// Rule 7's exception for an item rerouted away from its named user. Accepted
+/// only for approve, deny and answer, with `escalated: true` and a `role`
+/// claim that is in the key's role order and ranks at or above the key's
+/// `escalation_min_role`. Every refusal says which condition failed.
+fn check_reroute(
+    key: &ta_credentials::human::AssertionKey,
+    action: &str,
+    escalated: bool,
+    role: Option<&str>,
+    named_user: &str,
+) -> Result<(), AssertionError> {
+    let not_permitted = |why: String| AssertionError::NotPermitted(why);
+    if !escalated {
+        return Err(not_permitted(format!(
+            "this item is waiting on a specific other user ('{named_user}'); only an assertion \
+             with escalated: true can act on an item that was rerouted away from its named user"
+        )));
+    }
+    if !matches!(action, "approve" | "deny" | "answer") {
+        return Err(not_permitted(format!(
+            "the escalated claim covers approve, deny and answer only, not '{action}'"
+        )));
+    }
+    let Some(claimed) = role else {
+        return Err(not_permitted(
+            "the escalated claim needs a role claim and the assertion carries none".into(),
+        ));
+    };
+    let floor = key.escalation_min_role.as_str();
+    match (key.rank(claimed), key.rank(floor)) {
+        (Some(c), Some(f)) if c >= f => Ok(()),
+        (Some(_), Some(_)) => Err(not_permitted(format!(
+            "role '{claimed}' ranks below this key's escalation floor '{floor}' (rank order {}); \
+             change the floor with `ta keys add --escalation-min-role`",
+            key.role_order.join(" < ")
+        ))),
+        _ => Err(not_permitted(format!(
+            "role '{claimed}' or the escalation floor '{floor}' is not in key '{}' role order ({})",
+            key.kid,
+            key.role_order.join(" < ")
+        ))),
     }
 }
 
@@ -1076,6 +1126,162 @@ mod tests {
         let v = r.verify(&c, "approve", &it).unwrap();
         assert!(v.escalated);
         assert_eq!(v.role.as_deref(), Some("owner"));
+    }
+
+    /// A verifier whose key has the default order (member < admin < owner)
+    /// and the given escalation floor.
+    fn rig_with_floor(floor: &str) -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = TestSigner::new(1);
+        ta_credentials::human::add_assertion_key_full(
+            dir.path(),
+            KID,
+            &signer.public_b64(),
+            None,
+            None,
+            Some(floor),
+            None,
+        )
+        .unwrap();
+        let install = ta_credentials::human::install_id(dir.path()).unwrap();
+        let verifier = Ed25519RegistryVerifier::new(dir.path().to_path_buf());
+        Rig {
+            _dir: dir,
+            verifier,
+            signer,
+            install,
+        }
+    }
+
+    fn rerouted_claims(r: &Rig, action: &str, it: &ItemFacts, role: &str, jti: &str) -> Value {
+        let mut c = r.claims(action, it, "mia", role, jti);
+        c["escalated"] = true.into();
+        c
+    }
+
+    #[test]
+    fn rerouted_user_item_is_accepted_under_escalated_claim_for_approve_deny_and_answer() {
+        let r = rig();
+        let mut it = item("user", Some("viewer-9"));
+        it.requester_id = None;
+        for (action, jti) in [
+            ("approve", "jti-00000080"),
+            ("deny", "jti-00000081"),
+            ("answer", "jti-00000082"),
+        ] {
+            let mut c = rerouted_claims(&r, action, &it, "member", jti);
+            let answer = "use postgres";
+            c["answer_sha256"] = sha256_tagged(answer.as_bytes()).into();
+            let token = r.signer.sign(KID, &c);
+            let v = r
+                .verifier
+                .verify(
+                    &token,
+                    &AssertionRequest {
+                        action,
+                        item: &it,
+                        answer: (action == "answer").then_some(answer),
+                    },
+                    NOW,
+                )
+                .unwrap_or_else(|e| panic!("{action}: {e}"));
+            assert!(v.escalated, "{action}");
+            assert_eq!(v.user_id, "mia");
+            assert_eq!(v.rerouted_from.as_deref(), Some("viewer-9"), "{action}");
+        }
+    }
+
+    #[test]
+    fn the_named_user_acting_on_their_own_item_is_not_marked_rerouted() {
+        let r = rig();
+        let mut it = item("user", Some("viewer-9"));
+        it.requester_id = None;
+        let mut c = r.claims("approve", &it, "viewer-9", "member", "jti-00000083");
+        c["escalated"] = true.into();
+        let v = r.verify(&c, "approve", &it).unwrap();
+        assert_eq!(v.rerouted_from, None);
+    }
+
+    #[test]
+    fn rerouted_user_item_is_refused_without_the_escalated_claim() {
+        let r = rig();
+        let mut it = item("user", Some("viewer-9"));
+        it.requester_id = None;
+        let c = r.claims("approve", &it, "mia", "owner", "jti-00000084");
+        let err = r.verify(&c, "approve", &it).unwrap_err();
+        assert!(
+            matches!(&err, AssertionError::NotPermitted(w) if w.contains("escalated: true")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rerouted_user_item_is_refused_when_role_is_below_the_keys_floor() {
+        let r = rig_with_floor("admin");
+        let mut it = item("user", Some("viewer-9"));
+        it.requester_id = None;
+        let c = rerouted_claims(&r, "approve", &it, "member", "jti-00000085");
+        let err = r.verify(&c, "approve", &it).unwrap_err();
+        assert!(
+            matches!(&err, AssertionError::NotPermitted(w) if w.contains("below") && w.contains("'admin'")),
+            "{err:?}"
+        );
+        // At the floor it is accepted, and a refusal burnt no jti.
+        let ok = rerouted_claims(&r, "approve", &it, "admin", "jti-00000086");
+        assert!(r.verify(&ok, "approve", &it).is_ok());
+    }
+
+    #[test]
+    fn rerouted_user_item_is_refused_when_the_role_claim_is_absent() {
+        let r = rig();
+        let mut it = item("user", Some("viewer-9"));
+        it.requester_id = None;
+        let mut c = rerouted_claims(&r, "approve", &it, "owner", "jti-00000087");
+        c.as_object_mut().unwrap().remove("role");
+        let err = r.verify(&c, "approve", &it).unwrap_err();
+        assert!(
+            matches!(&err, AssertionError::NotPermitted(w) if w.contains("no role claim") || w.contains("carries none")),
+            "{err:?}"
+        );
+        // A role the key does not know cannot meet the floor either.
+        let c = rerouted_claims(&r, "approve", &it, "superuser", "jti-00000088");
+        assert!(matches!(
+            r.verify(&c, "approve", &it),
+            Err(AssertionError::NotPermitted(_))
+        ));
+    }
+
+    #[test]
+    fn rerouted_user_item_is_refused_for_actions_other_than_approve_deny_answer() {
+        let r = rig();
+        let mut it = item("user", Some("viewer-9"));
+        it.requester_id = None;
+        for (action, jti) in [
+            ("apply", "jti-00000089"),
+            ("commands", "jti-00000090"),
+            ("shutdown", "jti-00000091"),
+        ] {
+            let c = rerouted_claims(&r, action, &it, "owner", jti);
+            let err = r.verify(&c, action, &it).unwrap_err();
+            assert!(
+                matches!(&err, AssertionError::NotPermitted(w) if w.contains("approve, deny and answer only")),
+                "{action}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_seven_does_not_widen_role_items() {
+        // The escalated exception is for user-addressed items only: a role
+        // item still needs a role that satisfies it.
+        let r = rig();
+        let mut it = item("role", Some("owner"));
+        it.requester_id = None;
+        let c = rerouted_claims(&r, "approve", &it, "member", "jti-00000092");
+        assert!(matches!(
+            r.verify(&c, "approve", &it),
+            Err(AssertionError::NotPermitted(_))
+        ));
     }
 
     #[test]

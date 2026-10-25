@@ -77,7 +77,7 @@ fn world() -> World {
         egress_proxy_port: Some(proxy.local_addr().unwrap().port()),
         egress_unix_socket: None,
         windows: Default::default(),
-        violation_tag: Some(seatbelt::violation_tag("conformance-goal")),
+        violation_tag: Some(seatbelt::violation_tag(&uuid::Uuid::new_v4().to_string())),
     };
     World {
         _root: root,
@@ -359,46 +359,128 @@ fn rosetta_translated_binaries_still_run() {
     );
 }
 
-#[test]
-fn denials_carry_the_goal_tag_in_the_unified_log() {
+/// Start a tail for the world's goal tag and prove the live stream is
+/// attached. `None` (after saying why) when this host's unified log never
+/// delivers even a denial TA causes on purpose; `TA_REQUIRE_SANDBOX_CONFORMANCE=1`
+/// turns that into a failure.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<ta_runtime::seatbelt_log::Violation>>>;
+
+fn live_tail(
+    w: &World,
+) -> Option<(
+    ta_runtime::seatbelt_log::ViolationTail,
+    Seen,
+    ta_runtime::seatbelt_log::Canary,
+)> {
     use std::sync::{Arc, Mutex};
     use ta_runtime::seatbelt_log::ViolationTail;
-    let w = world();
-    if !can_run(&w) {
-        return;
-    }
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
     let tag = w.policy.violation_tag.clone().unwrap();
     let Ok(tail) = ViolationTail::start(tag, Arc::new(move |v| sink.lock().unwrap().push(v)))
     else {
         eprintln!("SKIP: /usr/bin/log unavailable");
+        return None;
+    };
+    let start = tail.probe(std::time::Duration::from_secs(30));
+    if !start.delivered() {
+        let msg = format!(
+            "the unified log delivered no canary denial in 30s ({start:?}, {} raw lines): \
+             sandbox denial capture is unavailable on this host",
+            tail.lines_seen()
+        );
+        assert!(
+            std::env::var("TA_REQUIRE_SANDBOX_CONFORMANCE").as_deref() != Ok("1"),
+            "{msg}, but TA_REQUIRE_SANDBOX_CONFORMANCE=1 requires it"
+        );
+        eprintln!("SKIP: {msg}");
+        return None;
+    }
+    Some((tail, seen, start))
+}
+
+fn ssh_denial_seen(seen: &std::sync::Mutex<Vec<ta_runtime::seatbelt_log::Violation>>) -> usize {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|v| v.target.contains(".ssh") && v.operation.starts_with("file-read"))
+        .count()
+}
+
+/// The macOS unified log is lossy (see `ViolationTail`): a single denial can
+/// be dropped by the live stream or never logged by the OS at all. Delivery is
+/// therefore made deterministic by retrying the denial until the tail has it,
+/// the same way the pre-spawn canary does. 50 independent denials must all be
+/// delivered; the attempt histogram is printed so a regression in the pipeline
+/// (more retries per delivery) is visible in the test output.
+#[test]
+fn fifty_denials_are_all_delivered_with_bounded_retries() {
+    let w = world();
+    if !can_run(&w) {
+        return;
+    }
+    let Some((tail, seen, _start)) = live_tail(&w) else {
         return;
     };
-    std::thread::sleep(std::time::Duration::from_millis(4000));
-    // Enforcement is the hard assertion: the read must be refused.
-    assert!(!sandboxed(&w, &["read", s(&w.ssh_key)]));
-    for _ in 0..40 {
-        if seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|v| v.target.contains(".ssh") && v.operation.starts_with("file-read"))
-        {
-            return;
+    let mut histogram = std::collections::BTreeMap::<u32, u32>::new();
+    for run in 1..=50 {
+        let before = ssh_denial_seen(&seen);
+        let mut delivered_after = None;
+        for attempt in 1..=10u32 {
+            // Enforcement is the hard assertion: every read must be refused.
+            assert!(
+                !sandboxed(&w, &["read", s(&w.ssh_key)]),
+                "run {run}: the read must be denied"
+            );
+            let wait_until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            while std::time::Instant::now() < wait_until {
+                if ssh_denial_seen(&seen) > before {
+                    delivered_after = Some(attempt);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            if delivered_after.is_some() {
+                break;
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        let attempts = delivered_after.unwrap_or_else(|| {
+            panic!(
+                "run {run}: no tagged denial reached the tail in 10 attempts ({} raw Sandbox \
+                 lines seen); delivery is not dependable on this host",
+                tail.lines_seen()
+            )
+        });
+        *histogram.entry(attempts).or_default() += 1;
     }
-    // Delivery of the denial to `log stream` is NOT asserted. Measured on macOS:
-    // with the profile fixed (tags on explicit denies only), roughly 1 run in 6
-    // to 1 in 4 delivers no tagged line for the whole test, even over repeated
-    // refused reads, while the refusal itself is always enforced. The cause is
-    // unexplained, so a required check must not depend on it. The profile shape
-    // and the parser are covered by the unit tests; this prints what was seen.
-    let got = seen.lock().unwrap().clone();
-    eprintln!(
-        "WARN: unified log did not deliver a tagged denial ({} raw Sandbox events seen, \
-         tagged={got:?}); sandbox violation events can be missing for a goal",
-        tail.lines_seen()
-    );
+    eprintln!("denial delivery, attempts needed -> runs: {histogram:?}");
+}
+
+/// A whole capture: probe, one denial with NO retry, finish. What the OS kept
+/// is recovered from the persisted log, and the report says whether capture
+/// was verified; it must never claim health it did not check.
+#[test]
+fn finish_reconciles_with_the_persisted_log_and_reports_capture_health() {
+    let w = world();
+    if !can_run(&w) {
+        return;
+    }
+    let Some((tail, seen, start)) = live_tail(&w) else {
+        return;
+    };
+    assert!(!sandboxed(&w, &["read", s(&w.ssh_key)]));
+    let report = tail.finish(start, std::time::Duration::from_secs(30));
+    eprintln!("{}", report.summary());
+    // A denial is never counted twice: the live and persisted copies are one.
+    let tagged = ssh_denial_seen(&seen) as u64;
+    assert_eq!(tagged, report.live_denials + report.recovered_denials);
+    assert!(tagged <= 1, "one refused read, {tagged} reported");
+    if report.healthy() {
+        assert!(report.reconciled && report.end.delivered() && report.start.delivered());
+    } else {
+        assert!(
+            !report.problems.is_empty() && report.summary().contains("NOT verified"),
+            "{report:?}"
+        );
+    }
 }

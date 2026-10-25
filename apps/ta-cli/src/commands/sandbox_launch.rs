@@ -535,6 +535,69 @@ fn emit_violation(
     }
 }
 
+/// Longest the launcher waits, before spawning the agent, for the unified log
+/// to deliver a denial TA causes on purpose.
+const PRE_SPAWN_CANARY: std::time::Duration = std::time::Duration::from_secs(15);
+/// Longest the launcher spends after the agent exits proving the log still
+/// delivers and reading the persisted log for denials the stream missed.
+const POST_EXIT_RECONCILE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// A running macOS denial capture for one goal: the live tail plus what the
+/// pre-spawn canary proved. Dropping it stops the tail without a report;
+/// call [`ViolationCapture::finish`] once the agent has exited.
+pub struct ViolationCapture {
+    tail: ViolationTail,
+    start: ta_runtime::seatbelt_log::Canary,
+    events_dir: PathBuf,
+    goal_id: uuid::Uuid,
+}
+
+impl ViolationCapture {
+    /// Verify the capture after the agent exited, deliver denials the live
+    /// stream dropped, record a `SandboxCapture` event and say on stderr how
+    /// far the denial list can be trusted.
+    pub fn finish(self) {
+        use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+        let Self {
+            tail,
+            start,
+            events_dir,
+            goal_id,
+        } = self;
+        let report = tail.finish(start, POST_EXIT_RECONCILE);
+        if report.healthy() {
+            tracing::info!(%goal_id, live = report.live_denials, recovered = report.recovered_denials, "{}", report.summary());
+        } else {
+            tracing::warn!(%goal_id, problems = ?report.problems, "{}", report.summary());
+            eprintln!("[warn] sandbox: {}", report.summary());
+        }
+        if report.recovered_denials > 0 {
+            eprintln!(
+                "[sandbox] {} denial(s) the live log stream dropped were recovered from the \
+                 persisted log and recorded.",
+                report.recovered_denials
+            );
+        }
+        let event = SessionEvent::SandboxCapture {
+            goal_id,
+            verified: report.healthy(),
+            start_canary: report.start.delivered(),
+            end_canary: report.end.delivered(),
+            reconciled: report.reconciled,
+            live_denials: report.live_denials,
+            recovered_denials: report.recovered_denials,
+            detail: report.problems.join("; "),
+        };
+        if let Err(e) = FsEventStore::new(&events_dir).append(&EventEnvelope::new(event)) {
+            tracing::warn!(
+                events_dir = %events_dir.display(),
+                error = %e,
+                "could not record the sandbox capture result in the event store"
+            );
+        }
+    }
+}
+
 impl SandboxPlan {
     /// The provider-facing policy for the spawn wrapper.
     pub fn policy(&self) -> SandboxPolicy {
@@ -577,17 +640,20 @@ impl SandboxPlan {
     /// Watch the unified log for this goal's Seatbelt denials and record each
     /// as a `SandboxViolation` event. macOS only; `None` elsewhere or if the
     /// `log` tool cannot start (the sandbox still enforces). Start it BEFORE the
-    /// spawn: `log stream` needs a moment before it sees events. Repeats of the
-    /// same denial are reported once.
+    /// spawn: this blocks (at most `PRE_SPAWN_CANARY`) until a denial TA causes
+    /// on purpose comes back through the stream, which proves the stream is
+    /// attached. Repeats of the same denial are reported once. Call
+    /// [`ViolationCapture::finish`] after the agent exits.
     pub fn start_violation_tail(
         &self,
         events_dir: &Path,
         goal_id: uuid::Uuid,
-    ) -> Option<ViolationTail> {
+    ) -> Option<ViolationCapture> {
         if !self.wraps || self.provider != SandboxProvider::MacosSandboxExec {
             return None;
         }
         let tag = ta_runtime::seatbelt::violation_tag(&goal_id.to_string());
+        let events_dir_for_capture = events_dir.to_path_buf();
         let events_dir = events_dir.to_path_buf();
         let seen = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
         let report = move |v: Violation| {
@@ -612,7 +678,22 @@ impl SandboxPlan {
             );
         };
         match ViolationTail::start(tag, std::sync::Arc::new(report)) {
-            Ok(t) => Some(t),
+            Ok(tail) => {
+                let start = tail.probe(PRE_SPAWN_CANARY);
+                if !start.delivered() {
+                    eprintln!(
+                        "[warn] sandbox: the unified log did not deliver a test denial before \
+                         the agent started ({start:?}); denials may be missing from `ta sandbox \
+                         explain`. The sandbox still enforces."
+                    );
+                }
+                Some(ViolationCapture {
+                    tail,
+                    start,
+                    events_dir: events_dir_for_capture,
+                    goal_id,
+                })
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "sandbox denial events are unavailable");
                 eprintln!("[warn] sandbox: {e}");

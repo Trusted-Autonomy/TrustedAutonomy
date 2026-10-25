@@ -565,7 +565,7 @@ fn specs() -> Vec<Spec> {
             description: "answer_sha256 does not match the relayed answer (a swapped answer).",
             waiting_on: ("user", Some("user-123")),
             answer: Some("Use the release branch.".to_string()),
-            signed_answer: Some(long_answer),
+            signed_answer: Some(long_answer.clone()),
             role: None,
             ..Spec::new("refuse_answer_hash_mismatch", "agent_question", "answer", "user-123", Refuse("answer_changed"))
         },
@@ -598,24 +598,65 @@ fn specs() -> Vec<Spec> {
             role: Some("viewer"),
             ..Spec::new("refuse_custom_role_order_too_low", prov, "approve", "erin", Refuse("not_permitted"))
         },
+        // ── Rule 7: items rerouted away from a viewer ───────────────────────
+        Spec {
+            description: "Approve an item that was addressed to viewer-9 and rerouted by Wayfinder: the signer is another user (dana), escalated is true, and role 'member' meets the key's escalation_min_role (member). TA accepts and records escalated true.",
+            waiting_on: ("user", Some("viewer-9")),
+            role: Some("member"),
+            escalated: true,
+            ..Spec::new("approve_rerouted_viewer_item", prov, "approve", "dana", Accept { user: "dana", role: Some("member"), escalated: true, self_approved: false })
+        },
+        Spec {
+            description: "Deny a rerouted item under the escalated claim with an owner role.",
+            waiting_on: ("user", Some("viewer-9")),
+            role: Some("owner"),
+            escalated: true,
+            ..Spec::new("deny_rerouted_viewer_item", prov, "deny", "dana", Accept { user: "dana", role: Some("owner"), escalated: true, self_approved: false })
+        },
+        Spec {
+            description: "Answer an agent question that was rerouted from viewer-9 to dana under the escalated claim. answer_sha256 covers the exact relayed text.",
+            waiting_on: ("user", Some("viewer-9")),
+            answer: Some(long_answer),
+            role: Some("admin"),
+            escalated: true,
+            ..Spec::new("answer_rerouted_viewer_item", "agent_question", "answer", "dana", Accept { user: "dana", role: Some("admin"), escalated: true, self_approved: false })
+        },
+        Spec {
+            description: "A different user signs an item addressed to viewer-9 WITHOUT escalated: refused, the exception needs the escalated claim.",
+            waiting_on: ("user", Some("viewer-9")),
+            role: Some("owner"),
+            ..Spec::new("refuse_rerouted_without_escalated_claim", prov, "approve", "dana", Refuse("not_permitted"))
+        },
+        Spec {
+            description: "Escalated claim with a role below the key's escalation_min_role (custom order viewer < editor < lead, floor editor; claim 'viewer'): refused.",
+            waiting_on: ("user", Some("viewer-9")),
+            key: KeySpec::custom_order(),
+            role: Some("viewer"),
+            escalated: true,
+            ..Spec::new("refuse_rerouted_role_below_escalation_floor", prov, "approve", "erin", Refuse("not_permitted"))
+        },
+        Spec {
+            description: "Escalated claim with no role claim at all: refused, the floor cannot be checked.",
+            waiting_on: ("user", Some("viewer-9")),
+            role: None,
+            escalated: true,
+            ..Spec::new("refuse_rerouted_role_claim_absent", prov, "approve", "dana", Refuse("not_permitted"))
+        },
+        Spec {
+            description: "The exception covers approve, deny and answer only. A signed 'apply' for a rerouted item is refused even with escalated true and an owner role.",
+            waiting_on: ("user", Some("viewer-9")),
+            role: Some("owner"),
+            escalated: true,
+            ..Spec::new("refuse_rerouted_wrong_action", prov, "apply", "dana", Refuse("not_permitted"))
+        },
     ]
 }
 
 /// Placeholders other plan items fill in. They carry no `assertion` and no
 /// `expect`, and the runner skips them, so they can never pass by accident.
+/// None are open: rule 7's escalated viewer reroute is now active above.
 fn pending() -> Vec<Value> {
-    vec![json!({
-        "name": "escalated_viewer_reroute",
-        "status": "pending",
-        "pending_reason": "Filled in by plan phase v0.17.12.11 item 17 (rule 7: rerouted user-targeted items verify under the escalated claim). Today TA refuses a user-addressed item signed by a different user, with reason not_permitted, even when escalated is true.",
-        "intended": {
-            "item_waiting_on": { "type": "user", "value": "viewer-9" },
-            "assertion_claims": "user_id differs from waiting_on.value, escalated true, role at or above the registered key's escalation_min_role",
-            "accept_for": ["approve", "deny", "answer"],
-            "refuse_when": ["role below escalation_min_role", "role claim absent", "any other action"],
-            "audit": "TA records escalated true and the original waiting_on.value"
-        }
-    })]
+    Vec::new()
 }
 
 fn notes() -> Vec<&'static str> {
@@ -630,7 +671,7 @@ fn notes() -> Vec<&'static str> {
         "Answers: answer_sha256 is sha256 over the exact UTF-8 bytes of the relayed answer text. TA does not trim, normalize or re-encode the answer before hashing, so trailing whitespace and newlines count. An assertion whose hash was computed over trimmed text is refused with answer_changed when the relayed text is not trimmed.",
         "provenance null (no agent-side requester) and provenance with an empty-string excerpt are different values and have different digests.",
         "The signature is over the exact base64url header and claims segments as sent (header.claims). A signer may serialize the JSON with any key order; the verifier parses it. Signatures are Ed25519 and deterministic, so the compact assertions in this file are stable.",
-        "role_order, maintainer_roles and escalation_min_role are the registered key's settings and are published by GET /api/attention metadata (keys[]). escalation_min_role is recorded and published now; the escalated viewer reroute that enforces it is the pending vector below.",
+        "role_order, maintainer_roles and escalation_min_role are the registered key's settings and are published by GET /api/attention metadata (keys[]). escalation_min_role is published by the feed and enforced by rule 7: for an item rerouted away from its named user, TA accepts a different signer only with escalated true, a role claim at or above this floor, and the action approve, deny or answer (the *_rerouted_* vectors).",
         "jti must be 8 to 128 characters. TA keeps used jtis for at least 300 seconds, so a replay inside an assertion's lifetime is always refused.",
     ]
 }
@@ -866,10 +907,7 @@ fn every_vector_runs_through_the_real_verifier() {
         failures.join("\n")
     );
     assert!(ran >= 20, "expected at least 20 active vectors, ran {ran}");
-    assert_eq!(
-        skipped, 1,
-        "exactly the escalated reroute placeholder is pending"
-    );
+    assert_eq!(skipped, 0, "no vector is pending any more");
     for r in REQUIRED_REASONS {
         assert!(
             reasons.contains(*r),
