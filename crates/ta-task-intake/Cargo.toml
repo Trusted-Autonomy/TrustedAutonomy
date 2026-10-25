@@ -18,8 +18,8 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
-ta-audit = { path = "../ta-audit", version = "0.17.12-alpha.5" }
-ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.5" }
+ta-audit = { path = "../ta-audit", version = "0.17.12-alpha.11" }
+ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.11" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
