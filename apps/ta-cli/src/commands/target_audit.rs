@@ -416,7 +416,12 @@ mod tests {
         let results = check(root);
         let r = results.iter().find(|r| r.name == "Build output").unwrap();
         assert_eq!(r.status, super::super::doctor::CheckStatus::Warn);
-        let stale = root.join(".ta/staging/stale/target");
+        // Component-wise: the path in the message uses the platform separator.
+        let stale = root
+            .join(".ta")
+            .join("staging")
+            .join("stale")
+            .join("target");
         assert!(
             r.fix
                 .contains(&format!("ta doctor --remove-target {}", stale.display())),
