@@ -575,6 +575,7 @@ pub fn render_text(r: &CapabilitiesReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::path::Path;
 
     /// `Commands` is large; clap builds it on the stack, so every test that
