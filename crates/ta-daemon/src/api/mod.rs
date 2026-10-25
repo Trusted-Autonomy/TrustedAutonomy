@@ -24,6 +24,7 @@ pub mod events;
 pub mod goal_output;
 pub mod health;
 pub mod health_signals;
+pub mod identity;
 pub mod input;
 pub mod interactions;
 pub mod links;
@@ -626,12 +627,23 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/whiteboard/presence_for_source",
             get(whiteboard::presence_for_source),
         )
+        .with_state(state.clone());
+
+    // Identity: every response names its project. Added BEFORE the auth
+    // layer so it sits inside it: a 401/403 carries nothing, and
+    // `project_root` reaches only callers the API already serves.
+    let api_routes = identity::layer_for_state(api_routes, &state, identity::Exposure::Full)
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
-        ))
-        .with_state(state);
+        ));
+
+    // Unauthenticated groups reveal `project_id` only (see api/identity.rs).
+    let health_routes =
+        identity::layer_for_state(health_routes, &state, identity::Exposure::IdOnly);
+    let webhook_routes =
+        identity::layer_for_state(webhook_routes, &state, identity::Exposure::IdOnly);
 
     // Merge: health (no auth), webhooks (HMAC auth), api (Bearer auth).
     health_routes.merge(webhook_routes).merge(api_routes)

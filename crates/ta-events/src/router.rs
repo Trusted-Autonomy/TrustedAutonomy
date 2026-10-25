@@ -469,6 +469,8 @@ impl EventRouter {
                 source: "router".into(),
             },
             actions: vec![],
+            project_id: None,
+            project_root: None,
         };
         self.route(&synthetic)
     }

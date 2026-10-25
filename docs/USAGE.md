@@ -10617,6 +10617,54 @@ The daemon writes its PID to `.ta/daemon.pid` and logs to `.ta/daemon.log`. On s
 
 `.ta/daemon.pid` records the port the daemon actually bound (lines `pid=`, `bind=host:port`, `port=`, `log=`). The CLI and the agent whiteboard tools read it to find this project's daemon. If the file exists but has no usable port, or `.ta/daemon.toml` is unreadable, the whiteboard tools refuse to guess a port (the default could belong to a different project's daemon) and tell you to run `ta daemon restart`. Before sending a session token they also ask the daemon which project it serves and refuse if it is not this one.
 
+#### Finding a project's daemon: `.ta/daemon.json`
+
+Once the daemon has bound its port it writes `<project>/.ta/daemon.json`. This is the one place a project's daemon address is recorded; the CLI, the MCP tools, TA Studio and any script or poller should read it and never assume a port.
+
+```json
+{
+  "schema": 1,
+  "host": "127.0.0.1",
+  "port": 7712,
+  "bind": "127.0.0.1:7712",
+  "pid": 41873,
+  "project_id": "p_0123456789abcdef0123456789abcdef",
+  "project_root": "/Users/me/work/acme",
+  "started_at": "2026-10-23T09:14:02Z"
+}
+```
+
+`host` is what to connect to (a wildcard bind such as `0.0.0.0` is recorded as `127.0.0.1`); `bind` is what the daemon bound. Ignore fields you do not know. The file is written atomically with owner-only permissions and removed on a clean shutdown.
+
+**Resolution order** (first match wins): `--port` / `--url` on the command, a live `.ta/daemon.json`, `.ta/daemon.pid`, `[server]` in `.ta/daemon.toml`, then the project's derived port. `.ta/daemon.pid` is still written, so older plugins keep working.
+
+**A crash leaves the file behind, so do not trust it blindly.** A reader must treat the record as stale, and ignore it, when any of these holds:
+
+- the file is not valid JSON (cut short by a crash);
+- `pid` is not a running process (the daemon exited or was killed);
+- `project_root` is not the project directory you found the file in (the tree was copied), or `project_id` differs from `.ta/project-id`.
+
+`ta daemon start` and `ta daemon stop` remove a stale record and print why. A record that is live is never removed except by its own daemon. Starting a second daemon for a project whose record is live is refused, naming the pid and URL.
+
+**Verify before you send a credential.** Anything in `.ta/` is writable by an agent running in the project, so a poller or script that sends a token should connect only to a loopback host and check that the daemon that answers is the project it meant to reach, using the identity every response carries.
+
+#### Which project answered: identity on every response and event
+
+Every daemon response names its project, so a client never has to assume that the daemon it reached is the one it meant:
+
+- **Headers, on every response** (JSON, HTML, event streams, errors): `X-TA-Project-Id` (for example `p_0123456789abcdef0123456789abcdef`, from `.ta/project-id`) and `X-TA-Project-Root` (the canonical absolute path, percent-encoded; decode it with any URL decoder).
+- **Body:** JSON object responses also gain `project_id` and `project_root`. A field the endpoint already returns is left as it is, nothing is removed or renamed, and clients that ignore unknown fields are unaffected. `project_id` is `null` only when the project has no `.ta/project-id` yet. Arrays and non-JSON bodies carry the headers only.
+- **Events:** every event envelope, in `.ta/events/` and on `GET /api/events`, has `project_id` and `project_root`. Events written before the fields existed are filled in when they are read.
+
+What an unauthenticated caller sees: `/health`, `/metrics`, `/health/signals` and the webhook endpoints answer with `project_id` only. `/health` already reports `project_root` in its body, as before. A request the daemon refuses (401/403) carries no identity. Everything else carries both fields.
+
+Check it from a shell:
+
+```bash
+PORT=$(jq -r .port .ta/daemon.json)
+curl -si "http://127.0.0.1:$PORT/api/status" | grep -i '^x-ta-project'
+```
+
 #### Starting the daemon unattended
 
 On macOS the daemon keeps its capability-token root key, its audit-log signing key and the credential vault key in the Keychain. The first time a newly installed or rebuilt `ta-daemon` reads each of those, macOS shows a dialog that needs a person's click. The daemon asks for them all at startup, so the dialog appears when you start it, not in the middle of the first piece of real work.

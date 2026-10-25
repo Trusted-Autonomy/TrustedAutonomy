@@ -88,6 +88,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "human-verify-audit.jsonl", // ta_human_verify audit trail (v0.17.0.12.26)
     "wake-dead-letter.jsonl", // wake-on-demand messages abandoned after the retry cap
     "daemon-update.json", // daemon self-update restart-loop guard (attempt count per target build)
+    "daemon.json", // where this machine's daemon for the project listens (host/port/pid); machine-local
     "human-verify-invocations.jsonl", // ta_human_verify invocation log (v0.17.0.12.26)
     "verify-audit-reviewed.jsonl", // ta_human_verify review cursor (v0.17.0.12.26)
     "verify-threshold-proposals.jsonl", // ta_human_verify threshold proposals (v0.17.0.12.26)

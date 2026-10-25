@@ -32,6 +32,7 @@ pub mod chat_launch;
 pub mod config;
 pub mod constitution_gate;
 pub mod daemon_client;
+pub mod daemon_json;
 pub mod daemon_pid;
 pub mod daemon_port;
 pub mod error;

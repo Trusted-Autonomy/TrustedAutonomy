@@ -352,6 +352,15 @@ fn remove_pid_file(project_root: &Path) {
     let _ = std::fs::remove_file(pid_path(project_root));
 }
 
+/// Remove a leftover `.ta/daemon.json` (its daemon crashed or exited, or it was
+/// copied from another project) and say so. A live daemon's record is never
+/// touched.
+fn clean_stale_daemon_record(project_root: &Path) {
+    if let Some(reason) = ta_mcp_gateway::daemon_json::clean_stale(project_root) {
+        eprintln!("Removed stale .ta/daemon.json: {reason}");
+    }
+}
+
 /// Check whether a process with the given PID is alive.
 pub fn is_process_alive(pid: u32) -> bool {
     ta_lifecycle::process_is_alive(pid)
@@ -369,15 +378,25 @@ fn daemon_toml_bind_port(project_root: &Path) -> (String, u16) {
 }
 
 /// Host and port to reach `project_root`'s daemon on, with optional port
-/// override. Order: `port_override`, then the live daemon's `.ta/daemon.pid`
-/// (the port it actually bound), then `[server] port` in `.ta/daemon.toml`,
-/// then the project's derived port. A pid file that exists but carries no
-/// readable port is reported loudly on stderr rather than silently ignored.
+/// override. Order: `port_override`, then the live daemon's `.ta/daemon.json`,
+/// then its `.ta/daemon.pid` (the port it actually bound), then `[server] port`
+/// in `.ta/daemon.toml`, then the project's derived port. A pid file that
+/// exists but carries no readable port is reported loudly on stderr rather
+/// than silently ignored.
 fn resolve_daemon_addr(project_root: &Path, port_override: Option<u16>) -> (String, u16) {
     let (bind, toml_port) = daemon_toml_bind_port(project_root);
 
     if let Some(p) = port_override {
         return (bind, p);
+    }
+    // `.ta/daemon.json`, while its daemon is running and it names this project,
+    // is the one authoritative record of where the daemon is.
+    match ta_mcp_gateway::daemon_json::read(project_root) {
+        ta_mcp_gateway::daemon_json::Lookup::Live(rec) => return (rec.host, rec.port),
+        ta_mcp_gateway::daemon_json::Lookup::Ignored { reason } => {
+            tracing::debug!(reason = %reason, "ignoring .ta/daemon.json; falling back to daemon.pid");
+        }
+        ta_mcp_gateway::daemon_json::Lookup::Absent => {}
     }
 
     match ta_mcp_gateway::daemon_pid::read_pid_file(project_root) {
@@ -625,6 +644,18 @@ fn start_with_binary(
         // Stale PID file — remove it.
         remove_pid_file(project_root);
     }
+    if let ta_mcp_gateway::daemon_json::Lookup::Live(rec) =
+        ta_mcp_gateway::daemon_json::read(project_root)
+    {
+        return Err(anyhow::anyhow!(
+            "Daemon already running for {} (pid {}, {}; recorded in .ta/daemon.json). Use \
+             `ta daemon stop` first, or `ta daemon restart` to replace it.",
+            project_root.display(),
+            rec.pid,
+            rec.base_url()
+        ));
+    }
+    clean_stale_daemon_record(project_root);
 
     let StartPlan { port, .. } = plan_start(project_root, port_override, probe)?;
     let port_override = Some(port);
@@ -744,6 +775,7 @@ fn stop_with(project_root: &Path, probe: &dyn DaemonProbe) -> anyhow::Result<()>
             } else {
                 eprintln!("Daemon not running (stale PID file).");
                 remove_pid_file(project_root);
+                clean_stale_daemon_record(project_root);
                 return Ok(());
             }
         } else {
@@ -778,6 +810,7 @@ fn stop_with(project_root: &Path, probe: &dyn DaemonProbe) -> anyhow::Result<()>
     }
 
     remove_pid_file(project_root);
+    clean_stale_daemon_record(project_root);
     Ok(())
 }
 
@@ -2729,6 +2762,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = resolve_daemon_url(dir.path(), Some(9900));
         assert_eq!(url, "http://127.0.0.1:9900");
+    }
+
+    #[test]
+    fn resolve_daemon_url_follows_a_live_daemon_json_over_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(pid_path(dir.path()), "pid=1\nbind=127.0.0.1:7710\n").unwrap();
+        // This test process is the "daemon": its pid is certainly running.
+        ta_mcp_gateway::daemon_json::write(dir.path(), "127.0.0.1", 7733, std::process::id())
+            .unwrap();
+        assert_eq!(
+            resolve_daemon_url(dir.path(), None),
+            "http://127.0.0.1:7733"
+        );
+        // An explicit --port still wins.
+        assert_eq!(
+            resolve_daemon_url(dir.path(), Some(9900)),
+            "http://127.0.0.1:9900"
+        );
+    }
+
+    #[test]
+    fn a_crashed_daemons_daemon_json_is_ignored_and_cleaned_by_start_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(pid_path(dir.path()), "pid=1\nbind=127.0.0.1:7710\n").unwrap();
+        // pid 2147483646 is not running: the daemon crashed and left its record.
+        ta_mcp_gateway::daemon_json::write(dir.path(), "127.0.0.1", 7733, 2_147_483_646).unwrap();
+        assert_eq!(
+            resolve_daemon_url(dir.path(), None),
+            "http://127.0.0.1:7710",
+            "a stale record must not redirect the CLI"
+        );
+        clean_stale_daemon_record(dir.path());
+        assert!(!ta_mcp_gateway::daemon_json::path(dir.path()).exists());
     }
 
     #[test]

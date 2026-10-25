@@ -239,6 +239,7 @@ memory/work_queue.md
 .ta/attention/
 .ta/wake-dead-letter.jsonl
 .ta/daemon.pid
+.ta/daemon.json
 .ta/daemon.log
 .ta/mcp-agent.json
 .ta/mcp-agent-chat.json
