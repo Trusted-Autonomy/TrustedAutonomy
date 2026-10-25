@@ -69,6 +69,5 @@ notify = { workspace = true }
 # TLS transport support (v0.13.2).
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
-
-[dev-dependencies]
+# Scratch project for `ta-daemon --print-capabilities` (capability_probe.rs).
 tempfile = { workspace = true }

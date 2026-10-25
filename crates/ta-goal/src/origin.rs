@@ -115,6 +115,31 @@ pub struct LaunchOrigin {
     pub origin: Option<String>,
 }
 
+/// The `ta run` flag that starts a read-only chat-mode session.
+pub const RUN_FLAG_CHAT_MODE: &str = "--chat-mode";
+
+/// The `ta run` flag that sets the goal's origin.
+pub const RUN_FLAG_ORIGIN: &str = "--origin";
+
+impl LaunchOrigin {
+    /// The `ta run` arguments this launch carries. This is the one place the
+    /// daemon turns a resolved launch into flags (`build_ta_run_args` calls
+    /// it for every role launch), and the one the `ta-daemon
+    /// --print-capabilities` probe calls, so what `ta capabilities` reports
+    /// about the daemon is computed by the code that does the launching.
+    pub fn run_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.chat_mode {
+            args.push(RUN_FLAG_CHAT_MODE.to_string());
+        }
+        if let Some(origin) = &self.origin {
+            args.push(RUN_FLAG_ORIGIN.to_string());
+            args.push(origin.clone());
+        }
+        args
+    }
+}
+
 /// Work out the origin and chat-mode flags for a role launch from its
 /// persona (`[capabilities] chat_mode` / `origin`) and its team role
 /// (`team.toml` member `origin`).
@@ -331,6 +356,43 @@ pub fn origin_class_to_stamp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_args_carry_exactly_the_requested_restrictions() {
+        let plain = LaunchOrigin {
+            chat_mode: false,
+            origin: None,
+        };
+        assert!(plain.run_args().is_empty());
+
+        let chat = LaunchOrigin {
+            chat_mode: true,
+            origin: None,
+        };
+        assert_eq!(chat.run_args(), vec![RUN_FLAG_CHAT_MODE.to_string()]);
+
+        let cos = LaunchOrigin {
+            chat_mode: true,
+            origin: Some("cos".to_string()),
+        };
+        assert_eq!(
+            cos.run_args(),
+            vec![
+                RUN_FLAG_CHAT_MODE.to_string(),
+                RUN_FLAG_ORIGIN.to_string(),
+                "cos".to_string()
+            ]
+        );
+
+        let origin_only = LaunchOrigin {
+            chat_mode: false,
+            origin: Some("chat".to_string()),
+        };
+        assert_eq!(
+            origin_only.run_args(),
+            vec![RUN_FLAG_ORIGIN.to_string(), "chat".to_string()]
+        );
+    }
 
     #[test]
     fn chat_mode_and_untrusted_origins_never_claim_a_plan_phase() {

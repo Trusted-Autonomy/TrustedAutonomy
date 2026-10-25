@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod apply_queue;
 pub mod audit;
 pub mod build;
+pub mod capabilities;
 pub mod chat_launch;
 pub mod cleanup;
 pub mod community;

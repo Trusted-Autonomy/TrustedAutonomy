@@ -92,6 +92,30 @@ pub const SPECS: &[SpecEntry] = &[
         file: "init_report.schema.json",
         generate: init_report_schema,
     },
+    SpecEntry {
+        name: "capabilities",
+        version: ta_workspace::CAPABILITIES_SCHEMA_VERSION,
+        file: "capabilities.schema.json",
+        generate: capabilities_schema,
+    },
+    SpecEntry {
+        name: "daemon_probe",
+        version: ta_workspace::DAEMON_PROBE_SCHEMA_VERSION,
+        file: "daemon_probe.schema.json",
+        generate: daemon_probe_schema,
+    },
+    SpecEntry {
+        name: "terms_status",
+        version: ta_workspace::TERMS_STATUS_SCHEMA_VERSION,
+        file: "terms_status.schema.json",
+        generate: terms_status_schema,
+    },
+    SpecEntry {
+        name: "daemon_report",
+        version: ta_workspace::DAEMON_REPORT_SCHEMA_VERSION,
+        file: "daemon_report.schema.json",
+        generate: daemon_report_schema,
+    },
 ];
 
 /// The `Goal` spec — `ta_goal::GoalRun`, the execution-lifecycle unit.
@@ -141,6 +165,26 @@ pub fn vcs_setup_report_schema() -> Schema {
 /// The `InitReport` spec: `ta init --json`.
 pub fn init_report_schema() -> Schema {
     schemars::schema_for!(ta_workspace::InitReport)
+}
+
+/// The `Capabilities` spec: `ta capabilities --json`.
+pub fn capabilities_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::CapabilitiesReport)
+}
+
+/// The `DaemonProbe` spec: `ta-daemon --print-capabilities`.
+pub fn daemon_probe_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::DaemonProbe)
+}
+
+/// The `TermsStatus` spec: `ta terms-status --json`.
+pub fn terms_status_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::TermsStatusReport)
+}
+
+/// The `DaemonReport` spec: `ta daemon start|restart|status --json`.
+pub fn daemon_report_schema() -> Schema {
+    schemars::schema_for!(ta_workspace::DaemonReport)
 }
 
 /// Looks up a published spec's current version by name (e.g. `"draft"`,

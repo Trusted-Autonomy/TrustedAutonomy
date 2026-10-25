@@ -1,0 +1,46 @@
+{
+  "$id": "https://trustedautonomy.dev/schema/daemon_probe.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `ta-daemon --print-capabilities` prints: the facts only the daemon\nbinary can vouch for, each computed by running the code the daemon itself\nuses (never from a flag or version string).",
+  "properties": {
+    "daemon_version": {
+      "description": "The daemon's own version.",
+      "type": "string"
+    },
+    "evidence": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "One line per capability saying what was run to decide it.",
+      "type": "object"
+    },
+    "nats_credentials": {
+      "description": "The daemon's NATS client refuses a non-loopback server without\ncredentials and accepts one with them.",
+      "type": "boolean"
+    },
+    "outcome_roles": {
+      "description": "Only roles in `[whiteboard] outcome_roles` receive the outcome right\nwhen the daemon mints a role token.",
+      "type": "boolean"
+    },
+    "passes_restricted_flags": {
+      "description": "A CoS launch built by the daemon's role-launch code carries both\n`--chat-mode` and `--origin cos`.",
+      "type": "boolean"
+    },
+    "probe_schema": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "probe_schema",
+    "daemon_version",
+    "passes_restricted_flags",
+    "outcome_roles",
+    "nats_credentials",
+    "evidence"
+  ],
+  "title": "DaemonProbe",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

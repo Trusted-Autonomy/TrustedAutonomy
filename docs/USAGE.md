@@ -9077,17 +9077,55 @@ ta draft approve <id> --as emergency-admin --override
 # Approved draft package <id> by emergency-admin
 ```
 
+### Machine-Readable Install Facts (for installers and scripts)
+
+Scripts ask `ta` what it can do instead of parsing `--help` or human text. Each command below prints exactly one JSON document on stdout; progress, warnings and the deprecation notice go to stderr. Every document carries `schema_version`, and its JSON Schema is generated from the Rust type into `schema/` (`capabilities`, `daemon_probe`, `terms_status`, `daemon_report`, `init_report`, `vcs_setup_report`).
+
+**What can this `ta` safely do?**
+
+```bash
+ta capabilities           # human summary: yes/NO per capability, with evidence
+ta capabilities --json    # versioned document
+```
+
+Fields: `capabilities_schema`, `ta_version`, `platform` (`os`, `arch`), `daemon_passes_restricted_flags`, `supports_chat_mode`, `supports_origin`, `rules_engine`, `outcome_roles`, `nats_credentials`, `terms_status`, `atomic_apply`, `sandbox_providers` (name and what each enforces), `daemon_probe` and an `evidence` line per capability.
+
+A capability is `true` only when the code path ran and worked: the probe parses `ta run --chat-mode` / `--origin`, compiles a strict rules posture and checks it denies, journals and rolls back a file change, and so on. A flag appearing in `ta run --help` proves nothing. The daemon-side capabilities (`daemon_passes_restricted_flags`, `outcome_roles`, `nats_credentials`) come from the sibling `ta-daemon` binary itself (`ta-daemon --print-capabilities`), which builds a real chief-of-staff launch and checks it carries `--chat-mode --origin cos`. They are `false` whenever the daemon cannot vouch: `daemon_probe.state` is `binary_not_found`, `probe_unsupported` (a daemon older than the probe) or `probe_failed`, and `daemon_probe.detail` says what to do (usually reinstall `ta` and `ta-daemon` together). `daemon_passes_restricted_flags` additionally requires this `ta` to support chat mode and origin.
+
+**Terms of use.**
+
+```bash
+ta terms-status --json
+```
+
+`status` is `current`, `stale`, `not_accepted` or `unavailable`. `document_version` and `document_sha256` identify the exact terms text this build shows (`ta view-terms` prints that text plus one extra trailing newline). Acceptance records both; when the text changes, the stored hash no longer matches and the status is `stale`, so the next `accept-terms` re-prompts. A record written before hashes were stored stays `current` while its short hash matches and is flagged `legacy_record`. The plain `ta terms-status` text (`Status: current`, `Version:` lines) is unchanged.
+
+**Daemon, init and VCS setup.**
+
+```bash
+ta daemon status --json                 # state, pid, port, url, pid_file, log_file, reasons
+ta daemon start --json                  # same document after the start
+ta daemon restart --json                # also previous_pid
+ta init --json
+ta setup vcs --dry-run --json
+```
+
+`state` for the daemon commands is `running`, `starting`, `degraded`, `unresponsive`, `stale_pid`, `not_running`, `other_project` or `external`; `starting` and `degraded` list `reasons` with a `next_step`. `ta daemon start --foreground --json` is refused (a foreground daemon never returns). When `ta init --json` or another JSON command is the first to need the terms, the terms notice is written to stderr so stdout stays one document. Secrets never pass through these documents; supply them with `ta credentials add --secret-stdin` (see Credential Management).
+
 ### Credential Management
 
 TA manages credentials so agents never hold raw secrets. Agents request access; TA provides scoped, time-limited session tokens. This is the foundation for all external service integrations (MCP servers that need auth, API keys, OAuth tokens).
 
 ```bash
-# Add a credential (secret is stored with 0600 file permissions)
-ta credentials add --name "GitHub Token" --service github --secret "ghp_..."
+# Add a credential (secret is stored with 0600 file permissions). Give the
+# secret on standard input or from an environment variable so it never
+# appears in `ps` or your shell history:
+printf %s "$GITHUB_TOKEN" | ta credentials add --name "GitHub Token" --service github --secret-stdin
+ta credentials add --name "GitHub Token" --service github --secret-env GITHUB_TOKEN
 
 # Add with scopes
-ta credentials add --name "Gmail Read" --service gmail --secret "ya29.a0..." \
-  --scope "read" --scope "labels"
+printf %s "$GMAIL_TOKEN" | ta credentials add --name "Gmail Read" --service gmail \
+  --secret-stdin --scope "read" --scope "labels"
 
 # List credentials (secrets are never shown -- only name, service, scopes)
 ta credentials list
@@ -9097,7 +9135,7 @@ ta credentials list
 # already referring to it by id (an issued grant, a role binding in
 # .ta/team.toml) keeps working and just resolves to the new secret on the
 # next agent launch. Prefer this over revoke + add for rotation.
-ta credentials update <credential-id> --secret "sk-ant-new..."
+printf %s "$NEW_KEY" | ta credentials update <credential-id> --secret-stdin
 
 # Revoke a credential
 ta credentials revoke <credential-id>
@@ -9113,6 +9151,16 @@ project's vault is created. On a machine with nobody present to answer that prom
 failing -- set the `TA_NO_KEYCHAIN` environment variable (to any value) before running
 `ta credentials add`/`update`/`revoke`/`grant` to force file-based key custody
 (an owner-only file in the per-user state directory, not in the project) instead and skip the keychain entirely.
+
+**Where the secret comes from.** `add` and `update` need exactly one of:
+
+| Flag | Source |
+|---|---|
+| `--secret-stdin` | Standard input, read to the end. One trailing newline is dropped; nothing else is trimmed. |
+| `--secret-env NAME` | The environment variable `NAME` (give the variable's name, not the secret). |
+| `--secret VALUE` | The command line. Still works, but TA warns on stderr: the value is visible in `ps` and your shell history. |
+
+An empty secret is refused, and an unset `--secret-env` variable is an error that names the variable. The secret is never printed: not in the confirmation, the `--secret` warning, or any error text (an `--secret-env` argument that is not an `UPPER_CASE` name is not echoed either, in case it was the secret).
 
 `<credential-id>` accepts a full UUID or any unambiguous prefix, for `update`, `revoke`, and `grant` alike.
 
@@ -9212,7 +9260,7 @@ create`), register it in the vault with a matching scope and pass
 `--credential-scopes` on the parent `ta run --workflow swarm ...` command:
 
 ```bash
-ta credentials add --name GITHUB_TOKEN --service github --secret "ghp_..." --scope "ci.push"
+printf %s "$GITHUB_TOKEN" | ta credentials add --name GITHUB_TOKEN --service github --secret-stdin --scope "ci.push"
 ta run "Ship the release" --workflow swarm --sub-goals "Build" "Test" \
   --credential-scopes "ci.push"
 ```

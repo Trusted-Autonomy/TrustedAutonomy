@@ -1431,8 +1431,32 @@ enum Commands {
     #[command(hide = true)]
     ViewTerms,
     /// Show terms acceptance status.
+    ///
+    /// With `--json`, prints one document with the terms document version and
+    /// SHA-256 (and what was accepted) on stdout, for scripts and installers.
     #[command(hide = true)]
-    TermsStatus,
+    TermsStatus {
+        /// Print a JSON document instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show what this installation can safely do (for scripts and installers).
+    ///
+    /// Reports, per capability, whether the code path is really wired: the
+    /// daemon passing `--chat-mode`/`--origin` to the Chief of Staff, the rules
+    /// engine, role-bound outcomes, NATS credentials, atomic apply, terms
+    /// status and sandbox providers. Each is decided by running the code
+    /// behind it, never from a flag appearing in `--help` or from the version.
+    ///
+    /// Examples:
+    ///   ta capabilities            # human summary
+    ///   ta capabilities --json     # stable, versioned JSON on stdout
+    #[command(hide = true)]
+    Capabilities {
+        /// Print the JSON document instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage per-agent terms consent (v0.10.18.4).
     ///
     /// Subcommands: `ta terms show <agent>`, `ta terms accept <agent>`, `ta terms status`.
@@ -1596,9 +1620,11 @@ fn run() -> anyhow::Result<()> {
     let cli = parse_cli_with_help_curation();
     let t_parse = startup_begin.elapsed();
 
-    // Handle --accept-terms flag (non-interactive acceptance).
+    // Handle --accept-terms flag (non-interactive acceptance). When the command
+    // prints a JSON document, the terms text goes to stderr so stdout stays JSON.
+    let json_stdout = command_prints_json(cli.command.as_ref());
     if cli.accept_terms {
-        commands::terms::accept_non_interactive()?;
+        commands::terms::accept_non_interactive(json_stdout)?;
     }
 
     // Terms-related commands don't require prior acceptance.
@@ -1606,7 +1632,7 @@ fn run() -> anyhow::Result<()> {
         match cmd {
             Commands::AcceptTerms { yes } => {
                 if *yes {
-                    return commands::terms::accept_non_interactive();
+                    return commands::terms::accept_non_interactive(false);
                 } else {
                     return commands::terms::prompt_and_accept();
                 }
@@ -1615,7 +1641,10 @@ fn run() -> anyhow::Result<()> {
                 commands::terms::view_terms();
                 return Ok(());
             }
-            Commands::TermsStatus => return commands::terms::show_status(),
+            Commands::TermsStatus { json } => return commands::terms::show_status(*json),
+            // Read-only and project-independent: answered before any project or
+            // daemon work so an installer can probe a machine with no project.
+            Commands::Capabilities { json } => return commands::capabilities::execute(*json),
             // Per-agent terms management (v0.10.18.4).
             Commands::Terms { action, agent } => {
                 let project_root = cli
@@ -1653,7 +1682,7 @@ fn run() -> anyhow::Result<()> {
     // Read-only commands (ta plan list, ta draft view, ta stats, etc.) are exempt.
     let needs_terms = cli.command.as_ref().is_some_and(requires_terms_acceptance);
     if needs_terms {
-        commands::terms::ensure_accepted()?;
+        commands::terms::ensure_accepted(json_stdout)?;
     }
 
     let project_root = cli.project_root.canonicalize().unwrap_or(cli.project_root);
@@ -2478,7 +2507,8 @@ fn dispatch_raw(
         // Already handled above.
         Commands::AcceptTerms { .. }
         | Commands::ViewTerms
-        | Commands::TermsStatus
+        | Commands::TermsStatus { .. }
+        | Commands::Capabilities { .. }
         | Commands::Terms { .. } => unreachable!(),
     }
 }
@@ -2492,6 +2522,18 @@ fn requires_terms_acceptance(cmd: &Commands) -> bool {
     match cmd {
         Commands::Init { .. } | Commands::Run { .. } => true,
         Commands::Goal { command } => commands::goal::is_start_command(command),
+        _ => false,
+    }
+}
+
+/// True when the command prints a JSON document on stdout, so anything else it
+/// triggers on the way (terms text, prompts) must go to stderr.
+fn command_prints_json(cmd: Option<&Commands>) -> bool {
+    match cmd {
+        Some(Commands::Init { json, .. }) => *json,
+        Some(Commands::Setup { command }) => commands::setup::prints_json(command),
+        Some(Commands::Daemon { command }) => commands::daemon::prints_json(command),
+        Some(Commands::TermsStatus { json }) | Some(Commands::Capabilities { json }) => *json,
         _ => false,
     }
 }

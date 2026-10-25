@@ -20,6 +20,7 @@ pub mod advisor_patch;
 pub mod conflict;
 pub mod copy_strategy;
 pub mod error;
+pub mod install_facts;
 pub mod link_cache;
 pub mod links;
 pub mod local_dev;
@@ -40,6 +41,12 @@ pub use advisor_patch::AdvisorPatch;
 pub use conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 pub use copy_strategy::{CopyStat, CopyStrategy};
 pub use error::WorkspaceError;
+pub use install_facts::{
+    CapabilitiesReport, DaemonAction, DaemonProbe, DaemonProbeState, DaemonProbeStatus,
+    DaemonReason, DaemonReport, DaemonState, Platform, SandboxProviderFact, TermsState,
+    TermsStatusReport, CAPABILITIES_SCHEMA_VERSION, DAEMON_PROBE_SCHEMA_VERSION,
+    DAEMON_REPORT_SCHEMA_VERSION, TERMS_STATUS_SCHEMA_VERSION,
+};
 pub use links::{Link, LinkStatus, Relationship};
 pub use log_rotation::{
     force_rotate as force_rotate_daemon_log, rotate_if_needed as rotate_daemon_log_if_needed,

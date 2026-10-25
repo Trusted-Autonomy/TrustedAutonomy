@@ -32,6 +32,23 @@ pub enum TeamSessionStatus {
     Stopped,
 }
 
+/// The scopes minted into one role launch's whiteboard token. The outcome
+/// right (`OUTCOME_SEND_SCOPE`) is granted only to roles named in
+/// `outcome_roles`. `role_launch_env` and `ta-daemon --print-capabilities` both
+/// use this, so the capability report cannot claim role-bound outcomes the
+/// real launch does not mint.
+pub fn role_token_scopes(session_id: &str, role: &str, outcome_roles: &[String]) -> Vec<String> {
+    let mut scope_list = vec![
+        ta_agent_whiteboard::scopes::session_scope(session_id),
+        ta_agent_whiteboard::scopes::role_scope(session_id, role),
+        ta_agent_whiteboard::scopes::target_scope(ta_agent_whiteboard::scopes::DEFAULT_TARGET),
+    ];
+    if outcome_roles.iter().any(|r| r == role) {
+        scope_list.push(ta_agent_whiteboard::scopes::OUTCOME_SEND_SCOPE.to_string());
+    }
+    scope_list
+}
+
 /// Environment for one role launch: a fresh whiteboard token for this role,
 /// in the launched process's environment only (never on disk). Empty when the
 /// session has no whiteboard. A minting failure is logged loudly and the role
@@ -51,14 +68,7 @@ pub fn role_launch_env(
     // outcome_roles` (default chief-of-staff). The daemon reads all of this
     // back from the token when the role calls the whiteboard API (CR-04).
     let wb_cfg = ta_agent_whiteboard::WhiteboardConfig::load(project_root);
-    let mut scope_list = vec![
-        ta_agent_whiteboard::scopes::session_scope(&state.id),
-        ta_agent_whiteboard::scopes::role_scope(&state.id, role),
-        ta_agent_whiteboard::scopes::target_scope(ta_agent_whiteboard::scopes::DEFAULT_TARGET),
-    ];
-    if wb_cfg.outcome_roles.iter().any(|r| r == role) {
-        scope_list.push(ta_agent_whiteboard::scopes::OUTCOME_SEND_SCOPE.to_string());
-    }
+    let scope_list = role_token_scopes(&state.id, role, &wb_cfg.outcome_roles);
     let granted = ta_credential_broker::CredentialBroker::open_for_project(project_root)
         .map_err(|e| e.to_string())
         .and_then(|broker| {
@@ -578,13 +588,10 @@ pub fn build_ta_run_args(
                 role, e
             )
         })?;
-        if launch.chat_mode {
-            args.push("--chat-mode".to_string());
-        }
-        if let Some(origin) = launch.origin {
-            args.push("--origin".to_string());
-            args.push(origin);
-        }
+        // The flags come from `LaunchOrigin::run_args`, the same function
+        // `ta-daemon --print-capabilities` runs, so `ta capabilities` cannot
+        // report `daemon_passes_restricted_flags` for a daemon that does not.
+        args.extend(launch.run_args());
         // `team.toml`'s `member.agent_id`/`model_tier` name a MODEL (e.g.
         // "claude-opus-5"), not a framework -- `ta run`'s `--agent` flag
         // means framework (claude-code, codex, a custom manifest) and

@@ -1,0 +1,223 @@
+{
+  "$defs": {
+    "DaemonAction": {
+      "description": "Which `ta daemon` command produced a [`DaemonReport`].",
+      "enum": [
+        "start",
+        "restart",
+        "status"
+      ],
+      "type": "string"
+    },
+    "DaemonReason": {
+      "description": "One reason a daemon is `starting` or `degraded`.",
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "DaemonState": {
+      "description": "What state the project's daemon is in.",
+      "oneOf": [
+        {
+          "const": "running",
+          "description": "Answering and healthy.",
+          "type": "string"
+        },
+        {
+          "const": "starting",
+          "description": "Answering (or just spawned and not answering yet) but not finished\nstarting, usually waiting on a Keychain approval; see `reasons`.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "Answering, started with a failed component; see `reasons`.",
+          "type": "string"
+        },
+        {
+          "const": "unresponsive",
+          "description": "The pid in `.ta/daemon.pid` is alive but nothing answers on `url`.",
+          "type": "string"
+        },
+        {
+          "const": "stale_pid",
+          "description": "`.ta/daemon.pid` named a process that is gone; the file was removed.",
+          "type": "string"
+        },
+        {
+          "const": "not_running",
+          "description": "No daemon for this project.",
+          "type": "string"
+        },
+        {
+          "const": "other_project",
+          "description": "The port answers with another project's daemon. This project has none.",
+          "type": "string"
+        },
+        {
+          "const": "external",
+          "description": "A daemon for this project answers but did not write a pid file here.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://trustedautonomy.dev/schema/daemon_report.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "`ta daemon start|restart|status --json`: the pid/port contract of\n`.ta/daemon.pid` (pid, bind host, port, log) plus the daemon's health.",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/DaemonAction"
+    },
+    "active_agents": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "active_goals": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "detail": {
+      "description": "What happened and what to do next; null when there is nothing to add.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "host": {
+      "description": "Host the daemon binds / is reached on.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "log_file": {
+      "description": "Absolute path of the daemon log.",
+      "type": "string"
+    },
+    "pending_drafts": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "pid": {
+      "description": "Daemon process id; null when none is known.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "pid_file": {
+      "description": "Absolute path of `.ta/daemon.pid`.",
+      "type": "string"
+    },
+    "port": {
+      "description": "Port the daemon API is (or will be) reachable on.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "previous_pid": {
+      "description": "The pid before a `restart`; null for other actions or no earlier daemon.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "project_root": {
+      "type": "string"
+    },
+    "reasons": {
+      "description": "Why the daemon is `starting` or `degraded`, each with a next step.",
+      "items": {
+        "$ref": "#/$defs/DaemonReason"
+      },
+      "type": "array"
+    },
+    "reported_project_root": {
+      "description": "Project root the answering daemon reports; set for `other_project`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "running": {
+      "description": "True for `running`, `starting`, `degraded` and `external`.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "stale_pid_removed": {
+      "description": "A stale pid file was removed by this call.",
+      "type": "boolean"
+    },
+    "state": {
+      "$ref": "#/$defs/DaemonState"
+    },
+    "url": {
+      "description": "`http://<host>:<port>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "description": "Daemon version when it answered.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "action",
+    "state",
+    "running",
+    "pid_file",
+    "log_file",
+    "project_root",
+    "reasons",
+    "stale_pid_removed"
+  ],
+  "title": "DaemonReport",
+  "type": "object",
+  "x-ta-schema-version": 1
+}
