@@ -465,13 +465,17 @@ enum DaemonProbe {
 fn probe_daemon(daemon_url: &str, timeout: std::time::Duration) -> DaemonProbe {
     let client = match reqwest::blocking::Client::builder()
         .timeout(timeout)
+        // Connecting gets half the budget: a connect that never completes (a
+        // refused port on Windows takes ~2 s to fail) is "not reachable", while
+        // "slow" means the TCP connection was made and the answer did not come.
+        .connect_timeout(timeout / 2)
         .build()
     {
         Ok(c) => c,
         Err(e) => return DaemonProbe::Unreachable(format!("could not build HTTP client: {e}")),
     };
     match client.get(format!("{}/api/status", daemon_url)).send() {
-        Err(e) if e.is_timeout() => DaemonProbe::Slow,
+        Err(e) if e.is_timeout() && !e.is_connect() => DaemonProbe::Slow,
         Err(e) => DaemonProbe::Unreachable(e.to_string()),
         Ok(r) if !r.status().is_success() => {
             DaemonProbe::Unhealthy(format!("HTTP {} from /api/status", r.status()))
