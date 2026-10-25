@@ -28,7 +28,8 @@ use ta_goal::chat_mode::{
     resolve_chat_mode_tool_surface, validate_chat_agent_id, CHAT_MODE_NATIVE_DENY,
 };
 use ta_mcp_gateway::chat_launch::{
-    ENV_CHAT_AGENT_ID, ENV_CHAT_MODE, ENV_CHAT_SESSION_ID, ENV_CHAT_WORKSPACE_ROOT,
+    ENV_CHAT_AGENT_ID, ENV_CHAT_MODE, ENV_CHAT_SESSION_ID, ENV_CHAT_WAYFINDER_PROJECT_ID,
+    ENV_CHAT_WORKSPACE_ROOT,
 };
 
 /// File name (under the project's `.ta/`) of the MCP config used for
@@ -279,6 +280,61 @@ pub(crate) fn chat_mode_agent_env(
             staging_path.display().to_string(),
         ),
     ]
+}
+
+/// The Wayfinder project a chat launch for `project_root` is pinned to, as the one
+/// environment entry the agent's `ta serve` reads (`TA_CHAT_WAYFINDER_PROJECT_ID`).
+///
+/// The project is `[plan.wayfinder].project_id` in `project_root/.ta/workflow.toml`, the
+/// project the wake or run is FOR. `inherited` is the value already in this process's
+/// environment (set by the daemon's wake listener, or ambient); it must agree with that
+/// config, or the launch is refused rather than guessing which project is meant.
+///
+/// Fail closed: when the project cannot be determined the entry is still emitted, EMPTY,
+/// which overrides any ambient value and leaves the read tools without a pin, so every
+/// `ta_wayfinder_*` call refuses (it names the missing `[plan.wayfinder]` config).
+pub(crate) fn chat_mode_wayfinder_env(
+    project_root: &Path,
+    inherited: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    let inherited = inherited.map(str::trim).filter(|s| !s.is_empty());
+    let workflow_toml = project_root.join(".ta").join("workflow.toml");
+    let configured = match ta_submit::WorkflowConfig::load(&workflow_toml) {
+        Ok(w) => w
+            .plan
+            .wayfinder
+            .map(|c| c.project_id.trim().to_string())
+            .filter(|id| !id.is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                path = %workflow_toml.display(),
+                error = %e,
+                "chat mode: could not read the Wayfinder project from workflow.toml"
+            );
+            None
+        }
+    };
+    let pin = match (configured, inherited) {
+        (Some(c), Some(i)) if c != i => anyhow::bail!(
+            "Cannot launch chat-mode session: the wake context names Wayfinder project '{i}' \
+             ({ENV_CHAT_WAYFINDER_PROJECT_ID}) but {} [plan.wayfinder] project_id is '{c}'. \
+             Refusing to pick one: a chat session reads exactly one project. Fix the config, or \
+             unset {ENV_CHAT_WAYFINDER_PROJECT_ID} and re-launch.",
+            workflow_toml.display()
+        ),
+        (Some(c), _) => c,
+        (None, Some(i)) => i.to_string(),
+        (None, None) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                "chat mode: no Wayfinder project known for this session; the ta_wayfinder_* read \
+                 tools will refuse every call. Set [plan.wayfinder] project_id in {}",
+                workflow_toml.display()
+            );
+            String::new()
+        }
+    };
+    Ok((ENV_CHAT_WAYFINDER_PROJECT_ID.to_string(), pin))
 }
 
 /// True when an agent spawn environment carries the chat-mode switch.
@@ -546,6 +602,57 @@ mod tests {
                 deny_written
             );
         }
+    }
+
+    fn project_pinned_to(id: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        if let Some(id) = id {
+            std::fs::write(
+                dir.path().join(".ta/workflow.toml"),
+                format!(
+                    "[plan.wayfinder]\nbase_url = \"http://127.0.0.1:3000\"\norg_id = \"org\"\n\
+                     project_id = \"{id}\"\ncredential_name = \"wf\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn two_projects_get_two_different_pins_and_never_each_others() {
+        let a = project_pinned_to(Some("proj-a"));
+        let b = project_pinned_to(Some("proj-b"));
+        let (k, va) = chat_mode_wayfinder_env(a.path(), None).unwrap();
+        let (_, vb) = chat_mode_wayfinder_env(b.path(), None).unwrap();
+        assert_eq!(k, ENV_CHAT_WAYFINDER_PROJECT_ID);
+        assert_eq!((va.as_str(), vb.as_str()), ("proj-a", "proj-b"));
+        // An ambient value for the other project is refused, not silently overridden.
+        let err = chat_mode_wayfinder_env(b.path(), Some("proj-a"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("proj-a") && err.contains("proj-b"), "{err}");
+        // The matching wake value is fine.
+        assert_eq!(
+            chat_mode_wayfinder_env(a.path(), Some("proj-a")).unwrap().1,
+            "proj-a"
+        );
+    }
+
+    #[test]
+    fn an_unknown_project_emits_an_empty_pin_that_overrides_ambient_state() {
+        let none = project_pinned_to(None);
+        assert_eq!(chat_mode_wayfinder_env(none.path(), None).unwrap().1, "");
+        // No config and an ambient id: the id is carried (the tools still refuse for want of config).
+        assert_eq!(
+            chat_mode_wayfinder_env(none.path(), Some(" ")).unwrap().1,
+            ""
+        );
+        // A malformed workflow.toml is an unknown project, never a panic or a guess.
+        let bad = project_pinned_to(None);
+        std::fs::write(bad.path().join(".ta/workflow.toml"), "[plan.wayfinder\n").unwrap();
+        assert_eq!(chat_mode_wayfinder_env(bad.path(), None).unwrap().1, "");
     }
 
     #[test]
