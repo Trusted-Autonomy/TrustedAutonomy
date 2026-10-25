@@ -1,7 +1,7 @@
 //! Behavioural tests of the file-backed intake store: concurrency, torn
 //! writes, crash recovery, caps, dedupe and project isolation.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -259,6 +259,7 @@ fn oversized_body_is_refused_before_anything_is_written() {
 #[test]
 fn directory_is_0700_and_files_are_0600() {
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path(), big_caps());
     s.enqueue(sub("p1", Uuid::new_v4(), "eng", task("a")), t0())
