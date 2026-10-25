@@ -350,6 +350,39 @@ mod tests {
         }
     }
 
+    /// Task intake funnel: a CoS chat session (and any chat-profile launch)
+    /// must not be able to request tasks, with or without a wildcard allow.
+    #[test]
+    fn task_intake_tools_are_absent_from_every_chat_profile_surface() {
+        for tool in [
+            "ta_request_task",
+            "ta_request_status",
+            "ta_request_anything",
+        ] {
+            assert!(!is_chat_mode_mcp_tool(tool), "{tool}");
+            let pattern = format!("{TA_MCP_TOOL_PREFIX}{tool}");
+            assert!(
+                !chat_mode_allowed_tool_patterns().contains(&pattern),
+                "{tool}"
+            );
+            for persona in [
+                s(&[&pattern]),
+                s(&["mcp__ta__*"]),
+                s(&["mcp__ta__ta_request_*"]),
+                s(&["*"]),
+            ] {
+                let surface = resolve_chat_mode_tool_surface(&persona);
+                assert!(
+                    !surface.allowed.contains(&pattern),
+                    "{tool} leaked through persona {persona:?}"
+                );
+            }
+        }
+        for tool in CHAT_MODE_MCP_TOOLS {
+            assert!(!tool.starts_with("ta_request_"), "{tool}");
+        }
+    }
+
     /// The profile itself must never contain a tool that mutates anything
     /// outside chat scratch: goal/draft/plan/wiki-write/task/external
     /// tools are all absent.

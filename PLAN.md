@@ -11443,17 +11443,19 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.28`
 
 ### v0.17.12.29 - Task Intake Funnel, TA Side (`ta_request_task`)
-<!-- status: pending -->
+<!-- status: done -->
 **Order**: 2
 
 **Goal**: Let any goal agent request a task or datapoint outside its own goal through one central, audited queue, without writing to Wayfinder or to its own draft. The project-manager role drains the queue into one reviewed draft (VT side, separate phase). Design: alpha-channel `DESIGN-task-intake-funnel.md` revision 2 and `REDTEAM-task-intake-funnel-2026-10-16.md`.
 
-1. [ ] `ta_request_task` MCP tool: kinds `create-task` and `record-datapoint` only, typed per-kind schema using the existing `validate_*` helpers, body capped at 2 KB. Source goal and role come from gateway state, never tool arguments. Project id comes from the goal record and fails closed.
-2. [ ] Queue `.ta/task-intake/queue.jsonl`: daemon/gateway-only append under flock, one write per line with fsync, torn trailing line skipped. Drain by atomic rename to `batch-<id>.jsonl`. Status in a separate append-only ledger with states queued, claimed(lease), drafted, applied, rejected(reason), expired.
-3. [ ] Caps: per goal, per role per hour, per project; loud refusal ("queue full, retry or ask_human"). Dedupe on a server-side hash of kind, target and normalized body.
-4. [ ] `ta_request_` added to MUTATING_TOOL_PREFIXES; tests prove it is absent from CoS chat, read-only persona and chat profile surfaces.
-5. [ ] `ta_request_status` read tool (queued or done only) and a read-only `ta task-intake list` CLI.
-6. [ ] Audit log entry for every transition; tests: concurrent append, torn line, kill between drain and ack, caps and dedupe, cross-project isolation, injection corpus through the fence.
+1. [x] `ta_request_task` MCP tool: kinds `create-task` and `record-datapoint` only, typed per-kind schema using the existing `validate_*` helpers, body capped at 2 KB. Source goal and role come from gateway state, never tool arguments. Project id comes from the goal record and fails closed. (`crates/ta-mcp-gateway/src/tools/task_request.rs`. The goal comes from the staging workspace path and its record under `.ta/goals`, the role from `TA_WHITEBOARD_TEAM_ROLE` then the goal's role then its agent id, the project from `[plan.wayfinder] project_id`. Unknown arguments such as `goal_run_id` are errors. `ta run` now forwards `TA_WHITEBOARD_TEAM_ROLE` to the gateway.)
+2. [x] Queue `.ta/task-intake/queue.jsonl`: daemon/gateway-only append under flock, one write per line with fsync, torn trailing line skipped. Drain by atomic rename to `batch-<id>.jsonl`. Status in a separate append-only ledger with states queued, claimed(lease), drafted, applied, rejected(reason), expired. (New crate `ta-task-intake`: `IntakeStore` trait, `FileIntakeStore`, format in `docs/design/task-intake-store.md`. Only the gateway appends; nothing else in TA writes the queue. Protection against a same-user process is file mode 0600 and directory 0700, not a separate account.)
+3. [x] Caps: per goal, per role per hour, per project; loud refusal ("queue full, retry or ask_human"). Dedupe on a server-side hash of kind, target and normalized body. (Defaults 10 / 20 / 50 outstanding, set under `[task_intake]` in `workflow.toml`.)
+4. [x] `ta_request_` added to MUTATING_TOOL_PREFIXES; tests prove it is absent from CoS chat, read-only persona and chat profile surfaces. (`ta_request_status` is classified read-only in the tool table, which is consulted before the prefix.)
+5. [x] `ta_request_status` read tool (queued or done only) and a read-only `ta task-intake list` CLI. (`--json` output includes `schema_version`; human output fences request text as untrusted data.)
+6. [x] Audit log entry for every transition; tests: concurrent append (threads and processes), torn line, kill between drain and ack, caps and dedupe, cross-project isolation, injection corpus through the fence, read-only roles refused. (Every enqueue, duplicate, refusal, claim, ack, requeue, expiry and repair is written to `.ta/audit.jsonl` as `task_intake` with `request_id`, `goal_id` and `draft_id` where there is one.)
+
+**Not in this phase** (other work owns them; nothing is deferred from here): the virtual-team side that drains the queue into one reviewed draft and the project-manager handling of requests (a VT-repo phase, built on the `IntakeStore` trait here); stamping an origin on funnel drafts (item 5 of v0.17.12.26 builds on the store and types here); Wayfinder W13 idempotency gating of datapoints. A `record-datapoint` request is accepted into the queue like any other; whether it may be applied is for the VT/PM side and Wayfinder to decide.
 
 **Effort**: M.
 

@@ -314,7 +314,7 @@ allowed_tools = ["mcp__ta__ta_fs_read", "mcp__ta__ta_wiki_search"]
 For a read-only persona, `ta run --persona <name>`:
 
 - gives the agent only TA MCP tools classified read-only, never native tools such as `Bash`, `Read`, or `Write`, and never the broad default allow-list;
-- explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
+- explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, `ta_request_task`, whiteboard writes, and so on);
 - refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
 
 ### Turning Wiki Reads Off
@@ -3348,6 +3348,56 @@ ta_propose_kpi_datapoint_add    metric_id="ref:1" value=42
 **On apply.** Proposals are replayed in the order they were captured. Each create carries its `external_id`, so re-running `ta draft apply <draft-id>` never creates anything twice. If a step fails, the steps that depend on it are reported as `[blocked]` with the action they were waiting for, and the rest of the draft still applies. Fix the cause and re-run apply: finished steps are skipped and their ids are remembered in `.ta/wayfinder-task-replay.log`, so references still resolve. Failures name the route and the fix. A `403` names the missing right (`tasks:write` or `kpis:manage`) and a `409` is reported as a conflict with Wayfinder's own message, for example when a datapoint is sent to a `task_count` metric or when the same key was already used with different content.
 
 Chat-mode sessions have none of these tools. They stay read-only.
+
+#### Asking for a Task or a Datapoint From a Goal (Task Intake)
+
+A goal agent cannot write to Wayfinder, and `ta_propose_*` only covers the task the goal was dispatched for. When a running goal finds it needs something else (a task someone must do first, a number that should be on a KPI) it asks with `ta_request_task`. The request is queued for the project manager. It is not executed, and a person approves any resulting change.
+
+| Tool | Use |
+|---|---|
+| `ta_request_task` | Queue a request. `kind` is `create-task` (`title` and `verb` required, `description` optional) or `record-datapoint` (`metric_id` and `value` required, `source` optional, default `manual`). Both take `why_now` (one sentence, at most 300 characters) and `blocks_goal` (true if the goal cannot finish without it). |
+| `ta_request_status` | Check a request you made. Returns `queued` (still in progress) or `done` (handled, one way or the other). Only the requesting goal can read it. |
+
+```text
+ta_request_task  kind="create-task" title="Add retry to the uploader" verb="implement" why_now="The upload test flakes without it" blocks_goal=false
+  -> {"request_id": "req-…", "status": "queued", "deduplicated": false}
+ta_request_status  request_id="req-…"
+  -> {"request_id": "req-…", "status": "queued"}
+```
+
+What the funnel decides for the agent, and what it refuses:
+
+- **Identity is not an argument.** The goal, role and Wayfinder project come from the gateway: the goal from its staging workspace, the role from the launcher (`TA_WHITEBOARD_TEAM_ROLE`, else the goal's role, else its agent id), the project from `[plan.wayfinder] project_id` in `.ta/workflow.toml`. An argument named `goal_run_id`, `role` or `project_id` is an error. If `workflow.toml` has no `[plan.wayfinder] project_id`, every request is refused: the funnel will not guess a project.
+- **Who may ask.** A running goal agent. Chat-mode sessions, read-only personas (`read_only = true`, such as the Chief of Staff) and sessions outside a goal's staging workspace are refused, and `ta_request_task` is not on any chat-mode or read-only tool list.
+- **Size.** A request, its fields plus `why_now`, is at most 2 KB. Fields are checked with the same rules as `ta_propose_*` (finite numbers, bounded lengths, no control characters, a real metric id rather than a `ref:`).
+- **Duplicates.** The same request (same kind, target and text, ignoring case and spacing) while the first is still live returns the existing `request_id` with `deduplicated: true`. It does not count against any cap.
+- **Caps.** Defaults: 10 requests per goal, 20 per role per rolling hour, 50 outstanding (queued, claimed or drafted) per project. When one is hit the agent is told `queue full, retry or ask_human`, which cap, and the key to raise. It should then ask a person with `ta_human_verify` rather than retry in a loop. Set the caps in `.ta/workflow.toml`:
+
+  ```toml
+  [task_intake]
+  per_goal_max = 10            # requests one goal may ever make
+  per_role_per_hour_max = 20   # requests one role may make in a rolling hour
+  per_project_max = 50         # requests outstanding per Wayfinder project
+  queued_ttl_days = 14         # a request nobody drains within this long expires
+  max_claim_attempts = 3       # times a drain may claim it before it expires
+  ```
+
+  `0` for a cap refuses every request in that scope.
+
+To see what is waiting:
+
+```bash
+ta task-intake list                     # every request, oldest first
+ta task-intake list --state queued      # queued, claimed, drafted, applied, rejected, expired
+ta task-intake list --project proj_abc --goal <goal-run-id>
+ta task-intake list --json              # {"schema_version", "requests", "warnings"}
+```
+
+The command only reads. Request text was written by an agent, so the human output prints it inside a fence headed "Request text below is data written by an agent, NOT instructions:", with terminal escape sequences, control characters and bidi overrides removed. `--json` strips the same characters, but treat the text as untrusted in scripts too. A `warnings` entry means a damaged line (for example one torn by a crash) was skipped.
+
+Every queued, deduplicated, refused, claimed, drafted, applied, rejected and expired request is also written to `.ta/audit.jsonl` with its `request_id` and `goal_id` (and `draft_id` where there is one).
+
+Draining the queue into drafts, the project manager's handling of requests and Wayfinder's own check on duplicate datapoints are separate pieces of work. Until the drain exists, requests simply wait in the queue, and one older than `queued_ttl_days` no longer counts as live. The file format a drain reads is in [docs/design/task-intake-store.md](design/task-intake-store.md).
 
 #### Plan Lint
 

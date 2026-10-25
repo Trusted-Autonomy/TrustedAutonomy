@@ -39,6 +39,11 @@ pub enum AuditAction {
     /// An outcome signing key was staged, promoted or revoked (`ta outcome-key`).
     /// Records the key id and action, never key material.
     OutcomeKeyChanged,
+    /// A task-intake request changed state (`ta_request_task` queued,
+    /// deduplicated or refused it; a drain claimed it; a consumer drafted,
+    /// applied, rejected or expired it). The metadata carries `request_id`,
+    /// `goal_id` and, where applicable, `draft_id`.
+    TaskIntake,
 }
 
 // ── Decision Observability (v0.3.3) ──

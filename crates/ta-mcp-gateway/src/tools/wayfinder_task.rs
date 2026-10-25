@@ -364,16 +364,34 @@ where
     Option::<String>::deserialize(d).map(Some)
 }
 
+/// Names the tool a validation error belongs to. Implemented by
+/// [`ProposeKind`] and by other tools (such as `ta_request_task`) that reuse
+/// these field validators, so their errors never name a different tool.
+pub(crate) trait ToolLabel: Copy {
+    fn label(self) -> &'static str;
+}
+
+impl ToolLabel for ProposeKind {
+    fn label(self) -> &'static str {
+        self.tool_name()
+    }
+}
+
 // ── Validation helpers ──────────────────────────────────────────
 
-fn invalid(kind: ProposeKind, msg: impl std::fmt::Display) -> McpError {
-    McpError::invalid_params(format!("{}: {msg}", kind.tool_name()), None)
+pub(crate) fn invalid(kind: impl ToolLabel, msg: impl std::fmt::Display) -> McpError {
+    McpError::invalid_params(format!("{}: {msg}", kind.label()), None)
 }
 
 /// Ids (task ids, roster ids, external ids): non-empty, bounded, and
 /// restricted to `[A-Za-z0-9._:-]`, so they can't smuggle whitespace,
 /// control characters, or path separators.
-fn validate_id(kind: ProposeKind, field: &str, value: &str, max: usize) -> Result<(), McpError> {
+pub(crate) fn validate_id(
+    kind: impl ToolLabel,
+    field: &str,
+    value: &str,
+    max: usize,
+) -> Result<(), McpError> {
     if value.is_empty() {
         return Err(invalid(kind, format!("{field} must be non-empty")));
     }
@@ -399,7 +417,11 @@ fn validate_id(kind: ProposeKind, field: &str, value: &str, max: usize) -> Resul
     Ok(())
 }
 
-fn validate_verb(kind: ProposeKind, field: &str, value: &str) -> Result<(), McpError> {
+pub(crate) fn validate_verb(
+    kind: impl ToolLabel,
+    field: &str,
+    value: &str,
+) -> Result<(), McpError> {
     if value.is_empty() {
         return Err(invalid(
             kind,
@@ -425,8 +447,8 @@ fn validate_verb(kind: ProposeKind, field: &str, value: &str) -> Result<(), McpE
 /// Free text. `single_line` text (titles) rejects every control character;
 /// multi-line text (descriptions, reasons) allows `\n`, `\r` and `\t` only.
 /// `required` text must contain a non-whitespace character.
-fn validate_text(
-    kind: ProposeKind,
+pub(crate) fn validate_text(
+    kind: impl ToolLabel,
     field: &str,
     value: &str,
     max: usize,
@@ -457,12 +479,16 @@ fn validate_text(
     Ok(())
 }
 
-fn validate_title(kind: ProposeKind, field: &str, value: &str) -> Result<(), McpError> {
+pub(crate) fn validate_title(
+    kind: impl ToolLabel,
+    field: &str,
+    value: &str,
+) -> Result<(), McpError> {
     validate_text(kind, field, value, MAX_TITLE_LEN, true, true)
 }
 
-fn validate_opt_description(
-    kind: ProposeKind,
+pub(crate) fn validate_opt_description(
+    kind: impl ToolLabel,
     field: &str,
     value: Option<&str>,
 ) -> Result<(), McpError> {
@@ -474,7 +500,12 @@ fn validate_opt_description(
 
 /// A lowercase slug: 1..=`max` chars of `[a-z0-9_-]`, starting with a letter
 /// or digit (Wayfinder's goal kind and datapoint source shape).
-fn validate_slug(kind: ProposeKind, field: &str, value: &str, max: usize) -> Result<(), McpError> {
+pub(crate) fn validate_slug(
+    kind: impl ToolLabel,
+    field: &str,
+    value: &str,
+    max: usize,
+) -> Result<(), McpError> {
     let mut chars = value.chars();
     let first_ok = chars
         .next()
@@ -513,8 +544,8 @@ fn validate_enum(
 
 /// A finite number within +-[`MAX_ABS_VALUE`]; `min_exclusive_zero` also
 /// requires it to be greater than zero, `non_negative` to be zero or more.
-fn validate_number(
-    kind: ProposeKind,
+pub(crate) fn validate_number(
+    kind: impl ToolLabel,
     field: &str,
     value: f64,
     positive: bool,

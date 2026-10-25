@@ -92,6 +92,7 @@ pub mod status;
 pub mod style;
 pub mod sync;
 pub mod target_audit;
+pub mod task_intake;
 pub mod team;
 pub mod team_session;
 pub mod template;
