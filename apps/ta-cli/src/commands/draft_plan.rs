@@ -431,7 +431,16 @@ mod tests {
                     .iter()
                     .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()) && l.contains(". ["))
                     .collect();
-                items.len() >= 2 && (!all_checked || items.iter().all(|l| !l.contains(". [ ]")))
+                let unchecked = items.iter().filter(|l| l.contains(". [ ]")).count();
+                // A phase with a mix of checked and unchecked items (a partly done
+                // phase) is fine for `all_checked == false` only when two items are
+                // still open, so "one carried, the rest left unchecked" is testable.
+                items.len() >= 2
+                    && (if all_checked {
+                        unchecked == 0
+                    } else {
+                        unchecked >= 2
+                    })
             })
             .map(|p| p.id.clone())
     }
