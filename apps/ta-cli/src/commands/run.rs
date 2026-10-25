@@ -5063,31 +5063,23 @@ pub fn execute(
                                     println!("Re-launching agent to fix verification failures...");
                                     println!();
 
-                                    // Build failure context for re-injection.
-                                    let mut failure_context = String::new();
-                                    failure_context
-                                        .push_str("\n## Verification Failures (auto-injected)\n\n");
-                                    failure_context.push_str(
-                                        "The following verification commands failed. Fix these issues and ensure all checks pass.\n\n",
+                                    // Build failure context for re-injection. A first-party
+                                    // minimizer selected in `[optimizers.input]` reduces each
+                                    // command's output (up to 60 lines for agent context).
+                                    let failure_context = super::input_minimizer::render_failures(
+                                        &result.warnings,
+                                        60,
+                                        super::input_minimizer::Minimizer::for_goal(
+                                            &config.workspace_root,
+                                            goal.goal_run_id,
+                                            goal_experiment_overrides(
+                                                &config.workspace_root,
+                                                goal.goal_run_id,
+                                            )
+                                            .as_ref(),
+                                        )
+                                        .as_ref(),
                                     );
-                                    for w in &result.warnings {
-                                        failure_context.push_str(&format!("### `{}`\n", w.command));
-                                        failure_context.push_str(&format!(
-                                            "Exit code: {}\n",
-                                            w.exit_code
-                                                .map_or("N/A".to_string(), |c| c.to_string())
-                                        ));
-                                        if !w.output.is_empty() {
-                                            failure_context.push_str("```\n");
-                                            // Show more output for agent context (up to 60 lines).
-                                            for line in w.output.lines().take(60) {
-                                                failure_context.push_str(line);
-                                                failure_context.push('\n');
-                                            }
-                                            failure_context.push_str("```\n");
-                                        }
-                                        failure_context.push('\n');
-                                    }
 
                                     // Re-inject failure context through the channel.
                                     if agent_config.injects_context_file {
@@ -5208,28 +5200,19 @@ pub fn execute(
                         );
                         println!();
 
-                        // Build failure context for re-injection (v0.10.14).
-                        let mut failure_context = String::new();
-                        failure_context.push_str("\n## Verification Failures (auto-injected)\n\n");
-                        failure_context.push_str(
-                            "The following verification commands failed. Fix these issues and ensure all checks pass.\n\n",
+                        // Build failure context for re-injection (v0.10.14). A first-party
+                        // minimizer selected in `[optimizers.input]` reduces each command's output.
+                        let failure_context = super::input_minimizer::render_failures(
+                            &result.warnings,
+                            30,
+                            super::input_minimizer::Minimizer::for_goal(
+                                &config.workspace_root,
+                                goal.goal_run_id,
+                                goal_experiment_overrides(&config.workspace_root, goal.goal_run_id)
+                                    .as_ref(),
+                            )
+                            .as_ref(),
                         );
-                        for w in &result.warnings {
-                            failure_context.push_str(&format!("### `{}`\n", w.command));
-                            failure_context.push_str(&format!(
-                                "Exit code: {}\n",
-                                w.exit_code.map_or("N/A".to_string(), |c| c.to_string())
-                            ));
-                            if !w.output.is_empty() {
-                                failure_context.push_str("```\n");
-                                for line in w.output.lines().take(30) {
-                                    failure_context.push_str(line);
-                                    failure_context.push('\n');
-                                }
-                                failure_context.push_str("```\n");
-                            }
-                            failure_context.push('\n');
-                        }
 
                         // Re-inject failure context through the channel.
                         if agent_config.injects_context_file {

@@ -86,6 +86,13 @@ fn show_status(workspace_root: &Path) -> Result<()> {
         if cfg.enabled { "yes" } else { "no" }
     );
     print_optimizer_slots(&load_optimizers(workspace_root));
+    if let Some((n, bytes_in, bytes_out)) = super::input_minimizer::totals(workspace_root) {
+        println!(
+            "  Minimizer use:  {n} application(s), {bytes_in} -> {bytes_out} bytes ({:.0}% smaller); originals in .ta/compression/originals/, records in .ta/compression/{}",
+            100.0 * (1.0 - bytes_out as f64 / bytes_in.max(1) as f64),
+            super::input_minimizer::METRICS_FILE,
+        );
+    }
     println!("  Plugin:         {}", plugin.name);
     println!("  Proxy URL:      {}", plugin.proxy_base_url);
     println!(
@@ -110,10 +117,22 @@ fn show_status(workspace_root: &Path) -> Result<()> {
         let display_name = status.plugin_name.unwrap_or_else(|| plugin.name.clone());
         println!("  Process:        {} (PID {})", status.status, pid_str);
         println!("  Restarts:       {}", status.restart_count);
+        let carried = if status.carried_over {
+            " (from before the last daemon restart; clears when the optimizer passes a health check)"
+        } else {
+            ""
+        };
         match (&status.last_failure, &status.last_failure_at) {
-            (Some(reason), Some(at)) => println!("  Last failure:   {} ({})", reason, at),
-            (Some(reason), None) => println!("  Last failure:   {}", reason),
-            _ => println!("  Last failure:   none this session"),
+            (Some(reason), Some(at)) => {
+                println!("  Last failure:   {} ({}){}", reason, at, carried)
+            }
+            (Some(reason), None) => println!("  Last failure:   {}{}", reason, carried),
+            _ => println!("  Last failure:   none"),
+        }
+        if status.carried_over && status.status != "suspended" {
+            if let Some(notice) = &status.notice {
+                println!("  Earlier notice: {}", notice);
+            }
         }
         if status.status == "suspended" {
             let detail = status.notice.clone().unwrap_or_else(|| {
@@ -530,6 +549,10 @@ struct OptimizerStatusFile {
     pub last_failure_at: Option<String>,
     #[serde(default)]
     pub notice: Option<String>,
+    /// The failure was recorded before the last daemon restart and no run since has passed
+    /// a health check.
+    #[serde(default)]
+    pub carried_over: bool,
 }
 
 fn read_optimizer_status(workspace_root: &Path) -> Option<OptimizerStatusFile> {

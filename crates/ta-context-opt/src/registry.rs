@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::minimize::Kind;
 use crate::{estimate_tokens, HookSpec, OptError, OptMetrics, OptimizersConfig, OriginalStore};
 
 /// The three places an optimizer can sit.
@@ -65,6 +66,18 @@ pub trait Optimizer: Send + Sync {
 /// Acts on tool and command output, files and logs before they enter context.
 pub trait InputOptimizer: Optimizer {
     fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError>;
+
+    /// Like [`apply`](Self::apply), told which command line produced `input`. The default
+    /// ignores the command; a minimizer that understands several commands uses it to pick
+    /// the right reduction without guessing from the text.
+    fn apply_for_command(
+        &self,
+        _command: &str,
+        input: &str,
+        store: &OriginalStore,
+    ) -> Result<(String, OptMetrics), OptError> {
+        self.apply(input, store)
+    }
 }
 
 /// Acts on the accumulated conversation.
@@ -99,6 +112,68 @@ pub fn run_measured(
         original_ref,
     };
     Ok((output, metrics))
+}
+
+/// A first-party input minimizer (see [`crate::minimize`]). `kind` fixes the command it
+/// understands; `None` is the router (`first-party`) that picks per command line, or from the
+/// text when no command is known, and passes unrecognised output through unchanged.
+struct FirstParty {
+    name: &'static str,
+    kind: Option<Kind>,
+}
+
+impl FirstParty {
+    fn reduce(
+        &self,
+        kind: Option<Kind>,
+        input: &str,
+        store: &OriginalStore,
+    ) -> Result<(String, OptMetrics), OptError> {
+        let output = match kind {
+            Some(k) => crate::minimize::minimize(k, input),
+            None => input.to_string(),
+        };
+        let lossless = output == input;
+        run_measured(input, store, lossless, |_| output)
+    }
+}
+
+impl Optimizer for FirstParty {
+    fn info(&self) -> OptimizerInfo {
+        OptimizerInfo {
+            name: self.name.into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            kind: OptimizerKind::InProcess,
+            licence: "Apache-2.0".into(),
+        }
+    }
+    fn available(&self) -> bool {
+        true
+    }
+}
+
+impl InputOptimizer for FirstParty {
+    fn apply(&self, input: &str, store: &OriginalStore) -> Result<(String, OptMetrics), OptError> {
+        let kind = self.kind.or_else(|| crate::minimize::sniff(input));
+        self.reduce(kind, input, store)
+    }
+
+    fn apply_for_command(
+        &self,
+        command: &str,
+        input: &str,
+        store: &OriginalStore,
+    ) -> Result<(String, OptMetrics), OptError> {
+        // A single-kind minimizer only reduces its own command's output; anything else it
+        // was handed passes through, never mangled by the wrong rules.
+        let kind = match self.kind {
+            Some(k) => (crate::minimize::kind_for_command(command) == Some(k)).then_some(k),
+            None => {
+                crate::minimize::kind_for_command(command).or_else(|| crate::minimize::sniff(input))
+            }
+        };
+        self.reduce(kind, input, store)
+    }
 }
 
 /// The baseline: changes nothing, valid in every slot.
@@ -227,6 +302,22 @@ impl Registry {
                     licence: "see the configured [compression.plugin] command",
                     binary: None,
                     hook: None,
+                }),
+                Box::new(FirstParty {
+                    name: "first-party",
+                    kind: None,
+                }),
+                Box::new(FirstParty {
+                    name: "cargo",
+                    kind: Some(Kind::Cargo),
+                }),
+                Box::new(FirstParty {
+                    name: "git",
+                    kind: Some(Kind::Git),
+                }),
+                Box::new(FirstParty {
+                    name: "ta",
+                    kind: Some(Kind::Ta),
                 }),
             ],
             context: vec![
@@ -462,7 +553,10 @@ mod tests {
         let r = Registry::builtin();
         let err = r.input("caveman").err().unwrap().to_string();
         assert!(err.contains("'caveman'"), "{err}");
-        assert!(err.contains("none, rtk, headroom, proxy"), "{err}");
+        assert!(
+            err.contains("none, rtk, headroom, proxy, first-party, cargo, git, ta"),
+            "{err}"
+        );
         assert!(err.contains("--set optimizers.input.use=none"), "{err}");
     }
 
@@ -493,6 +587,67 @@ mod tests {
         assert_eq!(m.est_tokens_in, m.est_tokens_out);
         assert!(m.lossless);
         assert_eq!(m.reduction(), 0.0);
+    }
+
+    const CARGO_OUT: &str = "   Compiling serde v1.0.200\n   Compiling tokio v1.38.0\n   Compiling hyper v1.3.1\n   Compiling reqwest v0.12.4\n   Compiling ta-core v0.1.0\n   Compiling b v1.0.0\nerror[E0308]: mismatched types\n --> src/lib.rs:1:1\n\nerror: could not compile `b` (lib) due to 1 previous error\n";
+
+    #[test]
+    fn first_party_minimizers_are_selectable_and_apply_records_real_metrics() {
+        let r = Registry::builtin();
+        for name in ["first-party", "cargo", "git", "ta"] {
+            let chosen = r.select_input(&cfg(Some(name))).unwrap();
+            assert_eq!(chosen.info().name, name);
+            assert_eq!(chosen.info().kind, OptimizerKind::InProcess);
+            assert!(chosen.available());
+            assert!(!chosen.info().licence.is_empty());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        let opt = r.select_input(&cfg(Some("cargo"))).unwrap();
+        let (out, m) = opt
+            .apply_for_command("cargo build", CARGO_OUT, &store)
+            .unwrap();
+        assert!(out.contains("error[E0308]") && !out.contains("Compiling serde"));
+        assert_eq!(m.bytes_in, CARGO_OUT.len());
+        assert_eq!(m.bytes_out, out.len());
+        assert!(m.bytes_out < m.bytes_in && m.reduction() > 0.0);
+        assert!(!m.lossless, "text was removed, so it is not lossless");
+        assert_eq!(store.recover(&m.original_ref).unwrap(), CARGO_OUT);
+    }
+
+    #[test]
+    fn a_single_kind_minimizer_leaves_other_commands_output_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        let r = Registry::builtin();
+        let (out, m) = r
+            .input("git")
+            .unwrap()
+            .apply_for_command("cargo build", CARGO_OUT, &store)
+            .unwrap();
+        assert_eq!(out, CARGO_OUT);
+        assert!(m.lossless && m.reduction() == 0.0);
+        // The original is still stored, so the record stays auditable.
+        assert_eq!(store.recover(&m.original_ref).unwrap(), CARGO_OUT);
+    }
+
+    #[test]
+    fn the_router_picks_by_command_then_by_text_and_passes_the_rest_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OriginalStore::new(dir.path());
+        let router = Registry::builtin();
+        let router = router.input("first-party").unwrap();
+        let (by_cmd, _) = router
+            .apply_for_command("./dev cargo test", CARGO_OUT, &store)
+            .unwrap();
+        assert!(!by_cmd.contains("Compiling serde"));
+        let (by_text, _) = router.apply(CARGO_OUT, &store).unwrap();
+        assert_eq!(by_text, by_cmd);
+        let (plain, m) = router
+            .apply_for_command("make deploy", "just some words\n", &store)
+            .unwrap();
+        assert_eq!(plain, "just some words\n");
+        assert!(m.lossless);
     }
 
     #[test]

@@ -88,10 +88,11 @@ Each step has a check that must pass before the next.
 
 - **Windows no-window smoke run (item 2):** needs a real Windows build and the manual check in
   `docs/RELEASING.md`.
-- **First-party minimizers (item 3):** `cargo`, `git` and `ta` output minimizers that call `apply`, to
-  replay against RTK and `none`. Nothing in the repo calls `apply` outside tests today.
-- **Failure history across restart (item 4):** the supervisor deletes `.ta/compression/status.json` at
-  startup, hiding why an optimizer was disabled.
+- **First-party minimizers (item 3):** `cargo`, `git` and `ta` minimizers now run through `apply` on the
+  verification-failure context (`commands/input_minimizer.rs`). Still open: replaying them against RTK and
+  `none` on a real golden entry, which spends money.
+- **Failure history across restart (item 4):** done. The supervisor keeps `last_failure` and `notice`
+  across a daemon restart and clears them on the first healthy check.
 
 ## 6. What "done" looks like
 
