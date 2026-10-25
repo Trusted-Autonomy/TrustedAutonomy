@@ -45,6 +45,20 @@ if [[ -z "$NEW_VERSION" ]]; then
   exit 1
 fi
 
+# Refuse anything that is not a semver before a single file is touched: the
+# value is written into Cargo.toml, so a stray string (e.g. text captured from
+# a command's stdout) would leave every manifest unparseable.
+SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
+if ! [[ "$NEW_VERSION" =~ $SEMVER_RE ]]; then
+  SHOWN=$(printf '%s' "$NEW_VERSION" | tr '\n' ' ' | cut -c1-200)
+  echo "ERROR: '$SHOWN' is not a valid version; nothing was changed." >&2
+  echo "       Expected MAJOR.MINOR.PATCH with an optional pre-release suffix," >&2
+  echo "       e.g. 0.17.12-alpha.5, 0.14.22-rc.5 or 0.15.0." >&2
+  echo "       If this value came from another command's output, run that command" >&2
+  echo "       by hand and check that stdout carries only the version." >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 

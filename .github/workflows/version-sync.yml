@@ -3,12 +3,20 @@ name: Version Sync
 # Keeps Cargo.toml tracking the last completed PLAN.md phase however the work
 # was merged (ta draft apply, ordinary pull requests, agent pull requests).
 #
-# On every push to main it asks the same code `ta plan status` uses
+# On a push to main that changes PLAN.md or Cargo.toml (the only inputs to
+# the expected version, so other pushes skip the Nix install and the build of
+# ta-cli), or on a manual run, it asks the same code `ta plan status` uses
 # (`ta plan expected-version`, via scripts/plan-version.sh) what version
 # PLAN.md expects. If Cargo.toml lags, it runs scripts/bump-version.sh on a
 # branch and opens (or refreshes) ONE bump pull request with auto-merge on.
-# It never pushes to main, and never creates tags or releases (see CLAUDE.md
-# Release Rules); `ta release run` stays the only path to a non-alpha version.
+# The expected version is validated as a plain semver before anything is
+# bumped. It never pushes to main, and never creates tags or releases (see
+# CLAUDE.md Release Rules); `ta release run` stays the only path to a
+# non-alpha version.
+#
+# Run it by hand after a change the path filter cannot see (the sync logic in
+# crates/ta-plan, scripts/, this workflow, or a repaired secret):
+#   gh workflow run version-sync.yml
 #
 # ONE-TIME OWNER SETUP (the job fails with these steps until done):
 #   Pull requests opened with the default GITHUB_TOKEN do not trigger
@@ -29,6 +37,7 @@ name: Version Sync
 on:
   push:
     branches: [main]
+    paths: [PLAN.md, Cargo.toml]
   workflow_dispatch: {}
 
 permissions:
@@ -98,8 +107,22 @@ jobs:
           rc=$?
           set -e
           cat expected.err
-          EXPECTED=$(tr -d '[:space:]' < expected.out)
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+          # stdout of the command must be exactly one version. Trim only the
+          # surrounding whitespace so stray text is NOT squashed into something
+          # that looks plausible, then require a strict semver before the value
+          # reaches scripts/bump-version.sh (which writes it into Cargo.toml).
+          EXPECTED=$(tr -d '\r' < expected.out | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+)?)?$'
+          case "$rc" in
+            0|1)
+              if ! [[ "$EXPECTED" =~ $SEMVER_RE ]]; then
+                SHOWN=$(printf '%s' "$EXPECTED" | tr '\n' ' ' | cut -c1-200)
+                echo "::error title=Expected version is not a semver::'scripts/plan-version.sh --check' (exit $rc) printed '$SHOWN' on stdout instead of a version like 0.17.12-alpha.5. Nothing was bumped. Anything that writes to stdout before the version (a shell banner, a build message) causes this; re-run it by hand and check stdout."
+                exit 1
+              fi ;;
+          esac
           echo "expected=$EXPECTED" >> "$GITHUB_OUTPUT"
           echo "exit code $rc, expected version '$EXPECTED'"
 

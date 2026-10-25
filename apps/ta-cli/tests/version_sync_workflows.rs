@@ -99,3 +99,84 @@ fn plan_version_script_documents_exit_codes() {
     }
     assert!(sh.contains("plan expected-version"));
 }
+
+#[test]
+fn sync_runs_only_when_plan_or_cargo_toml_change_and_validates_the_version() {
+    let wf = read(".github/workflows/version-sync.yml");
+    assert!(
+        wf.contains("    paths: [PLAN.md, Cargo.toml]\n"),
+        "the push trigger must be limited to the files the expected version depends on"
+    );
+    assert!(
+        wf.contains("workflow_dispatch"),
+        "manual runs must stay available"
+    );
+    assert!(
+        wf.contains(r"SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+)?)?$'"),
+        "the expected version must be checked against a strict semver"
+    );
+    assert!(wf.contains("::error title=Expected version is not a semver::"));
+}
+
+#[test]
+fn dev_shell_banner_goes_to_stderr_so_command_stdout_stays_clean() {
+    let flake = read("flake.nix");
+    let hook_start = flake
+        .find("shellHook = ''")
+        .expect("flake.nix has a shellHook");
+    let hook = &flake[hook_start..];
+    let hook = &hook[..hook.find("'';").expect("shellHook is terminated")];
+    assert!(
+        hook.contains("} >&2"),
+        "the shellHook banner must be redirected to stderr: nix develop --command \
+         output is captured by CI (version-sync.yml)"
+    );
+}
+
+/// `scripts/bump-version.sh` writes its argument into Cargo.toml, so it must
+/// reject non-semver text (e.g. a captured shell banner) before touching a
+/// file. Runs a copy of the script in a scratch tree so a regression cannot
+/// damage the real checkout.
+#[cfg(unix)]
+#[test]
+fn bump_version_refuses_a_non_semver_argument_without_touching_files() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("scripts")).unwrap();
+    std::fs::copy(
+        root.join("scripts/bump-version.sh"),
+        tmp.path().join("scripts/bump-version.sh"),
+    )
+    .unwrap();
+    let manifest = "[workspace.package]\nversion = \"0.1.0-alpha\"\n";
+    std::fs::write(tmp.path().join("Cargo.toml"), manifest).unwrap();
+
+    for bad in [
+        "TrustedAutonomydevenvironmentloadedRust:rustc1.97.0",
+        "Trusted Autonomy dev environment loaded",
+        "0.17",
+        "v0.17.12",
+        "0.17.12-",
+        "0.17.12\n0.17.13",
+    ] {
+        let out = std::process::Command::new("bash")
+            .arg(tmp.path().join("scripts/bump-version.sh"))
+            .arg(bad)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{bad:?} must be refused");
+        assert!(
+            stderr.contains("is not a valid version"),
+            "{bad:?}: {stderr}"
+        );
+        assert!(stderr.contains("nothing was changed"), "{bad:?}: {stderr}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap(),
+            manifest,
+            "{bad:?} must leave Cargo.toml untouched"
+        );
+    }
+}
