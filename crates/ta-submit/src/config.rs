@@ -888,6 +888,44 @@ pub struct SupervisorConfig {
     /// for them, run when the draft is submitted. Off by default.
     #[serde(default)]
     pub conversation_review: ConversationReviewConfig,
+    /// The bar `ta constitution shadow report` holds a shadow rule to before
+    /// it recommends promoting it to `enforce`. A recommendation only.
+    #[serde(default)]
+    pub shadow_promotion: ShadowPromotionConfig,
+}
+
+/// `[supervisor.shadow_promotion]` in `workflow.toml`.
+///
+/// ```toml
+/// [supervisor.shadow_promotion]
+/// min_decisions = 50        # decisions with a human outcome before the rate counts
+/// max_disagreement = 0.02   # largest fraction of them the human disagreed with
+/// ```
+///
+/// A rule that would have approved an item a human rejected is never
+/// recommended, whatever these say.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowPromotionConfig {
+    #[serde(default = "default_shadow_min_decisions")]
+    pub min_decisions: usize,
+    #[serde(default = "default_shadow_max_disagreement")]
+    pub max_disagreement: f64,
+}
+
+fn default_shadow_min_decisions() -> usize {
+    50
+}
+fn default_shadow_max_disagreement() -> f64 {
+    0.02
+}
+
+impl Default for ShadowPromotionConfig {
+    fn default() -> Self {
+        Self {
+            min_decisions: default_shadow_min_decisions(),
+            max_disagreement: default_shadow_max_disagreement(),
+        }
+    }
 }
 
 /// `[supervisor.conversation_review]` in `workflow.toml`.
@@ -973,6 +1011,7 @@ impl Default for SupervisorConfig {
             agent_profile: None,
             enable_hooks: false,
             conversation_review: ConversationReviewConfig::default(),
+            shadow_promotion: ShadowPromotionConfig::default(),
         }
     }
 }

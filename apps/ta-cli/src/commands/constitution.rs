@@ -122,6 +122,140 @@ pub enum ConstitutionCommands {
     /// Exit code 0 = valid; exit code 1 = overlapping patterns that may indicate
     /// unreachable rules. Does not require a running daemon.
     Validate,
+    /// Shadow-mode agreement between constitution rules and human decisions.
+    Shadow {
+        #[command(subcommand)]
+        command: ShadowCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ShadowCommands {
+    /// Per-rule decisions, agreement and disagreements, plus a promotion
+    /// recommendation. Never changes a rule's mode: promoting a rule to
+    /// `enforce` is an amendment you make (`ta constitution amend`).
+    Report {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Print the snapshot in the shape Wayfinder's shadow-report receiver
+        /// documents (needs owner/Wayfinder confirmation before it is pushed).
+        #[arg(long)]
+        wayfinder: bool,
+        /// Only count decisions made in the last N days.
+        #[arg(long)]
+        since_days: Option<i64>,
+        /// Override `[supervisor.shadow_promotion] min_decisions` (default 50).
+        #[arg(long)]
+        min_decisions: Option<usize>,
+        /// Override `[supervisor.shadow_promotion] max_disagreement` (default 0.02).
+        #[arg(long)]
+        max_disagreement: Option<f64>,
+    },
+}
+
+fn shadow_report(
+    config: &GatewayConfig,
+    json: bool,
+    wayfinder: bool,
+    since_days: Option<i64>,
+    min_decisions: Option<usize>,
+    max_disagreement: Option<f64>,
+) -> anyhow::Result<()> {
+    use ta_policy::constitution_shadow as shadow;
+    let root = &config.workspace_root;
+    let set = ta_policy::constitution_v2::ConstitutionSet::load(root)?;
+    let wf = ta_submit::WorkflowConfig::load_or_default(&root.join(".ta/workflow.toml"));
+    let bar = shadow::PromotionBar {
+        min_decisions: min_decisions.unwrap_or(wf.supervisor.shadow_promotion.min_decisions),
+        max_disagreement: max_disagreement
+            .unwrap_or(wf.supervisor.shadow_promotion.max_disagreement),
+    };
+    bar.validate().map_err(|e| {
+        anyhow::anyhow!("invalid promotion bar: {e}. Fix [supervisor.shadow_promotion] in .ta/workflow.toml or the flag.")
+    })?;
+    let resolved = ta_mcp_gateway::constitution_gate::resolve_pending(root, &|id| {
+        let uuid = Uuid::parse_str(id).ok()?;
+        crate::commands::draft::load_package(config, uuid).ok()
+    })?;
+    let loaded = shadow::load(root)?;
+    let window = shadow::Window {
+        from: since_days.map(|d| Utc::now() - chrono::Duration::days(d)),
+        to: None,
+    };
+    let report = shadow::build_report(
+        &loaded.records,
+        loaded.malformed,
+        &set.rule_refs(),
+        (
+            set.org_sha256().map(str::to_string),
+            set.project_sha256().map(str::to_string),
+        ),
+        window,
+        bar,
+    );
+    if wayfinder {
+        let snap =
+            shadow::wayfinder_snapshot(&report, Utc::now()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{}", serde_json::to_string_pretty(&snap)?);
+        return Ok(());
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!(
+        "Shadow report ({}; bar: {} decisions, at most {} percent disagreement, no machine-approved human-rejected item)",
+        shadow::SHADOW_LOG_PATH,
+        bar.min_decisions,
+        bar.max_disagreement * 100.0
+    );
+    if resolved > 0 {
+        println!("  picked up {resolved} human outcome(s) from saved drafts");
+    }
+    if report.malformed_lines > 0 {
+        println!(
+            "  warning: {} unreadable line(s) in the log were skipped",
+            report.malformed_lines
+        );
+    }
+    if report.rules.is_empty() {
+        println!(
+            "  No rules and no shadow records. Add v2 rules (see docs/USAGE.md, Constitution v2)."
+        );
+    }
+    for r in &report.rules {
+        println!(
+            "\n{} ({} layer, {}{}): {} decision(s), {} agree, {} disagree{}, {} machine-approved-human-rejected, {} pending",
+            r.rule_id,
+            r.layer.as_str(),
+            r.mode.as_str(),
+            if r.current { "" } else { ", no longer in the constitution" },
+            r.decisions,
+            r.agree,
+            r.disagree,
+            r.agreement_rate.map_or(String::new(), |a| format!(" ({:.1}% agreement)", a * 100.0)),
+            r.machine_approved_human_rejected,
+            r.pending
+        );
+        for d in r.disagreements.iter().take(5) {
+            println!(
+                "    disagreement: draft {} item {} would {} / human {} - {}",
+                d.draft_id, d.item_id, d.would_be, d.human, d.reason
+            );
+        }
+        if r.promotion.eligible {
+            println!(
+                "  RECOMMENDATION: {}. To promote, set `mode = \"enforce\"` on rule `{}` in the {} constitution via `ta constitution amend` (docs/USAGE.md, \"Constitution v2\"). Nothing was changed.",
+                r.promotion.reason,
+                r.rule_id,
+                r.layer.as_str()
+            );
+        } else {
+            println!("  not eligible: {}", r.promotion.reason);
+        }
+    }
+    Ok(())
 }
 
 pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -144,6 +278,23 @@ pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow
         } => review_constitution(config, *dry_run, model.as_deref(), *no_agent),
         ConstitutionCommands::Amend { dry_run } => amend_constitution(config, *dry_run),
         ConstitutionCommands::Validate => validate_constitution_cmd(&config.workspace_root),
+        ConstitutionCommands::Shadow {
+            command:
+                ShadowCommands::Report {
+                    json,
+                    wayfinder,
+                    since_days,
+                    min_decisions,
+                    max_disagreement,
+                },
+        } => shadow_report(
+            config,
+            *json,
+            *wayfinder,
+            *since_days,
+            *min_decisions,
+            *max_disagreement,
+        ),
     }
 }
 
