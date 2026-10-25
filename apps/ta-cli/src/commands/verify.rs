@@ -42,9 +42,11 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
 
 /// Run verification commands inside a goal's staging directory.
 ///
-/// Cargo is pointed at the goal's own target directory (`<staging>/target`), never the
-/// source project's: artifacts compiled in staging bake the staging path into test
-/// binaries (`env!("CARGO_MANIFEST_DIR")`), which break once staging is cleaned.
+/// Cargo is pointed at the goal's build directory: the project's shared build cache
+/// when `ta run` chose it for this goal, otherwise the goal's own `<staging>/target`.
+/// Never the source project's `target/`: artifacts compiled in staging bake the
+/// staging path into test binaries (`env!("CARGO_MANIFEST_DIR")`), which break once
+/// staging is cleaned.
 pub fn run_verification_in_staging(
     config: &VerifyConfig,
     staging_dir: &Path,
@@ -56,10 +58,9 @@ pub fn run_verification_in_staging(
 /// The cargo environment for commands run in a goal's staging directory.
 pub fn goal_cargo_env(staging_dir: &Path) -> Vec<(String, String)> {
     if staging_dir.join("Cargo.toml").exists() {
-        vec![(
-            "CARGO_TARGET_DIR".to_string(),
-            goal_target_dir(staging_dir).display().to_string(),
-        )]
+        let target = super::build_cache::gate_target_dir(staging_dir)
+            .unwrap_or_else(|| goal_target_dir(staging_dir));
+        vec![("CARGO_TARGET_DIR".to_string(), target.display().to_string())]
     } else {
         Vec::new()
     }

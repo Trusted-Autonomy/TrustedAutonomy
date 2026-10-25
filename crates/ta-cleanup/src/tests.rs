@@ -393,6 +393,68 @@ fn staging_rules_delete_keep_and_orphan() {
     assert!(r2.done.iter().any(|d| d.decided_by == Decider::Human));
 }
 
+#[test]
+fn build_cache_keys_idle_past_the_threshold_are_proposed_and_busy_or_fresh_ones_kept() {
+    let fx = Fx::new();
+    let cache = ta_workspace::build_cache::cache_root(fx.root());
+    let make = |key: &str, bytes: usize, idle: bool| {
+        let dir = cache.join(key);
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/dep.rlib"), vec![1u8; bytes]).unwrap();
+        ta_workspace::build_cache::touch(&dir);
+        if idle {
+            filetime_old(&dir.join("last_used"));
+        }
+        dir
+    };
+    let idle = make("aarch64-apple-darwin-aaaaaaaaaaaaaaaa", 4000, true);
+    let busy = make("aarch64-apple-darwin-bbbbbbbbbbbbbbbb", 4000, true);
+    let fresh = make("aarch64-apple-darwin-cccccccccccccccc", 4000, false);
+    // A goal in this process is building in `busy`.
+    let _holder =
+        ta_workspace::build_cache::register_holder(&busy, "goal-live", std::process::id()).unwrap();
+
+    let t = Truth::default();
+    let e = fx.engine(&t, Settings::default());
+
+    // Unattended: an idle key is only proposed, never auto-removed.
+    let r = run(&e, &opts(), None).unwrap();
+    assert!(idle.exists(), "cache keys are proposed, not auto-deleted");
+    assert_eq!(
+        find(&r, "build-cache:aarch64-apple-darwin-aaaa").verdict,
+        Verdict::Propose
+    );
+    let busy_finding = find(&r, "build-cache:aarch64-apple-darwin-bbbb");
+    assert_eq!(busy_finding.verdict, Verdict::Skip);
+    assert!(
+        busy_finding.reason.contains("goal-live"),
+        "the keep reason names the goal using it: {}",
+        busy_finding.reason
+    );
+    assert_eq!(
+        find(&r, "build-cache:aarch64-apple-darwin-cccc").verdict,
+        Verdict::Skip
+    );
+
+    // With --yes only the idle, unused key goes.
+    let r2 = run(
+        &e,
+        &RunOptions {
+            yes: true,
+            ..opts()
+        },
+        None,
+    )
+    .unwrap();
+    assert!(!idle.exists());
+    assert!(
+        busy.exists(),
+        "a key a live goal builds in is never removed"
+    );
+    assert!(fresh.exists());
+    assert!(r2.bytes_reclaimed >= 4000, "{}", r2.bytes_reclaimed);
+}
+
 fn filetime_old(p: &Path) {
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
     let mut opts = std::fs::OpenOptions::new();

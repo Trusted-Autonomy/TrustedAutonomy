@@ -2148,6 +2148,17 @@ pub struct StagingConfig {
     /// diff. `ta run --keep-build-output` keeps them for one goal. Default: true.
     #[serde(default = "default_reclaim_build_output")]
     pub reclaim_build_output: bool,
+    /// Goal agents build Rust projects into one shared cache outside staging
+    /// (`.ta/build-cache/<toolchain-key>/target`) instead of compiling the whole
+    /// workspace into each goal's own `target/`. `ta run --no-build-cache` turns
+    /// it off for one goal. Default: true.
+    #[serde(default = "default_build_cache")]
+    pub build_cache: bool,
+    /// Size cap of the shared build cache in GB. Least-recently-used toolchain
+    /// keys are evicted when a goal starts and the cache exceeds it. `0` means
+    /// no cap. Default: 20.
+    #[serde(default = "default_build_cache_max_gb")]
+    pub build_cache_max_gb: f64,
 }
 
 impl Default for StagingConfig {
@@ -2158,8 +2169,18 @@ impl Default for StagingConfig {
             strategy: StagingStrategy::Full,
             staging_max_gb: default_staging_max_gb(),
             reclaim_build_output: default_reclaim_build_output(),
+            build_cache: default_build_cache(),
+            build_cache_max_gb: default_build_cache_max_gb(),
         }
     }
+}
+
+fn default_build_cache() -> bool {
+    true
+}
+
+fn default_build_cache_max_gb() -> f64 {
+    20.0
 }
 
 fn default_reclaim_build_output() -> bool {

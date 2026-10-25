@@ -568,19 +568,17 @@ fn apply_source_no_longer_rewrites_plan_md_wholesale() {
     }
 }
 
-/// Goals must build in their own target directory, never the source tree's `target/`
-/// (artifacts compiled in staging bake the staging path into test binaries).
+/// Goals must never build in the source tree's `target/` (artifacts compiled in staging
+/// bake the staging path into test binaries). They build in the shared build cache or,
+/// with it off, in their own staging `target/`.
 #[test]
-fn goal_builds_use_their_own_target_directory() {
+fn goal_builds_never_use_the_source_trees_target_directory() {
     let src = include_str!("../run.rs").replace("\r\n", "\n");
     assert!(
         !src.contains("src_dir.join(\"target\")"),
         "run.rs must not point CARGO_TARGET_DIR at the source project's target/"
     );
-    assert!(
-        src.contains("super::verify::goal_target_dir(&staging_path)"),
-        "run.rs must give each goal its own CARGO_TARGET_DIR inside staging"
-    );
+    // A goal that has not been given the cache builds in its own staging directory.
     let staging = std::path::Path::new("/tmp/.ta/staging/abc");
     assert_eq!(
         super::super::verify::goal_target_dir(staging),

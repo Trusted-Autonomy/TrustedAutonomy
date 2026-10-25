@@ -839,6 +839,30 @@ fn check_gc(config: &GatewayConfig) -> Vec<CheckResult> {
         }
     }
 
+    // Shared goal build cache: size per toolchain key against its cap, and what the
+    // first goals' builds cost.
+    if ta_workspace::build_cache::cache_root(&config.workspace_root).exists() {
+        let staging = ta_submit::WorkflowConfig::load_or_default(
+            &config.workspace_root.join(".ta").join("workflow.toml"),
+        )
+        .staging;
+        let lines = super::build_cache::doctor_lines(&config.workspace_root, &staging);
+        let total: u64 = ta_workspace::build_cache::list_entries(&config.workspace_root)
+            .iter()
+            .map(|e| e.bytes)
+            .sum();
+        let cap = (staging.build_cache_max_gb * 1_073_741_824.0) as u64;
+        if cap > 0 && total > cap {
+            results.push(CheckResult::warn(
+                "Build cache",
+                lines.join("\n"),
+                "Over its cap: the next goal evicts least-recently-used keys, or run: ta cleanup --only staging (raise [staging] build_cache_max_gb in .ta/workflow.toml to keep more)",
+            ));
+        } else {
+            results.push(CheckResult::ok("Build cache", lines.join("\n")));
+        }
+    }
+
     if config.pr_packages_dir.exists() {
         match super::cleanup::findings(config, &[ta_cleanup::Category::Drafts], true) {
             Ok(found) => {

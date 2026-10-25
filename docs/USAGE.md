@@ -2631,7 +2631,7 @@ If pre-submit verification fails during `ta draft apply`, the changes are alread
 
 In warn mode (`on_failure = "warn"`), the draft is created but carries verification warnings visible in `ta draft view`.
 
-**Goals build in their own target directory.** For Rust projects, `ta run` sets `CARGO_TARGET_DIR` to `<staging>/target` for the agent and for verification, so build artifacts compiled in a goal's staging directory never land in your project's `target/` (they bake the staging path into test binaries, which then fail once staging is cleaned). The first build in a goal is a cold build and the directory is removed with staging. To use a different location, set `CARGO_TARGET_DIR` in `[agent_env]` of `.ta/workflow.toml` and TA leaves it alone.
+**Goals build in their own target directory.** For Rust projects, `ta run` sets `CARGO_TARGET_DIR` for the agent and for verification to the project's shared build cache under `.ta/build-cache/` (see "Shared build cache" under staging), or to `<staging>/target` with `--no-build-cache` or `[staging] build_cache = false`. Either way build artifacts compiled in a goal's staging directory never land in your project's `target/` (they bake the staging path into test binaries, which then fail once staging is cleaned). A `<staging>/target` directory is removed with staging. To use a different location, set `CARGO_TARGET_DIR` in `[agent_env]` of `.ta/workflow.toml` and TA leaves it alone.
 
 `ta init` generates a pre-populated `[verify]` section for Rust projects. Other project types get commented-out examples.
 
@@ -4253,6 +4253,38 @@ To turn reclaim off for the project, add to `.ta/workflow.toml`:
 [staging]
 reclaim_build_output = false   # default: true
 ```
+
+#### Shared build cache
+
+Goals of one project share a build cache, so the second goal does not recompile every dependency the first one compiled. `ta run` points the agent and the verification gates at `.ta/build-cache/<key>/target` instead of a per-goal `target/`, and prints which directory a goal uses:
+
+```
+Build cache: aarch64-apple-darwin-3f9a1c0b7d2e4a55 (1.8 GB cached; shared by this project's goals, cap 20 GB).
+```
+
+What is shared, and what is not:
+
+- The cache is **per project** and never leaves `.ta/`. It is not shared between projects, and it never enters a staging copy or a draft.
+- The key is the host target triple plus a hash of the `rustc -vV` output, `RUSTFLAGS`, and the registry/git packages in `Cargo.lock` (name, version, checksum). A different compiler, different flags or a changed dependency set gets a different directory, so a goal never reuses artifacts built for something else. Your own workspace crates do not change the key.
+- Cargo fingerprints include each crate's path, so only third-party dependencies are reused between goals. A goal's own crates are rebuilt in its own staging path.
+- Cargo serializes builds in one target directory. When another goal is building in the same key, `ta run` says so (`waiting for build lock held by goal <id>`) and the goal's builds wait for it. Use `--no-build-cache` to build in a private directory instead.
+- A sandboxed agent may not write under `.ta/`, so it builds in `<staging>/target` (removed when the agent exits) and says so; the verification gates still use the cache.
+
+Turn it off for one goal, or for the project:
+
+```bash
+ta run "title" --no-build-cache
+```
+
+```toml
+[staging]
+build_cache = false       # default: true
+build_cache_max_gb = 20   # default: 20; 0 = no cap
+```
+
+The cap is applied when a goal starts: least-recently-used keys are removed first, a key a live goal is using is never removed, and the key the new goal needs is kept. `ta doctor` shows each key's size and age, whether the cache is over its cap, and what the most recent goals' builds cost (agent wall time and build output before and after). `ta cleanup --only staging` proposes removing keys unused for `stale_days`, and asks before removing them; `rm -rf .ta/build-cache` is always safe when no goal is running, because the next build recreates it.
+
+If a build behaves differently with the cache than without it, rerun the goal with `--no-build-cache` to rule the cache out, and tell us which crates were involved.
 
 #### Viewing staging status
 

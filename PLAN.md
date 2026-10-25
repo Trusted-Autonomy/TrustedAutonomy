@@ -11472,18 +11472,18 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
 #### Version: `0.17.12-alpha.30`
 
 ### v0.17.12.31 - Shared Build Cache for Goal Agents
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.12.30
 
 **Goal**: Stop every goal compiling the whole workspace from scratch into its own staging `target/`. Goal agents build into one shared cache outside staging.
 
-1. [ ] Set `CARGO_TARGET_DIR` for goal agents to `.ta/build-cache/<toolchain-key>/target` (key from rustc version, target triple and Cargo.lock hash of dependencies), outside staging and excluded from staging copies. Configurable, default on, off with `--no-build-cache`.
-2. [ ] Concurrent goals: Cargo's own build lock serializes the same target directory; document the wait and surface "waiting for build lock held by goal <id>" in goal output. Option for per-goal subdirectories sharing a registry-level cache (sccache) when contention is measured to matter.
-3. [ ] Size management: cap the cache (`[staging] build_cache_max_gb`), evict least recently used toolchain keys, and show it in `ta doctor` and `ta cleanup`.
-4. [ ] Isolation: a goal's build output never leaves the cache into a draft; the cache is not readable through MCP file tools; document that a shared cache is shared across goals of one project only.
-5. [ ] Measurement (monitor): record per-goal wall time and bytes of build output before and after, and report the first ten goals in `ta cost report`/`ta doctor`. Flag any goal whose result differs from a clean build.
-6. [ ] Tests: key changes with toolchain and lockfile, eviction, two goals share the cache, exclude from staging copy and from drafts.
+1. [x] Set `CARGO_TARGET_DIR` for goal agents to `.ta/build-cache/<toolchain-key>/target` (key from rustc version, target triple and Cargo.lock hash of dependencies), outside staging and excluded from staging copies. Configurable, default on, off with `--no-build-cache`. Also `[staging] build_cache = false`. The key is chosen once per goal and the verification gates use the same directory. A sandboxed agent cannot write under `.ta/`, so it builds in `<staging>/target` and says so.
+2. [ ] Concurrent goals: Cargo's own build lock serializes the same target directory; document the wait and surface "waiting for build lock held by goal <id>" in goal output. Option for per-goal subdirectories sharing a registry-level cache (sccache) when contention is measured to matter. **Done**: the wait is documented in USAGE and printed at goal start (goals register as holders of their key). **Open**: the sccache / per-goal-subdirectory option; it is conditional on measured contention, which needs data from real goals.
+3. [x] Size management: cap the cache (`[staging] build_cache_max_gb`), evict least recently used toolchain keys, and show it in `ta doctor` and `ta cleanup`. Keys a live goal uses are never evicted.
+4. [x] Isolation: a goal's build output never leaves the cache into a draft; the cache is not readable through MCP file tools; document that a shared cache is shared across goals of one project only.
+5. [ ] Measurement (monitor): record per-goal wall time and bytes of build output before and after, and report the first ten goals in `ta cost report`/`ta doctor`. Flag any goal whose result differs from a clean build. **Done**: each goal's agent wall time and build output before/after are recorded (`.ta/build-cache/measurements.jsonl`) and `ta doctor` reports them. **Open**: `ta cost report` does not show them yet, and nothing compares a goal's result with a clean build (that needs a second, clean build per goal; decide whether to spend the compute).
+6. [x] Tests: key changes with toolchain and lockfile, eviction, two goals share the cache, exclude from staging copy and from drafts.
 
 **Effort**: M.
 
