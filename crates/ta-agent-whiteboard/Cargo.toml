@@ -27,8 +27,8 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 futures-util = "0.3"
-ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.5" }
-ta-session = { path = "../ta-session", version = "0.17.12-alpha.5" }
+ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.11" }
+ta-session = { path = "../ta-session", version = "0.17.12-alpha.11" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
