@@ -172,6 +172,7 @@ pub fn remove_named(named: &[PathBuf], found: &[TargetDir]) -> anyhow::Result<Ve
 
 /// A warning when `tmutil listlocalsnapshots /` output shows local snapshots.
 /// Deleted build output stays allocated while a snapshot references it.
+#[cfg(any(target_os = "macos", test))]
 pub fn snapshot_warning(tmutil_output: &str) -> Option<String> {
     let n = tmutil_output
         .lines()
@@ -291,9 +292,18 @@ mod tests {
     /// Backdate the directory and its children with `touch -t`-equivalent std calls.
     fn filetime_set(dir: &Path, t: SystemTime) -> bool {
         let set = |p: &Path| {
-            std::fs::File::open(p)
-                .and_then(|f| f.set_modified(t))
-                .is_ok()
+            let mut opts = std::fs::OpenOptions::new();
+            // Unix cannot open a directory for writing but can set its times
+            // through a read-only handle; Windows needs write access.
+            opts.read(true).write(cfg!(windows) || !p.is_dir());
+            #[cfg(windows)]
+            {
+                // Windows opens a directory only with FILE_FLAG_BACKUP_SEMANTICS,
+                // and `set_modified` needs write access.
+                use std::os::windows::fs::OpenOptionsExt;
+                opts.custom_flags(0x0200_0000);
+            }
+            opts.open(p).and_then(|f| f.set_modified(t)).is_ok()
         };
         let mut ok = true;
         let entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
