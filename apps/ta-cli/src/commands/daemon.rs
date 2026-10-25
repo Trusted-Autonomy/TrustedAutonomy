@@ -2835,8 +2835,10 @@ mod tests {
             (r.active_goals, r.active_agents, r.pending_drafts),
             (Some(2), Some(3), Some(4))
         );
-        assert!(r.pid_file.ends_with(".ta/daemon.pid"), "{}", r.pid_file);
-        assert!(r.log_file.ends_with(".ta/daemon.log"), "{}", r.log_file);
+        let pid_file = r.pid_file.replace('\\', "/");
+        let log_file = r.log_file.replace('\\', "/");
+        assert!(pid_file.ends_with(".ta/daemon.pid"), "{}", r.pid_file);
+        assert!(log_file.ends_with(".ta/daemon.log"), "{}", r.log_file);
         assert_eq!(r.project_root, root.display().to_string());
         let url = r.url.clone().unwrap();
         assert_eq!(

@@ -51,7 +51,8 @@ fn sha256_hex(text: &str) -> String {
 
 /// Full SHA-256 (64 hex chars) of the embedded terms text.
 fn terms_sha256() -> String {
-    sha256_hex(TERMS)
+    // LF-normalized so a Windows checkout (CRLF) pins to the same digest.
+    sha256_hex(&TERMS.replace("\r\n", "\n"))
 }
 
 /// First 16 hex chars of the SHA-256, the value stored in `terms_hash`.

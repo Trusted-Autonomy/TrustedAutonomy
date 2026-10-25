@@ -131,12 +131,14 @@ pub fn probe_daemon(
             }
         }
     };
-    let stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
+    // On a timeout the killed child's own children can still hold the pipes
+    // open; return without joining the reader threads so the timeout holds.
     let status = match exit {
         Ok(s) => s,
         Err(detail) => return failed(DaemonProbeState::ProbeFailed, Some(shown), detail),
     };
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
 
     if !status.success() {
         // clap exits 2 on an argument it does not know: a daemon that predates
