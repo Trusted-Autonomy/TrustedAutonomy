@@ -294,6 +294,11 @@ pub enum DraftCommands {
         /// action runs without a human present.
         #[arg(long)]
         no_replay_actions: bool,
+        /// Apply even when the checked-out branch is behind `origin/<default>` (for
+        /// example a stacked branch whose pull request targets another branch).
+        /// Without it, a stale base is refused before anything is written.
+        #[arg(long)]
+        allow_stale_base: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -797,11 +802,14 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             skip_plan_merge,
             replay_actions,
             no_replay_actions,
+            allow_stale_base,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
                 return Ok(());
             }
+            // `--allow-stale-base`: carried to the pre-flight in `apply_package`.
+            let _stale_base_guard = super::apply_base::AllowStaleBaseGuard::set(*allow_stale_base);
 
             // CR-02: an agent must not apply its own draft. A dry run changes
             // nothing, so it stays open.
@@ -6123,14 +6131,20 @@ impl ApplyLock {
     /// - No existing lock → writes lock file and returns `Ok(ApplyLock)`.
     /// - Stale lock (pid dead) → removes it, then acquires as above.
     /// - Live lock → returns `Err` with an actionable error message.
-    fn acquire(workspace_root: &std::path::Path, draft_id: &str) -> anyhow::Result<Self> {
+    fn acquire(
+        workspace_root: &std::path::Path,
+        draft_id: &str,
+        recovered: usize,
+    ) -> anyhow::Result<Self> {
         let lock_path = workspace_root.join(".ta").join("apply.lock");
 
         if let Ok(raw) = std::fs::read_to_string(&lock_path) {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
                 let pid = data["pid"].as_u64().unwrap_or(0) as u32;
                 let existing_draft = data["draft_id"].as_str().unwrap_or("unknown");
-                if is_apply_process_alive(pid) {
+                // PID 0 would make `kill(0, 0)` signal this process group: a lock
+                // that names no process is never a live one.
+                if pid != 0 && is_apply_process_alive(pid) {
                     anyhow::bail!(
                         "Draft apply already in progress (PID {pid}, draft {existing_draft}). \
                          Wait for it to finish or kill PID {pid} if it has crashed.\n\
@@ -6139,10 +6153,31 @@ impl ApplyLock {
                         lock = lock_path.display()
                     );
                 }
-                // Stale lock — previous apply crashed without cleanup.
+                // Stale lock — previous apply crashed without cleanup. Say what
+                // was found and what to do about it, then remove it.
+                let stale = super::apply_base::StaleLock {
+                    pid,
+                    draft_id: existing_draft.to_string(),
+                    started_at: data["started_at"].as_str().unwrap_or("unknown").to_string(),
+                    lock_path: lock_path.clone(),
+                };
+                let dirty = super::apply_base::dirty_path_count(workspace_root);
                 eprintln!(
-                    "[apply] Removing stale apply lock (PID {pid} is no longer running): {lock}",
-                    lock = lock_path.display()
+                    "{}",
+                    super::apply_base::stale_lock_report(
+                        &stale,
+                        existing_draft == draft_id,
+                        recovered,
+                        dirty
+                    )
+                );
+                tracing::warn!(
+                    pid,
+                    interrupted_draft = %existing_draft,
+                    recovered_journals = recovered,
+                    uncommitted_paths = ?dirty,
+                    lock = %lock_path.display(),
+                    "removed a stale apply lock left by a dead process"
                 );
                 let _ = std::fs::remove_file(&lock_path);
             }
@@ -6190,7 +6225,16 @@ impl ApplyLock {
                         state = if alive { "running" } else { "stale/dead" }
                     );
                     if !alive {
-                        println!("  Lock is stale. Remove with: rm {}", lock_path.display());
+                        for line in super::apply_base::stale_lock_status_lines(
+                            &super::apply_base::StaleLock {
+                                pid,
+                                draft_id: draft_id.to_string(),
+                                started_at: started_at.to_string(),
+                                lock_path: lock_path.clone(),
+                            },
+                        ) {
+                            println!("{line}");
+                        }
                     }
                 }
             },
@@ -7035,8 +7079,9 @@ fn apply_package(
     // The lock is released automatically when `_apply_lock` is dropped.
     // Finish or undo any earlier apply that was interrupted (crash, power loss)
     // before taking the lock. A live apply is left alone (v0.17.12.3).
-    super::apply_queue::recover_interrupted_applies(config);
-    let _apply_lock = ApplyLock::acquire(&config.workspace_root, &package_id.to_string())?;
+    let recovered = super::apply_queue::recover_interrupted_applies(config);
+    let _apply_lock =
+        ApplyLock::acquire(&config.workspace_root, &package_id.to_string(), recovered)?;
 
     eprintln!("[apply] Loading draft package {}...", package_id);
     let mut pkg = load_package(config, package_id)?;
@@ -7658,6 +7703,11 @@ fn apply_package(
         let wf_path = target_dir.join(".ta/workflow.toml");
         let wf_config = WorkflowConfig::load_or_default(&wf_path);
         let adapter = select_adapter(&target_dir, &wf_config.submit);
+        if adapter.name() != "none" {
+            // Before anything is written: a base behind origin makes a PR that
+            // shows newer upstream work as deletions.
+            super::apply_base::enforce_current_base(&target_dir, id)?;
+        }
         let pre = ensure_off_protected_branch(
             adapter.as_ref(),
             &CommitContext::from(goal),
@@ -9188,9 +9238,23 @@ fn apply_package(
                 if skip_verify {
                     println!("\n  Skipping pre-submit verification (--skip-verify).");
                 } else if !workflow_config.verify.commands.is_empty() {
-                    println!("\nRunning pre-submit verification...");
+                    println!(
+                        "\n{}",
+                        super::apply_base::verify_announcement(
+                            workflow_config.verify.commands.len(),
+                            super::apply_base::last_verify_duration(&target_dir),
+                            id,
+                        )
+                    );
+                    let verify_started = std::time::Instant::now();
                     let verify_result =
                         super::verify::run_verification(&workflow_config.verify, &target_dir);
+                    super::apply_base::record_verify_duration(
+                        &target_dir,
+                        verify_started.elapsed(),
+                        workflow_config.verify.commands.len(),
+                        verify_result.passed,
+                    );
                     if !verify_result.passed {
                         for w in &verify_result.warnings {
                             eprintln!(

@@ -78,6 +78,28 @@ impl PhaseClaims {
         map.contains_key(phase_id)
     }
 
+    /// The goal id a claim was made with and how long ago it was made, or
+    /// `None` when `phase_id` is not claimed.
+    pub fn claim_info(&self, phase_id: &str) -> Option<(Option<String>, std::time::Duration)> {
+        let map = self.inner.lock().expect("phase_claims mutex poisoned");
+        map.get(phase_id).map(|r| {
+            (
+                r.goal_id.clone(),
+                r.claimed_at.elapsed().unwrap_or_default(),
+            )
+        })
+    }
+
+    /// Record a claim as made `age` ago. Test support for claims left behind
+    /// by runs that ended long before.
+    #[cfg(test)]
+    pub fn backdate(&self, phase_id: &str, age: std::time::Duration) {
+        let mut map = self.inner.lock().expect("phase_claims mutex poisoned");
+        if let Some(r) = map.get_mut(phase_id) {
+            r.claimed_at = SystemTime::now() - age;
+        }
+    }
+
     /// Return a snapshot of all current claims (for introspection / status endpoints).
     pub fn snapshot(&self) -> Vec<(String, Option<String>)> {
         let map = self.inner.lock().expect("phase_claims mutex poisoned");

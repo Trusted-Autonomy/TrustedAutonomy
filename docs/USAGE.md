@@ -4625,6 +4625,10 @@ ta doctor --fix --only secrets,vcs-gitignore   # apply exactly these ids, no pro
 
 **Orphaned plan-phase claims.** `ta doctor` warns about every phase `PLAN.md` marks `in_progress` while no live goal holds it, and shows the exact `PLAN.md` lines (with line numbers) the fix would change. `ta doctor --fix` then offers, for each one, to reset the phase to `pending`, or, when it is an ad-hoc `v0.0.0.N` stub with nothing under its heading but the inserted-goal note, to remove the stub. Nothing is changed until you confirm (or pass `--yes` or `--only orphaned-phase-<id>`). To release one claim by hand, run `ta plan reset <phase>`.
 
+**Build output and local snapshots.** `ta doctor` lists every Cargo `target/` directory under the project and its goal staging copies, largest first, with its size and how many days it has been idle. Those idle for 7 days or more are offered with the exact command to remove each: `ta doctor --remove-target <path>`. Doctor removes only what you name, and only a directory it listed: any other path is refused and nothing is removed. Removing `target/` is safe; the next build recreates it. On macOS, deleted space does not come back to `df` while a local APFS snapshot still references it, so doctor warns when `tmutil listlocalsnapshots /` shows snapshots and prints `tmutil thinlocalsnapshots / 10000000000 4` to ask macOS to free about 10 GB.
+
+**A phase claim that blocks `ta run`.** A claim held by the daemon for a goal that no longer exists or has ended is released automatically the next time anyone claims that phase (a claim whose goal has not started yet is trusted for 10 minutes). `ta plan reset <phase>` also releases the daemon's claim when the phase is missing from `PLAN.md`, and says whether it released a claim, found none, or could not reach the daemon.
+
 Stale-draft cleanup calls the same logic as `ta draft close --stale` directly (not a subprocess). It only closes drafts already in `Approved`/`PendingReview` status that are older than `gc.stale_threshold_days`, and it is gated like every other `--fix` action (the `stale_drafts` id).
 
 For cron jobs, `ta doctor --fix --yes` applies the non-destructive fixes; add `--only <id>` for a destructive one you have reviewed.
@@ -8515,6 +8519,7 @@ Before copying files, `ta draft apply` runs safety checks to catch suspicious ar
 - Critical workspace files (`Cargo.toml`, `.gitignore`, `flake.nix`, `CLAUDE.md`, `Cargo.lock`) use a tighter **50%** threshold.
 - Binary files are skipped (size changes are expected).
 
+
 If a check fires, the apply is blocked with a specific message:
 
 ```
@@ -8529,6 +8534,12 @@ To bypass the check (e.g., you intentionally deleted most of a file):
 ```bash
 ta draft apply <draft-id> --force-apply
 ```
+
+#### Interrupted applies and stale bases
+
+- **A branch behind `origin`.** Before anything is written, the apply compares the checked-out branch with the local `origin/main` (or `origin/master`, or whatever `origin/HEAD` names). If the branch lacks commits that are on it, the apply stops with the commit it expected and the fix: `git fetch origin && git merge --ff-only origin/main` (on a feature branch, `git rebase origin/main`), then re-run `ta draft apply <id>`. Without that, the pull request would show everyone else's newer work as deletions. The check reads local refs only; it never fetches. For a stacked branch whose pull request targets another branch, pass `--allow-stale-base`. Without a git repository, an `origin` remote or an `origin/main` ref, the check is skipped.
+- **A dead apply.** If an earlier `ta draft apply` was killed (for example by a caller timeout), the next apply first rolls back or finishes anything it journaled, then reports the stale `.ta/apply.lock`: the draft it belonged to, the dead PID, when it started, what recovery did, and any uncommitted paths it could not account for (inspect with `git status`). **Re-running `ta draft apply <id>` is the resume.** To drop the draft instead, run `ta draft close <id>`. `ta draft apply --status` shows the same commands for a stale lock.
+- **Long verification.** The pre-submit verification prints how long its last run took. A caller with a shorter timeout kills it; run the apply detached instead: `nohup ta draft apply <id> > apply.log 2>&1 &`, then watch `ta draft apply --status`.
 
 ### External Diff Handlers
 
