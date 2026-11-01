@@ -92,10 +92,11 @@ ta_codesign() {
 
     # Deliberately no --options runtime (hardened runtime): it enforces
     # strict library validation requiring every dynamically-loaded library
-    # to share this binary's Team ID. TA's Nix-built binaries link against
-    # Nix-store libs (e.g. libiconv) signed under their own, different
-    # identities -- hardened runtime made dyld refuse to load them at all
-    # ("different Team IDs"), found live testing this change. Plain signing
+    # to share this binary's Team ID. Binaries signed here no longer link
+    # Nix-store libs (see ta_portable_link), but hardened runtime stays off:
+    # earlier Nix-store libiconv copies were signed under their own, different
+    # identities and dyld refused to load them ("different Team IDs"), found
+    # live testing this change. Plain signing
     # still gives a stable identity, which is the only thing Keychain ACL
     # grants actually key off of.
     if codesign --force --sign "$TA_CODESIGN_IDENTITY" --identifier "$identifier" \
@@ -103,6 +104,48 @@ ta_codesign() {
         echo "Signed: $binary_path (identity: $TA_CODESIGN_IDENTITY, id: $identifier)"
     else
         echo "Warning: codesign failed for $binary_path — continuing with an unsigned binary."
+    fi
+}
+
+# ta_portable_link BINARY_PATH -- make an installed macOS binary independent of
+# the Nix store, then fail if anything under /nix/store is still linked.
+#
+# Why this exists: the cc-wrapper in `nix develop` puts the nixpkgs libiconv on
+# every link line (it is a dependency of the Darwin stdenv itself, so removing
+# `pkgs.libiconv` from flake.nix does not stop it -- verified). Rust's std then
+# resolves -liconv to /nix/store/...-libiconv/lib/libiconv.2.dylib, a path that
+# exists only on this machine. macOS ships the same library at
+# /usr/lib/libiconv.2.dylib, so repoint the load command there. This must run
+# BEFORE ta_codesign: editing the Mach-O invalidates its signature.
+#
+# Set TA_ALLOW_NIX_LINKS=1 to install a binary that still links the Nix store
+# (it will not run on any other machine, and must not be put in a depot).
+ta_portable_link() {
+    local binary_path="$1"
+    if [[ "$(uname -s)" != "Darwin" ]] || ! command -v otool &>/dev/null; then
+        return 0
+    fi
+
+    local nix_libiconv
+    while IFS= read -r nix_libiconv; do
+        [[ -n "$nix_libiconv" ]] || continue
+        if ! install_name_tool -change "$nix_libiconv" /usr/lib/libiconv.2.dylib "$binary_path"; then
+            echo "Error: could not repoint $nix_libiconv in $binary_path to /usr/lib/libiconv.2.dylib." >&2
+            echo "       install_name_tool ships with the Xcode Command Line Tools: xcode-select --install" >&2
+            exit 1
+        fi
+        echo "Portable link: $binary_path now uses /usr/lib/libiconv.2.dylib (was $nix_libiconv)"
+    done < <(otool -L "$binary_path" | awk '/\/nix\/store\/.*libiconv[^ ]*\.dylib/ {print $1}')
+
+    local leftovers
+    leftovers="$(otool -L "$binary_path" | awk '/\/nix\/store\// {print $1}')"
+    if [[ -n "$leftovers" && "${TA_ALLOW_NIX_LINKS:-}" != "1" ]]; then
+        echo "Error: $binary_path still links libraries from the Nix store and would not run on" >&2
+        echo "       another machine:" >&2
+        echo "$leftovers" | sed 's/^/         /' >&2
+        echo "       Build with a non-Nix link environment, or set TA_ALLOW_NIX_LINKS=1 to" >&2
+        echo "       install it for local use only." >&2
+        exit 1
     fi
 }
 
@@ -183,6 +226,7 @@ mkdir -p "$INSTALL_DIR"
 # syspolicyd caches provenance decisions per-inode — `cp` overwrites
 # can inherit a stale "kill" decision, causing SIGKILL on launch.
 install -m 755 "$TA_BINARY" "$INSTALL_DIR/ta"
+ta_portable_link "$INSTALL_DIR/ta"
 ta_codesign "$INSTALL_DIR/ta" "com.trustedautonomy.ta"
 echo "Installed: $INSTALL_DIR/ta"
 "$INSTALL_DIR/ta" --version
@@ -193,6 +237,7 @@ if [[ "$BUILD_DAEMON" == true ]]; then
         exit 1
     fi
     install -m 755 "$DAEMON_BINARY" "$INSTALL_DIR/ta-daemon"
+    ta_portable_link "$INSTALL_DIR/ta-daemon"
     ta_codesign "$INSTALL_DIR/ta-daemon" "com.trustedautonomy.ta-daemon"
     echo "Installed: $INSTALL_DIR/ta-daemon"
 

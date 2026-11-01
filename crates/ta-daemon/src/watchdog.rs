@@ -157,6 +157,9 @@ pub struct WatchdogState {
     /// In memory only: a daemon restart restarts the grace period, which errs
     /// on the side of keeping the goal.
     dead_agent_first_seen: HashMap<Uuid, DateTime<Utc>>,
+    /// Low-disk alerts were closed since disk space last recovered, so the
+    /// operations log is not rescanned every cycle. Cleared when disk goes low.
+    disk_recovery_recorded: bool,
 }
 
 impl Default for WatchdogState {
@@ -169,6 +172,7 @@ impl Default for WatchdogState {
             disk_alert_first_noticed: None,
             last_disk_alert_wall: None,
             dead_agent_first_seen: HashMap::new(),
+            disk_recovery_recorded: false,
         }
     }
 }
@@ -247,6 +251,36 @@ const LOW_DISK_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 /// Minimum time between repeated low-disk corrective actions for the same
 /// sustained episode (v0.17.0.12.5 item 6).
 const DISK_ALERT_COOLDOWN_SECS: u64 = 600; // 10 minutes
+
+/// When free space is back above the threshold, close any low-disk alert still
+/// `Proposed` (raised in this run or an earlier daemon run): it is no longer
+/// true. Done once per recovery, not every cycle, so `ta status` and
+/// notifications stop reporting it. A failed write is retried next cycle.
+fn close_stale_disk_alerts(
+    project_root: &Path,
+    avail_bytes: Option<u64>,
+    state: &mut WatchdogState,
+) {
+    if state.disk_recovery_recorded || !avail_bytes.is_some_and(|b| b >= LOW_DISK_THRESHOLD_BYTES) {
+        return;
+    }
+    let ops_log = OperationsLog::for_project(project_root);
+    match ops_log.resolve_proposed(
+        ta_goal::is_low_disk_alert,
+        "disk space recovered above the 2 GB threshold",
+    ) {
+        Ok(n) => {
+            state.disk_recovery_recorded = true;
+            if n > 0 {
+                tracing::info!(resolved = n, "Watchdog: closed stale low-disk alerts");
+            }
+        }
+        Err(e) => tracing::warn!(
+            "Watchdog: failed to close stale low-disk alerts: {} (will retry next cycle)",
+            e
+        ),
+    }
+}
 
 /// Evaluate the disk-space check for a given `avail_bytes` reading and update
 /// `state`'s dedup bookkeeping. Returns `Some(CorrectiveAction)` when a new
@@ -400,8 +434,9 @@ fn watchdog_cycle(
     // Check disk space and emit a corrective action if low, deduplicated so a
     // sustained low-disk condition doesn't flood the operations log with a
     // fresh entry every watchdog cycle (v0.17.0.12.5 item 6).
-    if let Some(action) = check_disk_space(available_disk_bytes(project_root), current_wall, state)
-    {
+    let avail_disk = available_disk_bytes(project_root);
+    if let Some(action) = check_disk_space(avail_disk, current_wall, state) {
+        state.disk_recovery_recorded = false;
         let ops_log = OperationsLog::for_project(project_root);
         if let Err(e) = ops_log.append(&action) {
             tracing::warn!(
@@ -409,6 +444,8 @@ fn watchdog_cycle(
                 e
             );
         }
+    } else {
+        close_stale_disk_alerts(project_root, avail_disk, state);
     }
 
     // Forget grace clocks for goals that are no longer `running` (they settled
@@ -1924,6 +1961,43 @@ mod tests {
         let refired = check_disk_space(Some(ONE_GB), t2, &mut state);
         assert!(refired.is_some(), "new episode after recovery should fire");
         assert_eq!(state.disk_alert_first_noticed, Some(t2));
+    }
+
+    #[test]
+    fn recovered_disk_closes_stale_low_disk_alerts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let log = OperationsLog::for_project(project);
+        let mut state = WatchdogState::default();
+
+        // An alert left over from an earlier low-disk episode.
+        let t0 = SystemTime::now();
+        let alert = check_disk_space(Some(ONE_GB), t0, &mut state).unwrap();
+        log.append(&alert).unwrap();
+
+        // Still low: nothing is closed.
+        close_stale_disk_alerts(project, Some(ONE_GB), &mut state);
+        assert!(matches!(
+            log.read(None).unwrap()[0].status,
+            ta_goal::ActionStatus::Proposed
+        ));
+
+        // Unknown reading: nothing is closed either.
+        close_stale_disk_alerts(project, None, &mut state);
+        assert!(matches!(
+            log.read(None).unwrap()[0].status,
+            ta_goal::ActionStatus::Proposed
+        ));
+
+        // Recovered: the alert is closed.
+        close_stale_disk_alerts(project, Some(10 * ONE_GB), &mut state);
+        let entries = log.read(None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].status,
+            ta_goal::ActionStatus::Executed { .. }
+        ));
+        assert!(state.disk_recovery_recorded);
     }
 
     #[test]
