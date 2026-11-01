@@ -136,6 +136,130 @@ pub fn ensure_ta_ignore_with(
     })
 }
 
+/// Deadline for the `svn` calls behind `changed_paths_since` (the trait gives
+/// the caller no timeout knob for it).
+const SVN_CHANGED_PATHS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Output of one bounded `svn` invocation: stdout bytes, or the error.
+type SvnBounded<'a> = &'a dyn Fn(&[&str]) -> Result<Vec<u8>>;
+
+/// Parse an SVN revision given as `1234` or `r1234`.
+fn parse_svn_rev(rev: &str) -> Result<u64> {
+    rev.trim()
+        .trim_start_matches('r')
+        .parse::<u64>()
+        .map_err(|_| {
+            SubmitError::InvalidState(format!(
+                "invalid svn revision {:?}: expected a revision number such as \"1234\" (the \
+                 value returned earlier by the adapter's head_rev_id())",
+                rev
+            ))
+        })
+}
+
+/// The working copy's current revision: the "head" both `head_rev_id` and the
+/// history queries use, so a stored baseline and a later range always agree
+/// with what is on disk.
+fn svn_wc_revision(run: SvnBounded<'_>) -> Result<u64> {
+    let out = run(&["info", "--non-interactive", "--show-item", "revision"])?;
+    let text = String::from_utf8_lossy(&out);
+    text.trim().parse::<u64>().map_err(|_| {
+        SubmitError::VcsError(format!(
+            "`svn info --show-item revision` returned {:?}, expected a revision number; is this \
+             directory an svn working copy?",
+            text.trim()
+        ))
+    })
+}
+
+/// Parse `svn diff --summarize` text into project-relative paths.
+///
+/// Each line is `<item><props>` + 6 spaces + path (8 leading columns). Any
+/// non-empty line that does not match is an error rather than being skipped:
+/// silently dropping paths would make a poller miss changes. Directory entries
+/// that exist in the working copy are dropped (summarize output has no kind
+/// column); a *deleted* directory cannot be told from a deleted file and is
+/// kept.
+fn parse_svn_summarize(output: &str, project_root: &Path) -> Result<Vec<String>> {
+    let mut paths: Vec<String> = Vec::new();
+    for line in output.lines().filter(|l| !l.trim().is_empty()) {
+        let cols: Vec<char> = line.chars().collect();
+        let well_formed = cols.len() > 8
+            && cols[2..8].iter().all(|c| *c == ' ')
+            && cols[..2].iter().any(|c| !c.is_whitespace());
+        if !well_formed {
+            return Err(SubmitError::VcsError(format!(
+                "unrecognised `svn diff --summarize` line {:?}; expected `<status><props>      \
+                 <path>`. TA cannot map it to a project path — report this svn version/output",
+                line
+            )));
+        }
+        let raw: String = cols[8..].iter().collect();
+        let mut path = raw.replace('\\', "/");
+        if path.contains("://") {
+            return Err(SubmitError::VcsError(format!(
+                "`svn diff --summarize` reported a URL ({:?}) instead of a working-copy path; \
+                 TA cannot map it to a project-relative path",
+                raw
+            )));
+        }
+        let root = project_root.to_string_lossy().replace('\\', "/");
+        if let Some(rest) = path.strip_prefix(&format!("{}/", root.trim_end_matches('/'))) {
+            path = rest.to_string();
+        }
+        let path = path.trim_start_matches("./").to_string();
+        if path.is_empty() || path == "." || project_root.join(&path).is_dir() {
+            continue;
+        }
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn svn_changed_paths(
+    run: SvnBounded<'_>,
+    project_root: &Path,
+    since_rev: &str,
+) -> Result<Vec<String>> {
+    let since = parse_svn_rev(since_rev)?;
+    let head = svn_wc_revision(run)?;
+    let range = format!("{since}:{head}");
+    let out = run(&["diff", "--summarize", "--non-interactive", "-r", &range])?;
+    parse_svn_summarize(&String::from_utf8_lossy(&out), project_root)
+}
+
+fn svn_diff_path(run: SvnBounded<'_>, since_rev: &str, rel_path: &str) -> Result<String> {
+    let since = parse_svn_rev(since_rev)?;
+    let head = svn_wc_revision(run)?;
+    let range = format!("{since}:{head}");
+    // A path containing `@` needs a trailing `@` so svn does not read the tail
+    // as a peg revision.
+    let target = if rel_path.contains('@') {
+        format!("{rel_path}@")
+    } else {
+        rel_path.to_string()
+    };
+    let out = run(&[
+        "diff",
+        "--non-interactive",
+        "--internal-diff",
+        "-r",
+        &range,
+        "-x",
+        "-U0",
+        "--",
+        &target,
+    ])?;
+    String::from_utf8(out).map_err(|_| {
+        SubmitError::VcsError(format!(
+            "svn diff of {} over {} is not valid UTF-8; cannot return it as text",
+            rel_path, range
+        ))
+    })
+}
+
 impl SourceAdapter for SvnAdapter {
     fn prepare(&self, _ctx: &CommitContext, _config: &SubmitConfig) -> Result<()> {
         // SVN doesn't use branches the same way as Git.
@@ -394,6 +518,46 @@ impl SourceAdapter for SvnAdapter {
             }
         }
     }
+
+    fn head_rev_id(&self, repo_root: &Path) -> Option<String> {
+        // Working-copy revision (what is on disk), as a bare number: the
+        // baseline format `changed_paths_since` / `diff_since` accept.
+        let run = |args: &[&str]| {
+            crate::bounded_cmd::run_bounded("svn", args, repo_root, &[], SVN_CHANGED_PATHS_TIMEOUT)
+        };
+        svn_wc_revision(&run).ok().map(|r| r.to_string())
+    }
+
+    fn changed_paths_since(
+        &self,
+        project_root: &Path,
+        since_rev: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let run = |args: &[&str]| {
+            crate::bounded_cmd::run_bounded(
+                "svn",
+                args,
+                project_root,
+                &[],
+                SVN_CHANGED_PATHS_TIMEOUT,
+            )
+        };
+        svn_changed_paths(&run, project_root, since_rev).map(Some)
+    }
+
+    fn diff_since(
+        &self,
+        project_root: &Path,
+        since_rev: &str,
+        rel_path: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<String>> {
+        crate::bounded_cmd::check_rel_path(rel_path)?;
+        let run = |args: &[&str]| {
+            crate::bounded_cmd::run_bounded("svn", args, project_root, &[], timeout)
+        };
+        svn_diff_path(&run, since_rev, rel_path).map(Some)
+    }
 }
 
 #[cfg(test)]
@@ -539,5 +703,137 @@ mod tests {
         };
         let err = ensure_ta_ignore_with(&run, false).unwrap_err().to_string();
         assert!(err.contains("Install Subversion"), "{err}");
+    }
+
+    // ---- changed_paths_since / diff_since (svn is not installed in CI, so the
+    // ---- command construction and parsing are tested through a fake runner) ----
+
+    /// A fake `svn` that records every argument vector and answers by
+    /// sub-command.
+    fn fake_svn<'a>(
+        calls: &'a std::cell::RefCell<Vec<Vec<String>>>,
+        info: &'static str,
+        diff: &'static str,
+    ) -> impl Fn(&[&str]) -> Result<Vec<u8>> + 'a {
+        move |args: &[&str]| {
+            calls
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            Ok(match args[0] {
+                "info" => info.as_bytes().to_vec(),
+                "diff" => diff.as_bytes().to_vec(),
+                other => panic!("unexpected svn sub-command {other}"),
+            })
+        }
+    }
+
+    #[test]
+    fn svn_changed_paths_builds_range_to_wc_revision_and_parses_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let run = fake_svn(
+            &calls,
+            "42\n",
+            "M       docs/guide.md\n\
+             A       docs\n\
+             D       old/gone.txt\n\
+             \x20M      docs/props only.txt\n\
+             MM      docs/guide.md\n",
+        );
+        let got = svn_changed_paths(&run, dir.path(), "r40").unwrap();
+        // `docs` exists as a directory -> dropped; duplicates collapsed.
+        assert_eq!(
+            got,
+            vec![
+                "docs/guide.md".to_string(),
+                "old/gone.txt".to_string(),
+                "docs/props only.txt".to_string()
+            ]
+        );
+        let calls = calls.borrow();
+        assert_eq!(calls[0][0], "info");
+        assert_eq!(
+            calls[1],
+            ["diff", "--summarize", "--non-interactive", "-r", "40:42"]
+        );
+    }
+
+    #[test]
+    fn svn_changed_paths_strips_absolute_and_dot_prefixes_and_rejects_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = format!(
+            "M       {}/a/b.txt\nM       ./c.txt\n",
+            dir.path().display()
+        );
+        let got = parse_svn_summarize(&abs, dir.path()).unwrap();
+        assert_eq!(got, vec!["a/b.txt".to_string(), "c.txt".to_string()]);
+
+        let err = parse_svn_summarize("M       https://svn.example/repo/x\n", dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("URL"), "{err}");
+    }
+
+    #[test]
+    fn svn_changed_paths_fails_loudly_on_unrecognised_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = parse_svn_summarize("something unexpected here\n", dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unrecognised"), "{err}");
+        assert_eq!(
+            parse_svn_summarize("", dir.path()).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn svn_diff_path_builds_zero_context_internal_diff_command() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let run = fake_svn(&calls, "7\n", "Index: a@b.txt\n");
+        let diff = svn_diff_path(&run, "5", "a@b.txt").unwrap();
+        assert_eq!(diff, "Index: a@b.txt\n");
+        assert_eq!(
+            calls.borrow()[1],
+            [
+                "diff",
+                "--non-interactive",
+                "--internal-diff",
+                "-r",
+                "5:7",
+                "-x",
+                "-U0",
+                "--",
+                "a@b.txt@"
+            ]
+        );
+    }
+
+    #[test]
+    fn svn_revisions_are_validated() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let run = fake_svn(&calls, "7\n", "");
+        assert!(svn_diff_path(&run, "--version", "a.txt").is_err());
+        assert!(svn_diff_path(&run, "", "a.txt").is_err());
+        assert!(svn_changed_paths(&run, Path::new("."), "HEAD").is_err());
+        assert!(calls.borrow().is_empty(), "rejected before running svn");
+        assert_eq!(parse_svn_rev("r12").unwrap(), 12);
+        assert_eq!(parse_svn_rev(" 12 ").unwrap(), 12);
+
+        let bad_info = fake_svn(&calls, "not a number", "");
+        let err = svn_changed_paths(&bad_info, Path::new("."), "3")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("working copy"), "{err}");
+    }
+
+    #[test]
+    fn svn_diff_since_rejects_escaping_paths_before_running_svn() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = SvnAdapter::new(dir.path());
+        let t = std::time::Duration::from_secs(5);
+        assert!(adapter.diff_since(dir.path(), "1", "../x", t).is_err());
+        assert!(adapter.diff_since(dir.path(), "1", "/abs", t).is_err());
     }
 }

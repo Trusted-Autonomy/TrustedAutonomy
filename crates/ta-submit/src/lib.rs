@@ -17,6 +17,7 @@
 //! Git remains built-in as the zero-configuration default.
 
 pub mod adapter;
+pub(crate) mod bounded_cmd;
 pub mod config;
 pub mod external_vcs_adapter;
 pub mod git;

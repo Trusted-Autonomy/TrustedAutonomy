@@ -182,6 +182,75 @@ fn check_wiki_seed_context(config: &GatewayConfig) -> Option<CheckResult> {
     }
 }
 
+/// `file`'s spelling for [`ta_submit::SourceAdapter::is_path_ignored`], which
+/// takes paths relative to `.ta/`: a file under `.ta/` loses that prefix; a
+/// project-root file is reached as `../<name>`.
+fn ta_relative_spelling(project_root: &std::path::Path, file: &std::path::Path) -> Option<String> {
+    let rel = file.strip_prefix(project_root).ok()?;
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    Some(match rel.strip_prefix(".ta/") {
+        Some(inside) => inside.to_string(),
+        None => format!("../{rel}"),
+    })
+}
+
+/// Plaintext credential files the project's VCS does not ignore (so a plain
+/// `add`/`commit` would include them), each as `(project-relative path,
+/// adapter name)`. A VCS that cannot answer (`Err`) or ignores the file (`Ok(true)`,
+/// which includes the `none` adapter) yields nothing: only a definite "not
+/// ignored" is reported.
+fn cred_files_not_ignored(
+    project_root: &std::path::Path,
+    cred_files: &[std::path::PathBuf],
+) -> Vec<(String, String)> {
+    if cred_files.is_empty() {
+        return Vec::new();
+    }
+    let adapter = ta_submit::detect_adapter(project_root);
+    cred_files
+        .iter()
+        .filter_map(|file| {
+            let spelling = ta_relative_spelling(project_root, file)?;
+            match adapter.is_path_ignored(project_root, &spelling) {
+                Ok(false) => {
+                    let rel = file.strip_prefix(project_root).ok()?;
+                    Some((
+                        rel.to_string_lossy().replace('\\', "/"),
+                        adapter.name().to_string(),
+                    ))
+                }
+                Ok(true) => None,
+                Err(e) => {
+                    tracing::debug!(
+                        file = %file.display(),
+                        vcs = adapter.name(),
+                        error = %e,
+                        "could not tell whether a credential file is ignored by the VCS"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// VCS-neutral instruction for credential files the VCS does not ignore.
+fn unignored_cred_fix(unignored: &[(String, String)]) -> String {
+    let vcs = &unignored[0].1;
+    let files: Vec<String> = unignored.iter().map(|(p, _)| format!("{p:?}")).collect();
+    if vcs == "git" {
+        format!(
+            "Not ignored by git, so `git add` would commit them: add `*.cred` to .gitignore; if already committed, run `git rm --cached -- {}` and rotate the credential (it is in history).",
+            files.join(" ")
+        )
+    } else {
+        format!(
+            "Not ignored by {vcs}, so a plain add/commit would include them: add them to {vcs}'s ignore rules; if already under version control, remove {} from {vcs} version control and rotate the credential (it may already be in history).",
+            files.join(" ")
+        )
+    }
+}
+
 /// Old-location keys, tokens and NATS data inside the project tree, or bearer
 /// tokens left in team-session state. Fails under the `strict` posture.
 fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
@@ -193,13 +262,19 @@ fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
             "no keys, credential files or tokens in the project tree",
         );
     }
+    let unignored = cred_files_not_ignored(&config.workspace_root, &summary.cred_files);
     let mut parts = super::state_secrets::describe_items(&summary);
-    parts.extend(
-        summary
-            .cred_files
-            .iter()
-            .map(|f| format!("{} (plaintext credential file)", f.display())),
-    );
+    parts.extend(summary.cred_files.iter().map(|f| {
+        let mut s = format!("{} (plaintext credential file)", f.display());
+        let rel = f
+            .strip_prefix(&config.workspace_root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if let Some((_, vcs)) = unignored.iter().find(|(p, _)| *p == rel) {
+            s.push_str(&format!(" (not ignored by {vcs}: it can be committed)"));
+        }
+        s
+    }));
     let detail = format!(
         "{} item(s) inside the project tree, reachable by any agent: {}",
         parts.len(),
@@ -218,6 +293,10 @@ fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
         fix.push_str(
             "Plaintext *.cred files need manual action: use `ta credentials add`, or keep the file in the per-user state directory (`ta show state`) and delete the copy in the project.",
         );
+    }
+    if !unignored.is_empty() {
+        fix.push('\n');
+        fix.push_str(&unignored_cred_fix(&unignored));
     }
     if summary.posture == Posture::Strict {
         CheckResult::fail("secrets", detail, fix)
@@ -2647,6 +2726,110 @@ mod tests {
         assert_eq!(
             check_control_plane_secrets(&test_config(&clean)).status,
             CheckStatus::Ok
+        );
+    }
+
+    /// `git init` in `dir` with the user's config and any inherited
+    /// repo-selecting variables neutralised.
+    fn git_init_hermetic(dir: &std::path::Path) {
+        let out = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{:?}", out);
+    }
+
+    #[test]
+    fn secrets_check_says_a_cred_file_git_does_not_ignore_can_be_committed() {
+        let dir = TempDir::new().unwrap();
+        git_init_hermetic(dir.path());
+        let ta = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta).unwrap();
+        std::fs::write(ta.join("wayfinder-service-account.cred"), "secret").unwrap();
+        std::fs::write(dir.path().join("root.cred"), "secret").unwrap();
+
+        let r = check_control_plane_secrets(&test_config(&dir));
+        assert_ne!(r.status, CheckStatus::Ok);
+        assert_eq!(
+            r.detail
+                .matches("(not ignored by git: it can be committed)")
+                .count(),
+            2,
+            "both the .ta/ file and the project-root file are flagged: {}",
+            r.detail
+        );
+        assert!(r.fix.contains("git rm --cached"), "{}", r.fix);
+        assert!(
+            r.fix.contains(".ta/wayfinder-service-account.cred"),
+            "{}",
+            r.fix
+        );
+        assert!(r.fix.contains("root.cred"), "{}", r.fix);
+        assert!(r.fix.contains("rotate"), "{}", r.fix);
+        // The original manual-action guidance is still there.
+        assert!(r.fix.contains("ta credentials add"), "{}", r.fix);
+    }
+
+    #[test]
+    fn secrets_check_stays_quiet_about_commits_when_git_ignores_the_cred_file() {
+        let dir = TempDir::new().unwrap();
+        git_init_hermetic(dir.path());
+        std::fs::write(dir.path().join(".gitignore"), "*.cred\n").unwrap();
+        let ta = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta).unwrap();
+        std::fs::write(ta.join("wayfinder-service-account.cred"), "secret").unwrap();
+        std::fs::write(dir.path().join("root.cred"), "secret").unwrap();
+
+        let r = check_control_plane_secrets(&test_config(&dir));
+        // Still a finding (the file is plaintext in the tree) ...
+        assert_ne!(r.status, CheckStatus::Ok);
+        assert!(
+            r.detail.contains("plaintext credential file"),
+            "{}",
+            r.detail
+        );
+        // ... but nothing about being committable.
+        assert!(!r.detail.contains("not ignored"), "{}", r.detail);
+        assert!(!r.fix.contains("git rm --cached"), "{}", r.fix);
+    }
+
+    #[test]
+    fn unignored_cred_fix_is_vcs_neutral_for_non_git_adapters() {
+        let fix = unignored_cred_fix(&[(".ta/a.cred".to_string(), "svn".to_string())]);
+        assert!(fix.contains("Not ignored by svn"), "{fix}");
+        assert!(
+            fix.contains("remove \".ta/a.cred\" from svn version control"),
+            "{fix}"
+        );
+        assert!(fix.contains("rotate"), "{fix}");
+        assert!(!fix.contains("git"), "{fix}");
+    }
+
+    #[test]
+    fn cred_files_are_spelled_relative_to_dot_ta_for_the_adapter() {
+        let root = std::path::Path::new("/p");
+        assert_eq!(
+            ta_relative_spelling(root, std::path::Path::new("/p/.ta/x.cred")).as_deref(),
+            Some("x.cred")
+        );
+        assert_eq!(
+            ta_relative_spelling(root, std::path::Path::new("/p/.ta/sub/x.cred")).as_deref(),
+            Some("sub/x.cred")
+        );
+        assert_eq!(
+            ta_relative_spelling(root, std::path::Path::new("/p/root.cred")).as_deref(),
+            Some("../root.cred")
+        );
+        assert_eq!(
+            ta_relative_spelling(root, std::path::Path::new("/elsewhere/x.cred")),
+            None
         );
     }
 

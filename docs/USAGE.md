@@ -6666,7 +6666,7 @@ ta doctor --fix --only secrets
 
 The copy is re-read and compared before `.ta/credentials.key` is removed, a second run does nothing, and if the state directory already holds a different key nothing is deleted. Under the strict posture TA refuses the key in the project tree and tells you to run this command.
 
-`ta doctor` also flags every plaintext `*.cred` file in the project root and in `.ta/` (for example a `.ta/wayfinder-service-account.cred` written by a pairing script). TA cannot move such a file for the script that reads it, so the finding is manual: store the secret with `ta credentials add`, or keep the file in the state directory and point the script there, then delete the copy in the project.
+`ta doctor` also flags every plaintext `*.cred` file in the project root and in `.ta/` (for example a `.ta/wayfinder-service-account.cred` written by a pairing script). TA cannot move such a file for the script that reads it, so the finding is manual: store the secret with `ta credentials add`, or keep the file in the state directory and point the script there, then delete the copy in the project. When the project's VCS (git, svn, Perforce or a plugin) does not ignore the file, the finding adds `(not ignored by <vcs>: it can be committed)` and the fix says how to remove it from version control (for git: `git rm --cached -- <file>`) and to rotate the credential, since it may already be in history.
 
 #### Moving an existing install out of the project tree
 
@@ -7380,6 +7380,23 @@ Each adapter contributes VCS-specific exclude patterns that are merged with your
 | `restore_state()` | Switch back to original branch | No-op | Log restore |
 
 **SVN and Perforce adapters are stubs** — they implement the correct protocol but have not been tested against real servers. If you use SVN or Perforce, please test and report issues.
+
+**History queries for pollers and ingestion tools.** Tools that watch a project for changes (for example the Virtual Team wiki ingestion) must not run `git` themselves; they ask the adapter, so the same code works on every VCS. These read-only operations are available through `SourceAdapter`:
+
+| Operation | Meaning |
+|-----------|---------|
+| `head_rev_id(root)` | The baseline to store: the revision of what is on disk now |
+| `changed_paths_since(root, since_rev)` | Project-relative paths changed after `since_rev` (exclusive) up to the current head (inclusive); deletions included |
+| `diff_since(root, since_rev, path, timeout)` | Zero-context unified diff of one path over the same range; the VCS tool runs without a shell and is killed when `timeout` elapses |
+
+| | Git | SVN | Perforce | none |
+|-|-----|-----|----------|------|
+| revision | abbreviated commit SHA of `HEAD` | working-copy revision number (`svn update` advances it) | not supported | not supported |
+| range | `since_rev..HEAD` tree diff, renames reported as delete + add | `since_rev` to the working-copy revision | | |
+
+A result of "not supported" is `Ok(None)`: the VCS cannot answer and the caller should fall back to another strategy. It is not an error, and it is never an empty list. An error means the VCS supports the query but it failed (unknown revision, tool not installed, timeout); the message names the command and what to do. Record the new baseline with `head_rev_id` *before* calling `changed_paths_since` and store it only after the paths were processed, so a commit that lands in between is reported again rather than lost.
+
+Perforce is not supported because `p4` reports depot paths, and mapping them to project-relative paths needs the client workspace view, which TA will not guess. External VCS plugins opt in per operation by listing `changed_paths_since` and/or `diff_since` in the `capabilities` of their handshake reply; their `revision_id` result is then the baseline. A plugin without the capability yields "not supported".
 
 #### Using TA with Perforce
 

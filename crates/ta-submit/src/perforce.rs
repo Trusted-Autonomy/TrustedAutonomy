@@ -216,6 +216,30 @@ impl SourceAdapter for PerforceAdapter {
             .map_err(SubmitError::VcsError)
     }
 
+    fn changed_paths_since(
+        &self,
+        _project_root: &Path,
+        _since_rev: &str,
+    ) -> Result<Option<Vec<String>>> {
+        // Unsupported on purpose. `p4 files`/`p4 describe` report *depot* paths;
+        // turning them into project-relative paths needs the client workspace
+        // view (`p4 where`/`fstat clientFile`), and which depot subtree belongs
+        // to `project_root` is workspace-specific. Guessing would silently
+        // report wrong paths, so callers get "this VCS cannot say" instead.
+        Ok(None)
+    }
+
+    fn diff_since(
+        &self,
+        _project_root: &Path,
+        _since_rev: &str,
+        _rel_path: &str,
+        _timeout: std::time::Duration,
+    ) -> Result<Option<String>> {
+        // Unsupported for the same reason as `changed_paths_since`.
+        Ok(None)
+    }
+
     fn commit_diff(&self) -> Option<String> {
         // Get the most recent submitted changelist number.
         let cl = match self.p4_cmd(&["changes", "-s", "submitted", "-m", "1"]) {
@@ -574,5 +598,26 @@ mod tests {
         let adapter = PerforceAdapter::new(dir.path());
         // This will either succeed (p4 not installed) or succeed (p4 installed but warns).
         assert!(adapter.verify_not_on_protected_target().is_ok());
+    }
+
+    #[test]
+    fn history_queries_are_unsupported_without_running_p4() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = PerforceAdapter::new(dir.path());
+        assert_eq!(
+            adapter.changed_paths_since(dir.path(), "123").unwrap(),
+            None
+        );
+        assert_eq!(
+            adapter
+                .diff_since(
+                    dir.path(),
+                    "123",
+                    "a.txt",
+                    std::time::Duration::from_secs(1)
+                )
+                .unwrap(),
+            None
+        );
     }
 }
