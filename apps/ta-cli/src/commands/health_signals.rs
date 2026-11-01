@@ -174,11 +174,15 @@ fn check_stale_goals(config: &GatewayConfig, signals: &mut Vec<HealthSignal>) {
     let now = Utc::now();
     let stale_hours = 24i64;
 
+    // Only goals whose staging directory still exists: the signal says "with
+    // staging", and `ta gc` has nothing to reclaim for a goal whose staging is
+    // already gone (its record alone costs no disk).
     let stale_failed: Vec<_> = goals
         .iter()
         .filter(|g| {
             matches!(g.state, GoalRunState::Failed { .. })
                 && (now - g.updated_at).num_hours() >= stale_hours
+                && g.workspace_path.is_dir()
         })
         .collect();
 

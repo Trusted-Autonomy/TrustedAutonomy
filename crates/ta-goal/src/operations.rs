@@ -4,6 +4,7 @@
 // They are persisted to `.ta/operations.jsonl` and surfaced via `ta operations log`.
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -138,6 +139,10 @@ impl OperationsLog {
     }
 
     /// Read all entries, most recent first. Optionally limited.
+    ///
+    /// The file is append-only: an update to an action (see
+    /// [`OperationsLog::resolve_proposed`]) appends a second record with the same
+    /// `id`, and the last record for an id is the one returned.
     pub fn read(&self, limit: Option<usize>) -> Result<Vec<CorrectiveAction>, GoalError> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -147,7 +152,8 @@ impl OperationsLog {
             source,
         })?;
         let reader = BufReader::new(file);
-        let mut entries = Vec::new();
+        let mut entries: Vec<CorrectiveAction> = Vec::new();
+        let mut index: HashMap<Uuid, usize> = HashMap::new();
         for line in reader.lines() {
             let line = line.map_err(|source| GoalError::IoError {
                 path: self.path.display().to_string(),
@@ -158,7 +164,13 @@ impl OperationsLog {
                 continue;
             }
             if let Ok(action) = serde_json::from_str::<CorrectiveAction>(line) {
-                entries.push(action);
+                match index.get(&action.id) {
+                    Some(&i) => entries[i] = action,
+                    None => {
+                        index.insert(action.id, entries.len());
+                        entries.push(action);
+                    }
+                }
             }
         }
         // Most recent first.
@@ -168,6 +180,37 @@ impl OperationsLog {
         }
         Ok(entries)
     }
+
+    /// Mark every still-`Proposed` action accepted by `matches` as executed
+    /// with `outcome`, by appending an updated record. Returns how many were
+    /// resolved. Used when the condition that raised an action has cleared
+    /// (for example disk space recovered) so it stops showing as pending.
+    pub fn resolve_proposed(
+        &self,
+        matches: impl Fn(&CorrectiveAction) -> bool,
+        outcome: &str,
+    ) -> Result<usize, GoalError> {
+        let open: Vec<CorrectiveAction> = self
+            .read(None)?
+            .into_iter()
+            .filter(|a| matches!(a.status, ActionStatus::Proposed) && matches(a))
+            .collect();
+        for mut action in open.iter().cloned() {
+            action.status = ActionStatus::Executed {
+                outcome: outcome.to_string(),
+            };
+            action.updated_at = Utc::now();
+            self.append(&action)?;
+        }
+        Ok(open.len())
+    }
+}
+
+/// True for the watchdog's low-disk-space alert (critical, issue text
+/// "Low disk space: ..."), which `ta status` and the watchdog treat as
+/// cleared once free space is back above the threshold.
+pub fn is_low_disk_alert(action: &CorrectiveAction) -> bool {
+    action.severity == ActionSeverity::Critical && action.issue.starts_with("Low disk space")
 }
 
 #[cfg(test)]
@@ -281,5 +324,44 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         let restored: CorrectiveAction = serde_json::from_str(&json).unwrap();
         assert!(matches!(restored.status, ActionStatus::Approved { .. }));
+    }
+
+    #[test]
+    fn resolve_proposed_closes_only_matching_open_actions_and_keeps_one_record_per_id() {
+        let dir = tempdir().unwrap();
+        let log = OperationsLog::for_project(dir.path());
+        let disk = CorrectiveAction::new(
+            "Low disk space: 0.2 GB available",
+            ActionSeverity::Critical,
+            "D",
+            "P",
+            "clean_applied_staging",
+        );
+        let zombie = CorrectiveAction::new(
+            "Goal xyz is zombie",
+            ActionSeverity::Warning,
+            "D",
+            "P",
+            "transition_zombie_to_failed",
+        );
+        log.append(&disk).unwrap();
+        log.append(&zombie).unwrap();
+
+        let n = log
+            .resolve_proposed(is_low_disk_alert, "disk recovered")
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let entries = log.read(None).unwrap();
+        assert_eq!(entries.len(), 2, "an update must not duplicate the action");
+        let disk_now = entries.iter().find(|e| e.id == disk.id).unwrap();
+        assert!(
+            matches!(&disk_now.status, ActionStatus::Executed { outcome } if outcome == "disk recovered")
+        );
+        let zombie_now = entries.iter().find(|e| e.id == zombie.id).unwrap();
+        assert!(matches!(zombie_now.status, ActionStatus::Proposed));
+
+        // Nothing left to resolve: a second call is a no-op.
+        assert_eq!(log.resolve_proposed(is_low_disk_alert, "again").unwrap(), 0);
     }
 }
