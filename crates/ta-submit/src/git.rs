@@ -14,6 +14,19 @@ use crate::adapter::{
 use crate::config::SubmitConfig;
 use crate::config::SyncConfig;
 
+/// Environment variables that make `git` operate on a repository other than
+/// the one in its working directory; removed for read-only history queries.
+const GIT_REPO_ENV_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// Deadline for `changed_paths_since` (the trait gives the caller no timeout
+/// knob for it; a name-only tree diff is cheap even on large repos).
+const GIT_CHANGED_PATHS_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Git adapter implementing branch-based workflow
 ///
 /// Features:
@@ -2005,6 +2018,83 @@ impl SourceAdapter for GitAdapter {
         ta_workspace::partitioning::git_is_ignored(project_root, ta_rel_path)
             .map_err(SubmitError::VcsError)
     }
+
+    fn changed_paths_since(
+        &self,
+        project_root: &Path,
+        since_rev: &str,
+    ) -> Result<Option<Vec<String>>> {
+        crate::bounded_cmd::check_rev_arg(since_rev, "git")?;
+        let range = format!("{}..HEAD", since_rev.trim());
+        // `-z`: NUL-separated, never quoted. `--relative`: paths relative to
+        // (and limited to) `project_root` even when it is a repo subdirectory.
+        let out = crate::bounded_cmd::run_bounded(
+            "git",
+            &[
+                "--literal-pathspecs",
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-renames",
+                "--relative",
+                &range,
+                "--",
+            ],
+            project_root,
+            GIT_REPO_ENV_VARS,
+            GIT_CHANGED_PATHS_TIMEOUT,
+        )?;
+        let paths = out
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        Ok(Some(paths))
+    }
+
+    fn diff_since(
+        &self,
+        project_root: &Path,
+        since_rev: &str,
+        rel_path: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>> {
+        crate::bounded_cmd::check_rev_arg(since_rev, "git")?;
+        crate::bounded_cmd::check_rel_path(rel_path)?;
+        let range = format!("{}..HEAD", since_rev.trim());
+        let out = crate::bounded_cmd::run_bounded(
+            "git",
+            &[
+                "--literal-pathspecs",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--unified=0",
+                "--relative",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                &range,
+                "--",
+                rel_path,
+            ],
+            project_root,
+            GIT_REPO_ENV_VARS,
+            timeout,
+        )?;
+        String::from_utf8(out).map(Some).map_err(|_| {
+            SubmitError::VcsError(format!(
+                "git diff of {} over {}..HEAD in {} is not valid UTF-8 (binary or non-UTF-8 \
+                 content); cannot return it as text",
+                rel_path,
+                since_rev.trim(),
+                project_root.display()
+            ))
+        })
+    }
 }
 
 impl GitAdapter {
@@ -3595,5 +3685,247 @@ mod tests {
         assert!(adapter.closed_unmerged_branches().is_err());
         // Read-only diagnostics still degrade rather than error.
         assert!(adapter.check_failures("1").unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // changed_paths_since / diff_since
+    // -----------------------------------------------------------------
+
+    /// Run git in `dir` with the user's global/system config and the
+    /// repo-selecting env vars neutralised, so commits never depend on the
+    /// developer's signing/identity/hook configuration.
+    fn hgit(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    /// A repo with one baseline commit; returns the dir and the baseline rev
+    /// exactly as a caller would store it (`head_rev_id`).
+    fn repo_with_baseline() -> (tempfile::TempDir, String) {
+        let dir = tempdir().unwrap();
+        hgit(dir.path(), &["init"]);
+        write_file(dir.path(), "keep.txt", "keep\n");
+        write_file(dir.path(), "gone.txt", "bye\n");
+        write_file(dir.path(), "docs/guide.md", "one\ntwo\nthree\n");
+        write_file(dir.path(), "moved-old.txt", "same content here\n");
+        hgit(dir.path(), &["add", "."]);
+        hgit(dir.path(), &["commit", "-m", "baseline"]);
+        let rev = GitAdapter::new(dir.path())
+            .head_rev_id(dir.path())
+            .expect("head_rev_id after first commit");
+        (dir, rev)
+    }
+
+    #[test]
+    fn changed_paths_since_reports_add_modify_delete_and_rename_sides() {
+        let (dir, base) = repo_with_baseline();
+        let root = dir.path();
+        write_file(root, "docs/guide.md", "one\nTWO\nthree\n");
+        write_file(root, "new file with spaces.txt", "n\n");
+        write_file(root, "ünï.txt", "u\n");
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::rename(root.join("moved-old.txt"), root.join("moved-new.txt")).unwrap();
+        hgit(root, &["add", "-A"]);
+        hgit(root, &["commit", "-m", "second"]);
+        // A second commit after the first: both are in the range.
+        write_file(root, "later.txt", "l\n");
+        hgit(root, &["add", "-A"]);
+        hgit(root, &["commit", "-m", "third"]);
+
+        let mut got = GitAdapter::new(root)
+            .changed_paths_since(root, &base)
+            .unwrap()
+            .expect("git supports changed_paths_since");
+        got.sort();
+        let mut want = vec![
+            "docs/guide.md",
+            "gone.txt",
+            "later.txt",
+            "moved-new.txt",
+            "moved-old.txt",
+            "new file with spaces.txt",
+            "ünï.txt",
+        ];
+        want.sort();
+        assert_eq!(got, want, "unquoted, rename = delete + add, no keep.txt");
+    }
+
+    #[test]
+    fn changed_paths_since_is_exclusive_of_baseline_and_empty_at_head() {
+        let (dir, base) = repo_with_baseline();
+        let root = dir.path();
+        let adapter = GitAdapter::new(root);
+        // Nothing after the baseline yet.
+        assert_eq!(
+            adapter.changed_paths_since(root, &base).unwrap(),
+            Some(vec![])
+        );
+        write_file(root, "after.txt", "a\n");
+        hgit(root, &["add", "-A"]);
+        hgit(root, &["commit", "-m", "after"]);
+        // The baseline commit's own files (keep.txt, ...) are not reported.
+        assert_eq!(
+            adapter.changed_paths_since(root, &base).unwrap(),
+            Some(vec!["after.txt".to_string()])
+        );
+        // Re-baselining at the new head yields an empty range again.
+        let head = adapter.head_rev_id(root).unwrap();
+        assert_eq!(
+            adapter.changed_paths_since(root, &head).unwrap(),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn changed_paths_since_is_relative_to_a_project_subdirectory() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        hgit(repo, &["init"]);
+        write_file(repo, "proj/a.txt", "a\n");
+        write_file(repo, "other/b.txt", "b\n");
+        hgit(repo, &["add", "."]);
+        hgit(repo, &["commit", "-m", "base"]);
+        let proj = repo.join("proj");
+        let adapter = GitAdapter::new(&proj);
+        let base = adapter.head_rev_id(&proj).unwrap();
+
+        write_file(repo, "proj/sub/c.txt", "c\n");
+        write_file(repo, "other/b.txt", "b2\n");
+        hgit(repo, &["add", "-A"]);
+        hgit(repo, &["commit", "-m", "change"]);
+
+        assert_eq!(
+            adapter.changed_paths_since(&proj, &base).unwrap(),
+            Some(vec!["sub/c.txt".to_string()]),
+            "paths are project-relative and changes outside the project are excluded"
+        );
+        let diff = adapter
+            .diff_since(&proj, &base, "sub/c.txt", Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert!(diff.contains("+c"), "{diff}");
+    }
+
+    #[test]
+    fn diff_since_is_zero_context_plain_text_for_one_path() {
+        let (dir, base) = repo_with_baseline();
+        let root = dir.path();
+        write_file(root, "docs/guide.md", "one\nTWO\nthree\n");
+        write_file(root, "keep.txt", "keep changed\n");
+        hgit(root, &["add", "-A"]);
+        hgit(root, &["commit", "-m", "edit"]);
+
+        let diff = GitAdapter::new(root)
+            .diff_since(root, &base, "docs/guide.md", Duration::from_secs(30))
+            .unwrap()
+            .expect("git supports diff_since");
+        assert!(diff.contains("@@ -2 +2 @@"), "zero-context hunk: {diff}");
+        assert!(diff.contains("-two\n") && diff.contains("+TWO\n"), "{diff}");
+        assert!(
+            !diff
+                .lines()
+                .skip_while(|l| !l.starts_with("@@"))
+                .skip(1)
+                .any(|l| l.starts_with(' ')),
+            "no context lines in the hunk body: {diff}"
+        );
+        assert!(!diff.contains("keep"), "only the requested path: {diff}");
+        assert!(!diff.contains('\u{1b}'), "no color escapes: {diff}");
+    }
+
+    #[test]
+    fn diff_since_is_empty_for_unchanged_path_and_nonempty_for_deleted() {
+        let (dir, base) = repo_with_baseline();
+        let root = dir.path();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        hgit(root, &["add", "-A"]);
+        hgit(root, &["commit", "-m", "rm"]);
+        let adapter = GitAdapter::new(root);
+        let t = Duration::from_secs(30);
+        assert_eq!(
+            adapter.diff_since(root, &base, "keep.txt", t).unwrap(),
+            Some(String::new())
+        );
+        let deleted = adapter
+            .diff_since(root, &base, "gone.txt", t)
+            .unwrap()
+            .unwrap();
+        assert!(deleted.contains("-bye"), "{deleted}");
+    }
+
+    #[test]
+    fn diff_since_treats_the_path_literally_not_as_pathspec_magic() {
+        let (dir, base) = repo_with_baseline();
+        let root = dir.path();
+        write_file(root, "keep.txt", "keep changed\n");
+        hgit(root, &["add", "-A"]);
+        hgit(root, &["commit", "-m", "edit"]);
+        let t = Duration::from_secs(30);
+        let adapter = GitAdapter::new(root);
+        assert_eq!(
+            adapter.diff_since(root, &base, "*.txt", t).unwrap(),
+            Some(String::new()),
+            "a glob must not expand"
+        );
+        assert_eq!(
+            adapter.diff_since(root, &base, ":(glob)**", t).unwrap(),
+            Some(String::new()),
+            "pathspec magic must not apply"
+        );
+    }
+
+    #[test]
+    fn git_history_queries_reject_bad_input_with_actionable_errors() {
+        let (dir, base) = repo_with_baseline();
+        let root = dir.path();
+        let adapter = GitAdapter::new(root);
+        let t = Duration::from_secs(30);
+
+        // Unknown revision: a real failure naming the command, not Ok(None).
+        let err = adapter
+            .changed_paths_since(root, "0000000000000000000000000000000000000001")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git") && err.contains("diff"), "{err}");
+
+        // Option injection and path escapes are refused before git runs.
+        assert!(adapter
+            .changed_paths_since(root, "--output=/tmp/ta-pwn")
+            .is_err());
+        assert!(adapter.changed_paths_since(root, "").is_err());
+        assert!(adapter.diff_since(root, &base, "../etc/passwd", t).is_err());
+        assert!(adapter.diff_since(root, &base, "/etc/passwd", t).is_err());
+        assert!(adapter.diff_since(root, "-p", "keep.txt", t).is_err());
     }
 }

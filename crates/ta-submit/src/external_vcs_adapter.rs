@@ -33,12 +33,13 @@ use crate::adapter::{
 use crate::config::SubmitConfig;
 use crate::vcs_plugin_manifest::VcsPluginManifest;
 use crate::vcs_plugin_protocol::{
-    CheckReviewParams, CheckReviewResult, CommitParams, CommitResult as PluginCommitResult,
-    DetectParams, DetectResult, ExcludePatternsResult, HandshakeParams, HandshakeResult,
-    IsPathIgnoredParams, IsPathIgnoredResult, MergeReviewParams, MergeReviewResult,
-    OpenReviewParams, OpenReviewResult, PrepareParams, ProtectedTargetsResult, PushParams,
-    PushResult as PluginPushResult, RestoreStateParams, SaveStateResult, SyncUpstreamResult,
-    VcsPluginRequest, VcsPluginResponse, PROTOCOL_VERSION,
+    ChangedPathsSinceParams, ChangedPathsSinceResult, CheckReviewParams, CheckReviewResult,
+    CommitParams, CommitResult as PluginCommitResult, DetectParams, DetectResult, DiffSinceParams,
+    DiffSinceResult, ExcludePatternsResult, HandshakeParams, HandshakeResult, IsPathIgnoredParams,
+    IsPathIgnoredResult, MergeReviewParams, MergeReviewResult, OpenReviewParams, OpenReviewResult,
+    PrepareParams, ProtectedTargetsResult, PushParams, PushResult as PluginPushResult,
+    RestoreStateParams, SaveStateResult, SyncUpstreamResult, VcsPluginRequest, VcsPluginResponse,
+    PROTOCOL_VERSION,
 };
 
 /// In-process representation of saved state from an external plugin.
@@ -206,17 +207,22 @@ impl ExternalVcsAdapter {
         method: &str,
         params: serde_json::Value,
     ) -> Result<T> {
+        self.call_with_timeout(method, params, self.timeout)
+    }
+
+    /// [`Self::call`] with an explicit per-call deadline instead of the
+    /// manifest's `timeout_secs`.
+    fn call_with_timeout<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<T> {
         let request = VcsPluginRequest {
             method: method.to_string(),
             params,
         };
-        let response = call_plugin(
-            &self.command,
-            &self.args,
-            &self.work_dir,
-            &request,
-            self.timeout,
-        )?;
+        let response = call_plugin(&self.command, &self.args, &self.work_dir, &request, timeout)?;
 
         if !response.ok {
             return Err(SubmitError::VcsError(format!(
@@ -534,6 +540,60 @@ impl SourceAdapter for ExternalVcsAdapter {
         Ok(result.ignored)
     }
 
+    fn head_rev_id(&self, _repo_root: &Path) -> Option<String> {
+        // Only plugins that opted in to the history queries are asked: the
+        // baseline is whatever their `revision_id` returns, which is exactly
+        // what their `changed_paths_since` / `diff_since` accept.
+        if !self.has_capability("changed_paths_since") && !self.has_capability("diff_since") {
+            return None;
+        }
+        self.revision_id().ok()
+    }
+
+    fn changed_paths_since(
+        &self,
+        project_root: &Path,
+        since_rev: &str,
+    ) -> Result<Option<Vec<String>>> {
+        if !self.has_capability("changed_paths_since") {
+            return Ok(None);
+        }
+        let params = ChangedPathsSinceParams {
+            project_root: project_root.to_string_lossy().into_owned(),
+            since_rev: since_rev.to_string(),
+        };
+        let result: ChangedPathsSinceResult = self.call(
+            "changed_paths_since",
+            serde_json::to_value(params).unwrap_or_default(),
+        )?;
+        Ok(Some(result.paths))
+    }
+
+    fn diff_since(
+        &self,
+        project_root: &Path,
+        since_rev: &str,
+        rel_path: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>> {
+        if !self.has_capability("diff_since") {
+            return Ok(None);
+        }
+        crate::bounded_cmd::check_rel_path(rel_path)?;
+        let params = DiffSinceParams {
+            project_root: project_root.to_string_lossy().into_owned(),
+            since_rev: since_rev.to_string(),
+            rel_path: rel_path.to_string(),
+            timeout_secs: timeout.as_secs().max(1),
+        };
+        let result: DiffSinceResult = self.call_with_timeout(
+            "diff_since",
+            serde_json::to_value(params).unwrap_or_default(),
+            timeout,
+        )?;
+        Ok(Some(result.diff))
+    }
+
     fn stage_env(
         &self,
         _staging_dir: &Path,
@@ -754,6 +814,74 @@ echo "this is not json"
                 || err.to_string().contains("invalid JSON"),
             "Got: {}",
             err
+        );
+    }
+
+    /// A plugin that answers handshake with `caps` and answers the history
+    /// methods with canned results; anything else fails the exchange.
+    fn history_plugin(dir: &Path, caps: &str) -> ExternalVcsAdapter {
+        let script = format!(
+            r#"#!/bin/sh
+read -r line
+case "$line" in
+  *'"method":"handshake"'*)
+    echo '{{"ok":true,"result":{{"plugin_version":"0.1.0","protocol_version":1,"adapter_name":"mock","capabilities":[{caps}]}}}}' ;;
+  *'"method":"revision_id"'*)
+    echo '{{"ok":true,"result":{{"revision_id":"r77"}}}}' ;;
+  *'"method":"changed_paths_since"'*'"since_rev":"r5"'*)
+    echo '{{"ok":true,"result":{{"paths":["docs/a.md","b.txt"]}}}}' ;;
+  *'"method":"changed_paths_since"'*)
+    echo '{{"ok":false,"error":"unknown baseline"}}' ;;
+  *'"method":"diff_since"'*'"rel_path":"docs/a.md"'*)
+    printf '%s\n' '{{"ok":true,"result":{{"diff":"@@ -1 +1 @@\n-a\n+b\n"}}}}' ;;
+  *)
+    echo '{{"ok":false,"error":"unexpected request"}}' ;;
+esac
+"#
+        );
+        let plugin_path = write_mock_plugin(dir, &script);
+        let manifest = mock_manifest(&plugin_path.display().to_string(), dir);
+        ExternalVcsAdapter::new(&manifest, dir, "0.17.0-alpha").unwrap()
+    }
+
+    #[test]
+    fn history_queries_use_declared_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = history_plugin(dir.path(), r#""changed_paths_since","diff_since""#);
+        assert_eq!(a.head_rev_id(dir.path()).as_deref(), Some("r77"));
+        assert_eq!(
+            a.changed_paths_since(dir.path(), "r5").unwrap(),
+            Some(vec!["docs/a.md".to_string(), "b.txt".to_string()])
+        );
+        let diff = a
+            .diff_since(dir.path(), "r5", "docs/a.md", Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert_eq!(diff, "@@ -1 +1 @@\n-a\n+b\n");
+        // A plugin error is an Err naming the plugin and method, not None.
+        let err = a
+            .changed_paths_since(dir.path(), "r999")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("changed_paths_since") && err.contains("unknown baseline"),
+            "{err}"
+        );
+        assert!(a
+            .diff_since(dir.path(), "r5", "../x", Duration::from_secs(10))
+            .is_err());
+    }
+
+    #[test]
+    fn history_queries_are_unsupported_without_the_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = history_plugin(dir.path(), r#""commit""#);
+        assert_eq!(a.head_rev_id(dir.path()), None);
+        assert_eq!(a.changed_paths_since(dir.path(), "r5").unwrap(), None);
+        assert_eq!(
+            a.diff_since(dir.path(), "r5", "docs/a.md", Duration::from_secs(10))
+                .unwrap(),
+            None
         );
     }
 }

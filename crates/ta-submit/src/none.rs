@@ -125,6 +125,19 @@ mod tests {
         assert_eq!(adapter.commit_diff(), None);
     }
 
+    #[test]
+    fn history_queries_are_unsupported() {
+        let adapter = NoneAdapter::new();
+        let root = std::path::Path::new(".");
+        assert_eq!(adapter.changed_paths_since(root, "abc").unwrap(), None);
+        assert_eq!(
+            adapter
+                .diff_since(root, "abc", "a.txt", std::time::Duration::from_secs(1))
+                .unwrap(),
+            None
+        );
+    }
+
     // Note: Tests for commit() and open_review() require PRPackage construction
     // which has a complex structure. These will be added as integration tests
     // that use actual PRPackage instances from ta-changeset test utilities.
