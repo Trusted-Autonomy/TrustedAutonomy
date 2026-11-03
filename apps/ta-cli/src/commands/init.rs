@@ -2360,6 +2360,65 @@ members = [
             !gitignore.is_empty(),
             "ta init on a git repo should write TA's local-state block to .gitignore"
         );
+        // The secrets a project can hold under .ta/ are ignored from the first
+        // `ta init`, so `git add -A` cannot commit them (docs/security/KEY-CUSTODY.md).
+        for line in [
+            ".ta/credentials.json",
+            ".ta/*.key",
+            ".ta/*.cred",
+            ".ta/*.pem",
+            ".ta/broker_root.key",
+            ".ta/daemon-tokens.json",
+            ".ta/tokens/",
+        ] {
+            assert!(
+                gitignore.lines().any(|l| l.trim() == line),
+                "ta init must ignore {line}; generated .gitignore:\n{gitignore}"
+            );
+        }
+    }
+
+    /// Not just "the lines are in the file": ask real git. After `ta init` on a
+    /// real repository, every secret a project can hold under `.ta/` is ignored,
+    /// so `git add -A` cannot commit the vault, a key, or a `*.cred` file. git's
+    /// global and system config are neutralised so a user's own excludes cannot
+    /// make this pass.
+    #[test]
+    fn init_makes_git_ignore_every_secret_under_dot_ta() {
+        let dir = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        let config = test_config(&dir);
+        execute(None, false, &config).unwrap();
+        for secret in [
+            ".ta/credentials.json",
+            ".ta/credentials.key",
+            ".ta/audit.key",
+            ".ta/broker_root.key",
+            ".ta/wayfinder-service-account.cred",
+            ".ta/daemon-tokens.json",
+            ".ta/tokens/t.json",
+        ] {
+            let out = git(&["check-ignore", "-q", secret]);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "git must ignore {secret} after `ta init`; .gitignore:\n{}",
+                std::fs::read_to_string(dir.path().join(".gitignore")).unwrap_or_default()
+            );
+        }
     }
 
     #[test]
