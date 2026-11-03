@@ -138,6 +138,7 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
                 true
             }
         })
+        .filter(|g| failed_goal_is_actionable(g.workspace_path.is_dir(), g.updated_at, now))
         .take(5)
         .collect();
 
@@ -161,13 +162,18 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         .take(3)
         .collect();
 
-    // Read operations log for pending corrective actions.
+    // Read operations log for pending corrective actions. A low-disk alert is
+    // a statement about a moment in time: once free space is back above the
+    // threshold it is no longer pending, even if nothing has closed it yet
+    // (the daemon that raised it may not be running).
     let ops_log = ta_goal::OperationsLog::for_project(&config.workspace_root);
+    let free_mb = ta_submit::check_disk_space_mb(&config.workspace_root).ok();
     let pending_ops: Vec<_> = ops_log
         .read(Some(10))
         .unwrap_or_default()
         .into_iter()
         .filter(|a| matches!(a.status, ta_goal::ActionStatus::Proposed))
+        .filter(|a| !disk_alert_is_cleared(a, free_mb))
         .take(5)
         .collect();
 
@@ -655,6 +661,33 @@ fn collect_done_phase_ids(plan_content: &str) -> HashSet<String> {
     done
 }
 
+/// How long after a goal fails `ta status` keeps listing it as URGENT even if
+/// its staging is already gone (the failure is recent news).
+const FAILED_GOAL_RECENT_HOURS: i64 = 24;
+
+/// Free space (MB) below which a low-disk alert is still true. Matches the
+/// watchdog's 2 GB threshold that raises it.
+const LOW_DISK_ALERT_THRESHOLD_MB: u64 = 2_048;
+
+/// A failed goal is worth an URGENT line while there is something to retry or
+/// recover (its staging still exists) or the failure is recent. An old failure
+/// whose staging was already garbage-collected cannot be followed up, so
+/// listing it forever is noise.
+fn failed_goal_is_actionable(
+    staging_exists: bool,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    staging_exists || (now - updated_at).num_hours() < FAILED_GOAL_RECENT_HOURS
+}
+
+/// True when `action` is a low-disk alert and free space (`None`: unknown) is
+/// back above the threshold, so the alert no longer describes the machine.
+fn disk_alert_is_cleared(action: &ta_goal::CorrectiveAction, free_mb: Option<u64>) -> bool {
+    ta_goal::is_low_disk_alert(action)
+        && free_mb.is_some_and(|mb| mb >= LOW_DISK_ALERT_THRESHOLD_MB)
+}
+
 /// Returns true if this is a system reviewer goal spawned by a governed workflow
 /// and the review is no longer actionable by the user (v0.15.7.1).
 ///
@@ -791,6 +824,44 @@ mod tests {
     }
 
     // v0.15.7.1 — reviewer goal URGENT filter tests.
+    #[test]
+    fn old_failed_goal_without_staging_is_not_actionable() {
+        use chrono::{Duration, Utc};
+        let now = Utc::now();
+        let old = now - Duration::days(30);
+        let recent = now - Duration::hours(2);
+        assert!(!failed_goal_is_actionable(false, old, now));
+        // Staging still there: it can be retried or recovered, however old.
+        assert!(failed_goal_is_actionable(true, old, now));
+        // Just failed: tell the user even though nothing is left on disk.
+        assert!(failed_goal_is_actionable(false, recent, now));
+    }
+
+    #[test]
+    fn low_disk_alert_is_cleared_only_when_space_recovered() {
+        use ta_goal::{ActionSeverity, CorrectiveAction};
+        let disk = CorrectiveAction::new(
+            "Low disk space: 0.2 GB available",
+            ActionSeverity::Critical,
+            "d",
+            "p",
+            "clean_applied_staging",
+        );
+        assert!(disk_alert_is_cleared(&disk, Some(140_000)));
+        assert!(!disk_alert_is_cleared(&disk, Some(300)));
+        // Unknown free space: keep showing it rather than hide a real problem.
+        assert!(!disk_alert_is_cleared(&disk, None));
+        // Other critical alerts are never hidden by free disk space.
+        let other = CorrectiveAction::new(
+            "Daemon unreachable",
+            ActionSeverity::Critical,
+            "d",
+            "p",
+            "restart_daemon",
+        );
+        assert!(!disk_alert_is_cleared(&other, Some(140_000)));
+    }
+
     #[test]
     fn is_terminal_reviewer_goal_matches_pattern() {
         use chrono::Utc;

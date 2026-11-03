@@ -451,14 +451,85 @@ pub trait SourceAdapter: Send + Sync {
         None
     }
 
-    /// Get the current HEAD revision identifier.
+    /// Get the current HEAD revision identifier — the baseline a caller stores
+    /// and later passes as `since_rev` to [`SourceAdapter::changed_paths_since`]
+    /// / [`SourceAdapter::diff_since`].
     ///
-    /// Git: short commit SHA (7 chars).
-    /// SVN: revision number string (e.g., "1234").
-    /// Perforce: changelist number (e.g., "1234").
+    /// Git: abbreviated commit SHA of `HEAD` (7+ chars, extended by git when
+    /// needed to stay unambiguous).
+    /// SVN: the working copy's revision number as a bare string (e.g., "1234").
+    /// External plugin: the plugin's `revision_id` result, only when the plugin
+    ///   declares `"changed_paths_since"` or `"diff_since"`.
+    /// Perforce: None (history queries are unsupported there).
     /// Default: None.
     fn head_rev_id(&self, _repo_root: &Path) -> Option<String> {
         None
+    }
+
+    /// Project-relative paths changed after `since_rev` (exclusive) up to the
+    /// current head revision (inclusive).
+    ///
+    /// `since_rev` is a baseline the caller stored earlier from
+    /// [`SourceAdapter::head_rev_id`]; the returned paths are relative to
+    /// `project_root`, use `/` separators, and include deletions (a path that
+    /// no longer exists on disk is still reported). To avoid missing changes,
+    /// record the new baseline with `head_rev_id` *before* calling this and
+    /// store it only after the paths were processed (a change landing in
+    /// between is then reported again, never lost).
+    ///
+    /// Returns `Ok(None)` when this VCS cannot answer the question (the
+    /// default — external plugins and unknown adapters keep working), so the
+    /// caller can choose a different detection strategy. `Err` means the VCS
+    /// supports the query but it failed (unknown revision, tool missing,
+    /// timeout, ...).
+    ///
+    /// Revision meaning per adapter:
+    /// - Git: `since_rev` is any revision `git` resolves (the value from
+    ///   `head_rev_id` is an abbreviated commit SHA); the range is
+    ///   `since_rev..HEAD` as a tree diff (renames reported as delete + add).
+    /// - SVN: `since_rev` is the working-copy revision number from
+    ///   `head_rev_id` (a leading `r` is accepted); the range is
+    ///   `since_rev` to the working copy's current revision (run `svn update`
+    ///   to advance it). Deleted directories may appear as entries.
+    /// - Perforce: unsupported (`Ok(None)`): a changelist's files are depot
+    ///   paths that can only be mapped to project-relative paths through the
+    ///   client workspace view, which this adapter cannot assume.
+    /// - None: `Ok(None)`.
+    /// - External plugin: calls the plugin's `changed_paths_since` method when
+    ///   the `"changed_paths_since"` capability is declared, else `Ok(None)`.
+    fn changed_paths_since(
+        &self,
+        _project_root: &Path,
+        _since_rev: &str,
+    ) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
+    /// Zero-context unified diff of one project-relative path between
+    /// `since_rev` (exclusive) and the current head revision (inclusive).
+    ///
+    /// `since_rev` has the same meaning as in
+    /// [`SourceAdapter::changed_paths_since`]. The diff is plain text (no
+    /// color, no external diff tool, no rename detection) and is empty when
+    /// the path did not change in the range. The VCS tool runs without a
+    /// shell and is killed when `timeout` elapses (that is an `Err`, so a
+    /// caller can treat "could not tell" differently from "no change").
+    /// Output that is not valid UTF-8 is an `Err` for the same reason.
+    ///
+    /// Returns `Ok(None)` when this VCS cannot answer (the default). Git
+    /// clears the repo-selecting environment (`GIT_DIR`, `GIT_WORK_TREE`,
+    /// `GIT_INDEX_FILE`, `GIT_COMMON_DIR`) so the diff is taken from
+    /// `project_root`'s own repository. SVN requires `rel_path` to exist in
+    /// the working copy. Perforce and None are `Ok(None)`; external plugins
+    /// use the `"diff_since"` capability.
+    fn diff_since(
+        &self,
+        _project_root: &Path,
+        _since_rev: &str,
+        _rel_path: &str,
+        _timeout: std::time::Duration,
+    ) -> Result<Option<String>> {
+        Ok(None)
     }
 
     /// Check whether a `.ta/`-relative path is excluded by this project's VCS ignore rules.
@@ -641,5 +712,19 @@ mod tests {
     fn check_failures_default_returns_empty_vec() {
         let adapter = MockAdapter;
         assert_eq!(adapter.check_failures("123").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn history_queries_default_to_unsupported() {
+        let adapter = MockAdapter;
+        let root = Path::new(".");
+        assert_eq!(adapter.head_rev_id(root), None);
+        assert_eq!(adapter.changed_paths_since(root, "abc").unwrap(), None);
+        assert_eq!(
+            adapter
+                .diff_since(root, "abc", "a.txt", std::time::Duration::from_secs(1))
+                .unwrap(),
+            None
+        );
     }
 }

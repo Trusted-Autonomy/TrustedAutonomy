@@ -68,7 +68,9 @@ pub use human_review::{
     extract_human_review_items, HumanReviewRecord, HumanReviewStatus, HumanReviewStore,
 };
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
-pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
+pub use operations::{
+    is_low_disk_alert, ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog,
+};
 pub use origin::OriginClass;
 pub use persona::{
     PersonaCapabilities, PersonaConfig, PersonaInner, PersonaSandboxConfig, PersonaStyle,

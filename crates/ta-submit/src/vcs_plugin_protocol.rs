@@ -32,6 +32,8 @@
 //! | `prepare`           | TA→plugin | Create feature branch / changelist               |
 //! | `check_review`      | TA→plugin | Check status of an open review                   |
 //! | `merge_review`      | TA→plugin | Merge / submit a review                          |
+//! | `changed_paths_since` | TA→plugin | Project-relative paths changed since a revision (optional capability) |
+//! | `diff_since`        | TA→plugin | Zero-context diff of one path since a revision (optional capability) |
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -329,6 +331,54 @@ pub struct IsPathIgnoredResult {
 }
 
 // ---------------------------------------------------------------------------
+// changed_paths_since / diff_since  (optional capabilities)
+// ---------------------------------------------------------------------------
+//
+// A plugin declares `"changed_paths_since"` and/or `"diff_since"` in its
+// handshake `capabilities` list to opt in; TA never calls an undeclared
+// method (the caller sees "this VCS cannot say"). `since_rev` is a baseline
+// the caller stored from the plugin's `revision_id` result, so its format is
+// whatever the plugin returns there (the plugin owns the meaning of
+// "exclusive of since_rev, inclusive of the current head").
+
+/// Parameters for the `changed_paths_since` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChangedPathsSinceParams {
+    /// Absolute path to the project root.
+    pub project_root: String,
+    /// Baseline revision previously obtained from `revision_id`.
+    pub since_rev: String,
+}
+
+/// Result from the `changed_paths_since` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChangedPathsSinceResult {
+    /// Paths changed after `since_rev` up to the current head, relative to
+    /// `project_root`, `/`-separated; deletions included.
+    pub paths: Vec<String>,
+}
+
+/// Parameters for the `diff_since` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiffSinceParams {
+    /// Absolute path to the project root.
+    pub project_root: String,
+    /// Baseline revision previously obtained from `revision_id`.
+    pub since_rev: String,
+    /// Path (relative to `project_root`) to diff.
+    pub rel_path: String,
+    /// Seconds the plugin may spend; TA kills the plugin process after this.
+    pub timeout_secs: u64,
+}
+
+/// Result from the `diff_since` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiffSinceResult {
+    /// Zero-context unified diff text; empty when the path did not change.
+    pub diff: String,
+}
+
+// ---------------------------------------------------------------------------
 // sync_upstream
 // ---------------------------------------------------------------------------
 
@@ -496,5 +546,32 @@ mod tests {
     #[test]
     fn protocol_version_is_one() {
         assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn changed_paths_and_diff_since_roundtrip() {
+        let p = ChangedPathsSinceParams {
+            project_root: "/p".to_string(),
+            since_rev: "abc1234".to_string(),
+        };
+        let parsed: ChangedPathsSinceParams =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(parsed.since_rev, "abc1234");
+
+        let r: ChangedPathsSinceResult =
+            serde_json::from_str(r#"{"paths":["docs/a.md","b.txt"]}"#).unwrap();
+        assert_eq!(r.paths, vec!["docs/a.md", "b.txt"]);
+
+        let d = DiffSinceParams {
+            project_root: "/p".to_string(),
+            since_rev: "7".to_string(),
+            rel_path: "docs/a.md".to_string(),
+            timeout_secs: 20,
+        };
+        let parsed: DiffSinceParams =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(parsed.timeout_secs, 20);
+        let r: DiffSinceResult = serde_json::from_str(r#"{"diff":"@@ -1 +1 @@\n"}"#).unwrap();
+        assert!(r.diff.starts_with("@@"));
     }
 }
