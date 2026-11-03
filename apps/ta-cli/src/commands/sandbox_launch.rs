@@ -76,6 +76,10 @@ pub struct PlanInput<'a> {
     pub agent_env: &'a HashMap<String, String>,
     /// Where denial events are appended (egress proxy denials are reported live).
     pub events_dir: &'a Path,
+    /// The goal's generated system-prompt file, when the launch passes one with
+    /// `--append-system-prompt-file`. The profile grants the sandboxed agent read
+    /// of exactly this file even though it lies under the protected `.ta/logs`.
+    pub prompt_file: Option<&'a Path>,
 }
 
 /// Map `[sandbox]` and `[security]` from the project's workflow config.
@@ -184,6 +188,7 @@ pub fn prepare_staging(project_root: &Path, goal_id: &str, staging: &Path) -> Re
             mediation_socket: None,
             egress_proxy: false,
             persona: None,
+            prompt_file: None,
         };
         SandboxProfile::compile(trusted.as_ref(), &project, &ctx).requested
     });
@@ -254,6 +259,7 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         mediation_socket: None,
         egress_proxy: false,
         persona,
+        prompt_file: input.prompt_file.map(Path::to_path_buf),
     };
 
     // First pass: is a sandbox wanted at all?
