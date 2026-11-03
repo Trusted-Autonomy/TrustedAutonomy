@@ -59,7 +59,7 @@ cd /path/to/each/project
 ta credentials custody file    # verified copy; old keychain items are left in place and cleanup commands are printed
 ```
 
-macOS asks once to let `ta` read the old items: choose Always Allow. Do not skip a project: after the switch, a project whose key was never copied gets a fresh key and cannot decrypt its existing vault until you migrate it (see [docs/security/KEY-CUSTODY.md](docs/security/KEY-CUSTODY.md#recovery)).
+macOS asks once to let `ta` read the old items: choose Always Allow. Do not skip a project: after the switch, a project whose key was never copied cannot open its vault. TA refuses with an error and creates no replacement key; run `ta credentials custody file` in that project to copy the key (see [docs/security/KEY-CUSTODY.md](docs/security/KEY-CUSTODY.md#71-a-projects-vault-will-not-open-its-key-is-not-in-the-active-custody-store)).
 
 **Opting into the keychain.** Create an Apple Development certificate (Xcode > Settings > Accounts > Manage Certificates; it carries a Team ID), set `TA_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` in the gitignored `.env.local` (template: `.env.local.example`), re-run `./install_local.sh --debug`, then `ta credentials custody keychain`.
 
