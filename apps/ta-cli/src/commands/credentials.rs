@@ -254,6 +254,8 @@ pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Res
 // ── Key custody ────────────────────────────────────────────────────────────
 
 /// Team ID state of a signed binary, from `codesign -dv --verbose=2`.
+// Only macOS runs `codesign`; elsewhere (and outside tests) the variants and the parser are unused.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TeamId {
     /// Signed, with this Team ID.
@@ -265,6 +267,7 @@ pub(crate) enum TeamId {
 }
 
 /// Parse `codesign -dv --verbose=2` output (it prints to stderr).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(crate) fn parse_team_identifier(codesign_output: &str) -> TeamId {
     for line in codesign_output.lines() {
         if let Some(rest) = line.trim().strip_prefix("TeamIdentifier=") {
