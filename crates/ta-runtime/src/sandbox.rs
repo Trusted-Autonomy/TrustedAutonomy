@@ -72,6 +72,12 @@ pub struct SandboxPolicy {
     /// home sits inside the denied state dir).
     pub goal_paths: Vec<PathBuf>,
 
+    /// Individual files the agent may READ even though they lie inside a denied
+    /// tree (the goal's own `system-prompt.txt` under the project `.ta/logs`).
+    /// Read-only, exact paths: never a directory, never writable. Granted after
+    /// `deny_paths`.
+    pub goal_read_files: Vec<PathBuf>,
+
     /// Unix socket files the agent may connect to (the per-goal mediation
     /// endpoint). The only IPC channel into the control plane.
     pub unix_sockets: Vec<PathBuf>,
@@ -136,6 +142,7 @@ impl SandboxPolicy {
             allow_network: Vec::new(),
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -555,6 +562,7 @@ mod tests {
             allow_network: Vec::new(),
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -588,6 +596,7 @@ mod tests {
             allow_network: vec!["api.anthropic.com".to_string()],
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -614,6 +623,7 @@ mod tests {
             allow_network: Vec::new(),
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -672,6 +682,7 @@ mod tests {
             allow_network: Vec::new(),
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -699,6 +710,7 @@ mod tests {
             allow_network: Vec::new(),
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,

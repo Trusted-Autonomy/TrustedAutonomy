@@ -1936,6 +1936,7 @@ mod tests {
             allow_network: vec![],
             deny_paths: vec![],
             goal_paths: vec![],
+            goal_read_files: vec![],
             unix_sockets: vec![],
             egress_proxy_port: None,
             egress_unix_socket: None,
