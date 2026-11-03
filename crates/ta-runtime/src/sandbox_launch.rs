@@ -579,6 +579,11 @@ pub struct LaunchContext {
     pub egress_proxy: bool,
     /// The persona's `[sandbox]` table, when the launch has a persona.
     pub persona: Option<PersonaSandbox>,
+    /// The goal's generated system-prompt file (`.ta/logs/goals/<id>/system-prompt.txt`),
+    /// passed to the agent with `--append-system-prompt-file`. It lies inside the
+    /// protected project `.ta/` tree, so the profile grants read of exactly this
+    /// one file (never the directory, never write). `None` when the launch has none.
+    pub prompt_file: Option<PathBuf>,
 }
 
 /// A persona's `[sandbox]` additions plus the facts needed to trust them.
@@ -622,6 +627,9 @@ pub struct SandboxProfile {
     pub allow_write: Vec<PathBuf>,
     pub allow_network: Vec<String>,
     pub deny_paths: Vec<PathBuf>,
+    /// Exact files readable although they lie inside a denied tree: the goal's
+    /// own system-prompt file. Read-only.
+    pub read_files: Vec<PathBuf>,
     pub unix_sockets: Vec<PathBuf>,
     /// The per-goal egress proxy is available to this launch.
     pub egress_proxy: bool,
@@ -780,6 +788,29 @@ impl SandboxProfile {
 
         let unix_sockets = ctx.mediation_socket.iter().cloned().collect();
 
+        // The goal's own prompt file: the one read exception inside the protected
+        // `.ta` tree. Only a file that really is this goal's `system-prompt.txt`
+        // under the project's `.ta/logs/goals/<goal-id>/` is accepted, so a bad
+        // caller cannot use it to open another protected path.
+        let mut read_files = Vec::new();
+        if let Some(p) = &ctx.prompt_file {
+            let expected = ctx
+                .project_root
+                .join(".ta/logs/goals")
+                .join(&ctx.goal_id)
+                .join("system-prompt.txt");
+            if normalize(p) == normalize(&expected) {
+                read_files.push(p.clone());
+            } else {
+                warnings.push(format!(
+                    "ignored the system-prompt file {}: only {} may be granted for read inside \
+                     the protected .ta tree, so the agent may fail to read its system prompt",
+                    p.display(),
+                    expected.display()
+                ));
+            }
+        }
+
         SandboxProfile {
             goal_id: ctx.goal_id.clone(),
             posture,
@@ -792,6 +823,7 @@ impl SandboxProfile {
             allow_write,
             allow_network,
             deny_paths,
+            read_files,
             unix_sockets,
             egress_proxy: ctx.egress_proxy,
             persona_applied,
@@ -816,6 +848,7 @@ impl SandboxProfile {
             allow_network: self.allow_network.clone(),
             deny_paths: self.deny_paths.clone(),
             goal_paths: vec![self.agent_home.clone()],
+            goal_read_files: self.read_files.clone(),
             unix_sockets: self.unix_sockets.clone(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -1178,6 +1211,7 @@ pub fn representative_profile(role: RoleClass, posture: SandboxPosture) -> Sandb
         mediation_socket: Some(PathBuf::from("/agent-home/mediation.sock")),
         egress_proxy: true,
         persona: None,
+        prompt_file: None,
     };
     let mut profile = SandboxProfile::compile(None, &ProjectRequest::default(), &ctx);
     profile.posture = posture;
@@ -1432,6 +1466,7 @@ mod tests {
             mediation_socket: None,
             egress_proxy: false,
             persona: None,
+            prompt_file: None,
         }
     }
 
@@ -1991,6 +2026,46 @@ mod tests {
     }
 
     #[test]
+    fn profile_grants_read_of_exactly_the_goals_system_prompt() {
+        let mut c = ctx(RoleClass::Chat, true);
+        let prompt = PathBuf::from("/work/proj/.ta/logs/goals/g1/system-prompt.txt");
+        c.prompt_file = Some(prompt.clone());
+        let p = SandboxProfile::compile(None, &project_open(), &c);
+        assert_eq!(p.read_files, vec![prompt.clone()]);
+        assert!(
+            p.deny_paths.contains(&PathBuf::from("/work/proj/.ta")),
+            "the .ta tree stays denied"
+        );
+        let policy = p.to_policy(SandboxProvider::MacosSandboxExec);
+        assert_eq!(policy.goal_read_files, vec![prompt]);
+        assert!(!policy
+            .goal_paths
+            .iter()
+            .any(|g| g.ends_with("system-prompt.txt")));
+        let seatbelt = crate::seatbelt::generate(&policy, &c.staging);
+        assert!(
+            seatbelt.contains("system-prompt.txt\")"),
+            "profile must allow reading the prompt file: {seatbelt}"
+        );
+    }
+
+    #[test]
+    fn profile_refuses_a_prompt_file_that_is_not_this_goals() {
+        let mut c = ctx(RoleClass::Chat, true);
+        c.prompt_file = Some(PathBuf::from("/work/proj/.ta/credentials.json"));
+        let p = SandboxProfile::compile(None, &project_open(), &c);
+        assert!(p.read_files.is_empty());
+        assert!(p.warnings.iter().any(|w| w.contains("credentials.json")));
+        let mut other = ctx(RoleClass::Chat, true);
+        other.prompt_file = Some(PathBuf::from(
+            "/work/proj/.ta/logs/goals/other/system-prompt.txt",
+        ));
+        assert!(SandboxProfile::compile(None, &project_open(), &other)
+            .read_files
+            .is_empty());
+    }
+
+    #[test]
     fn to_policy_carries_denies_goal_paths_and_socket() {
         let mut c = ctx(RoleClass::Worker, false);
         c.mediation_socket = Some(PathBuf::from("/tmp/ta-1/mcp.sock"));
@@ -2055,6 +2130,7 @@ mod tests {
             mediation_socket: Some(sock.clone()),
             egress_proxy: false,
             persona: None,
+            prompt_file: None,
         };
         let project_req = ProjectRequest {
             enabled: true,

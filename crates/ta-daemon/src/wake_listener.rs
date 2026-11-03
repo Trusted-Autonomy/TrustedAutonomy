@@ -772,13 +772,35 @@ fn run_and_record_launch(
             launch_timeout.as_secs(),
             log_path.display()
         )))
-    } else if output.status.success() {
-        Ok(output)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // An agent that never started its model session (the sandbox denied its
+        // login helper, its system prompt was unreadable, it printed one fatal
+        // line) did no work even when the process exits 0. Treat it as a failed
+        // launch so the retry / dead-letter path runs instead of acking the
+        // message as handled.
+        let never_started = ta_goal::agent_start::classify_stderr(&stderr);
+        if output.status.success() && never_started.is_none() {
+            return Ok(output);
+        }
+        let why = match never_started {
+            Some(_) => format!(
+                "the agent never started: {}",
+                ta_goal::agent_start::never_started_reason(None, Some(&stderr))
+            ),
+            None => "ta run failed".to_string(),
+        };
+        tracing::error!(
+            session = %session_id,
+            role = %role,
+            msg_id = %msg_id,
+            exit_code = ?output.status.code(),
+            log = %log_path.display(),
+            "wake_listener: {why}"
+        );
         Err(std::io::Error::other(format!(
             "wake_listener: ta run for role '{role}' (session '{session_id}', msg {msg_id}) \
-             exited with status {:?}. Full stdout and stderr: {}\n\
+             exited with status {:?}; {why}. Full stdout and stderr: {}\n\
              Last {STDERR_TAIL_LINES} lines of stderr:\n{}",
             output.status.code(),
             log_path.display(),
@@ -895,6 +917,13 @@ fn write_launch_log(
         args.join(" ")
     ));
     body.push_str(&format!("exit_code: {:?}\n", output.status.code()));
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    if ta_goal::agent_start::classify_stderr(&stderr_text).is_some() {
+        body.push_str(&format!(
+            "outcome: FAILED, {}\n",
+            ta_goal::agent_start::never_started_reason(None, Some(&stderr_text))
+        ));
+    }
     body.push_str("\n===== stdout =====\n");
     body.push_str(&redact_lines(&String::from_utf8_lossy(&output.stdout)));
     body.push_str("\n===== stderr =====\n");
@@ -1498,6 +1527,75 @@ mod tests {
         assert!(body.contains("transcript-on-stdout"));
         assert!(body.contains("err line 1\n"));
         assert!(body.contains("err line 100"));
+    }
+
+    /// Finding 043 item 5: the agent never started (sandbox denied its login
+    /// helper and its system prompt), yet `ta run` exited 0 and the daemon logged
+    /// "launch finished". It must be a failed launch with the cause, so the
+    /// retry / dead-letter path runs.
+    #[cfg(unix)]
+    #[test]
+    fn exit_zero_launch_whose_agent_never_started_is_a_failed_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("fake-ta.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+             echo 'a login stored in the macOS Keychain is not available inside the box' >&2\n\
+             echo 'Error reading append system prompt file: EPERM .ta/logs/goals/g/system-prompt.txt' >&2\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = run_and_record_launch(
+            tmp.path(),
+            "sess-1",
+            "chief-of-staff",
+            "seq-7",
+            &fake,
+            &["run".to_string(), "--headless".to_string()],
+            &[],
+            Duration::from_secs(60),
+        )
+        .expect_err("an agent that never started must not count as a finished launch")
+        .to_string();
+        assert!(err.contains("never started"), "{err}");
+        assert!(err.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{err}");
+        assert!(err.contains("ta-daemon"), "{err}");
+
+        let dir = tmp.path().join(".ta/logs/wake-launches");
+        let log = std::fs::read_dir(&dir).unwrap().flatten().next().unwrap();
+        let body = std::fs::read_to_string(log.path()).unwrap();
+        assert!(body.contains("outcome: FAILED"), "{body}");
+        assert!(body.contains("exit_code: Some(0)"), "{body}");
+    }
+
+    /// A clean exit 0 with ordinary stderr is still a successful launch.
+    #[cfg(unix)]
+    #[test]
+    fn exit_zero_launch_with_ordinary_stderr_still_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("fake-ta.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho '{\"type\":\"result\"}'\necho note >&2\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run_and_record_launch(
+            tmp.path(),
+            "sess-1",
+            "chief-of-staff",
+            "seq-8",
+            &fake,
+            &["run".to_string()],
+            &[],
+            Duration::from_secs(60),
+        )
+        .expect("ordinary launch succeeds");
     }
 
     #[test]

@@ -558,6 +558,23 @@ Any launch with a tool restriction (a persona `allowed_tools` list, `read_only =
 
 Launches with no restriction are unchanged: they still load `CLAUDE.md` normally and pick up your global allow rules and `defaultMode`. Because user settings are skipped for restricted launches, anything those launches need from `~/.claude/settings.json` (for example an `apiKeyHelper`) must come from the environment instead, such as `ANTHROPIC_API_KEY` or your normal `claude` login.
 
+The sandbox lets the agent read exactly that one file (read-only, never the rest of `.ta/logs`) on macOS and Linux. Windows AppContainer launches do not get this exception yet.
+
+#### Agent login inside the sandbox
+
+A sandboxed agent cannot use a login stored in the macOS Keychain or `~/.claude`: its home is a fresh per-goal directory and the Keychain helper cannot be run inside the box. Give it one of these in the environment of the process that starts the launch (for wake-on-demand launches that is where `ta-daemon` starts, so set it there and run `ta daemon restart`):
+
+- `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`): an API key.
+- `CLAUDE_CODE_OAUTH_TOKEN`: a Claude subscription token, created with `claude setup-token`.
+
+The sandbox forwards exactly these (plus the `ANTHROPIC_BASE_URL` family and the OpenAI/Gemini keys); everything else secret is withheld. A launch that passes `--credential-scopes` starts from a cleared environment and only gets what those scopes cover.
+
+An agent that never starts its model session is a **failed launch**, not a finished one. A headless agent that writes no output at all, or (for wake launches) whose stderr carries a known fatal start-up message (`a login stored in the macOS Keychain is not available inside the box`, `Error reading append system prompt file`, `Please run /login`), fails even when its process exits 0:
+
+- the goal is `failed`, and `ta goal status <id>` shows the reason, including what to set;
+- the wake launch log under `.ta/logs/wake-launches/` has an `outcome: FAILED, ...` line;
+- the wake launch takes the normal retry path (30 s, 2 min, 10 min, then the dead-letter file) instead of the message being acknowledged as handled.
+
 A goal's origin is fixed when the goal is created. A later `ta run --goal-id <id>` with a different `--origin` or `TA_GOAL_ORIGIN` keeps the recorded origin and prints a warning.
 
 ---

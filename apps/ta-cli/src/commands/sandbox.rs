@@ -541,6 +541,7 @@ fn live_checks(role: RoleClass, provider: SandboxProvider) -> anyhow::Result<Vec
         mediation_socket: None,
         egress_proxy: false,
         persona: None,
+        prompt_file: None,
     };
     let mut profile = SandboxProfile::compile(None, &ProjectRequest::default(), &ctx);
     profile.requested = true;

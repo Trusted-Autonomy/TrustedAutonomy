@@ -4747,6 +4747,44 @@ pub fn execute(
     };
 
     match launch_result {
+        Ok((exit, _)) if (headless || quiet) && headless_agent_never_started(&agent_tokens_out) => {
+            // The agent process ran but wrote nothing: it never reached its model
+            // session (for example the sandbox denied its login helper). That is a
+            // failed launch, not a finished goal with an empty draft.
+            let reason = ta_goal::agent_start::never_started_reason(
+                Some(agent_tokens_out.output_lines),
+                None,
+            );
+            mark_goal_agent_never_started(config, goal.goal_run_id, &reason, exit.code());
+            {
+                use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+                let events_dir = config.workspace_root.join(".ta").join("events");
+                let event_store = FsEventStore::new(&events_dir);
+                let event = SessionEvent::GoalFailed {
+                    goal_id: goal.goal_run_id,
+                    error: reason.clone(),
+                    exit_code: exit.code(),
+                };
+                if let Err(err) = event_store.append(&EventEnvelope::new(event)) {
+                    tracing::warn!("Failed to persist GoalFailed event: {}", err);
+                }
+            }
+            if agent_config.injects_context_file {
+                let _ = restore_claude_md(&staging_path);
+            }
+            if agent_config.injects_settings {
+                let _ = restore_claude_settings(&staging_path);
+            }
+            let _ = restore_mcp_server_config(&staging_path);
+            return Err(anyhow::anyhow!(
+                "Goal {} failed: {}. The agent exited with status {:?}; no draft was built. \
+                 Inspect it with `ta goal status {}`.",
+                goal.goal_run_id,
+                reason,
+                exit.code(),
+                goal.goal_run_id
+            ));
+        }
         Ok((exit, guidance_log)) => {
             // Record what this goal's agent builds cost (wall time, build output
             // before and after) for `ta doctor`.
@@ -6288,6 +6326,61 @@ fn launch_agent_interactive(
     Ok((result.exit_status, guidance_log))
 }
 
+/// A headless agent that wrote no output at all never started its model session.
+fn headless_agent_never_started(tokens: &AgentTokens) -> bool {
+    ta_goal::agent_start::never_started(tokens.output_lines, None)
+}
+
+/// Record on the goal that its agent never started: state `Failed` with the
+/// precise reason (shown by `ta goal status`), the reason as the progress note,
+/// and a journal entry. Best effort on each write, but a failure is logged.
+fn mark_goal_agent_never_started(
+    config: &GatewayConfig,
+    goal_run_id: uuid::Uuid,
+    reason: &str,
+    exit_code: Option<i32>,
+) {
+    tracing::error!(
+        goal_id = %goal_run_id,
+        exit_code = ?exit_code,
+        reason = %reason,
+        "agent never started its model session; recording the goal as failed"
+    );
+    match GoalRunStore::new(&config.goals_dir) {
+        Ok(store) => match store.get(goal_run_id) {
+            Ok(Some(mut g)) => {
+                g.agent_pid = None;
+                if let Err(e) = g.transition(ta_goal::GoalRunState::Failed {
+                    reason: reason.to_string(),
+                }) {
+                    tracing::warn!(goal_id = %goal_run_id, error = %e, "could not mark the goal failed");
+                } else if let Err(e) = store.save(&g) {
+                    tracing::warn!(goal_id = %goal_run_id, error = %e, "could not save the failed goal");
+                }
+                let _ = store.update_progress_note(goal_run_id, reason);
+            }
+            other => tracing::warn!(
+                goal_id = %goal_run_id,
+                result = ?other.map(|o| o.is_some()),
+                "goal not found in {}; its failure was not recorded",
+                config.goals_dir.display()
+            ),
+        },
+        Err(e) => tracing::warn!(
+            goal_id = %goal_run_id,
+            error = %e,
+            "could not open the goal store {}; the failure was not recorded",
+            config.goals_dir.display()
+        ),
+    }
+    append_progress_journal(
+        &config.goals_dir,
+        goal_run_id,
+        "agent_never_started",
+        reason,
+    );
+}
+
 /// What a headless agent session reported while it ran: its running usage
 /// (all four token kinds, the model and any runtime-reported cost) and, when a
 /// spend ceiling stopped it, the abort record.
@@ -6295,6 +6388,9 @@ fn launch_agent_interactive(
 struct AgentTokens {
     tracker: ta_goal::spend::UsageTracker,
     budget_abort: Option<ta_goal::BudgetAbort>,
+    /// Lines the agent wrote to stdout (its stream-json transcript). Zero means
+    /// the agent never started its model session.
+    output_lines: usize,
 }
 
 // ── Credential scope enforcement (v0.17.6.1) ──────────────────────────────────
@@ -6921,6 +7017,7 @@ fn launch_agent_via_runtime(
             persona: config.persona.as_deref(),
             agent_env: &env,
             events_dir,
+            prompt_file: config.system_prompt_file.as_deref(),
         };
         match super::sandbox_launch::plan(&input) {
             Ok(plan) => sandbox_plan = Some(plan),
@@ -7308,6 +7405,7 @@ fn pump_agent_output(
 ) {
     let mut usd_ceiling_unpriced_warned = false;
     for line in lines {
+        tokens.output_lines += 1;
         tokens.tracker.observe_line(&line);
         emit(&line);
         if budget_limits.is_unlimited() {
@@ -17301,6 +17399,81 @@ mod spend_tests {
         // And a run with no record still emits valid JSON.
         let none = headless_result_json("g", false, None, "failed", false, None);
         assert!(none["completion"].is_null());
+    }
+
+    /// Finding 043 item 5: a real child that prints nothing on stdout and exits 0
+    /// (the sandbox denied its login helper; it only complained on stderr) must
+    /// count as never started, while a child that streams output must not.
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_exit_zero_child_is_an_agent_that_never_started() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let count = |script: &str| {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("sh is available");
+            let stdout = child.stdout.take().unwrap();
+            let mut tokens = AgentTokens::default();
+            pump_agent_output(
+                BufReader::new(stdout).lines().map_while(Result::ok),
+                &mut tokens,
+                BudgetLimits::default(),
+                &PriceTable::builtin(),
+                uuid::Uuid::new_v4(),
+                |_| {},
+                || {},
+            );
+            assert!(child.wait().unwrap().success(), "exit status is 0 in both");
+            tokens
+        };
+        let silent = count(
+            "echo 'a login stored in the macOS Keychain is not available inside the box' >&2; exit 0",
+        );
+        assert_eq!(silent.output_lines, 0);
+        assert!(headless_agent_never_started(&silent));
+        let working = count(&format!(
+            "printf '%s\\n' '{}' '{}'",
+            init(),
+            result(5, 5, None)
+        ));
+        assert_eq!(working.output_lines, 2);
+        assert!(!headless_agent_never_started(&working));
+    }
+
+    #[test]
+    fn never_started_agent_marks_the_goal_failed_with_the_reason() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/w"),
+            std::path::PathBuf::from("/s"),
+        );
+        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
+        goal.transition(ta_goal::GoalRunState::Running).unwrap();
+        store.save(&goal).unwrap();
+        let reason = ta_goal::agent_start::never_started_reason(Some(0), None);
+        mark_goal_agent_never_started(&config, goal.goal_run_id, &reason, Some(0));
+        let saved = store.get(goal.goal_run_id).unwrap().unwrap();
+        match saved.state {
+            ta_goal::GoalRunState::Failed { reason: r } => {
+                assert!(r.contains("never started"), "{r}")
+            }
+            other => panic!("expected Failed, got {other}"),
+        }
+        assert!(saved
+            .progress_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("never started"));
     }
 
     /// End to end with a real child process standing in for the agent runtime
