@@ -10,6 +10,29 @@
   `file` to the custody file (never overwriting an existing one) and prints why. Root cause: a
   keychain item's `partition_id` ACL keys on the Team ID, or the cdhash without one, so every
   rebuild re-prompted; signing only fixes the app list. `CLAUDE.md` corrected accordingly.
+- **`ta doctor` "Key custody" check** — on macOS, warns when the effective custody is `keychain` but
+  the running `ta` has no Team ID (or `codesign` cannot report one), names why (cdhash identity,
+  re-prompt on every rebuild) and the fix (`ta credentials custody file`, once per project with a
+  `.ta/credentials.json`; or `TA_CODESIGN_IDENTITY` in `.env.local`). Never reads the keychain and
+  does not run `codesign` in file custody. The vault-key-missing doctor advice no longer tells you
+  to run a command that would create a replacement key; it points at `ta credentials custody file`.
+- **`docs/security/KEY-CUSTODY.md`** — each secret (root key, audit key, vault key, human
+  credential, vault file): what it protects, where it lives per custody mode, file/dir modes, who can
+  read it; what an agent can and cannot see; how secrets stay out of git; what CI verifies and what
+  has no CI check; recovery (and the key-rotation commands that do not exist). Linked from
+  `README.md` (new Security section), `CONTRIBUTING.md` (new "Local setup: keys, keychain and
+  custody") and `docs/USAGE.md`.
+- **Secret directories are created `0700`** — the per-project state directory, its `secrets/`
+  directory and `~/.config/ta/human` were created with the default umask. Newly created ones are now
+  owner-only; an existing directory keeps its mode.
+- **Sandbox denies `~/.config/ta/human`** — the `ta login` credential in file custody was not in the
+  macOS Seatbelt deny list (`HOME_PROTECTED`); it is now.
+- **`scripts/secret-scan.sh`** also matches age secret keys and `tahc_` human credentials, and fails
+  on a tracked or not-ignored `.ta/credentials.json`, `.ta/*.key|*.pem|*.cred` or any `*.cred`
+  (the self-test covers both). A test fixture that held an age-shaped literal now builds it at runtime.
+- **Tests** — `ta init` is checked with a real `git check-ignore` for every secret path under `.ta/`;
+  directory modes, the sandbox deny entry and the doctor check (with injected `codesign` output and
+  custody resolution) have unit tests.
 
 ---
 
