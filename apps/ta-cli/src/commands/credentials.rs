@@ -199,6 +199,29 @@ pub enum CredentialsCommands {
         #[arg(long)]
         ttl: u64,
     },
+    /// Show or change where TA keeps its secrets: the OS keychain or
+    /// owner-only files. `status` (the default) shows the effective mode and
+    /// why; `file` and `keychain` record your choice for every TA process and
+    /// move this project's secrets with a verified copy.
+    ///
+    /// Examples: `ta credentials custody status`, `ta credentials custody file`
+    Custody {
+        #[command(subcommand)]
+        action: Option<CustodyCommands>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CustodyCommands {
+    /// Show the effective custody mode, why it applies, and (macOS) whether
+    /// this `ta` binary has a Team ID.
+    Status,
+    /// Keep secrets in owner-only files. Needs no keychain, so no permission
+    /// prompts. Copies this project's keychain secrets to files first.
+    File,
+    /// Keep secrets in the OS keychain (the production default). Copies this
+    /// project's file secrets into the keychain first.
+    Keychain,
 }
 
 pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -224,7 +247,254 @@ pub fn execute(cmd: &CredentialsCommands, config: &GatewayConfig) -> anyhow::Res
             scope,
             ttl,
         } => grant_token(config, id, agent, scope, *ttl),
+        CredentialsCommands::Custody { action } => custody(config, action.as_ref()),
     }
+}
+
+// ── Key custody ────────────────────────────────────────────────────────────
+
+/// Team ID state of a signed binary, from `codesign -dv --verbose=2`.
+// Only macOS runs `codesign`; elsewhere (and outside tests) the variants and the parser are unused.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TeamId {
+    /// Signed, with this Team ID.
+    Present(String),
+    /// Signed (ad-hoc or self-signed) without a Team ID.
+    NotSet,
+    /// `codesign` could not describe the binary (unsigned, or not on PATH).
+    Unknown(String),
+}
+
+/// Parse `codesign -dv --verbose=2` output (it prints to stderr).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) fn parse_team_identifier(codesign_output: &str) -> TeamId {
+    for line in codesign_output.lines() {
+        if let Some(rest) = line.trim().strip_prefix("TeamIdentifier=") {
+            let rest = rest.trim();
+            return if rest.is_empty() || rest.eq_ignore_ascii_case("not set") {
+                TeamId::NotSet
+            } else {
+                TeamId::Present(rest.to_string())
+            };
+        }
+    }
+    TeamId::Unknown(
+        "codesign printed no TeamIdentifier line (the binary may be unsigned)".to_string(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
+    let exe = std::env::current_exe().ok()?;
+    let team = match std::process::Command::new("codesign")
+        .args(["-dv", "--verbose=2"])
+        .arg(&exe)
+        .output()
+    {
+        Ok(out) => parse_team_identifier(&String::from_utf8_lossy(&out.stderr)),
+        Err(e) => TeamId::Unknown(format!("could not run `codesign`: {e}")),
+    };
+    Some((exe, team))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
+    None
+}
+
+/// The text of `ta credentials custody status`. Pure, so the reason strings
+/// and hints are testable.
+pub(crate) fn custody_status_text(
+    resolution: &ta_credentials::custody::Resolution,
+    custody_file: &std::path::Path,
+    binary: Option<&(std::path::PathBuf, TeamId)>,
+) -> String {
+    use ta_credentials::custody::{read_custody_file, CustodyFileState, CustodyMode};
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Key custody: {}\n",
+        match resolution.mode {
+            CustodyMode::File => "file (owner-only files, the OS keychain is not used)",
+            CustodyMode::Keychain => "keychain (OS keychain, owner-only file fallback)",
+        }
+    ));
+    out.push_str(&format!(
+        "  Why:            {}\n",
+        resolution.reason.describe()
+    ));
+    let file_state = match read_custody_file(custody_file) {
+        CustodyFileState::Missing => "not present".to_string(),
+        CustodyFileState::Mode(m) => format!("holds `{}`", m.as_str()),
+        CustodyFileState::Invalid(_) => "present but NOT valid (ignored)".to_string(),
+    };
+    out.push_str(&format!(
+        "  Custody file:   {} ({file_state})\n",
+        custody_file.display()
+    ));
+    if let Some(w) = &resolution.warning {
+        out.push_str(&format!("  Warning:        {w}\n"));
+    }
+    if let Some((exe, team)) = binary {
+        out.push_str(&format!("  This binary:    {}\n", exe.display()));
+        match team {
+            TeamId::Present(id) => {
+                out.push_str(&format!("  Team ID:        {id}\n"));
+                out.push_str(
+                    "  Hint:           the binary has a Team ID, so keychain access grants \
+                     survive rebuilds signed by the same team; keychain custody is stable.\n",
+                );
+            }
+            TeamId::NotSet => {
+                out.push_str("  Team ID:        not set\n");
+                out.push_str(
+                    "  Hint:           without a Team ID macOS identifies this binary by its cdhash, \
+                     so every rebuild re-prompts for keychain access. Use `ta credentials custody \
+                     file`, or sign with an Apple Development certificate (TA_CODESIGN_IDENTITY in \
+                     .env.local).\n",
+                );
+            }
+            TeamId::Unknown(why) => {
+                out.push_str(&format!("  Team ID:        unknown ({why})\n"));
+            }
+        }
+    }
+    out
+}
+
+/// The text printed after `custody file|keychain`. Pure for testing.
+pub(crate) fn custody_switch_text(
+    switch: &ta_credentials::custody::SwitchOutcome,
+    custody_file: &std::path::Path,
+    project_root: &std::path::Path,
+    env_overrides: bool,
+) -> String {
+    use ta_credentials::custody::ItemStatus;
+    let m = &switch.migration;
+    let target = m.target.as_str();
+    let mut out = format!(
+        "Moving this project's secrets to {target} custody (project {}).\n",
+        project_root.display()
+    );
+    for item in &m.items {
+        let line = match &item.status {
+            ItemStatus::Copied => {
+                format!(
+                    "copied and verified: {} -> {}",
+                    item.source, item.destination
+                )
+            }
+            ItemStatus::AlreadyThere => {
+                format!("already identical in {}", item.destination)
+            }
+            ItemStatus::NothingToCopy => format!("nothing in {}", item.source),
+            ItemStatus::Skipped(why) => format!("SKIPPED: {why}"),
+            ItemStatus::Conflict(why) => format!("CONFLICT: {why}"),
+            ItemStatus::Failed(why) => format!("FAILED: {why}"),
+        };
+        out.push_str(&format!("  {:<34} {line}\n", item.name));
+    }
+    let copied = m.count(|s| *s == ItemStatus::Copied);
+    let same = m.count(|s| *s == ItemStatus::AlreadyThere);
+    let nothing = m.count(|s| *s == ItemStatus::NothingToCopy);
+    let skipped = m.count(|s| matches!(s, ItemStatus::Skipped(_)));
+    let bad = m.items.len() - copied - same - nothing - skipped;
+    out.push_str(&format!(
+        "Result: {copied} copied and verified, {same} already identical, {nothing} nothing to copy, {skipped} skipped, {bad} problem(s).\n"
+    ));
+    if bad > 0 {
+        out.push_str(&format!(
+            "Custody mode NOT changed ({} was not written): the problems above would leave a secret \
+             behind in the old store and TA would create a replacement key. Resolve them, then re-run \
+             `ta credentials custody {target}`.\n",
+            custody_file.display()
+        ));
+        return out;
+    }
+    match &switch.custody_file {
+        Ok(true) => out.push_str(&format!(
+            "Custody mode set to `{target}` in {}.\n",
+            custody_file.display()
+        )),
+        Ok(false) => {}
+        Err(e) => {
+            out.push_str(&format!(
+                "Secrets were copied, but writing {} failed: {e}. Create it yourself with the \
+                 single word `{target}`, or fix the directory permissions and re-run.\n",
+                custody_file.display()
+            ));
+            return out;
+        }
+    }
+    if env_overrides {
+        out.push_str(
+            "Note: TA_NO_KEYCHAIN is set in this shell and overrides the custody file here; unset \
+             it for the file to take effect.\n",
+        );
+    }
+    if !m.cleanup_commands.is_empty() {
+        out.push_str(
+            "The old copies were left in place (TA never deletes them silently). Once you have \
+             confirmed everything works, remove them with:\n",
+        );
+        for c in &m.cleanup_commands {
+            out.push_str(&format!("  {c}\n"));
+        }
+    }
+    out.push_str("Run `ta daemon restart` so a running daemon picks up the change.\n");
+    out
+}
+
+fn custody(config: &GatewayConfig, action: Option<&CustodyCommands>) -> anyhow::Result<()> {
+    use ta_credentials::custody::{self, CustodyMode};
+    use ta_credentials::state::{ProjectState, StateLocator};
+    let custody_path = custody::custody_file_path();
+    let target = match action {
+        None | Some(CustodyCommands::Status) => {
+            let resolution = custody::resolve();
+            let binary = running_binary_team_id();
+            print!(
+                "{}",
+                custody_status_text(&resolution, &custody_path, binary.as_ref())
+            );
+            return Ok(());
+        }
+        Some(CustodyCommands::File) => CustodyMode::File,
+        Some(CustodyCommands::Keychain) => CustodyMode::Keychain,
+    };
+    let locator = StateLocator::from_env();
+    let ps = ProjectState::open(&config.workspace_root, &locator).map_err(|e| {
+        anyhow::anyhow!(
+            "could not open the state directory for project {}: {e}. Nothing was changed.",
+            config.workspace_root.display()
+        )
+    })?;
+    let human_dir = ta_credentials::human::user_state_dir();
+    let env_set = std::env::var_os(ta_credentials::encryption::NO_KEYCHAIN_ENV).is_some();
+    let switch = custody::switch(&ps, &human_dir, &custody_path, target, !env_set);
+    let env_overrides = target == CustodyMode::Keychain && env_set;
+    print!(
+        "{}",
+        custody_switch_text(
+            &switch,
+            &custody_path,
+            &config.workspace_root,
+            env_overrides
+        )
+    );
+    if !switch.migration.is_clean() {
+        anyhow::bail!(
+            "custody was not changed to {}: see the problems above",
+            target.as_str()
+        );
+    }
+    if let Err(e) = &switch.custody_file {
+        anyhow::bail!(
+            "could not write the custody file {}: {e}",
+            custody_path.display()
+        );
+    }
+    Ok(())
 }
 
 fn cred_config(config: &GatewayConfig) -> CredentialsConfig {
@@ -724,5 +994,131 @@ mod tests {
             .resolve_with(&mut &*bytes, &|_| None, &mut warn)
             .unwrap_err();
         assert!(format!("{err:#}").contains("UTF-8"), "{err:#}");
+    }
+
+    // ── custody CLI text ──
+
+    fn resolution(
+        env: bool,
+        guard: bool,
+        file: &std::path::Path,
+    ) -> ta_credentials::custody::Resolution {
+        ta_credentials::custody::resolve_with(env, guard, file)
+    }
+
+    #[test]
+    fn status_text_reports_mode_and_each_reason() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("custody");
+
+        let t = custody_status_text(&resolution(false, false, &missing), &missing, None);
+        assert!(
+            t.contains("Key custody: keychain") && t.contains("default:"),
+            "{t}"
+        );
+        assert!(t.contains("not present"), "{t}");
+
+        let t = custody_status_text(&resolution(true, false, &missing), &missing, None);
+        assert!(
+            t.contains("Key custody: file") && t.contains("TA_NO_KEYCHAIN is set"),
+            "{t}"
+        );
+
+        let t = custody_status_text(&resolution(false, true, &missing), &missing, None);
+        assert!(t.contains("test guard"), "{t}");
+
+        std::fs::write(&missing, "file\n").unwrap();
+        let t = custody_status_text(&resolution(false, false, &missing), &missing, None);
+        assert!(
+            t.contains("Key custody: file") && t.contains("custody file:"),
+            "{t}"
+        );
+        assert!(t.contains("holds `file`"), "{t}");
+
+        std::fs::write(&missing, "bogus").unwrap();
+        let t = custody_status_text(&resolution(false, false, &missing), &missing, None);
+        assert!(t.contains("NOT valid") && t.contains("Warning:"), "{t}");
+    }
+
+    #[test]
+    fn status_text_hints_on_team_id() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("custody");
+        let exe = std::path::PathBuf::from("/x/ta");
+        let r = resolution(false, false, &p);
+        let none = custody_status_text(&r, &p, Some(&(exe.clone(), TeamId::NotSet)));
+        assert!(
+            none.contains("Team ID:        not set") && none.contains("cdhash"),
+            "{none}"
+        );
+        let some = custody_status_text(&r, &p, Some(&(exe, TeamId::Present("ABCDE12345".into()))));
+        assert!(
+            some.contains("ABCDE12345") && some.contains("stable"),
+            "{some}"
+        );
+    }
+
+    #[test]
+    fn parses_codesign_team_identifier() {
+        assert_eq!(
+            parse_team_identifier("Identifier=x\nTeamIdentifier=not set\n"),
+            TeamId::NotSet
+        );
+        assert_eq!(
+            parse_team_identifier("Identifier=x\nTeamIdentifier=ABCDE12345\n"),
+            TeamId::Present("ABCDE12345".into())
+        );
+        assert!(matches!(
+            parse_team_identifier("code object is not signed"),
+            TeamId::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn switch_text_lists_cleanup_commands_and_refuses_to_claim_success_on_problems() {
+        use ta_credentials::custody::{
+            CustodyMode, ItemReport, ItemStatus, MigrationOutcome, SwitchOutcome,
+        };
+        let item = |status| ItemReport {
+            name: "audit key".into(),
+            source: "the OS keychain".into(),
+            destination: "/s/audit-key".into(),
+            status,
+        };
+        let path = std::path::Path::new("/u/custody");
+        let root = std::path::Path::new("/proj");
+
+        let ok = SwitchOutcome {
+            migration: MigrationOutcome {
+                target: CustodyMode::File,
+                items: vec![item(ItemStatus::Copied)],
+                cleanup_commands: vec!["security delete-generic-password -s 'svc' -a 'acct'".into()],
+            },
+            custody_file: Ok(true),
+        };
+        let t = custody_switch_text(&ok, path, root, false);
+        assert!(t.contains("1 copied and verified"), "{t}");
+        assert!(
+            t.contains("Custody mode set to `file` in /u/custody"),
+            "{t}"
+        );
+        assert!(
+            t.contains("security delete-generic-password -s 'svc' -a 'acct'"),
+            "{t}"
+        );
+        assert!(t.contains("ta daemon restart"), "{t}");
+
+        let bad = SwitchOutcome {
+            migration: MigrationOutcome {
+                target: CustodyMode::File,
+                items: vec![item(ItemStatus::Failed("could not read".into()))],
+                cleanup_commands: vec![],
+            },
+            custody_file: Ok(false),
+        };
+        let t = custody_switch_text(&bad, path, root, false);
+        assert!(t.contains("FAILED: could not read"), "{t}");
+        assert!(t.contains("Custody mode NOT changed"), "{t}");
+        assert!(!t.contains("Custody mode set"), "{t}");
     }
 }

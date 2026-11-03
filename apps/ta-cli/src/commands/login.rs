@@ -65,7 +65,7 @@ pub fn execute(
     project_root: &std::path::Path,
 ) -> anyhow::Result<()> {
     let state_dir = human::user_state_dir();
-    let use_keychain = human::default_use_keychain();
+    let use_keychain = ta_credentials::custody::use_keychain();
     match command {
         None => login(&state_dir, use_keychain && !file),
         Some(LoginCommands::Open) => open_ui(&state_dir, use_keychain, project_root),

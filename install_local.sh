@@ -15,24 +15,25 @@
 #   1. Restart your shell, or
 #   2. Run: export PATH="$HOME/.local/bin:$PATH"
 #
-# macOS code signing (Keychain permission prompts on every rebuild):
-#   Local builds were previously unsigned, so every `cargo build` produced a
-#   binary with no stable signing identity. macOS Keychain's "Always Allow"
-#   grants are keyed to that identity, not the file path -- so even though
-#   `ta`/`ta-daemon` never change name or location, a fresh identity every
-#   build meant a fresh Keychain prompt every build.
+# macOS code signing and Keychain prompts:
+#   A keychain item has two ACL halves. The app list (which binaries may read
+#   it) is keyed to the signing identity, so signing with a stable cert fixes
+#   that half. The partition list (`partition_id`) is keyed to the Team ID, or
+#   to the cdhash when the cert has no Team ID. A self-signed "Trusted
+#   Autonomy Local Dev" cert has no Team ID, so every rebuild is a NEW identity
+#   for every item and macOS prompts again. Signing alone cannot fix that.
 #
-#   One-time setup to stop this: Keychain Access -> Certificate Assistant ->
-#   Create a Certificate -> name it "Trusted Autonomy Local Dev", Identity
-#   Type "Self Signed Root", Certificate Type "Code Signing". (There's no
-#   "Always Trust" toggle to find for this -- that setting only governs
-#   trusting OTHER people's binaries signed by your cert; it has no bearing
-#   on whether this Mac remembers a Keychain grant for your own app.) Once
-#   the cert exists, this script signs with it automatically on every build
-#   using a stable --identifier, so the Keychain grant carries over across
-#   rebuilds. Override the cert name with TA_CODESIGN_IDENTITY (environment
-#   variable, or a line in the gitignored .env.local; see .env.local.example)
-#   if yours differs.
+#   So after signing, this script checks the TeamIdentifier of the signed
+#   binary. With none, and no custody file yet, it writes `file` to
+#   <user state dir>/custody (default ~/.config/ta/human/custody) so every TA
+#   process keeps secrets in owner-only files instead of the Keychain. An
+#   existing custody file is never overwritten. Opt back in with
+#   `ta credentials custody keychain`, or create an Apple Development
+#   certificate (it has a Team ID; the keychain default is then stable) and put
+#   its name in the gitignored .env.local as TA_CODESIGN_IDENTITY. The script
+#   itself never reads or writes the Keychain.
+#   Override the cert name with TA_CODESIGN_IDENTITY (environment variable, or
+#   a line in .env.local; see .env.local.example).
 
 set -euo pipefail
 
@@ -60,6 +61,8 @@ cd "$SCRIPT_DIR"
 # stable binary name) is what actually stops repeat Keychain prompts.
 # shellcheck source=scripts/local-env.sh
 source "$SCRIPT_DIR/scripts/local-env.sh"
+# shellcheck source=scripts/custody-decision.sh
+source "$SCRIPT_DIR/scripts/custody-decision.sh"
 # Environment variable, then .env.local, then the default name.
 TA_CODESIGN_IDENTITY="$(ta_local_env TA_CODESIGN_IDENTITY 'Trusted Autonomy Local Dev')"
 _TA_CODESIGN_WARNED=""
@@ -82,8 +85,8 @@ ta_codesign() {
     if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "$TA_CODESIGN_IDENTITY"; then
         if [[ -z "$_TA_CODESIGN_WARNED" ]]; then
             echo "Note: code-signing identity '$TA_CODESIGN_IDENTITY' not found in Keychain —" \
-                 "signing ad-hoc instead. Keychain permission prompts will recur on every" \
-                 "rebuild until it exists. See this script's header comment for one-time setup."
+                 "signing ad-hoc instead (no Team ID either way; see the custody decision below)." \
+                 "See this script's header comment."
             _TA_CODESIGN_WARNED=1
         fi
         codesign --force --sign - --identifier "$identifier" "$binary_path" 2>/dev/null || true
@@ -96,9 +99,9 @@ ta_codesign() {
     # Nix-store libs (see ta_portable_link), but hardened runtime stays off:
     # earlier Nix-store libiconv copies were signed under their own, different
     # identities and dyld refused to load them ("different Team IDs"), found
-    # live testing this change. Plain signing
-    # still gives a stable identity, which is the only thing Keychain ACL
-    # grants actually key off of.
+    # live testing this change. Plain signing still gives a stable identity for
+    # the app-list half of a Keychain ACL; the partition half needs a Team ID
+    # (see the header comment and the custody decision below).
     if codesign --force --sign "$TA_CODESIGN_IDENTITY" --identifier "$identifier" \
         "$binary_path" 2>/dev/null; then
         echo "Signed: $binary_path (identity: $TA_CODESIGN_IDENTITY, id: $identifier)"
@@ -229,6 +232,11 @@ install -m 755 "$TA_BINARY" "$INSTALL_DIR/ta"
 ta_portable_link "$INSTALL_DIR/ta"
 ta_codesign "$INSTALL_DIR/ta" "com.trustedautonomy.ta"
 echo "Installed: $INSTALL_DIR/ta"
+if [[ "$BUILD_DAEMON" != true ]]; then
+    # Before any `ta` runs below, so even `--version`-adjacent work never
+    # reaches the Keychain with a fresh cdhash.
+    ta_decide_custody "$INSTALL_DIR/ta"
+fi
 "$INSTALL_DIR/ta" --version
 
 if [[ "$BUILD_DAEMON" == true ]]; then
@@ -240,6 +248,7 @@ if [[ "$BUILD_DAEMON" == true ]]; then
     ta_portable_link "$INSTALL_DIR/ta-daemon"
     ta_codesign "$INSTALL_DIR/ta-daemon" "com.trustedautonomy.ta-daemon"
     echo "Installed: $INSTALL_DIR/ta-daemon"
+    ta_decide_custody "$INSTALL_DIR/ta"
 
     # A daemon that was already running still has the old build in memory.
     # Say so, with the exact next step (or restart it when asked).

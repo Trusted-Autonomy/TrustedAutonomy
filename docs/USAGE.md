@@ -6644,7 +6644,32 @@ Set `TA_STATE_DIR` to use a different root (containers, installers that pre-seed
 | `config-hashes.json` | SHA-256 pins of persona and agent-config files |
 | `project-path` | The project path that owns this directory |
 
-**Key custody.** The root key and audit key go in the OS keychain when one is usable: macOS Keychain, Linux Secret Service, and on Windows the Credential Manager (which stores items protected by DPAPI, scoped to your user account). The keychain service is `trusted-autonomy-control-plane` and the item name is `<project-id>/<broker-root-key|audit-key>`. If the keychain is not usable, TA writes an owner-only file under `secrets/` and prints a warning saying so. Set `TA_NO_KEYCHAIN=1` to skip the keychain entirely (headless Linux, CI). On Windows the state directory sits under your profile, which already restricts access to your account.
+**Key custody.** The root key and audit key go in the OS keychain when one is usable: macOS Keychain, Linux Secret Service, and on Windows the Credential Manager (which stores items protected by DPAPI, scoped to your user account). The keychain service is `trusted-autonomy-control-plane` and the item name is `<project-id>/<broker-root-key|audit-key>`. If the keychain is not usable, TA writes an owner-only file under `secrets/` and prints a warning saying so. Set `TA_NO_KEYCHAIN=1` to skip the keychain entirely for one process (headless Linux, CI), or choose it persistently for your user with `ta credentials custody file` (see "Choosing where secrets are kept" below). On Windows the state directory sits under your profile, which already restricts access to your account.
+
+#### Choosing where secrets are kept
+
+TA keeps secrets (the root key, the audit key, the credential vault key and the human credential from `ta login`) either in the OS keychain or in owner-only files (mode 0600) in the state directories above. One persistent per-user choice covers every TA process, including the daemon and the Wayfinder poller, which an environment variable cannot do.
+
+The mode is resolved in one place, first match wins:
+
+| Order | Source | Result |
+|---|---|---|
+| 1 | `TA_NO_KEYCHAIN` set (any value) | file |
+| 2 | running inside a cargo test binary | file (tests never touch the real keychain) |
+| 3 | the file `custody` in the per-user state directory (`~/.config/ta/human/custody`, or `$TA_USER_STATE_DIR/custody`) holding exactly `file` or `keychain` | that mode |
+| 4 | nothing set | keychain (the production default) |
+
+A custody file with any other content is ignored with a warning that names the file and the accepted values.
+
+```bash
+ta credentials custody status     # effective mode, why, and (macOS) whether this ta binary has a Team ID
+ta credentials custody file       # use owner-only files; moves this project's secrets with a verified copy
+ta credentials custody keychain   # use the OS keychain; moves this project's secrets with a verified copy
+```
+
+`file` and `keychain` copy the root key, audit key, vault key and human credential of the current project to the new store, read each copy back and compare it, and only then write the custody file. They never overwrite a different value in the destination, never create a replacement over a secret they cannot read (a locked or denied keychain fails with what was attempted and what to do), and never delete the old copies: they print the exact `security delete-generic-password -s ... -a ...` (or `rm`) commands for you to run once you are satisfied. Run `ta daemon restart` afterwards so a running daemon picks the change up.
+
+**Why this matters on macOS.** Every keychain item carries a partition list. A binary signed with a self-signed local certificate has no Team ID, so macOS identifies it by its cdhash, and every rebuild is a new identity that prompts again for every item. Signing with a stable local certificate fixes only the app list, not the partition list. `ta credentials custody status` shows whether the running `ta` has a Team ID. Developers building from source get file custody by default: `./install_local.sh` writes `file` to the custody file when the signed binary has no Team ID (and never overwrites an existing file). If the keychain already holds TA secrets the installer leaves the mode alone and tells you to run `ta credentials custody file`, which migrates them first. To use the keychain on a dev machine, create your own Apple Development certificate, put its name in `.env.local` as `TA_CODESIGN_IDENTITY`, re-run `./install_local.sh`, then run `ta credentials custody keychain`.
 
 **Project id.** The first time a project stores a secret, TA writes a random-salted id such as `p_3f9c...` into `<project>/.ta/project-id` (not a secret; it is git-ignored, as is `.ta/setup-progress.json`). Read-only commands such as `ta show state` and `ta doctor` never create it. Two projects never share a state directory: if you copy a project, the copy gets its own id, and if you move a project, it keeps its id and its keys.
 
@@ -9395,6 +9420,7 @@ project's vault is created. On a machine with nobody present to answer that prom
 failing -- set the `TA_NO_KEYCHAIN` environment variable (to any value) before running
 `ta credentials add`/`update`/`revoke`/`grant` to force file-based key custody
 (an owner-only file in the per-user state directory, not in the project) instead and skip the keychain entirely.
+To make that choice permanent for your user, run `ta credentials custody file`.
 
 **Where the secret comes from.** `add` and `update` need exactly one of:
 
@@ -10715,7 +10741,7 @@ When it runs out:
 - **Default posture:** the daemon starts *degraded*. It serves requests, but anything that needs the missing key (capability tokens, audit signing, the credential vault) refuses with an error that names the key and says to approve the dialog and run `ta daemon restart`. If you click Always Allow later, the daemon notices, loads the key and goes back to `ok` without a restart.
 - **Strict posture** (`TA_POSTURE=strict`, or the word `strict` in the `posture` file in the state directory): the daemon refuses to start and exits with the reason. Start it again where someone can approve the dialog.
 
-To skip the Keychain entirely (a headless machine, a CI box), set `TA_NO_KEYCHAIN=1`; keys are then kept in owner-only files in the per-user state directory (`ta show state`).
+To skip the Keychain entirely (a headless machine, a CI box, or a macOS dev build whose binary has no Team ID), set `TA_NO_KEYCHAIN=1` for one process or run `ta credentials custody file` once for your user; keys are then kept in owner-only files in the per-user state directory (`ta show state`). See "Choosing where secrets are kept".
 
 After startup the daemon never reads the Keychain while handling a request. Secrets come from memory loaded at start, so a locked or revoked Keychain cannot freeze the daemon. A secret that was not loaded at start fails with an error telling you to run `ta daemon restart`. If the Keychain holds a key but cannot be read, TA will not create a replacement key over it.
 

@@ -12,13 +12,18 @@ use ta_credentials::human;
 /// Whether a usable credential exists (secret loads and verifies).
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn credential_present() -> bool {
-    human::credential_present(&human::user_state_dir(), human::default_use_keychain())
+    human::credential_present(
+        &human::user_state_dir(),
+        ta_credentials::custody::use_keychain(),
+    )
 }
 
 /// Default headers carrying the credential (empty when not logged in).
 fn credential_headers() -> reqwest::header::HeaderMap {
-    let mut headers =
-        credential_headers_from(&human::user_state_dir(), human::default_use_keychain());
+    let mut headers = credential_headers_from(
+        &human::user_state_dir(),
+        ta_credentials::custody::use_keychain(),
+    );
     add_actor_context(&mut headers, human::detect_agent_context().as_ref());
     headers
 }

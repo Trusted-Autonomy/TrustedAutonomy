@@ -117,18 +117,18 @@ fn guard_real_keychain(operation: &str, vault_dir: &Path) {
 /// (no backend, locked session, etc.) falls back to a chmod-0600 file at
 /// `<vault_dir>/credentials.key` and logs a loud warning so the gap is
 /// observable outside of `ta doctor`. When `use_keychain` is false, the
-/// keychain is never touched. The `TA_NO_KEYCHAIN` environment variable
-/// always wins over a `true` argument, so no caller can bypass it by building
+/// keychain is never touched. `TA_NO_KEYCHAIN` and an explicit `file` custody
+/// file always win over a `true` argument, so no caller can bypass it by building
 /// its own config. Under tests the real keychain is unreachable: see
 /// [`guard_real_keychain`].
 pub fn load_or_create_identity(
     vault_dir: &Path,
     use_keychain: bool,
 ) -> Result<(Identity, KeyCustody), VaultError> {
-    let use_keychain = if use_keychain && std::env::var_os(NO_KEYCHAIN_ENV).is_some() {
+    let use_keychain = if use_keychain && crate::custody::opted_out_of_keychain() {
         tracing::debug!(
             vault_dir = %vault_dir.display(),
-            "{NO_KEYCHAIN_ENV} is set; using file-based key custody instead of the OS keychain"
+            "file custody is selected ({NO_KEYCHAIN_ENV} or the custody file); not using the OS keychain"
         );
         false
     } else {
@@ -232,9 +232,10 @@ fn state_dir_identity_with(
 
 /// Non-mutating probe of current key custody, for `ta doctor`. Returns `None`
 /// when neither a keychain entry nor a fallback file exists yet (no vault
-/// key has been created). Skips the keychain when `TA_NO_KEYCHAIN` is set.
+/// key has been created). Skips the keychain when file custody is selected
+/// (`TA_NO_KEYCHAIN` or the custody file).
 pub fn probe_key_custody(vault_dir: &Path) -> Option<KeyCustody> {
-    if std::env::var_os(NO_KEYCHAIN_ENV).is_none() {
+    if !crate::custody::opted_out_of_keychain() {
         guard_real_keychain("probe_key_custody", vault_dir);
         if matches!(
             crate::keychain::get(KEYRING_SERVICE, KEYRING_USER),
@@ -473,6 +474,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "test tried to use the real OS keychain")]
     fn real_keychain_is_unreachable_under_cfg_test() {
+        // Another test may have a fake keychain backend installed; the guard
+        // only fires for the real backend, so serialize and reset first.
+        let _g = crate::keychain::testing::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::keychain::reset();
         let dir = tempfile::tempdir().unwrap();
         // `guard_real_keychain` is exercised directly so this test does not
         // depend on TA_NO_KEYCHAIN, which another test in this crate toggles.

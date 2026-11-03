@@ -16,8 +16,8 @@ pub struct CredentialsConfig {
     /// process/OS-global resource, not scoped to a test's tempdir, so using
     /// it there would make tests interfere with each other and with the
     /// developer's real keychain) or on headless servers with no keychain
-    /// daemon available. `for_project()` also reads this off the
-    /// `TA_NO_KEYCHAIN` environment variable for callers that don't build
+    /// daemon available. `for_project()` resolves this through
+    /// [`crate::custody::use_keychain`] for callers that don't build
     /// this struct by hand (e.g. the `ta credentials` CLI).
     #[serde(default = "default_use_keychain")]
     pub use_keychain: bool,
@@ -30,8 +30,10 @@ fn default_use_keychain() -> bool {
 impl CredentialsConfig {
     /// Create config with standard `.ta/` layout for a project.
     ///
-    /// `use_keychain` defaults to `true`, except when the `TA_NO_KEYCHAIN`
-    /// environment variable is set (to any value) — the OS keychain can
+    /// `use_keychain` comes from [`crate::custody::use_keychain`]: the
+    /// `TA_NO_KEYCHAIN` environment variable (any value) forces file custody,
+    /// then the per-user custody file (`ta credentials custody file|keychain`),
+    /// then the keychain default. The OS keychain can
     /// require an interactive GUI permission prompt on first use (observed
     /// live on macOS: a fresh vault's encryption-key lookup blocks
     /// indefinitely with no visible error when nothing can answer that
@@ -50,18 +52,9 @@ impl CredentialsConfig {
         let ta_dir = project_root.as_ref().join(".ta");
         Self {
             vault_path: ta_dir.join("credentials.json"),
-            use_keychain: resolve_use_keychain(
-                std::env::var_os("TA_NO_KEYCHAIN").is_some(),
-                crate::encryption::keychain_guard_active(),
-            ),
+            use_keychain: crate::custody::use_keychain(),
         }
     }
-}
-
-/// Whether the OS keychain is the default key custody: not when the
-/// environment opts out, and never inside a test binary.
-fn resolve_use_keychain(no_keychain_env_set: bool, test_binary: bool) -> bool {
-    !no_keychain_env_set && !test_binary
 }
 
 impl Default for CredentialsConfig {
@@ -76,17 +69,6 @@ impl Default for CredentialsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The keychain is the default only in production processes that did not
-    /// opt out: `TA_NO_KEYCHAIN` (presence, not value) and being a test binary
-    /// both turn it off. Pure, so no test mutates process-wide environment.
-    #[test]
-    fn resolve_use_keychain_is_off_for_env_opt_out_and_for_test_binaries() {
-        assert!(resolve_use_keychain(false, false), "production default");
-        assert!(!resolve_use_keychain(true, false), "TA_NO_KEYCHAIN set");
-        assert!(!resolve_use_keychain(false, true), "inside a test binary");
-        assert!(!resolve_use_keychain(true, true));
-    }
 
     /// Every `for_project` caller in a test binary gets a file-key vault, so a
     /// dependent crate's test can never reach the real keychain through it.

@@ -18,7 +18,7 @@
 // phases (v0.17.12.6 onward) are what turn it into a wall. Nothing here claims
 // more than that.
 //
-// Tests never touch the real keychain: `default_use_keychain()` is false inside
+// Tests never touch the real keychain: `custody::use_keychain()` is false inside
 // any cargo test binary and when `TA_NO_KEYCHAIN` is set, exactly like the
 // vault (see `encryption::keychain_guard_active`).
 
@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::keychain::{HUMAN_ITEM, HUMAN_SERVICE};
 
 /// Overrides the per-user state directory (tests, containers).
 pub const STATE_DIR_ENV: &str = "TA_USER_STATE_DIR";
@@ -37,10 +39,7 @@ pub const CREDENTIAL_HEADER: &str = "x-ta-human-credential";
 /// HTTP header a client sends when it detected an agent context. ADVISORY: it
 /// feeds the audit trail, it is not a security control (an agent can omit it).
 pub const ACTOR_CONTEXT_HEADER: &str = "x-ta-actor-context";
-/// Keychain service name for the human credential item.
-const KEYRING_SERVICE: &str = "trusted-autonomy-human";
-const KEYRING_USER: &str = "human-credential";
-const SECRET_FILENAME: &str = "credential";
+pub(crate) const SECRET_FILENAME: &str = "credential";
 const DIGEST_FILENAME: &str = "credential.sha256";
 const KEYS_FILENAME: &str = "assertion-keys.json";
 const SECRET_PREFIX: &str = "tahc_";
@@ -96,13 +95,6 @@ pub fn user_state_dir() -> PathBuf {
         .join(".config")
         .join("ta")
         .join("human")
-}
-
-/// Whether the OS keychain may be used: not when `TA_NO_KEYCHAIN` is set and
-/// never inside a test binary.
-pub fn default_use_keychain() -> bool {
-    std::env::var_os(crate::encryption::NO_KEYCHAIN_ENV).is_none()
-        && !crate::encryption::keychain_guard_active()
 }
 
 fn hash_secret(secret: &str) -> String {
@@ -175,15 +167,13 @@ pub fn login(state_dir: &Path, use_keychain: bool) -> Result<LoginOutcome, Human
     let mut custody = None;
     let mut reason = None;
     if use_keychain {
-        match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-            .and_then(|e| e.set_password(&secret))
-        {
+        match crate::keychain::set(HUMAN_SERVICE, HUMAN_ITEM, &secret) {
             Ok(()) => {
                 custody = Some(Custody::Keychain);
                 // A stale fallback file must not outlive the keychain item.
                 let _ = std::fs::remove_file(&secret_path);
             }
-            Err(e) => reason = Some(e.to_string()),
+            Err(e) => reason = Some(e),
         }
     }
     let custody = match custody {
@@ -214,10 +204,8 @@ pub fn load_secret(state_dir: &Path, use_keychain: bool) -> Option<String> {
         return Some(v);
     }
     if use_keychain {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-            if let Ok(s) = entry.get_password() {
-                return Some(s);
-            }
+        if let Ok(Some(s)) = crate::keychain::get(HUMAN_SERVICE, HUMAN_ITEM) {
+            return Some(s);
         }
     }
     std::fs::read_to_string(state_dir.join(SECRET_FILENAME))
@@ -255,9 +243,7 @@ pub fn logout(state_dir: &Path, use_keychain: bool) -> bool {
         removed |= std::fs::remove_file(state_dir.join(name)).is_ok();
     }
     if use_keychain {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-            removed |= entry.delete_credential().is_ok();
-        }
+        removed |= crate::keychain::delete(HUMAN_SERVICE, HUMAN_ITEM).unwrap_or(false);
     }
     removed
 }
@@ -985,7 +971,7 @@ mod tests {
 
     #[test]
     fn keychain_is_never_the_default_under_test() {
-        assert!(!default_use_keychain());
+        assert!(!crate::custody::use_keychain());
     }
 
     #[test]

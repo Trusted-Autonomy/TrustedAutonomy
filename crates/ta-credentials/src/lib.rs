@@ -21,6 +21,7 @@
 
 pub mod config;
 pub mod connector_registry;
+pub mod custody;
 pub mod daemon_tokens;
 pub mod encryption;
 pub mod error;

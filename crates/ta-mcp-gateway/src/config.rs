@@ -62,8 +62,10 @@ pub struct GatewayConfig {
     /// `ta_credentials::CredentialsConfig::use_keychain` documents — the
     /// keychain is a process/OS-global resource that must not leak between
     /// tests or interfere with the developer's real keychain.
-    /// `for_project()` also honors `TA_NO_KEYCHAIN`, same as
-    /// `CredentialsConfig::for_project` — set it to avoid an indefinite
+    /// `for_project()` resolves this through
+    /// `ta_credentials::custody::use_keychain` (`TA_NO_KEYCHAIN`, then the
+    /// per-user custody file, then the default), same as
+    /// `CredentialsConfig::for_project` — choose file custody to avoid an indefinite
     /// hang on a headless machine where nothing can answer the OS
     /// keychain's permission prompt.
     #[serde(default = "default_credential_vault_use_keychain")]
@@ -91,7 +93,7 @@ impl GatewayConfig {
             review_channel: ReviewChannelConfig::default(),
             web_ui_port: None,
             is_staging: std::env::var("TA_IS_STAGING").is_ok(),
-            credential_vault_use_keychain: std::env::var("TA_NO_KEYCHAIN").is_err(),
+            credential_vault_use_keychain: ta_credentials::custody::use_keychain(),
         }
     }
 }
@@ -100,25 +102,17 @@ impl GatewayConfig {
 mod tests {
     use super::*;
 
-    /// Both assertions live in one test function, not split across two, so
-    /// a parallel test runner never interleaves this env var's set/remove
-    /// with a read from another test — `TA_NO_KEYCHAIN` isn't touched
-    /// anywhere else in this crate.
+    /// `for_project` routes through the single custody resolver. Inside a test
+    /// binary the resolver always answers "file" (the test guard), whether or
+    /// not `TA_NO_KEYCHAIN` is set, so a gateway test can never open the real
+    /// keychain. The precedence table itself is tested in `ta-credentials`.
     #[test]
-    fn for_project_respects_ta_no_keychain_env_var() {
-        std::env::remove_var("TA_NO_KEYCHAIN");
+    fn for_project_uses_the_custody_resolver_and_is_file_under_test() {
         let config = GatewayConfig::for_project("/tmp/does-not-need-to-exist");
-        assert!(
+        assert_eq!(
             config.credential_vault_use_keychain,
-            "credential_vault_use_keychain must default to true when TA_NO_KEYCHAIN is unset"
+            ta_credentials::custody::use_keychain()
         );
-
-        std::env::set_var("TA_NO_KEYCHAIN", "1");
-        let config = GatewayConfig::for_project("/tmp/does-not-need-to-exist");
-        assert!(
-            !config.credential_vault_use_keychain,
-            "TA_NO_KEYCHAIN being set must disable keychain use, regardless of its value"
-        );
-        std::env::remove_var("TA_NO_KEYCHAIN");
+        assert!(!config.credential_vault_use_keychain);
     }
 }

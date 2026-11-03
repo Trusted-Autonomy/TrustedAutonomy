@@ -66,7 +66,8 @@ pub enum StateError {
         "{what} is held in the OS keychain ({item}) but the keychain could not be read: \
          {reason}. TA will not create a replacement key over it. Unlock the keychain, \
          approve the TA access prompt (choose Always Allow), then run `ta daemon restart` \
-         (or re-run your command). To use file custody instead, set TA_NO_KEYCHAIN=1."
+         (or re-run your command). To use file custody instead, set TA_NO_KEYCHAIN=1 (or run \
+         `ta credentials custody file` once the keychain can be read)."
     )]
     KeychainUnavailable {
         what: String,
@@ -542,7 +543,7 @@ pub struct CustodyOpts {
 impl CustodyOpts {
     pub fn from_env(locator: &StateLocator) -> Self {
         Self {
-            use_keychain: human::default_use_keychain(),
+            use_keychain: crate::custody::use_keychain(),
             posture: Posture::resolve(locator),
         }
     }
@@ -787,7 +788,8 @@ pub fn store_secret(
         );
         eprintln!(
             "[warn] The OS keychain was not usable ({}); {} is stored in {} (owner-only \
-             permissions). Set {} to silence this on machines without a keychain.",
+             permissions). Run `ta credentials custody file` (or set {}) to silence this on machines \
+             without a usable keychain.",
             reason.as_deref().unwrap_or("unknown reason"),
             which.describe(),
             file.display(),
