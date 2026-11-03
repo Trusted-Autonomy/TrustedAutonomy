@@ -110,13 +110,32 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Create `path` and any missing ancestors. On Unix every directory this call
+/// creates is owner-only (0700, subject to the umask); a directory that
+/// already exists keeps its mode, so a caller-chosen location such as a
+/// `TA_USER_STATE_DIR` is never loosened or tightened behind the user's back.
+pub(crate) fn create_private_dirs(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
 pub(crate) fn write_private(path: &Path, contents: &str) -> Result<(), HumanCredentialError> {
     let werr = |source| HumanCredentialError::Write {
         path: path.to_path_buf(),
         source,
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(werr)?;
+        create_private_dirs(parent).map_err(werr)?;
     }
     #[cfg(unix)]
     {
@@ -967,6 +986,28 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "{name} must be owner-only");
         }
+    }
+
+    /// A per-user state directory that `login` has to create is owner-only;
+    /// one that already exists keeps the mode its owner gave it.
+    #[cfg(unix)]
+    #[test]
+    fn login_creates_missing_state_directories_as_0700_and_leaves_existing_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state = root.path().join("a").join("human");
+        login(&state, false).unwrap();
+        for dir in [state.parent().unwrap(), state.as_path()] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{} must be 0700", dir.display());
+        }
+        let mode = std::fs::metadata(root.path()).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "a pre-existing directory is not changed"
+        );
     }
 
     #[test]
