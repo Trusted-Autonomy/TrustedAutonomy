@@ -52,12 +52,28 @@ impl FileVault {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
+        // Read the vault first: whether it already holds ciphertext decides if a
+        // missing key may be replaced. A fresh key can never decrypt an existing
+        // vault, so with ciphertext on disk and no key in the active custody the
+        // open fails (`VaultError::KeyMissing`) without creating one.
+        let existing = if vault_path.exists() {
+            Some(fs::read(&vault_path)?)
+        } else {
+            None
+        };
+        let creation = match &existing {
+            Some(raw) if !raw.is_empty() && !encryption::looks_like_plaintext_json(raw) => {
+                encryption::KeyCreation::Forbidden {
+                    vault_path: vault_path.clone(),
+                }
+            }
+            _ => encryption::KeyCreation::Allowed,
+        };
         let (identity, key_custody) =
-            encryption::load_or_create_identity(&vault_dir, config.use_keychain)?;
+            encryption::load_identity(&vault_dir, config.use_keychain, creation)?;
 
-        let (data, needs_migration) = if vault_path.exists() {
+        let (data, needs_migration) = if let Some(raw) = existing {
             debug!(?vault_path, "loading existing vault");
-            let raw = fs::read(&vault_path)?;
             if encryption::looks_like_plaintext_json(&raw) {
                 info!(
                     ?vault_path,
@@ -531,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_key_with_existing_encrypted_vault_produces_actionable_error_not_data_loss() {
+    fn missing_key_with_existing_encrypted_vault_is_refused_and_no_key_is_created() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
 
@@ -541,21 +557,115 @@ mod tests {
         }
         let encrypted_bytes_before = fs::read(&config.vault_path).unwrap();
 
-        // Simulate the key being lost (e.g. fallback key file deleted).
+        // Simulate the key being lost (e.g. the key file deleted, or custody
+        // switched while the key stayed in the other store).
         let key_path = dir.path().join(encryption::FALLBACK_KEY_FILENAME);
         assert!(key_path.exists());
         fs::remove_file(&key_path).unwrap();
 
-        // Re-opening generates a *new* key (file custody has no way to know
-        // the old one is "missing" vs "never created"), which cannot decrypt
-        // the existing ciphertext — this must fail loudly, not silently
-        // return an empty vault or overwrite the encrypted file.
-        let result = FileVault::open(&config);
-        assert!(matches!(result, Err(VaultError::DecryptionFailed { .. })));
+        // A fresh key could never decrypt the existing ciphertext, and storing
+        // one would shadow the real key. Refuse, say what to do, create nothing.
+        let err = match FileVault::open(&config) {
+            Err(e) => e,
+            Ok(_) => panic!("opening an encrypted vault with no key must fail"),
+        };
+        assert!(matches!(err, VaultError::KeyMissing { .. }), "got {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("already holds encrypted credentials"), "{msg}");
+        assert!(msg.contains("No replacement key was created"), "{msg}");
+        assert!(msg.contains("ta credentials custody file"), "{msg}");
+        assert!(msg.contains(".lost"), "{msg}");
+        assert!(!key_path.exists(), "no replacement key may be written");
+
+        // And again: the refusal is stable, not a one-off.
+        assert!(matches!(
+            FileVault::open(&config),
+            Err(VaultError::KeyMissing { .. })
+        ));
+        assert!(!key_path.exists());
 
         // The original encrypted vault file must be untouched.
         let encrypted_bytes_after = fs::read(&config.vault_path).unwrap();
         assert_eq!(encrypted_bytes_before, encrypted_bytes_after);
+    }
+
+    #[test]
+    fn no_vault_yet_creates_a_key_and_vault_with_key_opens() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let key_path = dir.path().join(encryption::FALLBACK_KEY_FILENAME);
+        assert!(!config.vault_path.exists() && !key_path.exists());
+
+        // No vault: creating a key is the normal first-use path.
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault.add("n", "svc", "s", vec![]).unwrap();
+        }
+        assert!(key_path.exists(), "first open must create the key");
+        let key_before = fs::read(&key_path).unwrap();
+
+        // Vault and key: opens, and does not touch the key.
+        let vault = FileVault::open(&config).unwrap();
+        assert_eq!(vault.list().unwrap().len(), 1);
+        assert_eq!(fs::read(&key_path).unwrap(), key_before);
+    }
+
+    #[test]
+    fn restoring_the_key_makes_a_refused_vault_open_again() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault.add("n", "svc", "kept", vec![]).unwrap();
+        }
+        let key_path = dir.path().join(encryption::FALLBACK_KEY_FILENAME);
+        let saved_key = fs::read(&key_path).unwrap();
+        fs::remove_file(&key_path).unwrap();
+        assert!(matches!(
+            FileVault::open(&config),
+            Err(VaultError::KeyMissing { .. })
+        ));
+        fs::write(&key_path, saved_key).unwrap();
+        let vault = FileVault::open(&config).unwrap();
+        let id = vault.list().unwrap()[0].id;
+        assert_eq!(vault.get(id).unwrap().secret, "kept");
+    }
+
+    #[test]
+    fn missing_project_vault_key_in_the_state_dir_is_refused_and_not_recreated() {
+        let project = TempDir::new().unwrap();
+        let ta = project.path().join(".ta");
+        fs::create_dir_all(&ta).unwrap();
+        let config = CredentialsConfig {
+            vault_path: ta.join("credentials.json"),
+            use_keychain: false,
+        };
+        let key_file = {
+            let mut vault = FileVault::open(&config).unwrap();
+            vault.add("n", "svc", "s", vec![]).unwrap();
+            match vault.key_custody() {
+                KeyCustody::FallbackFile(p) => p.clone(),
+                other => panic!("expected a state-dir key file, got {other:?}"),
+            }
+        };
+        fs::remove_file(&key_file).unwrap();
+        assert!(matches!(
+            FileVault::open(&config),
+            Err(VaultError::KeyMissing { .. })
+        ));
+        assert!(!key_file.exists(), "no replacement key may be written");
+    }
+
+    #[test]
+    fn an_empty_vault_file_does_not_block_key_creation() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        fs::write(&config.vault_path, b"").unwrap();
+        // No ciphertext to protect: the key is created (decrypting an empty
+        // file then fails exactly as it did before this guard existed).
+        let result = FileVault::open(&config);
+        assert!(!matches!(result, Err(VaultError::KeyMissing { .. })));
+        assert!(dir.path().join(encryption::FALLBACK_KEY_FILENAME).exists());
     }
 
     #[test]

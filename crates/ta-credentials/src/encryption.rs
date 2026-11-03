@@ -125,6 +125,29 @@ pub fn load_or_create_identity(
     vault_dir: &Path,
     use_keychain: bool,
 ) -> Result<(Identity, KeyCustody), VaultError> {
+    load_identity(vault_dir, use_keychain, KeyCreation::Allowed)
+}
+
+/// Whether a missing vault key may be replaced by a freshly generated one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCreation {
+    /// No encrypted vault exists yet, so a new key has nothing to be wrong about.
+    Allowed,
+    /// An encrypted vault already exists at this path. A new key could never
+    /// decrypt it, and storing one would shadow the real key (still in the
+    /// other custody store) and make the vault look permanently lost.
+    /// [`VaultError::KeyMissing`] is returned instead.
+    Forbidden { vault_path: PathBuf },
+}
+
+/// [`load_or_create_identity`] with an explicit rule for what to do when no key
+/// is found anywhere in the active custody. `FileVault::open` passes
+/// [`KeyCreation::Forbidden`] when the vault file already holds ciphertext.
+pub fn load_identity(
+    vault_dir: &Path,
+    use_keychain: bool,
+    creation: KeyCreation,
+) -> Result<(Identity, KeyCustody), VaultError> {
     let use_keychain = if use_keychain && crate::custody::opted_out_of_keychain() {
         tracing::debug!(
             vault_dir = %vault_dir.display(),
@@ -136,8 +159,11 @@ pub fn load_or_create_identity(
     };
     if use_keychain {
         guard_real_keychain("load_or_create_identity", vault_dir);
-        match keyring_load_or_create() {
-            Ok(identity) => return Ok((identity, KeyCustody::Keychain)),
+        match keyring_load_or_create(creation == KeyCreation::Allowed) {
+            Ok(Some(identity)) => return Ok((identity, KeyCustody::Keychain)),
+            // Forbidden to create and the keychain holds none: the key may be
+            // in the owner-only fallback file, so look there before failing.
+            Ok(None) => {}
             Err(reason) if crate::keychain::request_mode() => {
                 // The daemon is serving requests: falling back to a fresh
                 // file key here would shadow the real key in the keychain.
@@ -156,10 +182,10 @@ pub fn load_or_create_identity(
         }
     }
     if let Some(project_root) = project_root_of(vault_dir) {
-        return state_dir_identity(&project_root);
+        return state_dir_identity(&project_root, use_keychain, &creation);
     }
     let key_path = vault_dir.join(FALLBACK_KEY_FILENAME);
-    let identity = file_load_or_create(&key_path)?;
+    let identity = file_load_or_create(&key_path, &creation, use_keychain)?;
     Ok((identity, KeyCustody::FallbackFile(key_path)))
 }
 
@@ -179,10 +205,14 @@ fn project_root_of(vault_dir: &Path) -> Option<PathBuf> {
 /// secret custody from `state.rs`: a leftover in-tree `credentials.key` is
 /// read with a loud warning in the default posture and refused under
 /// `strict`; `ta doctor --fix` migrates it with a verified copy.
-fn state_dir_identity(project_root: &Path) -> Result<(Identity, KeyCustody), VaultError> {
+fn state_dir_identity(
+    project_root: &Path,
+    keychain_searched: bool,
+    creation: &KeyCreation,
+) -> Result<(Identity, KeyCustody), VaultError> {
     let locator = StateLocator::from_env();
     let posture = Posture::resolve(&locator);
-    state_dir_identity_with(project_root, &locator, posture)
+    state_dir_identity_with(project_root, &locator, posture, keychain_searched, creation)
 }
 
 /// [`state_dir_identity`] with the state locator and posture injected.
@@ -190,6 +220,8 @@ fn state_dir_identity_with(
     project_root: &Path,
     locator: &StateLocator,
     posture: Posture,
+    keychain_searched: bool,
+    creation: &KeyCreation,
 ) -> Result<(Identity, KeyCustody), VaultError> {
     let opts = CustodyOpts {
         use_keychain: false,
@@ -214,6 +246,15 @@ fn state_dir_identity_with(
             _ => KeyCustody::FallbackFile(path),
         };
         return Ok((identity, custody));
+    }
+    if let KeyCreation::Forbidden { vault_path } = creation {
+        return Err(VaultError::KeyMissing {
+            vault_path: vault_path.clone(),
+            searched: searched_description(
+                keychain_searched,
+                &ps.secrets_dir().join(ControlSecret::VaultKey.name()),
+            ),
+        });
     }
     let identity = Identity::generate();
     let outcome = state::store_secret(
@@ -268,11 +309,28 @@ fn probe_project_file_custody(project_root: &Path, locator: &StateLocator) -> Op
     None
 }
 
-fn keyring_load_or_create() -> Result<Identity, String> {
+/// Where the key was looked for, for [`VaultError::KeyMissing`].
+fn searched_description(keychain_searched: bool, key_file: &Path) -> String {
+    if keychain_searched {
+        format!(
+            "the OS keychain (service {KEYRING_SERVICE}, item {KEYRING_USER}) or the key file {}",
+            key_file.display()
+        )
+    } else {
+        format!(
+            "the key file {} (file custody: the OS keychain was not searched)",
+            key_file.display()
+        )
+    }
+}
+
+/// `Ok(None)` only when `create` is false and the keychain holds no key.
+fn keyring_load_or_create(create: bool) -> Result<Option<Identity>, String> {
     match crate::keychain::get(KEYRING_SERVICE, KEYRING_USER) {
-        Ok(Some(secret)) => {
-            Identity::from_str(&secret).map_err(|e| format!("stored age identity is corrupt: {e}"))
-        }
+        Ok(Some(secret)) => Identity::from_str(&secret)
+            .map(Some)
+            .map_err(|e| format!("stored age identity is corrupt: {e}")),
+        Ok(None) if !create => Ok(None),
         Ok(None) => {
             let identity = Identity::generate();
             crate::keychain::set(
@@ -281,18 +339,27 @@ fn keyring_load_or_create() -> Result<Identity, String> {
                 identity.to_string().expose_secret(),
             )
             .map_err(|e| format!("keyring write error: {e}"))?;
-            Ok(identity)
+            Ok(Some(identity))
         }
         Err(e) => Err(format!("keyring read error: {e}")),
     }
 }
 
-fn file_load_or_create(key_path: &Path) -> Result<Identity, VaultError> {
+fn file_load_or_create(
+    key_path: &Path,
+    creation: &KeyCreation,
+    keychain_searched: bool,
+) -> Result<Identity, VaultError> {
     if key_path.exists() {
         let content = fs::read_to_string(key_path)?;
         Identity::from_str(content.trim()).map_err(|e| VaultError::KeyUnreadable {
             path: key_path.to_path_buf(),
             reason: e.to_string(),
+        })
+    } else if let KeyCreation::Forbidden { vault_path } = creation {
+        Err(VaultError::KeyMissing {
+            vault_path: vault_path.clone(),
+            searched: searched_description(keychain_searched, key_path),
         })
     } else {
         if let Some(parent) = key_path.parent() {
@@ -370,9 +437,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let key_path = dir.path().join(FALLBACK_KEY_FILENAME);
 
-        let identity1 = file_load_or_create(&key_path).unwrap();
+        let identity1 = file_load_or_create(&key_path, &KeyCreation::Allowed, false).unwrap();
         assert!(key_path.exists());
-        let identity2 = file_load_or_create(&key_path).unwrap();
+        let identity2 = file_load_or_create(&key_path, &KeyCreation::Allowed, false).unwrap();
 
         // Same identity round-trips from disk (public keys match).
         assert_eq!(
@@ -388,7 +455,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let key_path = dir.path().join(FALLBACK_KEY_FILENAME);
-        file_load_or_create(&key_path).unwrap();
+        file_load_or_create(&key_path, &KeyCreation::Allowed, false).unwrap();
 
         let mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -400,7 +467,7 @@ mod tests {
         let key_path = dir.path().join(FALLBACK_KEY_FILENAME);
         fs::write(&key_path, "not-a-valid-age-identity").unwrap();
 
-        let err = file_load_or_create(&key_path)
+        let err = file_load_or_create(&key_path, &KeyCreation::Allowed, false)
             .err()
             .expect("expected an error");
         match err {
@@ -509,8 +576,14 @@ mod tests {
     #[test]
     fn project_vault_key_lives_in_the_state_dir_not_next_to_the_vault() {
         let (project, state, locator) = project_with_ta();
-        let (identity, custody) =
-            state_dir_identity_with(project.path(), &locator, Posture::Default).unwrap();
+        let (identity, custody) = state_dir_identity_with(
+            project.path(),
+            &locator,
+            Posture::Default,
+            false,
+            &KeyCreation::Allowed,
+        )
+        .unwrap();
         let KeyCustody::FallbackFile(path) = custody else {
             panic!("expected a fallback file, got {custody:?}");
         };
@@ -527,8 +600,14 @@ mod tests {
             assert_eq!(mode, 0o600, "the key file must be owner-only");
         }
         // Same identity on the next open.
-        let (again, _) =
-            state_dir_identity_with(project.path(), &locator, Posture::Default).unwrap();
+        let (again, _) = state_dir_identity_with(
+            project.path(),
+            &locator,
+            Posture::Default,
+            false,
+            &KeyCreation::Allowed,
+        )
+        .unwrap();
         assert_eq!(
             identity.to_public().to_string(),
             again.to_public().to_string()
@@ -549,8 +628,14 @@ mod tests {
     fn default_posture_reads_a_leftover_in_tree_key_and_reports_it_unsafe() {
         let (project, _state, locator) = project_with_ta();
         let legacy = plant_legacy_key(project.path());
-        let (identity, custody) =
-            state_dir_identity_with(project.path(), &locator, Posture::Default).unwrap();
+        let (identity, custody) = state_dir_identity_with(
+            project.path(),
+            &locator,
+            Posture::Default,
+            false,
+            &KeyCreation::Allowed,
+        )
+        .unwrap();
         assert_eq!(
             identity.to_public().to_string(),
             legacy.to_public().to_string(),
@@ -570,9 +655,15 @@ mod tests {
     fn strict_posture_refuses_the_key_in_the_project_tree_with_the_fix() {
         let (project, _state, locator) = project_with_ta();
         plant_legacy_key(project.path());
-        let err = state_dir_identity_with(project.path(), &locator, Posture::Strict)
-            .err()
-            .expect("strict must refuse");
+        let err = state_dir_identity_with(
+            project.path(),
+            &locator,
+            Posture::Strict,
+            false,
+            &KeyCreation::Allowed,
+        )
+        .err()
+        .expect("strict must refuse");
         let msg = err.to_string();
         assert!(msg.contains("credentials.key"), "{msg}");
         assert!(msg.contains("strict"), "{msg}");
@@ -604,8 +695,14 @@ mod tests {
         );
 
         // The vault still opens, now with the key from the state directory.
-        let (identity, custody) =
-            state_dir_identity_with(project.path(), &locator, Posture::Strict).unwrap();
+        let (identity, custody) = state_dir_identity_with(
+            project.path(),
+            &locator,
+            Posture::Strict,
+            false,
+            &KeyCreation::Allowed,
+        )
+        .unwrap();
         assert!(
             matches!(custody, KeyCustody::FallbackFile(_)),
             "{custody:?}"

@@ -146,19 +146,26 @@ The allowlist is `scripts/secret-scan.allowlist`, which holds only `tests/fixtur
 
 Only paths the code supports are listed. **There is no key-rotation command** for the root key, the audit key or the vault key, and no re-encryption of `credentials.json` under a new key.
 
-### 7.1 After switching custody, a project's vault will not open (key never migrated)
+### 7.1 A project's vault will not open: its key is not in the active custody store
 
-Cause: custody mode is per user, so after `ta credentials custody file` succeeded in one project (or after you wrote `file` into the custody file by hand, or set `TA_NO_KEYCHAIN=1`), every other project is in file custody too, while its vault key may still exist only as the shared keychain item. `install_local.sh` avoids this: it refuses to write `file` when the keychain already holds TA items (`scripts/custody-decision.sh`, `ta_keychain_holds_ta_secrets`). With no `secrets/vault-key` file, TA generates a **new** key (`encryption.rs:189-235`), and decrypting the existing vault fails with `failed to decrypt vault ... the encryption key was lost, rotated, or replaced`. The vault file is not overwritten (`file_vault.rs:68-75`; test `missing_key_with_existing_encrypted_vault_produces_actionable_error_not_data_loss`). The original key is still in the keychain, because migration never deletes the source.
+Cause: custody mode is per user, so after `ta credentials custody file` succeeded in one project (or after you wrote `file` into the custody file by hand, or set `TA_NO_KEYCHAIN=1`), every other project is in file custody too, while its vault key may still exist only as the shared keychain item (or the reverse after switching to `keychain`). `install_local.sh` avoids this for installs: it refuses to write `file` when the keychain already holds TA items (`scripts/custody-decision.sh`, `ta_keychain_holds_ta_secrets`).
 
-1. Remove the newly generated key: `rm "<state>/secrets/vault-key"` (`ta show state` prints the directory).
-2. Run `ta credentials custody file` in that project. It copies the keychain key into `secrets/vault-key` with read-back verification.
-3. Run `ta doctor`; the vault-key check should report file custody and no warning.
+What TA does: **it refuses to open the vault and creates no key.** The error says `the credential vault at <path> already holds encrypted credentials, but no encryption key was found in <where it looked>. No replacement key was created ...` and names both remedies (`VaultError::KeyMissing`, `crates/ta-credentials/src/error.rs:47`). **ENFORCED** (file custody, project and non-project vaults): `FileVault::open` reads the vault first and forbids key creation when it holds ciphertext (`file_vault.rs:59-72`), and `load_identity` returns `KeyMissing` instead of generating (`encryption.rs:133-146`, `:250-257` for the per-project state directory, `:359-364` for a bare vault directory). Tests: `missing_key_with_existing_encrypted_vault_is_refused_and_no_key_is_created` (`file_vault.rs:550`: error text, no key file written, vault bytes unchanged, refusal repeats), `missing_project_vault_key_in_the_state_dir_is_refused_and_not_recreated` (`:635`), `no_vault_yet_creates_a_key_and_vault_with_key_opens` (`:593`), `restoring_the_key_makes_a_refused_vault_open_again` (`:614`), `an_empty_vault_file_does_not_block_key_creation` (`:660`). A legacy plaintext vault and an empty file still get a key, because there is no ciphertext to protect. **UNTESTED:** the keychain branch of the same rule (`keyring_load_or_create(false)`, `encryption.rs:328`): an empty keychain with creation forbidden falls through to the key file and then fails with `KeyMissing`. The keychain test double is process-global, and the keychain tests were not extended.
 
-**GAP:** nothing prevents the silent generation of a replacement key over an existing vault when file custody is selected and the keychain still holds the old key. `ta doctor` reports a vault file with no key file, but only if you run it before another command opens the vault. A guard in `FileVault::open` that refuses to create a key while `credentials.json` exists would close this.
+Before this rule, a missing key was replaced silently with a new one, the vault then failed to decrypt with `DecryptionFailed`, and the new key shadowed the real one until you deleted it by hand.
+
+Recovery:
+1. Run `ta credentials custody file` (or `keychain`, whichever store holds the key) in that project. It copies the key with read-back verification and never deletes the source.
+2. Retry; `ta doctor` should report the vault key in the expected custody.
+3. If the old key is gone for good: `mv .ta/credentials.json .ta/credentials.json.lost`, then re-add credentials with `ta credentials add`. Nothing recovers the old contents.
+
+`ta doctor` reports a vault file with no key (`doctor.rs:2608`) and now says the same thing.
+
+**Scope.** This rule covers the vault key only. The root key and the audit key have no notion of existing evidence in the code (`broker.rs:95-98` regenerates a missing root key; the audit key is created only by `ta audit ledger checkpoint --create-key`), so they are unchanged (section 7.2).
 
 ### 7.2 A key is lost or deleted
 
-- **Vault key:** the credentials in `credentials.json` cannot be recovered without the original key (`crates/ta-credentials/src/error.rs`). Restore the key file from your backup, or delete the vault and re-add the credentials with `ta credentials add`.
+- **Vault key:** the credentials in `credentials.json` cannot be recovered without the original key (`crates/ta-credentials/src/error.rs`). TA refuses to open the vault and writes no replacement key (section 7.1). Restore the key file from your backup or migrate it with `ta credentials custody file|keychain`; if it is gone for good, move the vault aside and re-add the credentials with `ta credentials add`.
 - **Root key:** deleting it makes TA generate a new one (`crates/ta-credential-broker/src/broker.rs:95-98`). Every outstanding grant then fails verification; mint fresh grants with `ta credentials grant`. A corrupt key file is an error (`BrokerError::KeyUnreadable`) and does not regenerate.
 - **Audit key:** with no key, `ta audit ledger verify` warns and skips HMAC verification, and checkpoint signing refuses until `ta audit ledger checkpoint --create-key`. A new key means older checkpoint signatures no longer verify (`apps/ta-cli/src/commands/audit.rs`, `crates/ta-audit/src/chain.rs`).
 - **Human credential:** run `ta login` again. It mints a new credential and the old one stops working at once; `ta login logout` deletes it (`human.rs`, `apps/ta-cli/src/commands/login.rs`).
@@ -187,11 +194,11 @@ Cause: custody mode is per user, so after `ta credentials custody file` succeede
 3. The shim and endpoint credential path does not bind a token to the agent it was issued to (section 4.1).
 4. A sandboxed agent still holds the model API key (section 4.3).
 5. No redaction on live MCP output (section 4.4).
-6. File custody plus an unmigrated per-project vault key silently generates a replacement key (section 7.1). Mode switching is per-user but migration is per-project.
+6. ~~File custody plus an unmigrated per-project vault key silently generates a replacement key~~ **closed** (section 7.1). Mode switching is still per user while migration is per project, so the vault now refuses to open until you migrate; it no longer loses or shadows the key. The root and audit keys have no such guard.
 7. No key rotation or re-encryption command for the root, audit and vault keys (section 7).
 8. `ta init --regen-audit-key`, named in an error message, does not exist (`crates/ta-audit/src/chain.rs:170-171`).
 9. `cargo run` binaries are not covered by the keychain guard; only test binaries are (section 2, CONTRIBUTING.md).
 10. No CI coverage of real keychain, Team ID, Windows ACL or several file modes, and no pre-commit hook (section 6).
 11. The project's `.ta/` directory mode is not set or checked (section 3).
 
-**Fixed in this branch:** secret directories were not created 0700; `~/.config/ta/human` was not in the sandbox deny list; the secret scan did not match age keys or `tahc_` credentials and did not flag a committable `.ta/credentials.json`; there was no `ta doctor` warning for keychain custody with an unsigned binary.
+**Fixed in this branch:** secret directories were not created 0700; `~/.config/ta/human` was not in the sandbox deny list; the secret scan did not match age keys or `tahc_` credentials and did not flag a committable `.ta/credentials.json`; there was no `ta doctor` warning for keychain custody with an unsigned binary; a missing vault key was silently replaced by a new one (section 7.1).

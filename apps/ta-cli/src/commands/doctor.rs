@@ -2609,12 +2609,13 @@ fn check_credential_vault_key_custody_with(
             "Credential vault",
             "vault file exists but no encryption key was found in the active custody \
              (the key file, or the keychain when keychain custody is selected)",
-            "If you recently switched custody (`ta credentials custody file`, \
-             TA_NO_KEYCHAIN, an installer-written custody file), the key may still be \
-             in the OS keychain: run `ta credentials custody file` in this project to \
-             copy it before anything opens the vault (opening it creates a replacement \
-             key that cannot decrypt the existing vault; see docs/security/KEY-CUSTODY.md, \
-             Recovery). Otherwise restore the key from a backup, then re-run `ta doctor`.",
+            "If you recently switched custody (`ta credentials custody file|keychain`, \
+             TA_NO_KEYCHAIN, an installer-written custody file), the key is probably \
+             still in the other store: run `ta credentials custody file` (or `keychain`) \
+             in this project to copy it. Opening the vault meanwhile fails without \
+             creating a replacement key (see docs/security/KEY-CUSTODY.md, Recovery). \
+             If the key is gone for good, move `.ta/credentials.json` aside and re-add \
+             your credentials; otherwise restore the key from a backup, then re-run `ta doctor`.",
         ),
     }
 }

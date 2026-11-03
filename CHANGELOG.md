@@ -10,6 +10,12 @@
   `file` to the custody file (never overwriting an existing one) and prints why. Root cause: a
   keychain item's `partition_id` ACL keys on the Team ID, or the cdhash without one, so every
   rebuild re-prompted; signing only fixes the app list. `CLAUDE.md` corrected accordingly.
+- **A missing vault key is no longer replaced silently** — when `.ta/credentials.json` already holds
+  ciphertext and no key is found in the active custody store, `FileVault::open` now fails with
+  `VaultError::KeyMissing` (what happened, where it looked, that no replacement key was created, and
+  `ta credentials custody file|keychain` or moving the vault aside) instead of generating a key
+  that cannot decrypt it and shadows the real one. A project with no vault, a legacy plaintext
+  vault, or an empty file still gets a key. Root and audit keys are unchanged.
 - **`ta doctor` "Key custody" check** — on macOS, warns when the effective custody is `keychain` but
   the running `ta` has no Team ID (or `codesign` cannot report one), names why (cdhash identity,
   re-prompt on every rebuild) and the fix (`ta credentials custody file`, once per project with a
