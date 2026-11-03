@@ -73,6 +73,7 @@ fn world() -> World {
             npmrc.clone(),
         ],
         goal_paths: vec![agent_home.clone(), staging.clone()],
+        goal_read_files: vec![],
         unix_sockets: vec![sock.clone()],
         egress_proxy_port: Some(proxy.local_addr().unwrap().port()),
         egress_unix_socket: None,

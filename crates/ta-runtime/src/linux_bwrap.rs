@@ -60,6 +60,8 @@ pub struct FsView {
     pub deny: Vec<PathBuf>,
     /// Re-granted read-write after `deny` (the goal's own staging and home).
     pub goal: Vec<PathBuf>,
+    /// Exact files re-granted read-only after `deny` (the goal's system prompt).
+    pub goal_ro: Vec<PathBuf>,
 }
 
 fn push_unique(v: &mut Vec<PathBuf>, p: PathBuf) {
@@ -102,6 +104,11 @@ pub fn fs_view(policy: &SandboxPolicy, working_dir: &Path) -> FsView {
     for p in &policy.goal_paths {
         if p.exists() {
             push_unique(&mut v.goal, p.clone());
+        }
+    }
+    for p in &policy.goal_read_files {
+        if p.is_file() {
+            push_unique(&mut v.goal_ro, p.clone());
         }
     }
     // A path that is both writable and readable is just writable.
@@ -244,6 +251,9 @@ pub fn bwrap_args(
     for p in &view.goal {
         mount("--bind-try", p);
     }
+    for p in &view.goal_ro {
+        mount("--ro-bind-try", p);
+    }
     for sock in &policy.unix_sockets {
         if let Some(dir) = sock.parent() {
             mount("--bind-try", dir);
@@ -277,7 +287,11 @@ pub fn helper_args(
         for g in &view.goal {
             push_unique(&mut rw, g.clone());
         }
-        (view.ro.clone(), rw)
+        let mut ro = view.ro.clone();
+        for g in &view.goal_ro {
+            push_unique(&mut ro, g.clone());
+        }
+        (ro, rw)
     } else {
         let mut rw = carve_denies(&view.rw, &view.deny);
         for g in view.goal.iter().chain(std::iter::once(&view.workspace)) {
@@ -292,7 +306,11 @@ pub fn helper_args(
                 push_unique(&mut rw, p);
             }
         }
-        (carve_denies(&view.ro, &view.deny), rw)
+        let mut ro = carve_denies(&view.ro, &view.deny);
+        for g in &view.goal_ro {
+            push_unique(&mut ro, g.clone());
+        }
+        (ro, rw)
     };
     let mut ro = ro;
     let mut rw = rw;

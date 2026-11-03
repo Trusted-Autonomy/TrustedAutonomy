@@ -114,6 +114,7 @@ fn world() -> World {
         allow_network: vec!["api.anthropic.com".into()],
         deny_paths: vec![ta_dir, base.join("state"), staging.join("private")],
         goal_paths: vec![agent_home.clone()],
+        goal_read_files: vec![],
         unix_sockets: Vec::new(),
         egress_proxy_port: Some(proxy_port),
         egress_unix_socket: Some(relay.socket_path().to_path_buf()),

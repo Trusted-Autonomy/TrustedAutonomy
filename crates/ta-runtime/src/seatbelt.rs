@@ -249,6 +249,12 @@ pub fn generate(policy: &SandboxPolicy, working_dir: &Path) -> String {
         ));
     }
 
+    // 5b. Read-only files inside a denied tree (the goal's system prompt): exact
+    // paths, read only, after the denies so they win.
+    for p in &policy.goal_read_files {
+        l.push(format!(r#"(allow file-read* (literal "{}"))"#, sb_path(p)));
+    }
+
     // 6. Network. A grant of "*" is the owner's explicit open-network choice
     // and still never reaches loopback (the daemon and NATS live there).
     if policy.allow_network.iter().any(|h| h == "*") {
@@ -305,6 +311,7 @@ mod tests {
             allow_network: Vec::new(),
             deny_paths: Vec::new(),
             goal_paths: Vec::new(),
+            goal_read_files: Vec::new(),
             unix_sockets: Vec::new(),
             egress_proxy_port: None,
             egress_unix_socket: None,
@@ -443,6 +450,37 @@ mod tests {
             ),
         );
         assert!(deny < grant && ssh < grant);
+    }
+
+    #[test]
+    fn goal_prompt_file_is_readable_not_writable_and_after_the_deny() {
+        let ta_dir = canonical(Path::new("/proj/.ta"));
+        let prompt = canonical(Path::new("/proj/.ta/logs/goals/g1/system-prompt.txt"));
+        let mut p = policy();
+        p.deny_paths = vec![PathBuf::from("/proj/.ta")];
+        p.goal_read_files = vec![PathBuf::from("/proj/.ta/logs/goals/g1/system-prompt.txt")];
+        let out = generate(&p, Path::new("/proj/.ta/staging/g1"));
+        let deny = pos(
+            &out,
+            &format!(
+                r#"(deny file-read* file-write* (subpath "{}"))"#,
+                escape(&ta_dir.to_string_lossy())
+            ),
+        );
+        let read_line = format!(
+            r#"(allow file-read* (literal "{}"))"#,
+            escape(&prompt.to_string_lossy())
+        );
+        assert!(deny < pos(&out, &read_line), "{out}");
+        assert!(
+            !out.contains(&format!(
+                r#"(allow file-read* file-write* (literal "{}"))"#,
+                escape(&prompt.to_string_lossy())
+            )),
+            "the prompt file must stay read-only: {out}"
+        );
+        // No directory-wide grant under the denied tree.
+        assert!(!out.contains(r#"(subpath "/proj/.ta/logs"#), "{out}");
     }
 
     #[test]
