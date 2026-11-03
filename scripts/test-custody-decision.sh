@@ -29,6 +29,13 @@ EOF
     chmod +x "$TMP/bin/codesign"
 }
 fresh_home() { export HOME="$TMP/home-$1"; rm -rf "$HOME"; mkdir -p "$HOME"; }
+# fake_security EXIT: installs a `security` whose find-generic-password exits EXIT
+# (0 = a TA item exists, 1 = none), so no test reads the real keychain.
+fake_security() {
+    printf '#!/usr/bin/env bash\nexit %s\n' "$1" >"$TMP/bin/security"
+    chmod +x "$TMP/bin/security"
+}
+fake_security 1
 PATH="$TMP/bin:$PATH"
 
 # 1. No Team ID, no custody file -> writes `file`, dir 0700, file 0600.
@@ -73,5 +80,12 @@ EOF
 fresh_home 6
 ta_decide_custody /fake/ta >/dev/null
 [[ "$(cat "$HOME/.config/ta/human/custody" 2>/dev/null)" == "file" ]]; check "unsigned binary writes 'file'" $?
+
+# 7. No Team ID, no custody file, but the keychain already holds TA secrets ->
+# do NOT switch (a switch without migration would mint replacement keys).
+fake_codesign "TeamIdentifier=not set"; fake_security 0; fresh_home 7
+out="$(ta_decide_custody /fake/ta)"
+[[ ! -e "$HOME/.config/ta/human/custody" ]]; check "keychain holding TA secrets blocks the automatic switch" $?
+grep -q "ta credentials custody file" <<<"$out" && grep -q "did NOT switch" <<<"$out"; check "tells the user to migrate explicitly" $?
 
 exit "$fail"
