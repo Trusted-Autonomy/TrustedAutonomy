@@ -240,6 +240,55 @@ fn update_check_interval_secs(project_root: &Path) -> u64 {
         .unwrap_or(300)
 }
 
+/// `[daemon] keychain_approval_timeout_secs` from `.ta/daemon.toml`; 0 when
+/// the file or the key is absent (the default wait applies).
+fn keychain_timeout_secs(project_root: &Path) -> u64 {
+    std::fs::read_to_string(project_root.join(".ta").join("daemon.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|t| {
+            t.get("daemon")?
+                .get("keychain_approval_timeout_secs")?
+                .as_integer()
+        })
+        .and_then(|n| u64::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+/// Make every keychain call this CLI process makes give up after the
+/// project's `[daemon] keychain_approval_timeout_secs` (default 60 s, and the
+/// `TA_KEYCHAIN_TIMEOUT_SECS` environment variable wins), instead of waiting
+/// forever on an approval dialog nobody can see.
+pub(crate) fn apply_keychain_timeout(project_root: &Path) {
+    ta_credentials::keychain::configure_timeout(std::time::Duration::from_secs(
+        keychain_timeout_secs(project_root),
+    ));
+}
+
+#[cfg(test)]
+mod keychain_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn the_project_setting_is_read_from_daemon_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(keychain_timeout_secs(dir.path()), 0, "no file: unset");
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[daemon]\nkeychain_approval_timeout_secs = 15\n",
+        )
+        .unwrap();
+        assert_eq!(keychain_timeout_secs(dir.path()), 15);
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[daemon]\nkeychain_approval_timeout_secs = -3\n",
+        )
+        .unwrap();
+        assert_eq!(keychain_timeout_secs(dir.path()), 0, "negative: unset");
+    }
+}
+
 fn cmd_check_build(project_root: &Path, restart_now: bool) -> anyhow::Result<()> {
     let base_url = resolve_daemon_url(project_root, None);
     let client = reqwest::blocking::Client::builder()

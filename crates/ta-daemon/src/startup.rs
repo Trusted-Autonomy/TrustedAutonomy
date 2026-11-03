@@ -27,7 +27,7 @@ use ta_credentials::state::Posture;
 use tokio::sync::{watch, Notify};
 
 /// Default seconds startup waits for one keychain item.
-pub const DEFAULT_KEYCHAIN_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_KEYCHAIN_TIMEOUT_SECS: u64 = keychain::DEFAULT_TIMEOUT_SECS;
 
 /// How long a keychain read may take before the daemon says it is waiting.
 /// An approved item answers in milliseconds; this keeps routine starts quiet.
@@ -246,7 +246,10 @@ impl DaemonHealth {
                 ),
                 next_step: "Click Always Allow in the macOS Keychain dialog (it may be behind \
                             other windows). If you are not at this machine, the daemon starts \
-                            degraded when the wait times out"
+                            degraded when the wait times out; to skip the keychain, run \
+                            `ta credentials custody file` and `ta daemon restart`. The wait is \
+                            `[daemon] keychain_approval_timeout_secs` in .ta/daemon.toml (or \
+                            the TA_KEYCHAIN_TIMEOUT_SECS environment variable)"
                     .into(),
             }),
             KeychainState::Loading { .. } => out.push(StatusReason {
@@ -261,7 +264,10 @@ impl DaemonHealth {
                             Allow), then run `ta daemon restart`. Until then features that need \
                             the key (capability tokens, audit signing, the credential vault) \
                             refuse with an error. To use file custody instead, run \
-                            `ta credentials custody file` (or set TA_NO_KEYCHAIN=1) and restart"
+                            `ta credentials custody file` (or set TA_NO_KEYCHAIN=1) and restart. \
+                            To change how long startup waits, set `[daemon] \
+                            keychain_approval_timeout_secs` in .ta/daemon.toml (or \
+                            TA_KEYCHAIN_TIMEOUT_SECS)"
                     .into(),
             }),
         }
@@ -346,7 +352,8 @@ impl DaemonHealth {
 pub fn waiting_line(label: &str, timeout: Duration) -> String {
     format!(
         "waiting for keychain approval for {label} ... click Always Allow in the macOS dialog; \
-         timeout {}s",
+         timeout {}s (change it with `[daemon] keychain_approval_timeout_secs` in \
+         .ta/daemon.toml, or run `ta credentials custody file` to stop using the keychain)",
         timeout.as_secs()
     )
 }
@@ -508,6 +515,12 @@ pub async fn run_preload(
                  and run `ta daemon restart`, or run `ta credentials custody file` (or set TA_NO_KEYCHAIN=1) for file custody. \
                  Strict posture (TA_POSTURE=strict) refuses to start instead"
             );
+            // Items the reader has not reached (the timed-out one and those after
+            // it) must fail with this reason, not with a bare "not loaded".
+            let reached = rx.borrow().done.min(total);
+            for item in &items[reached..] {
+                keychain::mark_unavailable_if_absent(&item.service, &item.user, reason);
+            }
             health.set_keychain_degraded(reason.clone());
             spawn_late_watcher(rx, total, announced, health.clone());
         }
@@ -737,6 +750,8 @@ mod tests {
         assert!(line.starts_with("waiting for keychain approval for audit-log signing key"));
         assert!(line.contains("click Always Allow in the macOS dialog"));
         assert!(line.contains("timeout 60s"));
+        assert!(line.contains("keychain_approval_timeout_secs"));
+        assert!(line.contains("ta credentials custody file"));
     }
 
     #[tokio::test]
@@ -761,6 +776,10 @@ mod tests {
         assert_eq!(reasons[0].component, "keychain");
         assert!(reasons[0].reason.contains("waiting for keychain approval"));
         assert!(reasons[0].next_step.contains("Always Allow"));
+        assert!(reasons[0]
+            .next_step
+            .contains("keychain_approval_timeout_secs"));
+        assert!(reasons[0].next_step.contains("ta credentials custody file"));
         let mut json = serde_json::json!({ "version": "x" });
         health.apply_to(&mut json);
         assert_eq!(json["status"], "starting");
@@ -785,6 +804,11 @@ mod tests {
             backend.reads.load(std::sync::atomic::Ordering::SeqCst),
             reads_at_timeout
         );
+        // The item behind the stuck one was never reached: it fails with the
+        // timeout reason, not with a bare "not loaded".
+        let err = keychain::get("svc", "b").unwrap_err();
+        assert!(err.contains("timed out after"), "{err}");
+        assert!(err.contains("ta credentials custody file"), "{err}");
 
         // A late click clears the degraded state.
         backend.release();
