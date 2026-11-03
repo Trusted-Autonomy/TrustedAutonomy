@@ -1,3 +1,18 @@
+## Unreleased — Persistent per-user key custody (fixes endless macOS Keychain prompts on dev builds)
+
+- **`ta credentials custody status|file|keychain`** — one persistent per-user choice between the OS
+  keychain and owner-only file custody, stored in `<user state dir>/custody`. Resolved in one
+  function (`ta_credentials::custody`) for the vault, control-plane keys, human credential, MCP
+  gateway and shadow spawn: `TA_NO_KEYCHAIN`, then the cargo-test guard, then the custody file,
+  then the keychain default (production unchanged). `file`/`keychain` migrate the current project's
+  secrets with a verified copy and print the exact commands to remove the old copies.
+- **`install_local.sh`** — when the signed binary has no Team ID (self-signed local cert), writes
+  `file` to the custody file (never overwriting an existing one) and prints why. Root cause: a
+  keychain item's `partition_id` ACL keys on the Team ID, or the cdhash without one, so every
+  rebuild re-prompted; signing only fixes the app list. `CLAUDE.md` corrected accordingly.
+
+---
+
 ## TA v0.15.30-alpha.2.1 — Windows Startup Crash Fix
 
 **Patch release on top of v0.15.30-alpha.2.**

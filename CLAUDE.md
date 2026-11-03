@@ -18,7 +18,7 @@ Or use the helper script for one-liners:
 
 ## Testing the Daemon or Poller Locally
 
-**Never run the daemon/poller via a bare `cargo build` + direct `target/debug/ta` invocation.** `ta daemon restart` resolves `ta-daemon` as the sibling of whichever `ta` binary is currently running. A bare `cargo build` produces a fresh, unsigned binary at `target/debug/ta-daemon` on every build, so macOS treats it as a new identity each time and you get a Keychain "Always Allow" prompt on every single iteration, even with the local codesigning cert set up (see `install_local.sh`'s own header comment for the full explanation).
+**Never run the daemon/poller via a bare `cargo build` + direct `target/debug/ta` invocation.** `ta daemon restart` resolves `ta-daemon` as the sibling of whichever `ta` binary is currently running. A bare `cargo build` produces a fresh, unsigned binary at `target/debug/ta-daemon` on every build, so macOS treats it as a new identity each time and you get a Keychain prompt on every single iteration (see `install_local.sh`'s own header comment for the full explanation, and the custody paragraphs below).
 
 Always use the installed, signed path instead:
 ```bash
@@ -27,7 +27,13 @@ ta daemon restart
 ```
 This is the same script real installs use (just a faster debug profile), so the signing step can't silently drift out of sync with a separate fast-loop path the way a second, parallel codesign mechanism could.
 
-**Test binaries are signed too.** `.cargo/config.toml` routes every macOS test and `cargo run` binary through `scripts/codesign-runner.sh`, which signs it with the same local identity (identifier `com.trustedautonomy.ta-test`), so tests that touch the Keychain do not re-prompt on every build. It is a no-op on Linux, CI, and any Mac without the "Trusted Autonomy Local Dev" certificate. To use a differently named certificate, copy `.env.local.example` to `.env.local` (gitignored) and set `TA_CODESIGN_IDENTITY`; the installer, the test runner and the daemon all read it. Linux and Windows have no equivalent yet.
+**What signing does and does not fix.** A keychain item has two ACL halves. The *app list* (which binaries may read the item) is keyed to the signing identity, and signing with the "Trusted Autonomy Local Dev" certificate fixes that half. The *partition list* (`partition_id`) is keyed to the Team ID, or to `cdhash:<hash>` when the certificate has no Team ID. A self-signed local certificate has no Team ID, so `ta`, `ta-daemon` and the Wayfinder poller are identified by cdhash, and every rebuild or reinstall is a new identity for every item (`trusted-autonomy-vault`, `trusted-autonomy-control-plane` items, the human credential) and re-prompts. Signing alone does not stop the prompts.
+
+**Dev installs default to file custody.** `./install_local.sh` checks the `TeamIdentifier` of the signed binary. If there is none and no `<user state dir>/custody` file exists (default `~/.config/ta/human/custody`), it writes `file` there, so every TA process (CLI, daemon, poller) keeps secrets in owner-only files and never touches the keychain. An existing custody file is never overwritten. Check it with `ta credentials custody status`; migrate an existing project with `ta credentials custody file` (verified copy; the old keychain items are left for you to delete, with the exact `security delete-generic-password` commands printed). Precedence: `TA_NO_KEYCHAIN` set, then the cargo-test guard, then the custody file, then the keychain default (production is unchanged).
+
+**To use the keychain on a dev machine**, create your own Apple Development certificate (every developer makes their own; no Team ID is hardcoded anywhere), put its name in `.env.local` as `TA_CODESIGN_IDENTITY`, re-run `./install_local.sh --debug`, then run `ta credentials custody keychain`. A binary with a Team ID has a stable identity across rebuilds, so the prompts stop.
+
+**Test binaries are signed too, but tests never need the keychain.** `.cargo/config.toml` routes every macOS test and `cargo run` binary through `scripts/codesign-runner.sh`, which signs it with the same local identity (identifier `com.trustedautonomy.ta-test`). That fixes only the app-list half, like the installer. Cargo test binaries never touch the real keychain at all (`encryption::keychain_guard_active` forces file custody), and it is a no-op on Linux, CI, and any Mac without the "Trusted Autonomy Local Dev" certificate. To use a differently named certificate, copy `.env.local.example` to `.env.local` (gitignored) and set `TA_CODESIGN_IDENTITY`; the installer, the test runner and the daemon all read it. Linux and Windows have no equivalent yet.
 
 ## Verification Before Every Commit
 
