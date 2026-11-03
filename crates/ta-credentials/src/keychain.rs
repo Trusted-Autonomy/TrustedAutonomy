@@ -35,6 +35,10 @@ pub const CONTROL_PLANE_SERVICE: &str = "trusted-autonomy-control-plane";
 pub const VAULT_SERVICE: &str = "trusted-autonomy-vault";
 pub const VAULT_ITEM: &str = "credential-vault-age-identity";
 
+/// Keychain service and item of the human credential (`ta login`).
+pub const HUMAN_SERVICE: &str = "trusted-autonomy-human";
+pub const HUMAN_ITEM: &str = "human-credential";
+
 /// A keychain implementation. `Ok(None)` from `get` means "no such item".
 pub trait KeychainBackend: Send + Sync {
     fn get(&self, service: &str, user: &str) -> Result<Option<String>, String>;
@@ -276,9 +280,9 @@ impl KeychainItem {
 
 /// Every keychain item the daemon will read for `project_root`: the broker
 /// root key, the audit signing key and the credential vault's age identity.
-/// Empty when the keychain is not in use (`TA_NO_KEYCHAIN`, a test binary).
+/// Empty when the keychain is not in use (file custody, `TA_NO_KEYCHAIN`, a test binary).
 pub fn startup_items(project_root: &Path) -> Result<Vec<KeychainItem>, String> {
-    if !crate::human::default_use_keychain() {
+    if !crate::custody::use_keychain() {
         return Ok(Vec::new());
     }
     items_for_project(project_root)

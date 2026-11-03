@@ -260,8 +260,8 @@ impl DaemonHealth {
                 next_step: "Unlock the keychain and approve the TA access prompt (choose Always \
                             Allow), then run `ta daemon restart`. Until then features that need \
                             the key (capability tokens, audit signing, the credential vault) \
-                            refuse with an error. To use file custody instead, set \
-                            TA_NO_KEYCHAIN=1 and restart"
+                            refuse with an error. To use file custody instead, run \
+                            `ta credentials custody file` (or set TA_NO_KEYCHAIN=1) and restart"
                     .into(),
             }),
         }
@@ -505,7 +505,7 @@ pub async fn run_preload(
                 reason = %reason,
                 "startup: keychain unavailable, starting DEGRADED. Features that need the \
                  key refuse until it is loaded. Approve the keychain prompt (Always Allow) \
-                 and run `ta daemon restart`, or set TA_NO_KEYCHAIN=1 for file custody. \
+                 and run `ta daemon restart`, or run `ta credentials custody file` (or set TA_NO_KEYCHAIN=1) for file custody. \
                  Strict posture (TA_POSTURE=strict) refuses to start instead"
             );
             health.set_keychain_degraded(reason.clone());

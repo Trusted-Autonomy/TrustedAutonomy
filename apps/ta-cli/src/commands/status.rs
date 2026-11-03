@@ -83,7 +83,7 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
     if let Some(line) = super::login::delegation_line_for_project(
         &config.workspace_root,
         &ta_credentials::human::user_state_dir(),
-        ta_credentials::human::default_use_keychain(),
+        ta_credentials::custody::use_keychain(),
         chrono::Utc::now(),
     ) {
         println!("│  {}", line);

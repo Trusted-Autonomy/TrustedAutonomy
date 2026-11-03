@@ -418,12 +418,17 @@ pub(crate) fn show_state_with(project_root: &Path, locator: &StateLocator) -> an
             );
         }
     }
+    let custody = ta_credentials::custody::resolve();
     println!(
         "  Key custody:      {}",
         if opts.use_keychain {
             "OS keychain first (service trusted-autonomy-control-plane), owner-only file fallback"
+                .to_string()
         } else {
-            "owner-only files (OS keychain disabled: TA_NO_KEYCHAIN is set)"
+            format!(
+                "owner-only files (OS keychain not used: {})",
+                custody.reason.describe()
+            )
         }
     );
     println!(
