@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use ta_goal::cost_detail::DetailTotals;
 use ta_goal::cost_export::{
     meridian_command, meridian_records_with_usage, session_rows, write_jsonl,
@@ -20,6 +20,17 @@ use ta_goal::cost_report::{
 use ta_goal::spend::parse_time_bound;
 use ta_goal::{GoalRun, GoalRunStore, PriceTable};
 use ta_mcp_gateway::GatewayConfig;
+
+/// A source of rows that `--source` can pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReportSource {
+    /// This project's TA goals (`.ta/goals`).
+    Goals,
+    /// Claude Code transcripts (`~/.claude/projects`, or `--claude-dir`).
+    Claude,
+    /// OMP transcripts (`~/.omp/agent/sessions`, or `--omp-dir`).
+    Omp,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum CostCommands {
@@ -59,6 +70,12 @@ pub enum CostCommands {
         /// OMP sessions directory (default: ~/.omp/agent/sessions).
         #[arg(long, value_name = "DIR")]
         omp_dir: Option<PathBuf>,
+        /// Read only these sources: goals, claude, omp (comma-separated;
+        /// default all). A source not listed is not opened at all, so
+        /// `--source goals` stays fast on a machine with gigabytes of
+        /// transcripts. Use it when only per-goal cost is wanted.
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "SOURCE")]
+        source: Vec<ReportSource>,
         /// Also write one record per goal or session to this Meridian JSONL
         /// file. Re-running updates records by id and never duplicates them.
         #[arg(long, value_name = "FILE.jsonl")]
@@ -83,6 +100,7 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
             rows,
             claude_dir,
             omp_dir,
+            source,
             meridian,
             detail,
         } => {
@@ -98,46 +116,52 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
                         .map(|h| h.join(".omp").join("agent").join("sessions"))
                 })
                 .unwrap_or_else(|| PathBuf::from(".omp/agent/sessions"));
-            let inputs = gather(
+            let wants = |s: ReportSource| source.is_empty() || source.contains(&s);
+            let inputs = gather_selected(
                 config,
                 since.as_deref(),
                 until.as_deref(),
                 group_by,
                 project.as_deref(),
-                &claude,
-                &omp,
+                &Selection {
+                    goals: wants(ReportSource::Goals),
+                    claude: wants(ReportSource::Claude).then_some(claude.as_path()),
+                    omp: wants(ReportSource::Omp).then_some(omp.as_path()),
+                },
             )?;
             // Plan and budget usage, attached to the JSON/text report and to
-            // each Meridian record. Never changes the `--rows` array.
-            let usage = ta_goal::usage::gather_summary(
-                &config.workspace_root,
-                chrono::Utc::now(),
-                false,
-                inputs.filter.since,
-                None,
-                None,
-            );
+            // each Meridian record. Never part of the `--rows` array, so a
+            // `--rows` run without `--meridian` does not read the ledger.
+            let usage = usage_needed(*rows, meridian.is_some()).then(|| {
+                ta_goal::usage::gather_summary(
+                    &config.workspace_root,
+                    chrono::Utc::now(),
+                    false,
+                    inputs.filter.since,
+                    None,
+                    None,
+                )
+            });
             // Export first from the same rows the report is built from, so the
             // file and the table cannot disagree.
             let exported = meridian
                 .as_ref()
-                .map(|path| export_meridian(&inputs, path, Some(&usage)))
+                .map(|path| export_meridian(&inputs, path, usage.as_ref()))
                 .transpose()?;
-            let rows_json = if *rows {
-                Some(rows_json(&inputs)?)
+            if *rows {
+                // The rows array is all that is printed: the grouped report
+                // would be built and thrown away.
+                println!("{}", rows_json(&inputs)?);
             } else {
-                None
-            };
-            let mut report = inputs.into_report();
-            report.usage = Some(usage);
-            if let Some(text) = rows_json {
-                println!("{text}");
-            } else if *json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", render(&report));
-                if *detail {
-                    print!("{}", render_detail(&report));
+                let mut report = inputs.into_report();
+                report.usage = usage;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print!("{}", render(&report));
+                    if *detail {
+                        print!("{}", render_detail(&report));
+                    }
                 }
             }
             if let Some(msg) = exported {
@@ -151,6 +175,12 @@ pub fn execute(cmd: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()>
             Ok(())
         }
     }
+}
+
+/// Whether the plan/budget usage summary is needed: it feeds the grouped
+/// report and the Meridian records, not the `--rows` array.
+fn usage_needed(rows: bool, meridian: bool) -> bool {
+    meridian || !rows
 }
 
 /// Validated flags and everything read from the sources.
@@ -243,6 +273,15 @@ fn run_report(
     Ok(gather(config, since, until, group_by, project, claude_dir, omp_dir)?.into_report())
 }
 
+/// Which sources a report reads. A source that is not selected is not opened.
+struct Selection<'a> {
+    goals: bool,
+    claude: Option<&'a Path>,
+    omp: Option<&'a Path>,
+}
+
+/// [`gather_selected`] over every source.
+#[cfg(test)]
 fn gather(
     config: &GatewayConfig,
     since: Option<&str>,
@@ -251,6 +290,22 @@ fn gather(
     project: Option<&str>,
     claude_dir: &Path,
     omp_dir: &Path,
+) -> anyhow::Result<Inputs> {
+    let all = Selection {
+        goals: true,
+        claude: Some(claude_dir),
+        omp: Some(omp_dir),
+    };
+    gather_selected(config, since, until, group_by, project, &all)
+}
+
+fn gather_selected(
+    config: &GatewayConfig,
+    since: Option<&str>,
+    until: Option<&str>,
+    group_by: &str,
+    project: Option<&str>,
+    selection: &Selection<'_>,
 ) -> anyhow::Result<Inputs> {
     let group_by = parse_cost_group_by(group_by).map_err(anyhow::Error::msg)?;
     let bound = |name: &str, v: Option<&str>| -> anyhow::Result<_> {
@@ -277,7 +332,7 @@ fn gather(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let goals = if config.goals_dir.is_dir() {
+    let goals = if selection.goals && config.goals_dir.is_dir() {
         let list = GoalRunStore::new(&config.goals_dir)
             .and_then(|s| s.list())
             .with_context(|| {
@@ -298,7 +353,13 @@ fn gather(
     } else {
         None
     };
-    let scans: Vec<Scan> = vec![scan_claude(claude_dir, &table), scan_omp(omp_dir, &table)];
+    let scans: Vec<Scan> = [
+        selection.claude.map(|dir| scan_claude(dir, &table)),
+        selection.omp.map(|dir| scan_omp(dir, &table)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Ok(Inputs {
         goals,
         scans,
@@ -1106,5 +1167,106 @@ mod tests {
         assert!(rep.groups.iter().all(|g| g.group.contains_key("goal")));
         let e = run_report(&config, None, None, "hour", None, &none, &none).unwrap_err();
         assert!(e.to_string().contains("--json --rows"), "{e}");
+    }
+
+    /// The goals and both transcript formats `ta cost report` reads, small.
+    fn all_sources_fixture(dir: &Path) -> (GatewayConfig, PathBuf, PathBuf) {
+        let root = proj_root(dir);
+        let config = goal_fixture(&root);
+        let (claude, omp) = fixture(dir);
+        (config, claude, omp)
+    }
+
+    #[test]
+    fn rows_json_is_byte_identical_to_the_golden_file() {
+        // `ta cost report --json --rows` stdout from the build before the
+        // report was sped up, on this same fixture: the rows must not change by
+        // so much as a space. (`println!` adds the final newline.)
+        let golden = include_str!("../../tests/golden/cost_rows_small.json").replace("\r\n", "\n");
+        let dir = tempfile::tempdir().unwrap();
+        let (config, claude, omp) = all_sources_fixture(dir.path());
+        let inputs = gather(&config, None, None, "source", None, &claude, &omp).unwrap();
+        assert_eq!(format!("{}\n", rows_json(&inputs).unwrap()), golden);
+    }
+
+    #[test]
+    fn source_selection_reads_only_the_named_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, claude, omp) = all_sources_fixture(dir.path());
+        let pick = |goals: bool, c: bool, o: bool| {
+            let sel = Selection {
+                goals,
+                claude: c.then_some(claude.as_path()),
+                omp: o.then_some(omp.as_path()),
+            };
+            gather_selected(&config, None, None, "source", None, &sel).unwrap()
+        };
+        let sources = |inputs: &Inputs| -> Vec<String> {
+            inputs
+                .scans
+                .iter()
+                .map(|s| s.status.source.clone())
+                .collect()
+        };
+
+        // Goals only: no transcript directory is opened, so none is reported.
+        let goals_only = pick(true, false, false);
+        assert!(goals_only.scans.is_empty());
+        assert_eq!(export_rows(&goals_only).len(), 3);
+
+        let claude_only = pick(false, true, false);
+        assert!(claude_only.goals.is_none());
+        assert_eq!(sources(&claude_only), ["claude_code"]);
+        assert_eq!(export_rows(&claude_only).len(), 1);
+
+        let omp_only = pick(false, false, true);
+        assert_eq!(sources(&omp_only), ["omp"]);
+
+        // Everything is still the default, and the selection is a subset of it.
+        let all = pick(true, true, true);
+        assert_eq!(sources(&all), ["claude_code", "omp"]);
+        assert_eq!(export_rows(&all).len(), 5);
+    }
+
+    #[test]
+    fn source_flag_parses_lists_and_rejects_unknown_names() {
+        #[derive(Debug, clap::Parser)]
+        struct Wrapper {
+            #[command(subcommand)]
+            cmd: CostCommands,
+        }
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["cost", "report", "--json", "--rows"];
+            argv.extend_from_slice(args);
+            Wrapper::try_parse_from(argv)
+        };
+        let source_of = |w: Wrapper| match w.cmd {
+            CostCommands::Report { source, .. } => source,
+        };
+        assert!(source_of(parse(&[]).unwrap()).is_empty(), "default is all");
+        assert_eq!(
+            source_of(parse(&["--source", "goals"]).unwrap()),
+            [ReportSource::Goals]
+        );
+        assert_eq!(
+            source_of(parse(&["--source", "goals,omp"]).unwrap()),
+            [ReportSource::Goals, ReportSource::Omp]
+        );
+        let err = parse(&["--source", "everything"]).unwrap_err().to_string();
+        assert!(err.contains("goals") && err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn usage_is_read_only_when_it_is_part_of_the_output() {
+        // (rows, meridian) -> needed. The `--rows` array carries no usage, so a
+        // plain `--rows` run does not read the usage ledger at all.
+        assert!(!usage_needed(true, false));
+        assert!(usage_needed(true, true), "Meridian records carry usage");
+        assert!(
+            usage_needed(false, false),
+            "the grouped report carries usage"
+        );
+        assert!(usage_needed(false, true));
     }
 }

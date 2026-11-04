@@ -253,11 +253,11 @@ async fn main() -> Result<()> {
     // in the middle of the first request) and `/health` answers `starting`
     // meanwhile. After this no secret is read from the keychain on the
     // request path (v0.17.12.16). Strict posture refuses to start on timeout.
-    let health = startup::begin(
-        &project_root,
-        daemon_config.daemon.keychain_timeout(),
-        posture,
-    );
+    // Every keychain call this daemon makes (not only the startup reads) is
+    // abandoned after the same wait, so nothing can hang on an unseen dialog.
+    let keychain_timeout = daemon_config.daemon.keychain_timeout();
+    ta_credentials::keychain::configure_timeout(keychain_timeout);
+    let health = startup::begin(&project_root, keychain_timeout, posture);
     // Backstop for modes where the API server does not own startup: when the
     // strict posture refused, make sure the process really stops.
     {

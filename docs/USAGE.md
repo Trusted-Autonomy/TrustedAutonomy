@@ -10753,7 +10753,15 @@ The daemon log has the matching line (`waiting for keychain approval for ... cli
 keychain_approval_timeout_secs = 60   # 0 means the default
 ```
 
-When it runs out:
+The environment variable `TA_KEYCHAIN_TIMEOUT_SECS` (whole seconds) overrides the file for one process. The same limit applies to every keychain call TA makes, not only the daemon's reads at start: `ta` commands that read, write or delete a keychain item (the credential vault key, the capability-token and audit keys, the `ta login` credential) give up after it as well. A command that gives up does not hang; it exits with an error like this one:
+
+```
+the OS keychain did not answer within 60s while reading keychain item trusted-autonomy-vault/credential-vault-age-identity (credential vault encryption key). It is most likely showing an approval dialog nobody can click ... Fix: approve the dialog at the machine's console (choose Always Allow) and run the command again; or stop using the keychain with `ta credentials custody file` (or set TA_NO_KEYCHAIN=1), so nothing prompts. To change how long TA waits, set [daemon] keychain_approval_timeout_secs in .ta/daemon.toml or the TA_KEYCHAIN_TIMEOUT_SECS environment variable (now 60s, default 60s)
+```
+
+Once one call has timed out, the other keychain calls in that process fail at once with the same advice, so a command that needs several keys waits once, not once per key. The dialog that is still open keeps waiting; approving it later is harmless.
+
+When the wait runs out at daemon start:
 
 - **Default posture:** the daemon starts *degraded*. It serves requests, but anything that needs the missing key (capability tokens, audit signing, the credential vault) refuses with an error that names the key and says to approve the dialog and run `ta daemon restart`. If you click Always Allow later, the daemon notices, loads the key and goes back to `ok` without a restart.
 - **Strict posture** (`TA_POSTURE=strict`, or the word `strict` in the `posture` file in the state directory): the daemon refuses to start and exits with the reason. Start it again where someone can approve the dialog.
@@ -15692,6 +15700,15 @@ ta cost report --group-by context_bucket --json
 
 It reads three sources, each optional and found automatically: this project's TA goals, Claude Code sessions in `~/.claude/projects/**/*.jsonl`, and OMP sessions in `~/.omp/agent/sessions/**/*.jsonl`. Use `--claude-dir` and `--omp-dir` to read from somewhere else. A source that is not there is named in the header as missing; it is not an error.
 
+Scanning transcripts is the slow part: a machine that has run agents for months keeps gigabytes of them, and every line is parsed. TA reads several transcript files at once (up to 8, one per core, with a fixed memory cap) and folds them in file order, so the numbers are the same as a single-threaded read. To skip the transcripts altogether, name the sources you want:
+
+```bash
+ta cost report --json --rows --source goals          # TA goals only: no transcript directory is opened
+ta cost report --source claude,omp                   # interactive sessions only
+```
+
+`--source` takes `goals`, `claude` and `omp` (comma-separated, default all three). A source you do not name is not read and is not listed in the header. Use `--source goals` for anything that only wants per-goal cost, such as a poller that runs on a timer.
+
 `--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket`, `origin_class`, `goal`, `session_family` and `entrypoint` (`origin_class` and `goal` apply to TA goals; `session_family` and `entrypoint` apply to interactive and headless transcript sessions; other rows show `n/a`). For a flat list with one row per goal and session instead of groups, use `--json --rows` (see below). `--since` and `--until` take a date or an RFC 3339 time (UTC), and `--project` keeps projects whose name contains the text.
 
 Example output (trimmed):
@@ -15753,6 +15770,8 @@ meridian analyze --source jsonl --path cost.jsonl
 #### Exporting cost rows for Meridian and Wayfinder
 
 `ta cost report --json --rows` prints a JSON array with one row per TA goal and per interactive session, instead of the grouped report. `--since`, `--until` and `--project` apply as usual. The `--meridian` file is built from the same rows, so ids and token counts always match. A session row also has an `instrumentation` object (`turns`, `first_turn_cache_write_tokens`, `first_turn_context_tokens`, `session_family`, `entrypoint` and a `detail` with the output split and edit counts; `_est` fields are estimates). Goal rows do not have it.
+
+A `--rows` run prints only the array, so it does not read the plan and budget usage ledger or build the grouped report; only `--meridian` (whose records carry usage) reads the ledger.
 
 ```bash
 ta cost report --since 2026-10-01 --json --rows > cost-rows.json
