@@ -351,6 +351,10 @@ fn run_all_checks_with(
     // 4. Agent binary presence.
     results.push(check_agent_binary(&agent_name, &config.workspace_root));
 
+    // 4b. A running daemon started without any agent login in its environment:
+    // the sandbox only forwards the environment's login, so wake launches fail.
+    results.extend(super::doctor_login::check(config, &agent_name));
+
     // 5. gh CLI presence and auth.
     results.push(gh_check());
 
@@ -1986,7 +1990,7 @@ pub(super) fn fix_orphaned_claim(
 // ── Stale PID file check (v0.16.1.8) ─────────────────────────────────────────
 
 /// Returns true if a process with the given PID is currently alive.
-fn is_pid_alive(pid: u32) -> bool {
+pub(super) fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         use std::process::Command;

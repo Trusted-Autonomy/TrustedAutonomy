@@ -569,6 +569,14 @@ A sandboxed agent cannot use a login stored in the macOS Keychain or `~/.claude`
 
 The sandbox forwards exactly these (plus the `ANTHROPIC_BASE_URL` family and the OpenAI/Gemini keys); everything else secret is withheld. A launch that passes `--credential-scopes` starts from a cleared environment and only gets what those scopes cover.
 
+**`ta doctor` checks the running daemon.** When a `ta-daemon` is running for the project, the active agent is `claude-code`, and chat-class launches run in the sandbox (the default unless the owner's sandbox policy sets the posture to `open`), `ta doctor` reads the daemon's environment and prints a `Daemon agent login` line:
+
+- `[ok]`: one of `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` is set (non-empty) in the daemon's environment. Only the variable's name is shown, never its value.
+- `[warn]`: none of them is set, so every goal the daemon starts will fail with "The sandboxed agent has no usable login". The line says what to set and to run `ta daemon restart` afterwards.
+- `[ok] cannot check ...`: the daemon's environment could not be read, so nothing is claimed either way. TA reads it with `/proc/<pid>/environ` on Linux and `/bin/ps -E -p <pid>` on macOS, which work only for your own user's processes; there is no reader on Windows.
+
+No line is printed when no daemon is running, the agent is not `claude-code`, or the sandbox is off.
+
 An agent that never starts its model session is a **failed launch**, not a finished one. A headless agent that writes no output at all, or (for wake launches) whose stderr carries a known fatal start-up message (`a login stored in the macOS Keychain is not available inside the box`, `Error reading append system prompt file`, `Please run /login`), fails even when its process exits 0:
 
 - the goal is `failed`, and `ta goal status <id>` shows the reason, including what to set;
