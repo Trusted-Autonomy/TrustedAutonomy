@@ -1,3 +1,15 @@
+## Unreleased — `ta doctor` flags a daemon started without an agent login
+
+- **`ta doctor` "Daemon agent login" check** — when a `ta-daemon` is running (pid from
+  `.ta/daemon.pid`, alive), the active agent is `claude-code` and chat-class launches run in the
+  sandbox, doctor reads the daemon's environment (`/proc/<pid>/environ` on Linux, `/bin/ps -E` on
+  macOS) and warns when none of `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN` is set: goals the daemon starts would fail with "The sandboxed agent has no
+  usable login". The warning names what to set, where, and `ta daemon restart`. Only variable names
+  are examined or printed, never values. When the environment cannot be read (another user's
+  process, Windows) doctor says "cannot check" instead of warning. New helper
+  `sandbox_launch::chat_launch_is_sandboxed` compiles the same profile `ta run` does.
+
 ## Unreleased — Persistent per-user key custody (fixes endless macOS Keychain prompts on dev builds)
 
 - **`ta credentials custody status|file|keychain`** — one persistent per-user choice between the OS

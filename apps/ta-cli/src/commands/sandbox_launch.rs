@@ -199,6 +199,38 @@ pub fn prepare_staging(project_root: &Path, goal_id: &str, staging: &Path) -> Re
     ta_runtime::sandbox_windows::prepare_staging_acl(&name, staging)
 }
 
+/// Whether a chat-class launch (what `ta-daemon` starts for a wake: the
+/// chief-of-staff and other chat/origin launches) would run in the sandbox for
+/// this project: the owner's state-dir policy and the project's `[sandbox]` /
+/// `[security]` settings, compiled exactly as `plan` does. Chat launches are on
+/// by default (balanced floor), so this is true unless the owner's policy sets
+/// the posture to `open`. `Err` is why the trusted policy could not be read.
+pub fn chat_launch_is_sandboxed(project_root: &Path) -> Result<bool, String> {
+    let locator = ta_credentials::state::StateLocator::from_env();
+    let state = ta_credentials::state::ProjectState::locate(project_root, &locator)
+        .ok()
+        .flatten();
+    let trusted = match &state {
+        Some(s) => TrustedPolicy::load(&s.sandbox_dir())?,
+        None => None,
+    };
+    let ctx = LaunchContext {
+        goal_id: "doctor-probe".to_string(),
+        role_class: RoleClass::Chat,
+        team_role: false,
+        project_root: project_root.to_path_buf(),
+        staging: PathBuf::new(),
+        state_dir: state.as_ref().map(|s| s.dir.clone()),
+        agent_home: PathBuf::new(),
+        user_home: dirs::home_dir(),
+        mediation_socket: None,
+        egress_proxy: false,
+        persona: None,
+        prompt_file: None,
+    };
+    Ok(SandboxProfile::compile(trusted.as_ref(), &project_request(project_root), &ctx).requested)
+}
+
 /// Build the plan. `Err` is a launch refusal reason that is already
 /// actionable (unreadable trusted policy, refused decision is NOT an error
 /// here: the caller inspects `decision`).

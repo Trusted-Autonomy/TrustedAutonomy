@@ -26,6 +26,7 @@ pub mod daemon_ownership;
 pub mod dev;
 pub mod doctor;
 pub mod doctor_fix;
+pub mod doctor_login;
 pub mod draft;
 pub mod draft_plan;
 pub mod draft_task_replay;
