@@ -197,11 +197,13 @@ pub struct DaemonSettings {
     pub auto_update: ta_lifecycle::AutoUpdateMode,
     /// Seconds between checks (default 300). `0` is treated as the default.
     pub update_check_interval_secs: u64,
-    /// Seconds startup waits for ONE macOS Keychain approval dialog (default
-    /// 60; `0` is treated as the default). The daemon reads every keychain
-    /// item it needs at start so the prompt appears then, while `/health`
-    /// keeps answering `starting`. On timeout the default posture starts
-    /// degraded and the strict posture (`TA_POSTURE=strict`) refuses to start.
+    /// Seconds one keychain read may take (default 60; `0` is treated as the
+    /// default; the `TA_KEYCHAIN_TIMEOUT_SECS` environment variable wins). At
+    /// startup the daemon reads every keychain item it needs, so a macOS
+    /// approval dialog appears then while `/health` keeps answering
+    /// `starting`. On timeout the default posture starts degraded and the
+    /// strict posture (`TA_POSTURE=strict`) refuses to start. The CLI applies
+    /// the same wait to every keychain call it makes.
     pub keychain_approval_timeout_secs: u64,
 }
 
@@ -216,13 +218,10 @@ impl Default for DaemonSettings {
 }
 
 impl DaemonSettings {
-    /// Per-item wait for a keychain approval dialog at startup.
+    /// Per-item wait for a keychain approval dialog (see
+    /// [`ta_credentials::keychain::resolve_timeout`] for the precedence).
     pub fn keychain_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(if self.keychain_approval_timeout_secs == 0 {
-            crate::startup::DEFAULT_KEYCHAIN_TIMEOUT_SECS
-        } else {
-            self.keychain_approval_timeout_secs
-        })
+        ta_credentials::keychain::resolve_timeout(self.keychain_approval_timeout_secs)
     }
 
     pub fn check_interval(&self) -> std::time::Duration {

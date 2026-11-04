@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -165,6 +166,255 @@ fn jsonl_files(root: &Path, status: &mut SourceStatus) -> Vec<PathBuf> {
     files.sort();
     status.files = files.len() as u64;
     files
+}
+
+// ── Reading transcript files ────────────────────────────────────────────────
+//
+// Parsing every line of every transcript is almost all of a scan's time, and a
+// machine that has run an agent for months has gigabytes of them. The parse of
+// one file does not depend on any other, so reader threads read and parse the
+// next few files while the scan folds the current one in. The fold itself
+// (deduplication by message id, tool-call tracking) stays on the calling
+// thread and sees the files in sorted order, so the result is the same as a
+// single-threaded scan, line for line.
+
+/// Most reader threads a scan starts.
+const MAX_READER_THREADS: usize = 8;
+/// Bytes of transcript text read ahead of the fold at once (at least one file
+/// is always in flight, however large). Bounds memory: a parsed line takes a
+/// few times its text size.
+const READ_AHEAD_BYTES: u64 = 64 * 1024 * 1024;
+/// A file larger than this is read by a reader thread but parsed line by line
+/// as the fold consumes it, so one huge transcript is never held parsed.
+const PARSE_AHEAD_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// How a scan reads its files.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReadPlan {
+    /// Reader threads; `1` reads and parses on the calling thread.
+    workers: usize,
+    read_ahead_bytes: u64,
+    parse_ahead_max_file_bytes: u64,
+}
+
+impl ReadPlan {
+    /// One reader thread per core, up to [`MAX_READER_THREADS`].
+    pub(crate) fn auto() -> Self {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Self {
+            workers: cores.clamp(1, MAX_READER_THREADS),
+            read_ahead_bytes: READ_AHEAD_BYTES,
+            parse_ahead_max_file_bytes: PARSE_AHEAD_MAX_FILE_BYTES,
+        }
+    }
+
+    /// Everything on the calling thread (the reference behavior).
+    #[cfg(test)]
+    pub(crate) fn sequential() -> Self {
+        Self {
+            workers: 1,
+            ..Self::auto()
+        }
+    }
+}
+
+/// One transcript line: `None` when it is not valid JSON.
+type ParsedLine = Option<Value>;
+
+fn parse_line(line: &str) -> ParsedLine {
+    serde_json::from_str::<Value>(line).ok()
+}
+
+/// The non-blank lines of one transcript file, parsed, in file order.
+pub(crate) enum FileLines {
+    /// Parsed ahead of time by a reader thread.
+    Parsed(std::vec::IntoIter<ParsedLine>),
+    /// Parsed line by line as the scan consumes it.
+    Text { text: String, pos: usize },
+}
+
+impl FileLines {
+    fn text(text: String) -> Self {
+        FileLines::Text { text, pos: 0 }
+    }
+
+    fn parsed(text: &str) -> Self {
+        let lines: Vec<ParsedLine> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(parse_line)
+            .collect();
+        FileLines::Parsed(lines.into_iter())
+    }
+}
+
+impl Iterator for FileLines {
+    type Item = ParsedLine;
+
+    fn next(&mut self) -> Option<ParsedLine> {
+        match self {
+            FileLines::Parsed(it) => it.next(),
+            // The same lines `str::lines` gives: split on '\n', drop a '\r' before it.
+            FileLines::Text { text, pos } => loop {
+                if *pos >= text.len() {
+                    return None;
+                }
+                let rest = &text[*pos..];
+                let (line, advance) = match rest.find('\n') {
+                    Some(i) => (&rest[..i], i + 1),
+                    None => (rest, rest.len()),
+                };
+                *pos += advance;
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                if line.trim().is_empty() {
+                    continue;
+                }
+                return Some(parse_line(line));
+            },
+        }
+    }
+}
+
+/// Reads transcript files in the order given, on reader threads when the plan
+/// allows, and yields each file's lines in that same order.
+pub(crate) struct TranscriptReader {
+    files: Arc<Vec<PathBuf>>,
+    sizes: Arc<Vec<u64>>,
+    out: usize,
+    pool: Option<Pool>,
+}
+
+struct Pool {
+    shared: Arc<(Mutex<PoolState>, Condvar)>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct PoolState {
+    /// Next file index a reader may claim.
+    next: usize,
+    /// Bytes of files claimed and not yet handed to the scan.
+    in_flight: u64,
+    ready: BTreeMap<usize, std::io::Result<FileLines>>,
+    stop: bool,
+}
+
+fn lock(m: &Mutex<PoolState>) -> std::sync::MutexGuard<'_, PoolState> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl TranscriptReader {
+    pub(crate) fn new(files: Vec<PathBuf>, plan: ReadPlan) -> Self {
+        let sizes: Vec<u64> = files
+            .iter()
+            .map(|f| std::fs::metadata(f).map_or(0, |m| m.len()))
+            .collect();
+        let workers = plan.workers.min(files.len());
+        let files = Arc::new(files);
+        let sizes = Arc::new(sizes);
+        let pool = (workers > 1).then(|| {
+            let shared = Arc::new((Mutex::new(PoolState::default()), Condvar::new()));
+            let handles = (0..workers)
+                .map(|_| {
+                    let (files, sizes, shared) =
+                        (Arc::clone(&files), Arc::clone(&sizes), Arc::clone(&shared));
+                    std::thread::spawn(move || reader_thread(&files, &sizes, &shared, plan))
+                })
+                .collect();
+            Pool { shared, handles }
+        });
+        Self {
+            files,
+            sizes,
+            out: 0,
+            pool,
+        }
+    }
+}
+
+/// A reader thread: claim the next file (waiting while the read-ahead budget
+/// is spent), read it, parse it unless it is huge, and hand it over.
+fn reader_thread(
+    files: &[PathBuf],
+    sizes: &[u64],
+    shared: &(Mutex<PoolState>, Condvar),
+    plan: ReadPlan,
+) {
+    let (state, wake) = shared;
+    loop {
+        let i = {
+            let mut g = lock(state);
+            loop {
+                if g.stop || g.next >= files.len() {
+                    return;
+                }
+                let size = sizes[g.next];
+                if g.in_flight == 0 || g.in_flight + size <= plan.read_ahead_bytes {
+                    g.in_flight += size;
+                    g.next += 1;
+                    break g.next - 1;
+                }
+                g = wake.wait(g).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        // A panic here must not leave the scan waiting for a file that never arrives.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::fs::read_to_string(&files[i]).map(|text| {
+                if sizes[i] <= plan.parse_ahead_max_file_bytes {
+                    FileLines::parsed(&text)
+                } else {
+                    FileLines::text(text)
+                }
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::other(
+                "the reader thread panicked while parsing this file",
+            ))
+        });
+        lock(state).ready.insert(i, result);
+        wake.notify_all();
+    }
+}
+
+impl Iterator for TranscriptReader {
+    type Item = (PathBuf, std::io::Result<FileLines>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let i = self.out;
+        let file = self.files.get(i)?.clone();
+        self.out += 1;
+        let Some(pool) = &self.pool else {
+            return Some((
+                file,
+                std::fs::read_to_string(&self.files[i]).map(FileLines::text),
+            ));
+        };
+        let (state, wake) = &*pool.shared;
+        let mut g = lock(state);
+        let result = loop {
+            if let Some(r) = g.ready.remove(&i) {
+                break r;
+            }
+            g = wake.wait(g).unwrap_or_else(|e| e.into_inner());
+        };
+        g.in_flight = g.in_flight.saturating_sub(self.sizes[i]);
+        drop(g);
+        wake.notify_all();
+        Some((file, result))
+    }
+}
+
+impl Drop for TranscriptReader {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            lock(&pool.shared.0).stop = true;
+            pool.shared.1.notify_all();
+            for h in pool.handles {
+                let _ = h.join();
+            }
+        }
+    }
 }
 
 fn u64_at(v: &Value, key: &str) -> u64 {
@@ -372,6 +622,10 @@ fn claude_user_record(
 /// Read Claude Code transcripts under `root` (normally `~/.claude/projects`).
 /// A missing `root` is reported in the status, not an error.
 pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
+    scan_claude_with(root, table, ReadPlan::auto())
+}
+
+pub(crate) fn scan_claude_with(root: &Path, table: &PriceTable, plan: ReadPlan) -> Scan {
     let mut scan = Scan {
         status: SourceStatus {
             source: CostSourceKind::Claude.as_str().to_string(),
@@ -389,9 +643,9 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut seen_blocks: HashSet<u64> = HashSet::new();
     let mut tracker = ToolTracker::new(Dialect::Claude);
-    for file in files {
-        let text = match std::fs::read_to_string(&file) {
-            Ok(t) => t,
+    for (file, lines) in TranscriptReader::new(files, plan) {
+        let lines = match lines {
+            Ok(l) => l,
             Err(e) => {
                 tracing::warn!(path = %file.display(), error = %e, "could not read a Claude transcript; skipped");
                 scan.status
@@ -408,8 +662,8 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
         let mut file_family: Option<String> = None;
         let mut file_entrypoint: Option<String> = None;
         let mut file_rows: Vec<usize> = Vec::new();
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
+        for parsed in lines {
+            let Some(v) = parsed else {
                 scan.status.unparsable_lines += 1;
                 continue;
             };
@@ -542,6 +796,10 @@ pub fn scan_claude(root: &Path, table: &PriceTable) -> Scan {
 
 /// Read OMP transcripts under `root` (normally `~/.omp/agent/sessions`).
 pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
+    scan_omp_with(root, table, ReadPlan::auto())
+}
+
+pub(crate) fn scan_omp_with(root: &Path, table: &PriceTable, plan: ReadPlan) -> Scan {
     let mut scan = Scan {
         status: SourceStatus {
             source: CostSourceKind::Omp.as_str().to_string(),
@@ -557,9 +815,9 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
     let files = jsonl_files(root, &mut scan.status);
     let mut seen_blocks: HashSet<u64> = HashSet::new();
     let mut tracker = ToolTracker::new(Dialect::Omp);
-    for file in files {
-        let text = match std::fs::read_to_string(&file) {
-            Ok(t) => t,
+    for (file, lines) in TranscriptReader::new(files, plan) {
+        let lines = match lines {
+            Ok(l) => l,
             Err(e) => {
                 tracing::warn!(path = %file.display(), error = %e, "could not read an OMP transcript; skipped");
                 scan.status
@@ -579,8 +837,8 @@ pub fn scan_omp(root: &Path, table: &PriceTable) -> Scan {
             .unwrap_or_else(|| "unknown".to_string());
         let mut file_family: Option<String> = None;
         let first_row = scan.rows.len();
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
+        for parsed in lines {
+            let Some(v) = parsed else {
                 scan.status.unparsable_lines += 1;
                 continue;
             };
@@ -1955,5 +2213,163 @@ mod tests {
         let old: CostReport = serde_json::from_value(v).unwrap();
         assert_eq!(old.schema_version, 1);
         assert!(old.session_shape.is_none() && old.totals.detail.is_none());
+    }
+
+    // ── Parallel transcript reading ─────────────────────────────────────────
+
+    #[test]
+    fn lazily_parsed_text_yields_the_same_lines_as_parsing_ahead() {
+        for text in [
+            "",
+            "\n",
+            "\r\n",
+            "{}",
+            "{}\n",
+            "{}\n\n  \n{\"a\":1}\r\n{\"b\":2}",
+            "not json\n{\"a\":1}\n{\"torn\":",
+            "\n\n{\"é\":\"ü\"}\n",
+        ] {
+            let lazy: Vec<ParsedLine> = FileLines::text(text.to_string()).collect();
+            let ahead: Vec<ParsedLine> = FileLines::parsed(text).collect();
+            assert_eq!(lazy, ahead, "text {text:?}");
+        }
+    }
+
+    /// Cross-file state (message-id dedup, tool-call tracking) is what a
+    /// parallel read could get wrong, so the fixture spans it: the same
+    /// message id in several files, edits retried across files of one
+    /// directory, torn and blank lines, CRLF, an empty file and one that is
+    /// not UTF-8.
+    fn parallel_fixture(dir: &Path) {
+        for n in 0..40u32 {
+            let session = format!("s{n}");
+            let mut lines = vec![user_rec(&session, "do the thing")];
+            // Seen in every fifth file: the last row for an id wins.
+            if n % 5 == 0 {
+                lines.push(assistant_rec(
+                    &session,
+                    "2026-10-15T01:00:00Z",
+                    "dup",
+                    json!([]),
+                    5 + u64::from(n),
+                    None,
+                    10,
+                ));
+            }
+            let tool = format!("t{n}");
+            lines.push(assistant_rec(
+                &session,
+                &format!("2026-10-15T02:{:02}:00Z", n % 60),
+                &format!("m{n}"),
+                json!([tool_use(&tool, "Edit", edit_input("/x/a.rs"))]),
+                7,
+                Some(3),
+                20,
+            ));
+            lines.push(result_rec(&session, &tool, n % 3 == 0, None));
+            if n % 4 == 0 {
+                lines.push("{\"type\":\"assistant\",\"torn\":".to_string());
+                lines.push(String::new());
+                lines.push("   ".to_string());
+            }
+            let rel = format!("p{}/s{n}.jsonl", n % 3);
+            write(dir, &rel, &lines);
+            if n % 7 == 0 {
+                let crlf = fs::read_to_string(dir.join(&rel))
+                    .unwrap()
+                    .replace('\n', "\r\n");
+                fs::write(dir.join(&rel), crlf).unwrap();
+            }
+        }
+        fs::write(dir.join("p0/empty.jsonl"), "").unwrap();
+        fs::write(dir.join("p1/not-utf8.jsonl"), [0xff, 0xfe, b'\n']).unwrap();
+    }
+
+    /// Every way of splitting the work between reader threads and the scan.
+    fn read_plans() -> Vec<ReadPlan> {
+        let plan = |workers, read_ahead_bytes, parse_ahead_max_file_bytes| ReadPlan {
+            workers,
+            read_ahead_bytes,
+            parse_ahead_max_file_bytes,
+        };
+        vec![
+            ReadPlan::auto(),
+            plan(2, READ_AHEAD_BYTES, PARSE_AHEAD_MAX_FILE_BYTES),
+            plan(8, READ_AHEAD_BYTES, PARSE_AHEAD_MAX_FILE_BYTES),
+            // A read-ahead budget of one byte: one file in flight at a time.
+            plan(4, 1, PARSE_AHEAD_MAX_FILE_BYTES),
+            // A small budget: readers repeatedly wait for the scan to catch up.
+            plan(4, 600, PARSE_AHEAD_MAX_FILE_BYTES),
+            // Every file parsed lazily, as an oversized file is.
+            plan(4, READ_AHEAD_BYTES, 0),
+            // Some files parsed ahead, some lazily.
+            plan(4, READ_AHEAD_BYTES, 500),
+        ]
+    }
+
+    #[test]
+    fn parallel_claude_scan_equals_the_sequential_scan() {
+        let dir = tempdir().unwrap();
+        parallel_fixture(dir.path());
+        let table = PriceTable::builtin();
+        let want = scan_claude_with(dir.path(), &table, ReadPlan::sequential());
+        assert!(
+            want.rows.len() > 40,
+            "fixture yields rows: {}",
+            want.rows.len()
+        );
+        assert!(want.status.unparsable_lines > 0 && !want.status.unreadable_files.is_empty());
+        for plan in read_plans() {
+            let got = scan_claude_with(dir.path(), &table, plan);
+            assert_eq!(got.rows, want.rows, "{plan:?}");
+            assert_eq!(got.status, want.status, "{plan:?}");
+        }
+    }
+
+    #[test]
+    fn parallel_omp_scan_equals_the_sequential_scan() {
+        let dir = tempdir().unwrap();
+        for n in 0..30u32 {
+            let mut lines = omp_lines();
+            lines[0] = json!({"type":"session","id":format!("om{n}"),"cwd":"/Users/x/dev/proj"})
+                .to_string();
+            if n % 4 == 0 {
+                lines.push("{\"type\":\"message\",\"torn\":".to_string());
+            }
+            write(dir.path(), &format!("p{}/o{n}.jsonl", n % 2), &lines);
+        }
+        fs::write(dir.path().join("p0/not-utf8.jsonl"), [0xff, 0xfe, b'\n']).unwrap();
+        let table = PriceTable::builtin();
+        let want = scan_omp_with(dir.path(), &table, ReadPlan::sequential());
+        assert!(
+            want.rows.len() >= 30,
+            "fixture yields rows: {}",
+            want.rows.len()
+        );
+        assert!(want.status.unparsable_lines > 0 && !want.status.unreadable_files.is_empty());
+        for plan in read_plans() {
+            let got = scan_omp_with(dir.path(), &table, plan);
+            assert_eq!(got.rows, want.rows, "{plan:?}");
+            assert_eq!(got.status, want.status, "{plan:?}");
+        }
+    }
+
+    #[test]
+    fn a_scan_that_stops_early_does_not_hang_the_readers() {
+        // Dropping the reader mid-way must stop readers that are waiting for
+        // read-ahead budget, not leave `drop` joining threads that never end.
+        let dir = tempdir().unwrap();
+        parallel_fixture(dir.path());
+        let mut status = SourceStatus::default();
+        let files = jsonl_files(dir.path(), &mut status);
+        let plan = ReadPlan {
+            workers: 4,
+            read_ahead_bytes: 1,
+            parse_ahead_max_file_bytes: PARSE_AHEAD_MAX_FILE_BYTES,
+        };
+        let mut reader = TranscriptReader::new(files.clone(), plan);
+        let (first, _) = reader.next().unwrap();
+        assert_eq!(first, files[0]);
+        drop(reader);
     }
 }

@@ -1707,6 +1707,7 @@ fn run() -> anyhow::Result<()> {
     }
 
     let project_root = cli.project_root.canonicalize().unwrap_or(cli.project_root);
+    commands::daemon::apply_keychain_timeout(&project_root);
     let t_project_root = startup_begin.elapsed();
     let config = GatewayConfig::for_project(&project_root);
     let t_config = startup_begin.elapsed();
