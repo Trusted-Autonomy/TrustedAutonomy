@@ -35,6 +35,21 @@ pub enum VaultError {
     },
 
     #[error(
+        "the credential vault at {vault_path} already holds encrypted credentials, but no \
+         encryption key was found in {searched}. No replacement key was created: a new key \
+         cannot decrypt the existing vault, and would hide the real one. If you switched \
+         key custody, the key is probably still in the other store: run \
+         `ta credentials custody file` (or `ta credentials custody keychain`) in this project \
+         to copy it, then retry. If the old key is gone for good, move the vault aside \
+         (`mv {vault_path} {vault_path}.lost`) and re-add your credentials with \
+         `ta credentials add`. Run `ta doctor` for key custody details."
+    )]
+    KeyMissing {
+        vault_path: std::path::PathBuf,
+        searched: String,
+    },
+
+    #[error(
         "OS keychain unavailable for vault key custody ({reason}); falling back \
          to a chmod-0600 key file"
     )]

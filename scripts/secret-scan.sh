@@ -35,7 +35,9 @@ GitHub fine-grained token|github_pat_[A-Za-z0-9_]{22,}
 Slack token|xox[abprs]-[0-9]{9,}[0-9A-Za-z-]*
 AWS access key id|(AKIA|ASIA)[0-9A-Z]{16}
 Google API key|AIza[0-9A-Za-z_-]{35}
-Private key block|-----BEGIN ([A-Z]+ )*PRIVATE KEY-----'
+Private key block|-----BEGIN ([A-Z]+ )*PRIVATE KEY-----
+age secret key (vault identity)|AGE-SECRET-KEY-1[0-9A-Z]{40,}
+TA human credential (ta login)|tahc_[0-9a-f]{64}'
 
 usage() {
   sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -110,6 +112,14 @@ scan_tree() {
   done <<EOP
 $PATTERNS
 EOP
+  # Files that must never be committed whatever they contain: the vault
+  # (age ciphertext, which grep -I skips as binary), key files and plaintext
+  # credential files. A path match is enough; the content is not inspected.
+  tr '\0' '\n' < "$list" \
+    | grep -E '(^|/)\.ta/(credentials\.json|credentials\.key|audit\.key|broker_root\.key|[^/]+\.(key|pem|cred))$|(^|/)[^/]+\.cred$' \
+    | while IFS= read -r f; do
+        printf '%s:1: secret-bearing file (vault, key or *.cred) is tracked or not ignored\n' "$f" >> "$tmp/hits"
+      done
   # The while-pipeline above runs in a subshell, so count patterns again here.
   npat=$(printf '%s\n' "$PATTERNS" | grep -c .)
   echo "[secret-scan] step 3/3: $npat patterns scanned"
@@ -144,21 +154,29 @@ self_test() {
   # Planted secrets assembled at runtime so this file holds no literal.
   printf 'key = "%s%s"\r\n' "sk-ant-" "api03-AAAAAAAAAAAAAAAAAAAAAAAA" > "$d/src/planted.txt"
   printf 'k=%s%s\n' "AKIA" "ABCDEFGHIJKLMNOP" > "$d/fixtures/allowed.txt"
+  # A vault identity and a secret-bearing file, assembled at runtime as well.
+  printf 'AGE-SECRET-KEY-1%s\n' "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" > "$d/src/age.txt"
+  mkdir -p "$d/proj/.ta"
+  : > "$d/proj/.ta/credentials.json"
 
   scan_tree "$d" "$d/empty.allow" > "$d/out1.log" 2>&1; rc=$?
   if [ $rc -ne 1 ] || ! grep -q 'src/planted.txt:1:' "$d/out1.log"; then
     echo "SELF-TEST FAILED: planted secret was not reported (rc=$rc)"; cat "$d/out1.log"; rm -rf "$d"; exit 1
   fi
   echo "  ok: planted secret detected with file:line"
+  if ! grep -q 'src/age.txt:1:' "$d/out1.log" || ! grep -q 'proj/.ta/credentials.json:1:' "$d/out1.log"; then
+    echo "SELF-TEST FAILED: age key or tracked .ta/credentials.json was not reported"; cat "$d/out1.log"; rm -rf "$d"; exit 1
+  fi
+  echo "  ok: age secret key and a committable .ta/credentials.json detected"
 
-  printf '# fixtures hold shaped secrets on purpose\r\nfixtures/*\r\nsrc/planted.txt\r\n' > "$d/crlf.allow"
+  printf '# fixtures hold shaped secrets on purpose\r\nfixtures/*\r\nsrc/planted.txt\r\nsrc/age.txt\r\nproj/.ta/credentials.json\r\n' > "$d/crlf.allow"
   scan_tree "$d" "$d/crlf.allow" > "$d/out2.log" 2>&1; rc=$?
   if [ $rc -ne 0 ]; then
     echo "SELF-TEST FAILED: allowlisted paths (CRLF file) still reported (rc=$rc)"; cat "$d/out2.log"; rm -rf "$d"; exit 1
   fi
   echo "  ok: allowlist globs honored, CRLF allowlist tolerated"
 
-  rm -f "$d/src/planted.txt"
+  rm -f "$d/src/planted.txt" "$d/src/age.txt" "$d/proj/.ta/credentials.json"
   scan_tree "$d" "$d/empty.allow" > "$d/out3.log" 2>&1; rc=$?
   if [ $rc -ne 1 ]; then
     echo "SELF-TEST FAILED: non-allowlisted fixture not reported (rc=$rc)"; cat "$d/out3.log"; rm -rf "$d"; exit 1

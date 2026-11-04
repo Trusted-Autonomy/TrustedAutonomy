@@ -6743,6 +6743,10 @@ Persona and agent-config hashes are pinned in `config-hashes.json` in the same d
 
 **Honest limit.** These locations stop an agent from reaching the secrets through the project tree and keep them out of backups of it. A process running as your own OS user, without the OS sandbox, can still read your state directory or ask the keychain. The sandbox phases make that a wall.
 
+`ta doctor` has a **Key custody** line for the macOS dev case: it warns when the effective custody is `keychain` but the running `ta` binary has no Apple Team ID, because macOS then re-prompts after every rebuild. The fix it prints is `ta credentials custody file` (run once in every project that has a `.ta/credentials.json`; the mode is per user) or signing with your own Apple Development certificate via `TA_CODESIGN_IDENTITY`. The check never reads the keychain. Contributors: see "Local setup: keys, keychain and custody" in `CONTRIBUTING.md`.
+
+For each secret, where it lives, who can read it, what an agent can and cannot see, what CI checks and what it does not, and how to recover a lost or leaked key, see [docs/security/KEY-CUSTODY.md](security/KEY-CUSTODY.md).
+
 ### Human-Asserted Actions
 
 A system that is not the CLI (Wayfinder, Studio, a chat channel) cannot hold your credential, but it can prove which human clicked. Its signing service signs a short-lived assertion, the poller relays it verbatim, and TA, the only verifier, acts. A relay service account can read the feed and relay an assertion but can never approve, deny or answer on its own authority, so a leaked poller token approves nothing.
@@ -6956,7 +6960,7 @@ This means `export TA_SLACK_BOT_TOKEN=your_token_here` in `USAGE.md` is silently
 
 **Repository secret scan (contributors)**
 
-CI runs a fast pattern scan over every file in the repository and fails on a real-shaped secret (Stripe-style `sk-live-`/`sk_test_` keys, Anthropic and OpenAI keys, GitHub tokens, Slack tokens, AWS key ids, Google API keys, PEM private key blocks) outside an allowlisted path. Run it before pushing:
+CI runs a fast pattern scan over every file in the repository and fails on a real-shaped secret (Stripe-style `sk-live-`/`sk_test_` keys, Anthropic and OpenAI keys, GitHub tokens, Slack tokens, AWS key ids, Google API keys, age secret keys, `tahc_` human credentials, PEM private key blocks) outside an allowlisted path. It also fails on a tracked or not-ignored file that is named like a secret (`.ta/credentials.json`, `.ta/*.key`, `.ta/*.pem`, `.ta/*.cred`, any `*.cred`), whatever its content, because the vault is binary ciphertext that a text scan cannot read. Run it before pushing:
 
 ```bash
 scripts/secret-scan.sh              # scan the repo; prints file:line and the pattern on a hit
@@ -9507,6 +9511,14 @@ or, in fallback mode:
        (the OS keychain was unavailable when the vault was created)
        Fix: Back up this file separately from the vault (losing it makes
        existing credentials unrecoverable) ...
+```
+
+On macOS, `ta doctor` also reports the custody mode against the binary's signing:
+
+```
+[warn] Key custody          custody is `keychain` but /Users/you/.local/bin/ta has no Team ID.
+       macOS then identifies it by its cdhash, which changes on every rebuild ...
+       Fix: Run: ta credentials custody file   (copies this project's keychain secrets ...
 ```
 
 If the key is lost or corrupted, TA refuses to silently drop your

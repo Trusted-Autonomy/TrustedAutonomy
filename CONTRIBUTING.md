@@ -32,6 +32,41 @@ Thank you for your interest in contributing to Trusted Autonomy! This document p
    ./dev cargo fmt --all -- --check
    ```
 
+### Local setup: keys, keychain and custody
+
+To run a locally built `ta` and `ta-daemon` on macOS, install them with the script, not with a bare `cargo build`:
+
+```bash
+./install_local.sh --debug   # same cargo build underneath, plus install + codesign
+ta credentials custody status
+```
+
+**What file custody is.** TA keeps a few secrets: the capability-token root key, the audit-log signing key, the credential-vault key that decrypts `<project>/.ta/credentials.json`, and the credential `ta login` mints. In *file custody* they are owner-only files (mode 0600) in a per-user state directory outside the project tree (`~/Library/Application Support/TrustedAutonomy/projects/<project-id>/secrets/` on macOS, `~/.config/ta/human/` for the login credential). In *keychain custody* they are items in the OS keychain.
+
+**Why dev installs default to it.** A locally built binary is signed with a self-signed certificate (or ad hoc), which has no Apple Team ID. macOS then identifies the binary by its cdhash for keychain access, and every rebuild is a new cdhash, so it asks again for every keychain item. `install_local.sh` therefore writes `file` to `~/.config/ta/human/custody` when the binary has no Team ID, no custody file exists yet, and the keychain holds no TA secrets. It never overwrites an existing custody file. See `scripts/custody-decision.sh` for the exact rule.
+
+**Check what is in effect:**
+
+```bash
+ta credentials custody status   # effective mode and why, the custody file, and this binary's Team ID
+ta doctor                       # "Key custody" warns if the keychain is selected but this binary has no Team ID
+```
+
+**Migrating an existing keychain-based project.** The installer does not move secrets that are already in the keychain. Custody mode is per user, but the vault key is per project in file mode, so run the migration once in every project that has a `.ta/credentials.json`:
+
+```bash
+cd /path/to/each/project
+ta credentials custody file    # verified copy; old keychain items are left in place and cleanup commands are printed
+```
+
+macOS asks once to let `ta` read the old items: choose Always Allow. Do not skip a project: after the switch, a project whose key was never copied cannot open its vault. TA refuses with an error and creates no replacement key; run `ta credentials custody file` in that project to copy the key (see [docs/security/KEY-CUSTODY.md](docs/security/KEY-CUSTODY.md#71-a-projects-vault-will-not-open-its-key-is-not-in-the-active-custody-store)).
+
+**Opting into the keychain.** Create an Apple Development certificate (Xcode > Settings > Accounts > Manage Certificates; it carries a Team ID), set `TA_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` in the gitignored `.env.local` (template: `.env.local.example`), re-run `./install_local.sh --debug`, then `ta credentials custody keychain`.
+
+**Tests never touch the real keychain.** Every `cargo test` binary (the crate's own unit tests, and any test binary under `target/<profile>/deps/`) resolves to file custody and panics if code reaches the real keychain (`crates/ta-credentials/tests/keychain_guard.rs`). `cargo run` is not covered by that guard: a `cargo run` binary follows your custody setting like an installed one, so set `TA_NO_KEYCHAIN=1` (forces file custody) for any manual run, and point `TA_STATE_DIR`, `TA_USER_STATE_DIR` and `HOME` at a temporary directory.
+
+What is protected, where, and what CI does and does not check: [docs/security/KEY-CUSTODY.md](docs/security/KEY-CUSTODY.md).
+
 ## Git Workflow
 
 **All work MUST happen on feature branches. Never commit directly to `main`.**

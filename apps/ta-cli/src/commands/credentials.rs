@@ -285,7 +285,7 @@ pub(crate) fn parse_team_identifier(codesign_output: &str) -> TeamId {
 }
 
 #[cfg(target_os = "macos")]
-fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
+pub(crate) fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
     let exe = std::env::current_exe().ok()?;
     let team = match std::process::Command::new("codesign")
         .args(["-dv", "--verbose=2"])
@@ -299,7 +299,7 @@ fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
+pub(crate) fn running_binary_team_id() -> Option<(std::path::PathBuf, TeamId)> {
     None
 }
 

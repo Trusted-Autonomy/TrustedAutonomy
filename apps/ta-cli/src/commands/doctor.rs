@@ -11,7 +11,7 @@
 //   [FAIL] <check name>  <detail>
 //          Fix: <fix hint>
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use ta_mcp_gateway::GatewayConfig;
@@ -429,6 +429,10 @@ fn run_all_checks_with(
     // 26. Credential vault key custody — loud warning when the encryption
     // key fell back to a file instead of the OS keychain (v0.17.6.2).
     results.push(check_credential_vault_key_custody(config));
+
+    // 26b. Keychain custody with a binary that has no Team ID re-prompts on
+    // every rebuild; warn and name the fix. Never reads the keychain.
+    results.push(check_keychain_custody_signing());
 
     // 27. Project-scoped .mcp.json missing while the global MCP config
     // carries TA_IS_STAGING=1 — silently inherited by every such project
@@ -2603,10 +2607,93 @@ fn check_credential_vault_key_custody_with(
         ),
         None => CheckResult::warn(
             "Credential vault",
-            "vault file exists but no encryption key was found (no keychain entry, \
-             no fallback file)",
-            "This is unexpected — run `ta credentials list` to trigger key \
-             creation/diagnosis, then re-run `ta doctor`.",
+            "vault file exists but no encryption key was found in the active custody \
+             (the key file, or the keychain when keychain custody is selected)",
+            "If you recently switched custody (`ta credentials custody file|keychain`, \
+             TA_NO_KEYCHAIN, an installer-written custody file), the key is probably \
+             still in the other store: run `ta credentials custody file` (or `keychain`) \
+             in this project to copy it. Opening the vault meanwhile fails without \
+             creating a replacement key (see docs/security/KEY-CUSTODY.md, Recovery). \
+             If the key is gone for good, move `.ta/credentials.json` aside and re-add \
+             your credentials; otherwise restore the key from a backup, then re-run `ta doctor`.",
+        ),
+    }
+}
+
+// ── Keychain custody vs. binary signing ────────────────────────────────────
+
+/// `ta doctor` line: is the effective custody mode `keychain` while the running
+/// `ta` binary has no Team ID? Resolves the mode and (only then, on macOS) asks
+/// `codesign` about the running binary. It never reads or writes the keychain.
+fn check_keychain_custody_signing() -> CheckResult {
+    let resolution = ta_credentials::custody::resolve();
+    let binary = if resolution.mode == ta_credentials::custody::CustodyMode::Keychain {
+        super::credentials::running_binary_team_id()
+    } else {
+        None
+    };
+    keychain_custody_signing_result(&resolution, binary.as_ref())
+}
+
+/// The decision behind [`check_keychain_custody_signing`], with the resolved
+/// custody and the binary's Team ID injected so tests never run `codesign` or
+/// reach the keychain. `binary` is `None` off macOS (there is no Team ID to
+/// check) or when custody is not `keychain` (the caller skips `codesign`).
+fn keychain_custody_signing_result(
+    resolution: &ta_credentials::custody::Resolution,
+    binary: Option<&(PathBuf, super::credentials::TeamId)>,
+) -> CheckResult {
+    use super::credentials::TeamId;
+    use ta_credentials::custody::CustodyMode;
+    const NAME: &str = "Key custody";
+    if resolution.mode == CustodyMode::File {
+        return CheckResult::ok(
+            NAME,
+            format!(
+                "file (owner-only files, no keychain prompts); {}",
+                resolution.reason.describe()
+            ),
+        );
+    }
+    let Some((exe, team)) = binary else {
+        return CheckResult::ok(
+            NAME,
+            "keychain (the Team ID check applies to macOS code signing only)",
+        );
+    };
+    let fix = "Run: ta credentials custody file   (copies this project's keychain secrets to \
+               owner-only files with a verified copy, then records the choice for your user; \
+               run it once in every project that has a .ta/credentials.json, because the \
+               custody mode is per user). Or keep the keychain and sign `ta` with your own \
+               Apple Development certificate: set TA_CODESIGN_IDENTITY in .env.local and \
+               re-run ./install_local.sh --debug. Check with: ta credentials custody status";
+    match team {
+        TeamId::Present(id) => CheckResult::ok(
+            NAME,
+            format!(
+                "keychain; {} is signed with Team ID {id}, so keychain access grants survive rebuilds",
+                exe.display()
+            ),
+        ),
+        TeamId::NotSet => CheckResult::warn(
+            NAME,
+            format!(
+                "custody is `keychain` but {} has no Team ID. macOS then identifies it by its \
+                 cdhash, which changes on every rebuild, so each rebuild or reinstall re-prompts \
+                 for keychain access (the daemon and poller prompt too)",
+                exe.display()
+            ),
+            fix,
+        ),
+        TeamId::Unknown(why) => CheckResult::warn(
+            NAME,
+            format!(
+                "custody is `keychain` and {} has no Team ID that `codesign` could report ({why}). \
+                 Without a Team ID macOS identifies a binary by its cdhash, so each rebuild or \
+                 reinstall re-prompts for keychain access",
+                exe.display()
+            ),
+            fix,
         ),
     }
 }
@@ -2701,6 +2788,72 @@ mod tests {
 
     fn test_config(dir: &TempDir) -> GatewayConfig {
         GatewayConfig::for_project(dir.path())
+    }
+
+    #[test]
+    fn keychain_custody_with_no_team_id_warns_and_names_the_fix() {
+        use super::super::credentials::{parse_team_identifier, TeamId};
+        use ta_credentials::custody::{resolve_with, CustodyMode};
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("custody");
+        let keychain = resolve_with(false, false, &missing);
+        assert_eq!(keychain.mode, CustodyMode::Keychain);
+        let exe = PathBuf::from("/Users/u/.local/bin/ta");
+
+        // Real `codesign -dv --verbose=2` output for a self-signed binary.
+        let team = parse_team_identifier("Identifier=ta\nTeamIdentifier=not set\n");
+        let r = keychain_custody_signing_result(&keychain, Some(&(exe.clone(), team)));
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("no Team ID") && r.detail.contains("cdhash"));
+        assert!(r.detail.contains("re-prompts"), "{}", r.detail);
+        assert!(
+            r.fix.contains("ta credentials custody file") && r.fix.contains("TA_CODESIGN_IDENTITY"),
+            "{}",
+            r.fix
+        );
+
+        // An unsigned binary (codesign prints no TeamIdentifier line) warns too.
+        let unsigned = parse_team_identifier("code object is not signed at all");
+        let r = keychain_custody_signing_result(&keychain, Some(&(exe.clone(), unsigned)));
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.fix.contains("ta credentials custody file"));
+
+        // A Team ID makes keychain custody stable: no warning.
+        let signed = parse_team_identifier("Identifier=ta\nTeamIdentifier=ABCDE12345\n");
+        assert_eq!(signed, TeamId::Present("ABCDE12345".into()));
+        let r = keychain_custody_signing_result(&keychain, Some(&(exe.clone(), signed)));
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.detail.contains("ABCDE12345"));
+    }
+
+    #[test]
+    fn file_custody_and_non_macos_never_warn_about_team_ids() {
+        use super::super::credentials::TeamId;
+        use ta_credentials::custody::resolve_with;
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("custody");
+        let exe = PathBuf::from("/Users/u/.local/bin/ta");
+
+        // File custody (here via TA_NO_KEYCHAIN) never prompts, whatever the signature.
+        let file = resolve_with(true, false, &missing);
+        let r = keychain_custody_signing_result(&file, Some(&(exe, TeamId::NotSet)));
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.detail.contains("no keychain prompts"), "{}", r.detail);
+        assert!(r.fix.is_empty());
+
+        // Keychain custody with no binary to inspect (non-macOS): nothing to warn about.
+        let keychain = resolve_with(false, false, &missing);
+        let r = keychain_custody_signing_result(&keychain, None);
+        assert_eq!(r.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn the_signing_check_in_a_test_binary_is_file_custody_and_never_runs_codesign() {
+        // Test binaries resolve to file custody (keychain guard), so the real
+        // wrapper takes the no-`codesign`, no-keychain path.
+        let r = check_keychain_custody_signing();
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.detail.contains("file"), "{}", r.detail);
     }
 
     #[test]

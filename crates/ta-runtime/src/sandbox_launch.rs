@@ -863,6 +863,11 @@ impl SandboxProfile {
 /// project's source tree, for instance) stays readable on macOS, so reads are
 /// not described as confined there.
 pub const HOME_PROTECTED: &[&str] = &[
+    // TA's own per-user human state: the `ta login` credential (`credential`,
+    // 0600, present when file custody holds it), its digest and the custody
+    // choice. An agent that could read `credential` could present it as the
+    // human (docs/security/KEY-CUSTODY.md).
+    ".config/ta/human",
     // Keys, tokens and cloud credentials.
     ".ssh",
     ".gnupg",
@@ -1569,6 +1574,28 @@ mod tests {
         assert_eq!(p.allow_read, vec![PathBuf::from("/opt/ok")]);
         assert!(p.allow_write.is_empty());
         assert_eq!(p.warnings.len(), 4);
+    }
+
+    #[test]
+    fn the_human_credential_directory_is_always_a_protected_path() {
+        let c = ctx(RoleClass::Worker, false);
+        let home = c.user_home.clone().expect("test context has a home");
+        let human = home.join(".config/ta/human");
+        assert!(
+            protected_paths(&c).contains(&human),
+            "{} must be denied to the agent: it holds the `ta login` credential in file custody",
+            human.display()
+        );
+        let project = ProjectRequest {
+            enabled: true,
+            allow_read: vec![human.join("credential").to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let p = SandboxProfile::compile(None, &project, &c);
+        assert!(
+            p.allow_read.is_empty(),
+            "an allowance reaching the credential must be dropped"
+        );
     }
 
     #[test]

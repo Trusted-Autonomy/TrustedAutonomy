@@ -75,6 +75,16 @@ Security model has not been independently audited. For critical or irreversible 
 
 ---
 
+## Security
+
+TA keeps a small set of secrets itself: the capability-token root key, the audit-log signing key, the credential-vault key and the credential `ta login` mints. You choose where they live with `ta credentials custody status|file|keychain`. In `file` custody (the default for local dev installs of a binary without an Apple Team ID) they are owner-only files (mode 0600) in a per-user state directory outside your project tree; in `keychain` custody (the default otherwise) they are OS keychain items. They are kept out of git by ignore rules in every project `ta init` sets up, and CI scans every pull request for secret-shaped strings and for committed key or vault files.
+
+What this does **not** do: a program running as your own OS user can read those files unless it runs inside the OS sandbox, and the sandbox is off by default for a solo `ta run` worker. Credentials you inject into an agent can reach it. There is no key-rotation command yet for the root, audit and vault keys.
+
+[docs/security/KEY-CUSTODY.md](docs/security/KEY-CUSTODY.md) lists each secret, where it lives, who can read it, what an agent can and cannot see, what CI verifies and what it does not, and how to recover. Contributors setting up a Mac: [Local setup: keys, keychain and custody](CONTRIBUTING.md#local-setup-keys-keychain-and-custody).
+
+---
+
 ## How the staging model works
 
 Agents interact with a **staging workspace** — an isolated copy of your project — using their native tools (read, write, run tests). TA intercepts nothing at the OS level; it simply presents the staging copy as the workspace. All writes become **ChangeSets with diffs** bundled into a Draft package. Nothing touches the real project until you approve.

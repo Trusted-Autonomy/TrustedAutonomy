@@ -343,7 +343,7 @@ impl ProjectState {
                 dir,
             }));
         }
-        std::fs::create_dir_all(&dir).map_err(|source| StateError::Io {
+        human::create_private_dirs(&dir).map_err(|source| StateError::Io {
             path: dir.clone(),
             source,
         })?;
@@ -1234,7 +1234,7 @@ fn migrate_moved(ps: &ProjectState, item: MovedItem) -> MigrationItem {
 
 fn write_bytes_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        human::create_private_dirs(parent)?;
     }
     #[cfg(unix)]
     {
@@ -1483,6 +1483,23 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The per-project state directory and its `secrets/` directory are created
+    /// owner-only, so even the names of the secrets are not listable by other
+    /// users. A directory that already exists (the state root the caller chose)
+    /// keeps its mode.
+    #[cfg(unix)]
+    #[test]
+    fn state_and_secrets_directories_are_mode_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let (p, _s, loc) = fixture();
+        let ps = ProjectState::open(p.path(), &loc).unwrap();
+        store_secret(&ps, ControlSecret::AuditKey, "k", CustodyOpts::file_only()).unwrap();
+        for dir in [ps.dir.clone(), ps.secrets_dir()] {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{} must be 0700", dir.display());
+        }
     }
 
     #[test]
