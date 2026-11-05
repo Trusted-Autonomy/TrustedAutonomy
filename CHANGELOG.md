@@ -12,7 +12,9 @@
   which rule decided it (and the old location's status); `relocate` migrates once and records the
   pointer, for installers; `user-dir` prints the per-user directory for shell scripts.
 - **One-time migration**: refuses while a daemon or NATS server runs against the old directory;
-  copies to a temp dir, verifies file count, permissions and the SHA-256 of every file, then
+  copies to a temp dir, verifies file count and the SHA-256 of every file (and, on unix, the
+  0600/0700 permissions; Windows has no mode bits, so there the copy is verified by content and
+  entry kind and symlinks are not copied), then
   renames atomically; writes `.migrated-from` (new) and `MIGRATED-TO` (old); never deletes or
   modifies the old data and prints its path, size and the `rm -rf` command; idempotent; never
   merges when both sides hold state (reports both, sizes and mtimes); reports stale temp dirs.

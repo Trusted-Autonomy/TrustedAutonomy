@@ -695,7 +695,8 @@ pub struct MigrationReport {
     pub bytes: u64,
     /// Files whose mode was tightened because the old one was looser than owner-only.
     pub tightened: Vec<PathBuf>,
-    /// Entries that are neither files, directories nor symlinks (sockets, fifos): not copied.
+    /// Entries that are not copied: sockets and fifos everywhere, and symlinks off unix
+    /// (`copy_into` can only recreate them on unix, so listing them would fail verification).
     pub skipped: Vec<PathBuf>,
     pub old_info: DirInfo,
     /// Set when the `MIGRATED-TO` marker could not be written in the old directory.
@@ -819,7 +820,7 @@ fn scan(root: &Path, skip_markers: bool) -> std::io::Result<Scan> {
             if ft.is_dir() {
                 out.manifest.insert(rel, Node::Dir);
                 walk(root, &path, false, skip, out)?;
-            } else if ft.is_symlink() {
+            } else if ft.is_symlink() && cfg!(unix) {
                 out.manifest
                     .insert(rel, Node::Link(std::fs::read_link(&path)?));
             } else if ft.is_file() {
@@ -863,8 +864,16 @@ fn is_secret_path(rel: &Path) -> bool {
 }
 
 /// The mode a migrated file must have: owner bits of the source, secrets 0600.
+///
+/// Permission bits only exist on unix. Everywhere else `mode_of` reports 0 for every
+/// file, so the expected mode must be 0 too or the verification below would compare a
+/// 0600 expectation against a 0 reading and reject every correct copy. On those
+/// platforms the content (length + sha256) and the entry kind are what is verified;
+/// access is governed by the ACL the new directory inherits from its parent.
 fn target_file_mode(rel: &Path, src_mode: u32) -> u32 {
-    if is_secret_path(rel) {
+    if !cfg!(unix) {
+        0
+    } else if is_secret_path(rel) {
         0o600
     } else {
         src_mode & 0o700
@@ -988,17 +997,18 @@ fn copy_into(from: &Path, temp: &Path, src: &Scan) -> Result<Vec<PathBuf>, Migra
                         ),
                     });
                 }
-                let want = target_file_mode(rel, *mode);
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    out.set_permissions(std::fs::Permissions::from_mode(want))
-                        .map_err(io_err("set permissions on", &d))?;
-                    if *mode & 0o077 != 0 {
-                        tightened.push(rel.clone());
-                    }
+                    out.set_permissions(std::fs::Permissions::from_mode(target_file_mode(
+                        rel, *mode,
+                    )))
+                    .map_err(io_err("set permissions on", &d))?;
                 }
-                let _ = want;
+                // `mode` is always 0 off unix (see `mode_of`), so this never fires there.
+                if *mode & 0o077 != 0 {
+                    tightened.push(rel.clone());
+                }
                 if let Ok(m) = std::fs::metadata(&s).and_then(|m| m.modified()) {
                     let _ = out.set_modified(m);
                 }
@@ -1522,6 +1532,16 @@ mod tests {
         p.display().to_string()
     }
 
+    /// A path that is absolute on the host OS: a bare `/x` has no drive on Windows and is
+    /// (correctly) rejected there as relative.
+    fn abs(p: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{p}"))
+        } else {
+            PathBuf::from(p)
+        }
+    }
+
     const NOT_ALIVE: &dyn Fn(u32) -> bool = &|_| false;
     fn ctx() -> MigrateCtx<'static> {
         MigrateCtx {
@@ -1547,11 +1567,11 @@ mod tests {
         assert_eq!(
             os_default_root(
                 Os::Linux,
-                &env_of(&[("XDG_STATE_HOME", "/x/state".into())]),
+                &env_of(&[("XDG_STATE_HOME", s(&abs("/x/state")))]),
                 None
             )
             .unwrap(),
-            Path::new("/x/state/trusted-autonomy"),
+            abs("/x/state").join("trusted-autonomy"),
             "XDG_STATE_HOME needs no home"
         );
         assert_eq!(
@@ -1675,21 +1695,27 @@ mod tests {
             assert!(msg.contains("HOME"), "{msg}");
         }
         // But an override works without a home.
+        let srv = abs("/srv/ta");
         let r = resolve_with(
-            &env_of(&[("TA_STATE_DIR", "/srv/ta".into())]),
+            &env_of(&[("TA_STATE_DIR", s(&srv))]),
             &host(Os::MacOs, None),
         )
         .unwrap();
-        assert_eq!(r.root, Path::new("/srv/ta"));
+        assert_eq!(r.root, srv);
         // A pointer works without a home when TA_USER_STATE_DIR names where it is.
         let user = tempfile::tempdir().unwrap();
-        write_atomic_private(&user.path().join(POINTER_FILENAME), b"/srv/ta2\n").unwrap();
+        let srv2 = abs("/srv/ta2");
+        write_atomic_private(
+            &user.path().join(POINTER_FILENAME),
+            format!("{}\n", srv2.display()).as_bytes(),
+        )
+        .unwrap();
         let r = resolve_with(
             &env_of(&[("TA_USER_STATE_DIR", s(user.path()))]),
             &host(Os::MacOs, None),
         )
         .unwrap();
-        assert_eq!(r.root, Path::new("/srv/ta2"));
+        assert_eq!(r.root, srv2);
     }
 
     #[test]
@@ -1717,13 +1743,15 @@ mod tests {
         let user = tempfile::tempdir().unwrap();
         let env = env_of(&[("TA_USER_STATE_DIR", s(&user.path().join("nested/human")))]);
         let h = host(Os::MacOs, None);
-        let file = write_pointer_with(&env, &h, Path::new("/one")).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "/one\n");
-        write_pointer_with(&env, &h, Path::new("/two")).unwrap();
+        let one = abs("/one");
+        let two = abs("/two");
+        let file = write_pointer_with(&env, &h, &one).unwrap();
         assert_eq!(
-            read_pointer_file(&file).unwrap().unwrap(),
-            Path::new("/two")
+            std::fs::read_to_string(&file).unwrap(),
+            format!("{}\n", one.display())
         );
+        write_pointer_with(&env, &h, &two).unwrap();
+        assert_eq!(read_pointer_file(&file).unwrap().unwrap(), two);
         #[cfg(unix)]
         {
             let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
@@ -1815,7 +1843,10 @@ mod tests {
             panic!("expected Migrated, got {out:?}")
         };
         assert!(
-            r.files >= 12 && r.dirs >= 10 && r.symlinks == 1 && r.bytes > 10_000,
+            r.files >= 12
+                && r.dirs >= 10
+                && r.symlinks == u64::from(cfg!(unix)) // fake_old_state makes the link on unix only
+                && r.bytes > 10_000,
             "{r:?}"
         );
         assert!(r.old_marker_error.is_none());
@@ -1982,7 +2013,13 @@ mod tests {
         let err = migrate(&old, &new, &ctx()).unwrap_err();
         let msg = err.to_string();
         assert!(matches!(err, MigrationError::Conflict { .. }), "{msg}");
-        assert!(msg.contains(&s(&old)) && msg.contains(&s(&new)), "{msg}");
+        // The message names the canonical paths (on Windows: long, `\\?\`-prefixed).
+        let old_c = std::fs::canonicalize(&old).unwrap();
+        let new_c = normalize_target(&new).unwrap();
+        assert!(
+            msg.contains(&s(&old_c)) && msg.contains(&s(&new_c)),
+            "{msg}"
+        );
         assert!(
             msg.contains("--no-migrate")
                 && msg.contains("project(s)")
