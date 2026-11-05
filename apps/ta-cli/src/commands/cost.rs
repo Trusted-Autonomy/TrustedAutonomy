@@ -49,7 +49,7 @@ pub enum CostCommands {
         #[arg(long)]
         until: Option<String>,
         /// Group by a comma-separated list of: day, source, model, project,
-        /// context_bucket, origin_class, goal, session_family, entrypoint.
+        /// context_bucket, origin_class, goal, session_family, entrypoint, tier, effort.
         /// For one typed row per goal and session use `--json --rows` instead.
         #[arg(long, default_value = "source")]
         group_by: String,
@@ -397,7 +397,17 @@ fn table(label_header: &str, rows: &[CostGroupRow], total: Option<&CostTotals>) 
         if g.group.is_empty() {
             "all".to_string()
         } else {
-            g.group.values().cloned().collect::<Vec<_>>().join(" / ")
+            // `group` is a sorted map; print the values in the requested `--group-by`
+            // order (the order of the header) when the header names every key.
+            let ordered: Vec<String> = label_header
+                .split(" / ")
+                .filter_map(|k| g.group.get(k).cloned())
+                .collect();
+            if ordered.len() == g.group.len() {
+                ordered.join(" / ")
+            } else {
+                g.group.values().cloned().collect::<Vec<_>>().join(" / ")
+            }
         }
     };
     let width = rows
@@ -585,7 +595,16 @@ pub fn render_detail(r: &CostReport) -> String {
         if g.group.is_empty() {
             "all".to_string()
         } else {
-            g.group.values().cloned().collect::<Vec<_>>().join(" / ")
+            let ordered: Vec<String> = r
+                .group_by
+                .iter()
+                .filter_map(|k| g.group.get(k).cloned())
+                .collect();
+            if ordered.len() == g.group.len() {
+                ordered.join(" / ")
+            } else {
+                g.group.values().cloned().collect::<Vec<_>>().join(" / ")
+            }
         }
     };
     let header = if r.group_by.is_empty() {

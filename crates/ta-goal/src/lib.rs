@@ -62,7 +62,7 @@ pub use error::GoalError;
 pub use events::{EventDispatcher, LogSink, NotificationSink, TaEvent};
 pub use experiment::{experiments_dir, ExperimentConfig};
 pub use goal_run::BudgetAbort;
-pub use goal_run::{slugify_title, GoalRun, GoalRunState};
+pub use goal_run::{slugify_title, GoalRun, GoalRunState, ModelEffortRecord};
 pub use goal_run::{POST_AGENT_PHASE_BUILDING_DRAFT, POST_AGENT_PHASE_REVIEWING};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use human_review::{

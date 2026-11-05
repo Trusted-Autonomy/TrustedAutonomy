@@ -25,6 +25,32 @@
   `ta state user-dir`, and mirrors the documented precedence only when `ta` cannot answer; with
   no HOME and no override it now writes nothing instead of a cwd-relative path.
 
+## Unreleased — Model tier and reasoning effort, mapped per agent framework
+
+- **`ta run --profile <name> | --tier <t> | --effort <e>`** — one vocabulary for "which model and
+  how hard it reasons": tiers `local|light|standard|max`, efforts `default|low|medium|high|xhigh|max`,
+  shipped profiles `local`, `light`, `standard`, `deep` (standard + `xhigh`), `max` (max tier + `max`
+  effort). `--model <id>` still works and beats the tier's model. Unknown names fail with the valid
+  values. `.ta/team.toml` members may set `profile` / `effort`; the daemon's `build_ta_run_args`
+  passes `--profile` / `--effort`.
+- **Per-framework mapping is data.** New `model_map` / `effort_map` / `env` fields on the agent
+  manifest (YAML and TOML), a shipped catalog (`crates/ta-runtime/src/model-profiles.default.toml`:
+  Claude Code, Codex, Gemini CLI, Antigravity, Ollama; every id carries its vendor doc URL and read
+  date), and `.ta/model-profiles.toml` / `~/.config/ta/model-profiles.toml` overrides and custom
+  profiles. Precedence: CLI flags, `PLAN.md` phase markers (`<!-- profile: deep -->`), project file,
+  user file, manifest, shipped catalog. There is no per-framework branching in `run.rs`.
+- **Nothing is dropped silently.** An effort or tier a framework cannot express (e.g. Gemini CLI
+  effort, unmapped Ollama/Antigravity tiers, Claude Flow) prints a warning with how to configure it.
+  Each launch logs `agent= tier= effort= model= effort_applied= via= model_via=`; the same values
+  are stored on the goal (`ta goal status` `Model:` line) and `ta cost report --group-by tier,effort`
+  groups by them.
+- **Claude Code effort is passed as `CLAUDE_CODE_EFFORT_LEVEL`**, an explicit env var that survives
+  the sandbox environment scrub; settings injection and the stream-json headless arguments are
+  unchanged. Codex now receives `--model` and `-c model_reasoning_effort`. Manifest `env` reaches
+  the agent through the sandbox scrub (deny-listed names are still dropped, with a warning).
+- **Not yet forwarded:** `--phases` (serial-phases) and `--sub-goals` (swarm) runs warn and ignore
+  these flags, as they already did for `--model`.
+
 ## Unreleased — `ta doctor` flags a daemon started without an agent login
 
 - **`ta doctor` "Daemon agent login" check** — when a `ta-daemon` is running (pid from

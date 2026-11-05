@@ -28,7 +28,7 @@ pub use history::{
 pub use memory_store::InMemoryPlanStore;
 pub use parse::{
     load_plan, parse_blocked_on, parse_plan, parse_plan_with_schema, phase_ids_match,
-    update_phase_status, update_phase_status_with_schema,
+    phase_launch_hints, update_phase_status, update_phase_status_with_schema, PhaseLaunchHints,
 };
 pub use query::{
     binary_version, candidate_waves, check_phase_order, check_version_sync,

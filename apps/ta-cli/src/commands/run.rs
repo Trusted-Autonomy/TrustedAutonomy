@@ -579,52 +579,86 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
     }
 }
 
-/// Apply a `--model` override onto an already-resolved `AgentLaunchConfig`,
-/// mutating its `args_template` in place.
+/// Resolve the model tier / reasoning effort / concrete model requested for this
+/// launch (`--profile`, `--tier`, `--effort`, `--model`, the plan phase's markers,
+/// `.ta/model-profiles.toml`) and apply it onto an already-resolved
+/// `AgentLaunchConfig`, mutating its `args_template` and `env` in place.
 ///
-/// `--agent`/`framework` picks WHICH framework/binary runs (claude-code,
-/// codex, a custom manifest); `--model` picks WHICH model that framework
-/// uses once launched — two independent questions that `team.toml`'s
-/// `model_tier`/`agent_id` mechanism once conflated by passing a model id
-/// into `--agent` itself (see `team_session::build_ta_run_args`'s doc
-/// comment for the full history of that bug, found live 2026-10-01).
+/// This is framework-neutral: HOW a tier becomes a model id and HOW an effort level
+/// reaches the agent (CLI arg, config-override arg, env var) is data in the agent
+/// manifest's `model_map`/`effort_map`, the project/user `model-profiles.toml`, or the
+/// shipped catalog (`ta_runtime::model_profile`); nothing here branches on a
+/// framework name. `--agent` still picks WHICH framework runs; this picks WHICH model
+/// and reasoning effort it runs with (the two used to be conflated by `team.toml`'s
+/// `model_tier`, see `team_session::build_ta_run_args`).
 ///
-/// Inserts `["--model", value]` immediately before the first arg template
-/// entry containing `{prompt}` (or at the end, if none does), so it lands
-/// before the prompt in both interactive mode (`args_template` alone) and
-/// headless mode (`args_template` + `headless_args`, see
-/// `launch_agent_via_runtime`). Only the `claude` binary is confirmed to
-/// accept this flag today (mirroring the same pattern already proven for
-/// the supervisor agent dispatch in
-/// `ta_changeset::supervisor_review::invoke_claude_cli_supervisor`) — any
-/// other framework gets a loud warning and the override is dropped rather
-/// than silently forwarded to a binary that doesn't understand it
-/// (Observability Mandate: never a silent no-op).
-fn apply_model_override(agent_config: &mut AgentLaunchConfig, model_value: &str, framework: &str) {
-    if agent_config.command == "claude" {
-        let prompt_pos = agent_config
-            .args_template
-            .iter()
-            .position(|a| a.contains("{prompt}"))
-            .unwrap_or(agent_config.args_template.len());
-        agent_config
-            .args_template
-            .insert(prompt_pos, model_value.to_string());
-        agent_config
-            .args_template
-            .insert(prompt_pos, "--model".to_string());
-    } else {
-        eprintln!(
-            "Warning: --model '{}' requested but agent framework '{}' (command: '{}') \
-             is not known to support model overrides — ignoring --model for this run.",
-            model_value, framework, agent_config.command
-        );
-        tracing::warn!(
-            model = %model_value,
-            framework = %framework,
-            command = %agent_config.command,
-            "Ignoring --model: framework not known to support model overrides"
-        );
+/// Everything requested but not delivered is reported (stderr + `tracing::warn!`) with
+/// the way to configure it, never silently dropped. The launch is always summarised on
+/// one line: `agent=<id> tier=<t> effort=<e> model=<concrete> effort_applied=<bool>
+/// via=<arg|config|env|unsupported|none> model_via=<...>`.
+///
+/// Returns the record stored on the goal.
+fn apply_model_effort(
+    agent_config: &mut AgentLaunchConfig,
+    agent_name: &str,
+    framework: Option<&ta_runtime::AgentFrameworkManifest>,
+    profiles: &ta_runtime::model_profile::ModelProfileConfig,
+    cli: &ta_runtime::model_profile::Selection,
+    plan: Option<(&str, &ta_runtime::model_profile::Selection)>,
+    quiet: bool,
+) -> anyhow::Result<ta_goal::ModelEffortRecord> {
+    use ta_runtime::model_profile::{AgentTarget, FrameworkMapping};
+
+    let inline = framework
+        .filter(|f| f.model_map.is_some() || f.effort_map.is_some())
+        .map(|f| FrameworkMapping {
+            model_map: f.model_map.clone(),
+            effort_map: f.effort_map.clone(),
+        });
+    let resolved = profiles
+        .resolve(
+            AgentTarget {
+                name: agent_name,
+                command: &agent_config.command,
+                manifest: inline.as_ref(),
+            },
+            cli,
+            plan,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot resolve the model/effort for agent '{agent_name}': {e}\n\
+                 Attempted: map --profile/--tier/--effort/--model onto the agent's launch \
+                 options.\n\
+                 Next: fix the value, or see docs/USAGE.md \"Model and effort profiles\"."
+            )
+        })?;
+    for w in &resolved.warnings {
+        eprintln!("[warning] {w}");
+        tracing::warn!(agent = %agent_name, "model/effort setting not applied: {w}");
+    }
+    resolved.apply(&mut agent_config.args_template, &mut agent_config.env);
+    let line = resolved.launch_line();
+    tracing::info!("{line}");
+    if !quiet {
+        println!("[model] {line}");
+    }
+    Ok(model_effort_record(&resolved))
+}
+
+/// The goal-metadata form of a resolved launch.
+fn model_effort_record(
+    r: &ta_runtime::model_profile::ResolvedModelEffort,
+) -> ta_goal::ModelEffortRecord {
+    ta_goal::ModelEffortRecord {
+        agent: r.agent.clone(),
+        profile: r.profile.clone(),
+        tier: r.tier.map(|t| t.as_str().to_string()),
+        effort: r.effort.as_str().to_string(),
+        model: r.model.clone(),
+        effort_applied: r.effort_applied,
+        effort_via: r.effort_via.clone(),
+        model_via: r.model_via.clone(),
     }
 }
 
@@ -657,7 +691,7 @@ fn framework_to_launch_config(manifest: &ta_runtime::AgentFrameworkManifest) -> 
         injects_context_file,
         injects_settings: false, // custom frameworks don't get claude settings
         pre_launch: None,
-        env: Default::default(),
+        env: manifest.env.clone(),
         shell: None,
         name: Some(manifest.name.clone()),
         description: Some(manifest.description.clone()),
@@ -2711,7 +2745,7 @@ pub fn execute(
     agent_id: Option<&str>,
     workflow_tag: Option<&str>,
     shadow_experiment: Option<&ShadowExperimentFlags>,
-    model: Option<&str>,
+    model_selection: Option<&ta_runtime::model_profile::Selection>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -3164,14 +3198,54 @@ pub fn execute(
     let mut agent_config = agent_config;
     agent_config.persona = persona_name.map(str::to_string);
 
-    // ── Model override (--model, independent of --agent/framework) ─────────
+    // ── Model tier / reasoning effort (--profile/--tier/--effort/--model) ──
     //
-    // --agent picks WHICH framework/binary runs; --model picks WHICH model
-    // that framework uses once launched. See `apply_model_override`'s doc
-    // comment for the full rationale.
-    if let Some(model_value) = model {
-        apply_model_override(&mut agent_config, model_value, agent);
-    }
+    // --agent picks WHICH framework/binary runs; the model selection picks WHICH
+    // model and reasoning effort it runs with. Precedence: CLI flags > PLAN.md phase
+    // markers > `.ta/model-profiles.toml` > the agent manifest / shipped catalog.
+    // See `apply_model_effort`.
+    let model_effort_record = {
+        let profiles = ta_runtime::model_profile::ModelProfileConfig::load(&config.workspace_root)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot load the model/effort settings: {e}\n\
+                     Attempted: read .ta/model-profiles.toml (project) and \
+                     ~/.config/ta/model-profiles.toml (user).\n\
+                     Next: fix or remove that file, then re-run."
+                )
+            })?;
+        let cli_selection = model_selection.cloned().unwrap_or_default();
+        let plan_selection: Option<(String, ta_runtime::model_profile::Selection)> = phase
+            .and_then(|p| {
+                let plan_root = source.unwrap_or(&config.workspace_root);
+                let content = std::fs::read_to_string(plan_root.join("PLAN.md")).ok()?;
+                let hints = ta_plan::phase_launch_hints(&content, p);
+                (!hints.is_empty()).then(|| {
+                    (
+                        format!("the PLAN.md markers of phase {p}"),
+                        ta_runtime::model_profile::Selection {
+                            profile: hints.profile,
+                            tier: hints.tier,
+                            effort: hints.effort,
+                            model: None,
+                        },
+                    )
+                })
+            });
+        let effective_agent = resolved_framework
+            .as_ref()
+            .map(|f| f.name.as_str())
+            .unwrap_or("claude-code");
+        apply_model_effort(
+            &mut agent_config,
+            effective_agent,
+            resolved_framework.as_ref(),
+            &profiles,
+            &cli_selection,
+            plan_selection.as_ref().map(|(o, s)| (o.as_str(), s)),
+            quiet,
+        )?
+    };
 
     // Disk space pre-flight (v0.11.3 item 28).
     {
@@ -3503,6 +3577,11 @@ pub fn execute(
         if let Some(tag) = workflow_tag {
             updated_goal.workflow = Some(tag.to_string());
         }
+
+        // What this launch asked of the model (tier/effort/concrete model, and
+        // whether the effort reached the agent). Read by `ta goal status` and
+        // `ta cost report --group-by tier,effort`.
+        updated_goal.model_effort = Some(model_effort_record.clone());
 
         // Cost-experiment arm assignment: check every defined experiment, apply
         // the first one whose roll selects this goal. Multiple simultaneously
@@ -11232,41 +11311,229 @@ context_inject = "{mode_toml}"
         );
     }
 
-    // ── apply_model_override tests ──────────────────────────────────────────
+    // ── apply_model_effort tests ────────────────────────────────────────────
     //
     // Regression coverage for the team.toml model_tier bug found live
-    // 2026-10-01: team_session::build_ta_run_args used to pass a model id
-    // into `--agent` (which `ta run` resolves as a FRAMEWORK name), always
-    // failed to resolve, and silently fell back to a hardcoded default that
-    // discarded the originally-requested model. These tests cover the
-    // replacement mechanism (`--model`, forwarded to the framework binary
-    // once it's already chosen) directly, without needing to run all of
-    // `execute()`.
+    // 2026-10-01 (a model id passed into `--agent` was resolved as a FRAMEWORK
+    // name and discarded) plus the tier/effort mapping layered on `--model`.
+    // They drive `apply_model_effort` directly, without running all of
+    // `execute()`; no agent is ever spawned.
+
+    fn model_sel(
+        profile: Option<&str>,
+        tier: Option<&str>,
+        effort: Option<&str>,
+        model: Option<&str>,
+    ) -> ta_runtime::model_profile::Selection {
+        ta_runtime::model_profile::Selection {
+            profile: profile.map(str::to_string),
+            tier: tier.map(str::to_string),
+            effort: effort.map(str::to_string),
+            model: model.map(str::to_string),
+        }
+    }
+
+    /// Apply `sel` to the builtin launch config for `agent` using the shipped
+    /// catalog only (no project or user override files).
+    fn apply_shipped(
+        agent: &str,
+        sel: &ta_runtime::model_profile::Selection,
+    ) -> anyhow::Result<(AgentLaunchConfig, ta_goal::ModelEffortRecord)> {
+        let mut config = builtin_agent_config(agent);
+        let record = apply_model_effort(
+            &mut config,
+            agent,
+            None,
+            &ta_runtime::model_profile::ModelProfileConfig::shipped_only(),
+            sel,
+            None,
+            true,
+        )?;
+        Ok((config, record))
+    }
 
     #[test]
-    fn apply_model_override_inserts_model_flag_before_prompt_for_claude() {
-        let mut config = builtin_agent_config("claude-code");
-        assert_eq!(config.args_template, vec!["{prompt}".to_string()]);
-
-        apply_model_override(&mut config, "claude-opus-5", "claude-code");
-
+    fn apply_model_effort_inserts_model_flag_before_prompt_for_claude() {
+        let (config, record) = apply_shipped(
+            "claude-code",
+            &model_sel(None, None, None, Some("claude-opus-5")),
+        )
+        .unwrap();
         assert_eq!(
             config.args_template,
             vec!["--model", "claude-opus-5", "{prompt}"]
         );
+        assert_eq!(record.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(record.model_via, "arg");
     }
 
     #[test]
-    fn apply_model_override_ignores_unsupported_framework() {
-        let mut config = builtin_agent_config("codex");
+    fn explicit_model_beats_the_tier_mapping() {
+        let (config, record) = apply_shipped(
+            "claude-code",
+            &model_sel(None, Some("max"), None, Some("my-pinned-model")),
+        )
+        .unwrap();
+        assert_eq!(
+            config.args_template,
+            vec!["--model", "my-pinned-model", "{prompt}"]
+        );
+        assert_eq!(record.model.as_deref(), Some("my-pinned-model"));
+        assert_eq!(record.tier.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn deep_profile_on_claude_passes_model_by_arg_and_effort_by_env() {
+        let (config, record) =
+            apply_shipped("claude-code", &model_sel(Some("deep"), None, None, None)).unwrap();
+        assert_eq!(
+            config.args_template,
+            vec!["--model", "claude-sonnet-5-5", "{prompt}"]
+        );
+        assert_eq!(
+            config
+                .env
+                .get("CLAUDE_CODE_EFFORT_LEVEL")
+                .map(String::as_str),
+            Some("xhigh")
+        );
+        assert_eq!(record.profile.as_deref(), Some("deep"));
+        assert_eq!(record.tier.as_deref(), Some("standard"));
+        assert_eq!(record.effort, "xhigh");
+        assert!(record.effort_applied);
+        assert_eq!(record.effort_via, "env");
+    }
+
+    #[test]
+    fn claude_path_still_injects_settings_after_model_effort_mapping() {
+        // Regression: the mapping must not disturb claude-code's settings
+        // injection or its stream-json headless argument set.
+        let before = builtin_agent_config("claude-code");
+        assert!(before.injects_settings);
+        let (after, _) =
+            apply_shipped("claude-code", &model_sel(Some("max"), None, None, None)).unwrap();
+        assert!(after.injects_settings, "settings injection must survive");
+        assert_eq!(after.command, before.command);
+        assert_eq!(after.headless_args, before.headless_args);
+        assert!(
+            !after.headless_args.is_empty(),
+            "stream-json headless args must survive"
+        );
+        assert_eq!(
+            after.args_template.last().map(String::as_str),
+            Some("{prompt}")
+        );
+    }
+
+    #[test]
+    fn codex_receives_model_by_arg_and_effort_by_config_override() {
+        let (config, record) =
+            apply_shipped("codex", &model_sel(Some("deep"), None, None, None)).unwrap();
+        assert!(
+            config
+                .args_template
+                .windows(2)
+                .any(|w| w == ["--model", "gpt-6.1-sol"]),
+            "{:?}",
+            config.args_template
+        );
+        assert!(
+            config
+                .args_template
+                .iter()
+                .any(|a| a == "model_reasoning_effort=\"xhigh\""),
+            "{:?}",
+            config.args_template
+        );
+        assert_eq!(record.effort_via, "config");
+        assert!(config.env.is_empty());
+    }
+
+    #[test]
+    fn unmapped_framework_is_left_untouched_and_recorded_as_unsupported() {
+        let mut config = builtin_agent_config("claude-flow");
         let original = config.args_template.clone();
-
-        apply_model_override(&mut config, "claude-opus-5", "codex");
-
+        let record = apply_model_effort(
+            &mut config,
+            "claude-flow",
+            None,
+            &ta_runtime::model_profile::ModelProfileConfig::shipped_only(),
+            &model_sel(Some("deep"), None, None, None),
+            None,
+            true,
+        )
+        .unwrap();
         assert_eq!(
             config.args_template, original,
-            "codex is not confirmed to support --model -- the override must be \
-             dropped, not silently forwarded to a binary that doesn't understand it"
+            "a framework with no mapping must not receive flags it may not understand"
+        );
+        assert!(config.env.is_empty());
+        assert!(!record.effort_applied);
+        assert_eq!(record.effort_via, "unsupported");
+        assert_eq!(record.model, None);
+    }
+
+    #[test]
+    fn unknown_profile_tier_and_effort_fail_listing_the_valid_values() {
+        let err = apply_shipped("claude-code", &model_sel(Some("turbo"), None, None, None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("turbo"), "{err}");
+        assert!(
+            err.contains("light") && err.contains("deep") && err.contains("max"),
+            "{err}"
+        );
+        let err = apply_shipped("claude-code", &model_sel(None, Some("huge"), None, None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("huge") && err.contains("standard"), "{err}");
+        let err = apply_shipped(
+            "claude-code",
+            &model_sel(None, None, Some("ludicrous"), None),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ludicrous") && err.contains("xhigh"), "{err}");
+    }
+
+    #[test]
+    fn project_override_file_beats_the_shipped_mapping() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/model-profiles.toml"),
+            "[frameworks.claude.model_map.tiers]\nstandard = \"my-sonnet\"\n",
+        )
+        .unwrap();
+        let profiles = ta_runtime::model_profile::ModelProfileConfig::load_from(
+            Some(dir.path().join(".ta/model-profiles.toml")),
+            None,
+        )
+        .unwrap();
+        let mut config = builtin_agent_config("claude-code");
+        let record = apply_model_effort(
+            &mut config,
+            "claude-code",
+            None,
+            &profiles,
+            &model_sel(Some("standard"), None, None, None),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(record.model.as_deref(), Some("my-sonnet"));
+    }
+
+    #[test]
+    fn framework_to_launch_config_carries_the_manifest_env() {
+        let mut manifest = manifest_with_context_inject("none");
+        manifest
+            .env
+            .insert("MY_AGENT_FLAG".to_string(), "on".to_string());
+        let config = framework_to_launch_config(&manifest);
+        assert_eq!(
+            config.env.get("MY_AGENT_FLAG").map(String::as_str),
+            Some("on")
         );
     }
 

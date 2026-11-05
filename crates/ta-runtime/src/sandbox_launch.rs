@@ -1272,7 +1272,7 @@ pub fn degraded_label(decision: &SandboxDecision) -> Option<String> {
 // ── Environment scrub ──────────────────────────────────────────────────────
 
 /// Variables never passed to a sandboxed agent, even when role config asks.
-fn is_denied_env(key: &str) -> bool {
+pub fn is_denied_env(key: &str) -> bool {
     const EXACT: &[&str] = &[
         "SSH_AUTH_SOCK",
         "GPG_AGENT_INFO",
@@ -1953,6 +1953,46 @@ mod tests {
         assert_eq!(out.env["TA_GOAL_ID"], "g1");
         // Removed lists hold names only, never values.
         assert!(!out.removed.iter().any(|n| n.contains("secret")));
+    }
+
+    #[test]
+    fn scrub_passes_the_effort_env_a_model_profile_resolves() {
+        // The `deep` profile on Claude Code delivers its effort as an env var. It
+        // reaches the sandboxed agent as an explicit variable even though an
+        // inherited copy would be scrubbed, and a denied name is still dropped.
+        use crate::model_profile::{AgentTarget, ModelProfileConfig, Selection};
+        let resolved = ModelProfileConfig::shipped_only()
+            .resolve(
+                AgentTarget {
+                    name: "claude-code",
+                    command: "claude",
+                    manifest: None,
+                },
+                &Selection {
+                    profile: Some("deep".to_string()),
+                    ..Selection::default()
+                },
+                None,
+            )
+            .unwrap();
+        let mut args = vec!["{prompt}".to_string()];
+        let mut explicit: HashMap<String, String> = HashMap::new();
+        resolved.apply(&mut args, &mut explicit);
+        assert_eq!(explicit["CLAUDE_CODE_EFFORT_LEVEL"], "xhigh");
+        explicit.insert("TA_WHITEBOARD_TOKEN".to_string(), "secret".to_string());
+
+        let inherited: HashMap<String, String> =
+            [("PATH", "/usr/bin"), ("CLAUDE_CODE_EFFORT_LEVEL", "low")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        let home = PathBuf::from("/state/agent-homes/g1");
+        let out = scrub_env(&inherited, &explicit, &scrub_ctx(&[], &home));
+        assert_eq!(
+            out.env["CLAUDE_CODE_EFFORT_LEVEL"], "xhigh",
+            "the resolved effort wins over a stray inherited value"
+        );
+        assert!(!out.env.contains_key("TA_WHITEBOARD_TOKEN"));
     }
 
     #[test]

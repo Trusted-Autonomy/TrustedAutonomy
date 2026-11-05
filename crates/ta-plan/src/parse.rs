@@ -298,6 +298,75 @@ pub fn parse_plan(content: &str) -> Vec<PlanPhase> {
     parse_plan_with_schema(content, &PlanSchema::default_schema())
 }
 
+/// Model/effort a plan phase asks for, from marker comments under its heading
+/// (`<!-- profile: deep -->`, `<!-- tier: max -->`, `<!-- effort: xhigh -->`).
+/// Values are returned verbatim; `ta run` validates them against the profile
+/// vocabulary and reports unknown names with the valid choices. This is the
+/// "plan/goal" precedence layer of `ta run --profile/--tier/--effort`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseLaunchHints {
+    pub profile: Option<String>,
+    pub tier: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl PhaseLaunchHints {
+    pub fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.tier.is_none() && self.effort.is_none()
+    }
+}
+
+/// Read the launch hints of phase `phase_id` (default schema). Scans up to 5
+/// lines after the phase heading, stopping at the next phase heading. Returns
+/// the empty hints when the phase is absent or carries no marker.
+pub fn phase_launch_hints(content: &str, phase_id: &str) -> PhaseLaunchHints {
+    let schema = PlanSchema::default_schema();
+    let patterns: Vec<Regex> = schema
+        .phase_patterns
+        .iter()
+        .filter_map(|p| Regex::new(&p.regex).ok())
+        .collect();
+    let hint_re = match Regex::new(r"<!--\s*(profile|tier|effort):\s*([^\s>]+)\s*-->") {
+        Ok(r) => r,
+        Err(_) => return PhaseLaunchHints::default(),
+    };
+    let fence = fenced_line_flags(&content.lines().collect::<Vec<_>>());
+    let lines: Vec<&str> = content.lines().collect();
+    let heading_id = |line: &str| -> Option<String> {
+        patterns.iter().find_map(|p| {
+            p.captures(line.trim())
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim().to_string())
+        })
+    };
+    for (i, line) in lines.iter().enumerate() {
+        if fence[i] {
+            continue;
+        }
+        let Some(id) = heading_id(line) else { continue };
+        if !phase_ids_match(&id, phase_id) {
+            continue;
+        }
+        let mut hints = PhaseLaunchHints::default();
+        let limit = std::cmp::min(i + 6, lines.len());
+        for next in &lines[i + 1..limit] {
+            if heading_id(next).is_some() {
+                break;
+            }
+            for caps in hint_re.captures_iter(next) {
+                let value = Some(caps[2].to_string());
+                match &caps[1] {
+                    "profile" => hints.profile = value,
+                    "tier" => hints.tier = value,
+                    _ => hints.effort = value,
+                }
+            }
+        }
+        return hints;
+    }
+    PhaseLaunchHints::default()
+}
+
 /// Update a phase's status in PLAN.md content. Returns the new content.
 ///
 /// Finds the phase by ID using the default schema's patterns
@@ -430,6 +499,19 @@ pub fn load_plan(project_root: &Path) -> anyhow::Result<Vec<PlanPhase>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_launch_hints_read_markers_under_the_heading_only() {
+        let md = "### v1.0.0 - A\n<!-- status: pending -->\n<!-- profile: deep -->\n\n### v1.0.1 - B\n<!-- status: pending -->\n<!-- tier: max -->\n<!-- effort: low -->\n";
+        let a = phase_launch_hints(md, "v1.0.0");
+        assert_eq!(a.profile.as_deref(), Some("deep"));
+        assert_eq!((a.tier, a.effort), (None, None));
+        let b = phase_launch_hints(md, "1.0.1");
+        assert_eq!(b.profile, None);
+        assert_eq!(b.tier.as_deref(), Some("max"));
+        assert_eq!(b.effort.as_deref(), Some("low"));
+        assert!(phase_launch_hints(md, "v9.9.9").is_empty());
+    }
 
     /// Regression test against this repo's own real PLAN.md — the extraction's
     /// "no behavior change" goal (v0.17.11.1 item 1) is only meaningfully

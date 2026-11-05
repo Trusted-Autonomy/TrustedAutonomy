@@ -1478,6 +1478,32 @@ fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
     Ok(value)
 }
 
+/// One-line description of the model/effort a goal was launched with, for
+/// `ta goal status`: what was requested, what concrete model that became, and
+/// whether the effort actually reached the agent.
+fn model_effort_summary(me: &ta_goal::ModelEffortRecord) -> String {
+    let effort = if me.effort == "default" {
+        "effort default (agent's own)".to_string()
+    } else if me.effort_applied {
+        format!("effort {} (applied via {})", me.effort, me.effort_via)
+    } else {
+        format!(
+            "effort {} NOT APPLIED ({}: the agent ran at its own default)",
+            me.effort, me.effort_via
+        )
+    };
+    format!(
+        "{} (tier {}{}), {}",
+        me.model.as_deref().unwrap_or("agent default model"),
+        me.tier.as_deref().unwrap_or("not requested"),
+        me.profile
+            .as_deref()
+            .map(|p| format!(", profile {p}"))
+            .unwrap_or_default(),
+        effort
+    )
+}
+
 /// Start state lines for `ta goal status` (v0.17.12.17).
 fn print_start_state(g: &ta_goal::GoalRun) {
     match g.start_commit.as_deref() {
@@ -1542,6 +1568,9 @@ fn show_status(
                 println!("By:       {}", by);
             }
             println!("Agent:    {}", g.agent_id);
+            if let Some(me) = &g.model_effort {
+                println!("Model:    {}", model_effort_summary(me));
+            }
             // Channel info (v0.15.28)
             let channel_display = if g.agent_id == "claude-code" || g.agent_id == "claude-flow" {
                 "ClaudeCode (Live)"

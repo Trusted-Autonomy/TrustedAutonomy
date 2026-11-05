@@ -134,6 +134,21 @@ pub struct AgentFrameworkManifest {
     /// Resolved to an absolute path: `~/`-prefixed → home dir, absolute → as-is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherit: Option<String>,
+    /// Environment variables set on the agent process. Explicit env passes the sandbox env
+    /// scrub (except the deny list), so this is the reliable way to hand a framework a
+    /// setting; see `crate::sandbox_launch::scrub_env`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    /// How TA's abstract model tiers map to this framework's concrete model ids and how
+    /// the id is delivered (args / config override / env). Absent: the shipped catalog
+    /// (`model-profiles.default.toml`, keyed by `command`) applies, if it has an entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_map: Option<crate::model_profile::ModelMap>,
+    /// How TA's abstract reasoning-effort levels map to this framework's values and how
+    /// they are delivered. Levels with no entry are unsupported (TA warns, never drops
+    /// silently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_map: Option<crate::model_profile::EffortMap>,
 }
 
 fn default_version() -> String {
@@ -197,6 +212,9 @@ impl AgentFrameworkManifest {
                 channel_type: crate::channels::ChannelType::ClaudeCode,
                 context: None,
                 inherit: None,
+                env: HashMap::new(),
+                model_map: None,
+                effort_map: None,
             },
             AgentFrameworkManifest {
                 name: "codex".to_string(),
@@ -227,6 +245,9 @@ impl AgentFrameworkManifest {
                 channel_type: crate::channels::ChannelType::Codex,
                 context: None,
                 inherit: None,
+                env: HashMap::new(),
+                model_map: None,
+                effort_map: None,
             },
             AgentFrameworkManifest {
                 name: "claude-flow".to_string(),
@@ -249,6 +270,9 @@ impl AgentFrameworkManifest {
                 channel_type: crate::channels::ChannelType::ClaudeCode,
                 context: None,
                 inherit: None,
+                env: HashMap::new(),
+                model_map: None,
+                effort_map: None,
             },
             AgentFrameworkManifest {
                 name: "ollama".to_string(),
@@ -289,6 +313,9 @@ impl AgentFrameworkManifest {
                 },
                 context: None,
                 inherit: None,
+                env: HashMap::new(),
+                model_map: None,
+                effort_map: None,
             },
         ]
     }
@@ -391,6 +418,17 @@ impl AgentFrameworkManifest {
         }
         if self.auth.methods.is_empty() {
             self.auth = base.auth;
+        }
+
+        // Env: base first, the inheriting manifest wins per key.
+        for (k, v) in base.env {
+            self.env.entry(k).or_insert(v);
+        }
+        if self.model_map.is_none() {
+            self.model_map = base.model_map;
+        }
+        if self.effort_map.is_none() {
+            self.effort_map = base.effort_map;
         }
 
         // Merge context.files: base files first, then project files.
@@ -1118,5 +1156,119 @@ inherit = "/some/other-base.toml"
                 );
             }
         }
+    }
+
+    // ── env / model_map / effort_map (model + effort mapping) ───────────────
+
+    const MAPPED_TOML: &str = r#"
+name = "mapped-agent"
+command = "mapped-bin"
+
+[env]
+MAPPED_MODE = "fast"
+
+[model_map]
+args = ["--model", "{value}"]
+[model_map.tiers]
+light = "tiny-1"
+max = "huge-1"
+
+[effort_map]
+env = { MAPPED_EFFORT = "{value}" }
+[effort_map.levels]
+low = "l"
+high = "h"
+"#;
+
+    const MAPPED_YAML: &str = r#"
+name: mapped-agent
+command: mapped-bin
+env:
+  MAPPED_MODE: fast
+model_map:
+  args: ["--model", "{value}"]
+  tiers:
+    light: tiny-1
+    max: huge-1
+effort_map:
+  env:
+    MAPPED_EFFORT: "{value}"
+  levels:
+    low: l
+    high: h
+"#;
+
+    fn assert_mapped(m: &AgentFrameworkManifest) {
+        assert_eq!(m.env.get("MAPPED_MODE").map(String::as_str), Some("fast"));
+        let mm = m.model_map.as_ref().expect("model_map parsed");
+        assert_eq!(mm.args, vec!["--model", "{value}"]);
+        assert_eq!(mm.tiers.get("light").map(String::as_str), Some("tiny-1"));
+        assert_eq!(mm.tiers.get("max").map(String::as_str), Some("huge-1"));
+        let em = m.effort_map.as_ref().expect("effort_map parsed");
+        assert_eq!(
+            em.env.get("MAPPED_EFFORT").map(String::as_str),
+            Some("{value}")
+        );
+        assert_eq!(em.levels.get("high").map(String::as_str), Some("h"));
+    }
+
+    #[test]
+    fn toml_manifest_parses_env_model_map_and_effort_map() {
+        let m: AgentFrameworkManifest = toml::from_str(MAPPED_TOML).unwrap();
+        assert_mapped(&m);
+    }
+
+    #[test]
+    fn yaml_manifest_parses_env_model_map_and_effort_map() {
+        let m: AgentFrameworkManifest = serde_yaml::from_str(MAPPED_YAML).unwrap();
+        assert_mapped(&m);
+    }
+
+    #[test]
+    fn discovered_manifests_in_both_formats_carry_the_mapping() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join(".ta/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("mapped-agent.toml"), MAPPED_TOML).unwrap();
+        let yaml = MAPPED_YAML.replace("mapped-agent", "mapped-yaml");
+        std::fs::write(agents_dir.join("mapped-yaml.yaml"), yaml).unwrap();
+        let global = tempdir().unwrap();
+        let found = AgentFrameworkManifest::discover_with_global_dir(dir.path(), global.path());
+        assert_eq!(found.len(), 2);
+        for m in &found {
+            assert_mapped(m);
+        }
+    }
+
+    #[test]
+    fn manifest_without_mapping_has_empty_env_and_no_maps() {
+        let m: AgentFrameworkManifest =
+            toml::from_str("name = \"plain\"\ncommand = \"plain-bin\"\n").unwrap();
+        assert!(m.env.is_empty());
+        assert!(m.model_map.is_none() && m.effort_map.is_none());
+    }
+
+    #[test]
+    fn inherit_merges_env_and_fills_missing_maps_from_the_base() {
+        let dir = tempdir().unwrap();
+        let base_path = dir.path().join("base.toml");
+        std::fs::write(&base_path, MAPPED_TOML).unwrap();
+        let mut child: AgentFrameworkManifest = toml::from_str(
+            "name = \"child\"\ncommand = \"mapped-bin\"\n[env]\nCHILD = \"1\"\nMAPPED_MODE = \"slow\"\n",
+        )
+        .unwrap();
+        child.inherit = Some(base_path.display().to_string());
+        let merged = child.with_inheritance_applied().unwrap();
+        assert_eq!(merged.env.get("CHILD").map(String::as_str), Some("1"));
+        assert_eq!(
+            merged.env.get("MAPPED_MODE").map(String::as_str),
+            Some("slow"),
+            "the inheriting manifest wins per key"
+        );
+        assert!(merged.model_map.is_some(), "model_map inherited from base");
+        assert!(
+            merged.effort_map.is_some(),
+            "effort_map inherited from base"
+        );
     }
 }

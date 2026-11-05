@@ -63,6 +63,7 @@ pub mod linux_confine;
 pub mod linux_probe;
 #[cfg(unix)]
 pub mod linux_relay;
+pub mod model_profile;
 pub mod plugin;
 pub mod sandbox;
 pub mod sandbox_launch;

@@ -88,6 +88,13 @@ pub struct CostRow {
     /// How the session was started (`sdk-cli` headless, `cli` interactive).
     /// Claude Code transcripts only.
     pub entrypoint: Option<String>,
+    /// Requested model tier of a TA goal (`ModelEffortRecord::tier`). Goals only.
+    pub tier: Option<String>,
+    /// Reasoning effort a TA goal ran at: the level when it was actually applied,
+    /// `unsupported` when one was requested but the agent could not take it, and
+    /// `default` when none was requested. `None` for transcripts and for goals
+    /// launched before the field existed.
+    pub effort: Option<String>,
     /// Content-block measurements of the turn. Transcripts only.
     pub detail: Option<TurnDetail>,
 }
@@ -732,6 +739,8 @@ pub(crate) fn scan_claude_with(root: &Path, table: &PriceTable, plan: ReadPlan) 
                 origin_class: None,
                 family: file_family.clone(),
                 entrypoint: file_entrypoint.clone(),
+                tier: None,
+                effort: None,
                 detail: None,
             };
             let mid = msg.get("id").and_then(Value::as_str);
@@ -917,6 +926,8 @@ pub(crate) fn scan_omp_with(root: &Path, table: &PriceTable, plan: ReadPlan) -> 
                         origin_class: None,
                         family: file_family.clone(),
                         entrypoint: None,
+                        tier: None,
+                        effort: None,
                         detail: Some(detail),
                     });
                 }
@@ -960,6 +971,16 @@ pub fn goal_rows(goals: &[(String, GoalRun)]) -> Vec<CostRow> {
             origin_class: Some(g.effective_origin_class().to_string()),
             family: None,
             entrypoint: None,
+            tier: g.model_effort.as_ref().and_then(|m| m.tier.clone()),
+            effort: g.model_effort.as_ref().map(|m| {
+                if m.effort_applied {
+                    m.effort.clone()
+                } else if m.effort == "default" {
+                    "default".to_string()
+                } else {
+                    "unsupported".to_string()
+                }
+            }),
             detail: None,
         })
         .collect()
@@ -982,6 +1003,11 @@ pub enum CostGroup {
     SessionFamily,
     /// How the session was started: `sdk-cli` (headless) or `cli`.
     Entrypoint,
+    /// The model tier a TA goal was launched with (`n/a` when none was requested).
+    Tier,
+    /// The reasoning effort a TA goal ran at: a level, `default`, or `unsupported`
+    /// (requested but not applied). `n/a` for transcripts and older goals.
+    Effort,
 }
 
 impl CostGroup {
@@ -996,6 +1022,8 @@ impl CostGroup {
             CostGroup::Goal => "goal",
             CostGroup::SessionFamily => "session_family",
             CostGroup::Entrypoint => "entrypoint",
+            CostGroup::Tier => "tier",
+            CostGroup::Effort => "effort",
         }
     }
 
@@ -1023,6 +1051,8 @@ impl CostGroup {
             CostGroup::Goal => "n/a".to_string(),
             CostGroup::SessionFamily => r.family.clone().unwrap_or_else(|| "n/a".to_string()),
             CostGroup::Entrypoint => r.entrypoint.clone().unwrap_or_else(|| "n/a".to_string()),
+            CostGroup::Tier => r.tier.clone().unwrap_or_else(|| "n/a".to_string()),
+            CostGroup::Effort => r.effort.clone().unwrap_or_else(|| "n/a".to_string()),
         }
     }
 }
@@ -1041,10 +1071,13 @@ pub fn parse_cost_group_by(s: &str) -> Result<Vec<CostGroup>, String> {
             "goal" => CostGroup::Goal,
             "session_family" => CostGroup::SessionFamily,
             "entrypoint" => CostGroup::Entrypoint,
+            "tier" => CostGroup::Tier,
+            "effort" => CostGroup::Effort,
             other => {
                 return Err(format!(
                     "unknown --group-by {other:?}: expected a comma-separated list of day, source, \
-                     model, project, context_bucket, origin_class, goal, session_family, entrypoint \
+                     model, project, context_bucket, origin_class, goal, session_family, entrypoint, \
+                     tier, effort \
                      (for example --group-by source,model). \
                      For one typed row per goal and session use --json --rows"
                 ))
@@ -1740,6 +1773,63 @@ mod tests {
         assert_eq!(rep.totals.exact_rows, agg.totals.exact_cost_goals);
         // Goals are not in the context-bucket table.
         assert!(rep.context_buckets.is_empty());
+    }
+
+    #[test]
+    fn goals_group_by_tier_and_effort_with_unsupported_effort_called_out() {
+        let mk = |effort: Option<(&str, bool)>| {
+            let mut g = GoalRun::new(
+                "t",
+                "o",
+                "claude-code",
+                PathBuf::from("/tmp/w"),
+                PathBuf::from("/tmp/s"),
+            );
+            g.input_tokens = 10;
+            g.cost_usd = 1.0;
+            g.cost_source = CostSource::Runtime;
+            g.model_effort = effort.map(|(e, applied)| crate::ModelEffortRecord {
+                agent: "claude-code".into(),
+                profile: Some("deep".into()),
+                tier: Some("standard".into()),
+                effort: e.into(),
+                model: Some("claude-sonnet-5-5".into()),
+                effort_applied: applied,
+                effort_via: if applied { "env" } else { "unsupported" }.into(),
+                model_via: "arg".into(),
+            });
+            ("proj".to_string(), g)
+        };
+        let goals = vec![
+            mk(Some(("xhigh", true))),
+            mk(Some(("xhigh", false))),
+            mk(Some(("default", false))),
+            mk(None),
+        ];
+        let by = parse_cost_group_by("tier,effort").unwrap();
+        assert_eq!(by, vec![CostGroup::Tier, CostGroup::Effort]);
+        let rep = build_report(Some(&goals), vec![], &by, &CostFilter::default());
+        let mut keys: Vec<(String, String, u64)> = rep
+            .groups
+            .iter()
+            .map(|g| {
+                (
+                    g.group["tier"].clone(),
+                    g.group["effort"].clone(),
+                    g.totals.rows,
+                )
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                ("n/a".to_string(), "n/a".to_string(), 1),
+                ("standard".to_string(), "default".to_string(), 1),
+                ("standard".to_string(), "unsupported".to_string(), 1),
+                ("standard".to_string(), "xhigh".to_string(), 1),
+            ]
+        );
     }
 
     #[test]
