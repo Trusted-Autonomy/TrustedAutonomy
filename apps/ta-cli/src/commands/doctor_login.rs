@@ -29,6 +29,7 @@ pub const LOGIN_VARS: [&str; 3] = [
 /// Variables every normal login environment has. Seeing one of them proves the
 /// environment text was really the process environment, so "no login variable in
 /// it" can be trusted instead of meaning "the read returned nothing".
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const BASELINE_VARS: [&str; 7] = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"];
 
 /// What was found in one process's environment. Holds names only.
@@ -44,6 +45,7 @@ pub struct EnvScan {
 /// (`/proc/<pid>/environ`) or whitespace (`ps -E` output, which appends the
 /// environment to the command line); a value containing spaces only splits the
 /// value, never the `NAME=` that starts an entry.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub fn scan_environment_text(text: &str) -> EnvScan {
     let mut scan = EnvScan::default();
     for token in text.split(|c: char| c == '\0' || c.is_whitespace()) {
