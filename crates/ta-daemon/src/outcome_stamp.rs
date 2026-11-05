@@ -29,7 +29,11 @@ pub struct StampSubject {
 }
 
 fn store_for(project_root: &Path) -> Result<(OutcomeKeyStore, ProjectState), String> {
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env().map_err(|e| {
+        format!(
+            "cannot resolve the TA state directory ({e}). Run `ta state show` to see where it is and `ta doctor` to repair it."
+        )
+    })?;
     let ps = ProjectState::open(project_root, &locator).map_err(|e| {
         format!(
             "cannot open the TA state directory for {} ({e}). Run `ta show state` to see where it is and `ta doctor` to repair it.",
@@ -67,8 +71,11 @@ pub fn stamp_and_sign(
 /// `strict` posture.
 pub fn effective_require_stamped(project_root: &Path) -> bool {
     let cfg = WhiteboardConfig::load(project_root);
-    cfg.require_stamped_outcomes
-        .unwrap_or_else(|| Posture::resolve(&StateLocator::from_env()) == Posture::Strict)
+    cfg.require_stamped_outcomes.unwrap_or_else(|| {
+        StateLocator::from_env()
+            .map(|l| Posture::resolve(&l) == Posture::Strict)
+            .unwrap_or(false)
+    })
 }
 
 fn replay_caches() -> &'static Mutex<HashMap<PathBuf, ReplayCache>> {

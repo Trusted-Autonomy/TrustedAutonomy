@@ -1698,8 +1698,10 @@ fn ensure_project_id(project_root: &std::path::Path) {
     if ta_events::identity::read_project_id(project_root).is_some() {
         return;
     }
-    let locator = ta_credentials::state::StateLocator::from_env();
-    if let Err(e) = ta_credentials::state::ProjectState::open(project_root, &locator) {
+    let opened = ta_credentials::state::StateLocator::from_env().and_then(|locator| {
+        ta_credentials::state::ProjectState::open(project_root, &locator).map(|_| ())
+    });
+    if let Err(e) = opened {
         tracing::warn!(
             project_root = %project_root.display(),
             error = %e,

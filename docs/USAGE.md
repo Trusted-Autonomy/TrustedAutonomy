@@ -6656,7 +6656,35 @@ ta show state
 | Linux | `$XDG_STATE_HOME/trusted-autonomy` (default `~/.local/state/trusted-autonomy`) | `<root>/projects/<project-id>/` |
 | Windows | `%LOCALAPPDATA%\TrustedAutonomy` | `<root>\projects\<project-id>\` |
 
-Set `TA_STATE_DIR` to use a different root (containers, installers that pre-seed a directory). Inside a project's state directory:
+The root above is the OS default. One rule, in one place (`ta_credentials::state_dir`), decides the root for **every** TA process of your user (`ta`, `ta-daemon`, the Wayfinder poller, an installer's call), first match wins:
+
+1. `TA_STATE_DIR` in the environment (an absolute path);
+2. the persisted pointer file `state-dir` in the per-user directory (`$TA_USER_STATE_DIR`, else `~/.config/ta/human`): one absolute path, owner-only, written atomically by `ta state relocate`;
+3. the OS default in the table.
+
+With no home directory and no override TA stops with an error that says what to set; it never falls back to the current directory. Cargo test binaries use a throwaway temp directory instead, so a test can never touch your real state.
+
+```bash
+ta state show                       # the resolved directory and which rule decided it
+ta state show --path-only           # just the path (for scripts)
+ta state relocate --to /data/ta     # move it once, verified, and remember it for every process
+ta state relocate --to /data/ta --no-migrate   # adopt a directory that already holds the state
+```
+
+Prefer the pointer to `TA_STATE_DIR` for a permanent move: a variable exported in one shell or service definition is invisible to every process started elsewhere (a daemon started by a login item, a poller started by launchd), and those silently disagree about where the keys are. The pointer cannot be forgotten. `TA_STATE_DIR` still wins when set (containers, CI); `ta state show` and `ta doctor` warn when it disagrees with the pointer.
+
+**What `ta state relocate` does** (also done automatically, once, the first time any `ta` or `ta-daemon` finds a configured directory with no state while the OS default holds some that was never migrated):
+
+- refuses, naming the pids and pid files, if a daemon or NATS server is running against the old directory;
+- copies to a temporary directory beside the target, checks the file count and the SHA-256 of **every** file against the source and the permissions (directories 0700, secret files 0600; anything looser is tightened), then renames it into place atomically. An interrupted copy leaves only a `.<name>.migrating-<pid>-<n>` directory, which is never used as state and which `ta state show` / `ta doctor` list with the command that removes it;
+- writes `.migrated-from` in the new directory and `MIGRATED-TO` in the old one, and only then sets the pointer;
+- **never deletes or changes the old data.** It prints the old path, its size and the `rm -rf` command to run once you have checked the new directory;
+- is idempotent: a second run reports that nothing was copied and that the pointer is already set, and changes nothing;
+- never merges: if both directories already hold state it changes nothing, reports both with sizes and modification times, and tells you which command keeps which side.
+
+Project ids live in `<project>/.ta/project-id` and keychain items are named by project id, so neither depends on where the state directory is: ids stay valid and custody (keychain or file) keeps working after a move. Installers should call `ta state relocate --to <dir>` rather than export `TA_STATE_DIR`. Shell scripts that need the per-user directory should call `ta state user-dir` instead of re-implementing it (`scripts/custody-decision.sh` does, and mirrors the same precedence only when `ta` is unavailable).
+
+Inside a project's state directory:
 
 | Path | Holds |
 |---|---|

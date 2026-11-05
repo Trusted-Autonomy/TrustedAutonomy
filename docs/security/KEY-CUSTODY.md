@@ -42,7 +42,7 @@
 
 ## 3. The secrets
 
-State directory per project: `~/Library/Application Support/TrustedAutonomy/projects/<project-id>/` (macOS), `$XDG_STATE_HOME/trusted-autonomy/projects/<project-id>/` (Linux, default `~/.local/state/...`), `%LOCALAPPDATA%\TrustedAutonomy\projects\<project-id>\` (Windows); `TA_STATE_DIR` overrides the root (`crates/ta-credentials/src/state.rs:8-13`). The `<project-id>` is minted once and recorded in the gitignored `<project>/.ta/project-id`. Control-plane files sit in its `secrets/` subdirectory. The human-credential directory is `~/.config/ta/human/`, or `$TA_USER_STATE_DIR` (`human.rs:89`).
+State directory per project: `~/Library/Application Support/TrustedAutonomy/projects/<project-id>/` (macOS), `$XDG_STATE_HOME/trusted-autonomy/projects/<project-id>/` (Linux, default `~/.local/state/...`), `%LOCALAPPDATA%\TrustedAutonomy\projects\<project-id>\` (Windows). Those are the OS defaults; the root is decided in one place (`crates/ta-credentials/src/state_dir.rs`) by `TA_STATE_DIR`, then the persisted pointer file `<user dir>/state-dir` written by `ta state relocate`, then the OS default, and moved with a verified, non-destructive migration (`ta state show` / `ta state relocate`, see `docs/USAGE.md`). The `<project-id>` is minted once and recorded in the gitignored `<project>/.ta/project-id`, so neither it nor keychain item names depend on where the state directory is. Control-plane files sit in its `secrets/` subdirectory. The human-credential directory is `~/.config/ta/human/`, or `$TA_USER_STATE_DIR` (`human.rs:89`).
 
 | Secret | What it protects | In `keychain` mode | In `file` mode | Who can read it |
 |---|---|---|---|---|

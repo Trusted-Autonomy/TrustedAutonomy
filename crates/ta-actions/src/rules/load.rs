@@ -189,7 +189,13 @@ impl RulesLoader {
         match &self.state {
             StateSel::Dir(d) => Ok(d.clone()),
             StateSel::Lazy => {
-                match ProjectState::locate(&self.project_root, &StateLocator::from_env()) {
+                let locator = StateLocator::from_env().map_err(|e| {
+                    format!(
+                        "could not locate the TA state directory for {}: {e}",
+                        self.project_root.display()
+                    )
+                })?;
+                match ProjectState::locate(&self.project_root, &locator) {
                     Ok(Some(ps)) => Ok(Some(ps.rules_dir())),
                     Ok(None) => Ok(None),
                     Err(e) => Err(format!(

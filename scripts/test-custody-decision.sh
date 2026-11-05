@@ -88,4 +88,38 @@ out="$(ta_decide_custody /fake/ta)"
 [[ ! -e "$HOME/.config/ta/human/custody" ]]; check "keychain holding TA secrets blocks the automatic switch" $?
 grep -q "ta credentials custody file" <<<"$out" && grep -q "did NOT switch" <<<"$out"; check "tells the user to migrate explicitly" $?
 
+# 8. The rule is owned by `ta state user-dir`: when BINARY answers with an
+# absolute path, that wins over the mirrored HOME rule. (A fake `ta` script;
+# the real one is never run.)
+fake_codesign "TeamIdentifier=not set"; fake_security 1; fresh_home 8
+cat >"$TMP/bin/fake-ta" <<EOF
+#!/usr/bin/env bash
+[[ "\$1 \$2" == "state user-dir" ]] && printf '%s\n' "$TMP/from-ta" && exit 0
+exit 2
+EOF
+chmod +x "$TMP/bin/fake-ta"
+out="$(ta_decide_custody "$TMP/bin/fake-ta")"
+[[ "$(cat "$TMP/from-ta/custody" 2>/dev/null)" == "file" && ! -e "$HOME/.config" ]]; check "'ta state user-dir' decides the directory when available" $?
+
+# 9. A `ta` that predates the subcommand (non-zero, prints nothing usable) or
+# answers with a relative path falls back to the documented precedence.
+fresh_home 9
+printf '#!/usr/bin/env bash\necho "error: unrecognized subcommand" >&2\nexit 2\n' >"$TMP/bin/old-ta"
+chmod +x "$TMP/bin/old-ta"
+ta_decide_custody "$TMP/bin/old-ta" >/dev/null
+[[ "$(cat "$HOME/.config/ta/human/custody" 2>/dev/null)" == "file" ]]; check "old ta falls back to the documented rule" $?
+fresh_home 10
+printf '#!/usr/bin/env bash\necho relative/dir\n' >"$TMP/bin/odd-ta"
+chmod +x "$TMP/bin/odd-ta"
+( cd "$TMP" && ta_decide_custody "$TMP/bin/odd-ta" >/dev/null )
+[[ "$(cat "$HOME/.config/ta/human/custody" 2>/dev/null)" == "file" && ! -e "$TMP/relative" ]]; check "a relative answer from ta is rejected" $?
+
+# 11. TA_USER_STATE_DIR is honoured by the fallback too, and with no HOME, no
+# override and no usable ta nothing is written (never a cwd-relative path).
+fresh_home 11
+mkdir -p "$TMP/cwd11"
+out="$( cd "$TMP/cwd11" && unset HOME TA_USER_STATE_DIR && ta_decide_custody /fake/ta )"
+[[ -z "$(ls -A "$TMP/cwd11")" ]]; check "no HOME and no override writes nothing in the cwd" $?
+grep -q "cannot tell where TA keeps its per-user state" <<<"$out"; check "no-HOME case says what to do" $?
+
 exit "$fail"

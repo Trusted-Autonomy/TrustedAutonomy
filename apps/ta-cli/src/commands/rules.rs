@@ -131,7 +131,12 @@ fn status(loader: &RulesLoader) -> anyhow::Result<()> {
     for w in &loaded.warnings {
         println!("  note: {w}");
     }
-    if let Ok(Some(ps)) = ProjectState::locate(loader.project_root(), &StateLocator::from_env()) {
+    let located = StateLocator::from_env().ok().and_then(|l| {
+        ProjectState::locate(loader.project_root(), &l)
+            .ok()
+            .flatten()
+    });
+    if let Some(ps) = located {
         match load::read_anchor(&ps) {
             Some(anchor) => println!("  trusted owner key: {anchor}"),
             None => println!(
@@ -252,7 +257,7 @@ fn migrate_cmd(loader: &RulesLoader, root: &Path, write: bool) -> anyhow::Result
 }
 
 fn open_state(root: &Path) -> anyhow::Result<(ProjectState, CustodyOpts)> {
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env()?;
     let ps = ProjectState::open(root, &locator).with_context(|| {
         format!(
             "could not open the TA state directory for {}. Run this from the project root",

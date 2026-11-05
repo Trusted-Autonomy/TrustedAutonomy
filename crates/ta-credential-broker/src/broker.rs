@@ -78,7 +78,7 @@ impl CredentialBroker {
     /// warning (move it with `ta doctor --fix`) and refused under `strict`.
     /// The revocation list stays next to the project's other `.ta` files.
     pub fn open_for_project(project_root: &Path) -> Result<Self, BrokerError> {
-        let locator = StateLocator::from_env();
+        let locator = StateLocator::from_env()?;
         let opts = CustodyOpts::from_env(&locator);
         let ps = ProjectState::open(project_root, &locator)?;
         Self::open_with_state(&project_root.join(".ta"), &ps, opts)

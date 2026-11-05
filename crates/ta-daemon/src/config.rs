@@ -1889,7 +1889,17 @@ impl TokenStore {
         use ta_credentials::state::{
             resolve_moved_path, MovedItem, Posture, ProjectState, StateLocator,
         };
-        let locator = StateLocator::from_env();
+        let locator = match StateLocator::from_env() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(
+                    project = %project_root.display(),
+                    error = %e,
+                    "could not resolve the TA state directory; falling back to the project path for daemon tokens"
+                );
+                return project_root.join(".ta").join("daemon-tokens.json");
+            }
+        };
         let posture = Posture::resolve(&locator);
         match ProjectState::open(project_root, &locator) {
             Ok(ps) => match resolve_moved_path(&ps, MovedItem::DaemonTokens, posture) {

@@ -130,7 +130,7 @@ fn daemon_tokens_path(project_root: &Path) -> anyhow::Result<PathBuf> {
     use ta_credentials::state::{
         resolve_moved_path, MovedItem, Posture, ProjectState, StateLocator,
     };
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env()?;
     let ps = ProjectState::open(project_root, &locator)?;
     Ok(resolve_moved_path(
         &ps,
@@ -322,7 +322,7 @@ fn tokens_dir(project_root: &std::path::Path) -> anyhow::Result<std::path::PathB
     use ta_credentials::state::{
         resolve_moved_path, MovedItem, Posture, ProjectState, StateLocator,
     };
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env()?;
     let ps = ProjectState::open(project_root, &locator)?;
     Ok(resolve_moved_path(
         &ps,

@@ -30,6 +30,7 @@ pub mod human;
 pub mod keychain;
 pub mod outcome_keys;
 pub mod state;
+pub mod state_dir;
 pub mod vault;
 
 pub use config::CredentialsConfig;

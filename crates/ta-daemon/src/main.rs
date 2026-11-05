@@ -237,10 +237,38 @@ async fn main() -> Result<()> {
         anyhow::bail!("Refusing to start: {e}");
     }
 
+    // The state directory may have been moved (TA_STATE_DIR or `ta state
+    // relocate`) since this machine's state was created. Copy it over once,
+    // verified, before any secret is read; refuse to start rather than run
+    // against an empty directory (that would mint a second vault key). This
+    // process's own pid file does not count as "a daemon is running".
+    {
+        let me = std::process::id();
+        let is_alive = move |pid: u32| pid != me && ta_lifecycle::process_is_alive(pid);
+        let ctx = ta_credentials::state_dir::MigrateCtx {
+            is_alive: &is_alive,
+            tool_version: env!("CARGO_PKG_VERSION"),
+        };
+        match ta_credentials::state_dir::ensure_migrated(&ctx) {
+            Ok(ta_credentials::state_dir::AutoMigration::NotNeeded) => {}
+            Ok(ta_credentials::state_dir::AutoMigration::Migrated(r)) => tracing::warn!(
+                from = %r.from.display(),
+                to = %r.to.display(),
+                files = r.files,
+                bytes = r.bytes,
+                "migrated the TA state directory to its configured location; the old directory \
+                 was kept. After checking the new one, remove the old with: rm -rf '{}'",
+                r.from.display()
+            ),
+            Err(e) => anyhow::bail!("Refusing to start: {e}"),
+        }
+    }
+
     // Control-plane secrets belong in the per-user state directory, not the
     // project tree. Warn about old-location copies; refuse under `strict`.
     let posture = {
-        let locator = ta_credentials::state::StateLocator::from_env();
+        let locator = ta_credentials::state::StateLocator::from_env()
+            .map_err(|e| anyhow::anyhow!("Refusing to start: {e}"))?;
         let posture = ta_credentials::state::Posture::resolve(&locator);
         if let Err(e) = ta_credentials::state::startup_check(&project_root, posture) {
             anyhow::bail!("Refusing to start: {e}");

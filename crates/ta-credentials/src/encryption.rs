@@ -210,7 +210,7 @@ fn state_dir_identity(
     keychain_searched: bool,
     creation: &KeyCreation,
 ) -> Result<(Identity, KeyCustody), VaultError> {
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env().map_err(|e| VaultError::Other(e.to_string()))?;
     let posture = Posture::resolve(&locator);
     state_dir_identity_with(project_root, &locator, posture, keychain_searched, creation)
 }
@@ -287,7 +287,7 @@ pub fn probe_key_custody(vault_dir: &Path) -> Option<KeyCustody> {
     }
     let key_path = vault_dir.join(FALLBACK_KEY_FILENAME);
     if let Some(project_root) = project_root_of(vault_dir) {
-        return probe_project_file_custody(&project_root, &StateLocator::from_env());
+        return probe_project_file_custody(&project_root, &StateLocator::from_env().ok()?);
     }
     if key_path.exists() {
         return Some(KeyCustody::FallbackFile(key_path));
