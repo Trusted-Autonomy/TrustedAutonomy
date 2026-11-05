@@ -346,6 +346,60 @@
       },
       "type": "object"
     },
+    "ModelEffortRecord": {
+      "description": "The model tier, reasoning effort and concrete model a goal was LAUNCHED with, as\nresolved from `--profile/--tier/--effort/--model`, the plan phase, and\n`.ta/model-profiles.toml` (see `ta_runtime::model_profile`). What the agent\nactually ran is `GoalRun::agent_model` (reported by the runtime); this is what TA\nasked for and whether it could deliver it, so a cost report can group by effort.",
+      "properties": {
+        "agent": {
+          "description": "The agent framework the mapping was resolved for.",
+          "type": "string"
+        },
+        "effort": {
+          "description": "Requested effort (`default|low|medium|high|xhigh|max`).",
+          "type": "string"
+        },
+        "effort_applied": {
+          "description": "`true` only when the effort was actually handed to the agent.",
+          "type": "boolean"
+        },
+        "effort_via": {
+          "description": "How the effort was delivered: `arg`, `config`, `env`, `unsupported`, or `none`.",
+          "type": "string"
+        },
+        "model": {
+          "description": "Concrete model id passed to the agent; `None` means the agent's own default ran.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_via": {
+          "description": "How the model was delivered: `arg`, `config`, `env`, or `none`.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "Named profile that supplied the tier/effort, if one did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "description": "Requested tier (`local|light|standard|max`); `None` when no tier was requested.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "effort",
+        "effort_applied",
+        "effort_via",
+        "model_via"
+      ],
+      "type": "object"
+    },
     "OriginClass": {
       "description": "Why a goal started. Accounting data only: see the section comment above.",
       "oneOf": [
@@ -614,6 +668,17 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "model_effort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ModelEffortRecord"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Model tier / reasoning effort / concrete model this goal was launched with.\n`None` on goals launched before the abstraction existed."
     },
     "objective": {
       "description": "Detailed objective describing what needs to be accomplished.",
