@@ -1,4 +1,50 @@
-## Unreleased — One state-directory resolver, `ta state`, and a verified one-time migration
+## v0.17.12-alpha.11 — Key custody, one state directory, model/effort profiles, sandboxing and cost tracking
+
+Covers `git log v0.17.11-alpha.7..main` (about 280 commits; PR numbers in parentheses). Not yet
+done in this release: Apple notarization and Windows code signing (phase v0.17.12.12, blocked;
+release checksums are Sigstore-signed), and model-mapping correctness for Codex/Gemini/Ollama
+(phase v0.17.12.33, pending).
+
+**Highlights**
+
+- **Key custody and Keychain prompts (#742, #744, #745, #673, #661, #617).** Persistent per-user
+  custody choice (`ta credentials custody status|file|keychain`); dev installs default to file
+  custody; the vault is never silently re-keyed; secret directories are `0700`; every keychain wait
+  is bounded; tests can no longer touch the real Keychain. Details below.
+- **State directory unification and `ta state` (#747, #750).** One resolver, `ta state show|relocate`,
+  a verified one-time migration and a `ta doctor` check. Windows migration failures fixed in #750.
+- **Model tier and effort profiles (#748).** `ta run --profile|--tier|--effort`, mapped per agent
+  framework from data. `--phases` and `--sub-goals` runs ignore these flags.
+- **`ta doctor` (#746, #741, #744, #747).** Warns about a running daemon with no agent login
+  and about committable `*.cred` files; key custody and state-directory checks.
+- **Cost reporting (#674, #681, #682, #711, #725, #722).** Goal spend and origin-class tracking,
+  `ta cost report` across goals and interactive sessions, output-token split, native per-goal export
+  and Meridian export, `plan_usage_pct` / `budget_used_pct` usage metrics.
+- **Windows (#689, #690, #692, #670, #750).** AppContainer sandbox parity with measured results,
+  CI process-leak fixes, and the state-dir migration fix. End-to-end Windows behaviour is only
+  covered by CI, not by a real-world soak.
+- **Sandbox and security hardening (#684, #686, #687, #689, #691, #694, #666, #669, #703-#705).**
+  Sandbox launch plumbing, macOS Seatbelt v2 with egress proxy, Linux bubblewrap/Landlock/seccomp,
+  default-on isolation for CoS and team roles, remaining red-team findings, deny-by-default gate,
+  Discord channel access control, wiki writes through draft review. Real Linux/macOS/Windows
+  end-to-end enforcement has been exercised mainly through tests and CI.
+- **Chief-of-Staff / chat mode and Wayfinder (#635-#639, #713-#715, #728, #737).** Chat-mode secure
+  launch, read-only persona tool surface, Wayfinder read tools, goal/KPI/datapoint proposals,
+  task intake funnel.
+- **Other notable changes.** Atomic apply and rules engine/postures (#675, #677); VCS detection and
+  `ta setup vcs` (#678); golden-set capture and replay (#697); swappable optimizer slots and RTK
+  optimizer (#698, #707); one `ta cleanup` engine (#708); automatic pruning of merged branches and
+  worktrees (#712); shared build cache and daemon GC for goal agents (#726, #730); phase resolution
+  for `ta run` (#716); draft apply fidelity (#663); automatic version sync (#660, #738, #739);
+  daemon project identity on every response and `.ta/daemon.json` as the one daemon address record; daemon self-update
+  library (#665); wake-on-demand listeners and persistent agent ids (#615, #624); `ta credentials
+  update` (#616); Wayfinder wiki MCP tools (#618, #619); cost-experiment framework (#622);
+  constitution shadow mode (#733, #736); plan-merge fixes (#620, #710); `blocked` plan phase status
+  (#720).
+
+### Per-change detail
+
+### One state-directory resolver, `ta state`, and a verified one-time migration
 
 - **One resolver for the state directory** (`ta_credentials::state_dir`): `TA_STATE_DIR`, then a
   persisted per-user pointer file (`<user dir>/state-dir`, owner-only, written atomically), then
@@ -27,7 +73,7 @@
   `ta state user-dir`, and mirrors the documented precedence only when `ta` cannot answer; with
   no HOME and no override it now writes nothing instead of a cwd-relative path.
 
-## Unreleased — Model tier and reasoning effort, mapped per agent framework
+### Model tier and reasoning effort, mapped per agent framework
 
 - **`ta run --profile <name> | --tier <t> | --effort <e>`** — one vocabulary for "which model and
   how hard it reasons": tiers `local|light|standard|max`, efforts `default|low|medium|high|xhigh|max`,
@@ -53,7 +99,7 @@
 - **Not yet forwarded:** `--phases` (serial-phases) and `--sub-goals` (swarm) runs warn and ignore
   these flags, as they already did for `--model`.
 
-## Unreleased — `ta doctor` flags a daemon started without an agent login
+### `ta doctor` flags a daemon started without an agent login
 
 - **`ta doctor` "Daemon agent login" check** — when a `ta-daemon` is running (pid from
   `.ta/daemon.pid`, alive), the active agent is `claude-code` and chat-class launches run in the
@@ -65,7 +111,7 @@
   process, Windows) doctor says "cannot check" instead of warning. New helper
   `sandbox_launch::chat_launch_is_sandboxed` compiles the same profile `ta run` does.
 
-## Unreleased — Persistent per-user key custody (fixes endless macOS Keychain prompts on dev builds)
+### Persistent per-user key custody (fixes endless macOS Keychain prompts on dev builds)
 
 - **`ta credentials custody status|file|keychain`** — one persistent per-user choice between the OS
   keychain and owner-only file custody, stored in `<user state dir>/custody`. Resolved in one
