@@ -11514,6 +11514,27 @@ Status note: items 1 to 3 are built and tested; the report only shows a recommen
 
 #### Version: `0.17.12-alpha.32`
 
+### v0.17.12.33 - Model and Effort Mapping Correctness (codex, gemini, ollama, others)
+<!-- status: pending -->
+**Depends on**: v0.17.12.32
+
+**Goal**: Sort out the codex, gemini and other model mapping issues so every framework maps tiers (`local|light|standard|max`) and effort (`default|low|medium|high|xhigh|max`) to **real, verified** ids and flags. PR #748 shipped the abstraction (profiles, per-framework `model_map` / `effort_map` / `env`, overrides in `.ta/model-profiles.toml` and `~/.config/ta/model-profiles.toml`, catalog `crates/ta-runtime/model-profiles.default.toml`); this phase makes the content correct.
+
+1. [ ] Verify every shipped model id and flag against vendor docs **on the day of the work**, recording URL and date next to each in the catalog. Known suspects: Codex id `gpt-6.1-sol` was not independently verified; the Codex built-in manifest still passes `--approval-mode full-auto` while Codex docs say `--full-auto` is no longer supported; the effort override `-c model_reasoning_effort=...` must be checked against `codex --help` and the config reference. Acceptance: each catalog entry has a source URL and date; wrong ones fixed.
+2. [ ] Gemini CLI vs Antigravity (`agy`): determine each one's model flag and whether any effort/thinking control exists; map Antigravity tiers (unmapped today) or declare them unsupported explicitly. Acceptance: no tier silently falls through.
+3. [ ] Ollama hardware-aware hook: tier to model is user-local. The installer (MLAppInstaller `mlai hardware detect` + `mlai catalog resolve`, VRAM-tier catalog) picks local models; TA reads the chosen mapping from `~/.config/ta/model-profiles.toml` / `.ta/model-profiles.toml`. Define and document that file contract, and add a `ta doctor` check that the `local` tier maps to a model `ollama list` really has (actionable message: the `ollama pull` command). Acceptance: doctor test with a fake `ollama` script in a tempdir.
+4. [ ] claude-flow and every other manifest in `agents/`: map, or declare unsupported with a loud error when a profile is requested. Acceptance: a test enumerates all manifests and fails on an unclassified one.
+5. [ ] `--phases` (serial), `--sub-goals` (swarm) and `build_shadow_experiment_command` currently ignore `--profile/--tier/--effort`: forward them or reject loudly. Acceptance: tests for each path.
+6. [ ] Real-launch smoke, **local only, never in CI or tests**: a real `claude` launch proving settings injection and `CLAUDE_CODE_EFFORT_LEVEL` pass through the sandbox, plus equivalent real launches for codex and gemini when installed. Record the commands and results in the PR.
+7. [ ] Freshness guard: a script or `ta doctor --models` that re-reads the vendor doc URLs recorded in the catalog and flags ids or levels that no longer appear. Run locally (Actions is unavailable). Acceptance: fixture-based test with a stubbed fetch.
+8. [ ] Pricing rows in `.ta/pricing.toml` for any new ids, with a cost-report test.
+9. [ ] VT side: per-role tier/profile selection in VT team config uses these names (cross-reference VT Phase 19); PR in the VT repo.
+10. [ ] docs/USAGE.md updated with the verified tables.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.33`
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: deferred -->
 
@@ -11896,6 +11917,113 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 **Effort**: M.
 
 #### Version: `0.18.5-alpha.1`
+
+### v0.18.6 - Constitution Skills Crate: Clause Model, Plan and Lock
+<!-- status: pending -->
+**Depends on**: v0.17.12.27 (constitution v2 and shadow mode)
+
+**Goal**: A standalone crate `ta-constitution-skills` turns a project constitution into agent skills that stay correct as the constitution changes. It has **no dependency on ta-cli, ta-daemon or ta-changeset**; TA, ta-virtual-team (VT) and Wayfinder use it through a `ConstitutionSource` trait. Skills are an **advisory rendering**; enforcement stays in `constitution_v2` / `PolicyConstitution`. Open decision, recorded not decided: adopt `rulesync` or write our own renderers. Recommendation: own renderers, because rendering is the easy part and change detection, provenance and approval are the hard part.
+
+1. [ ] Clause model: stable `ClauseId` (scheme from the doc-unification proposal: `<ns>.const.<clause>`, `<ns>.rule.<rule-id>`, `plan:<id>:R<n>`), per-clause sha256 of normalized text (no clause-level hash exists today), severity `Must` | `Should`. Acceptance: whitespace and reordering never change a clause hash; editing the text does.
+2. [ ] `ConstitutionSource` trait (`clauses()`, `source_hash()`) plus a markdown source that **copies** the bullet grammar of `crates/ta-memory/src/auto_capture.rs:463-516` (copy, no dependency). Acceptance: the crate's `cargo tree` shows none of ta-cli, ta-daemon, ta-changeset.
+3. [ ] `SkillPlan` (human-approved grouping of clauses into skills) at `.ta/skills/skills.plan.toml` and `.ta/skills/lock.json` (clause hashes, skill hashes, generator version). Acceptance: round-trip tests; a clause in zero or two skills is a load error.
+4. [ ] `SkillProposer` trait with a heuristic one-skill-per-section proposer in the crate. Acceptance: every clause covered exactly once on the TA constitution.
+5. [ ] Optional LLM proposer lives in **ta-cli**, not the crate; its output is validated: every clause covered exactly once, no invented ids, severity never lowered. The LLM never writes rendered files. Acceptance: tests with a fake model reject each of the three violations. Never reaches a paid agent in tests.
+
+**Effort**: M.
+
+#### Version: `0.18.6-alpha`
+
+### v0.18.6.1 - Constitution Skills: Renderers and Determinism
+<!-- status: pending -->
+**Depends on**: v0.18.6
+
+**Goal**: A `Renderer` trait (pure, no I/O, returns `OutFile`) and the target formats.
+
+1. [ ] Canonical `.agents/skills/<name>/SKILL.md` plus a real copy (not a symlink) in `.claude/skills/`. Frontmatter restricted to the spec keys `name`, `description`, `metadata`, because claude.ai and API upload reject others. Acceptance: a test fails on any other key.
+2. [ ] Short `AGENTS.md` as a managed block between markers (at most about 4 KB, with a routing table to skills) and `CLAUDE.md` containing `@AGENTS.md`; text outside the markers is never touched. Acceptance: size cap enforced; hand text outside markers survives.
+3. [ ] Gemini: `context.fileName` setting pointing at `AGENTS.md`. Acceptance: existing settings keys preserved.
+4. [ ] Optional renderers: `.cursor/rules/*.mdc` and Copilot instructions, off by default.
+5. [ ] Local-model digest (Ollama / `ta-agent-ollama`): a compact digest with **deterministic** skill selection by phase and paths, and a recorded requirement of `num_ctx` >= 64k. Acceptance: same inputs select the same skills.
+6. [ ] Determinism: byte-identical output across runs, LF line endings, no timestamps. Acceptance: render twice and on two platforms, compare bytes.
+
+**Effort**: M.
+
+#### Version: `0.18.6-alpha.1`
+
+### v0.18.6.2 - Constitution Skills: Maintenance Mode and Drift
+<!-- status: pending -->
+**Depends on**: v0.18.6.1
+
+**Goal**: Keep skills in step with a changing constitution without ever applying anything unreviewed.
+
+1. [ ] Delta by clause hash: reorder or whitespace change gives an empty delta; only affected skills are re-rendered. Acceptance: tests for both.
+2. [ ] Retire, never delete, skills whose clauses vanished (marked retired, kept in lock).
+3. [ ] Hand-edit drift of a rendered file is a conflict: default policy Refuse, with a 3-way diff shown. Acceptance: no silent overwrite.
+4. [ ] Every sync is a TA draft needing human approval; never auto-applied. Acceptance: a sync with no approval leaves the tree unchanged.
+
+**Effort**: M.
+
+#### Version: `0.18.6-alpha.2`
+
+### v0.18.6.3 - Constitution Skills: Triggers, Pinning and CLI
+<!-- status: pending -->
+**Depends on**: v0.18.6.2
+
+**Goal**: Wire the crate into TA.
+
+1. [ ] `ta constitution skills sync|diff|status`. Acceptance: each prints counts, paths and the next step (observability mandate).
+2. [ ] Extend the `DraftApplied` event with changed paths (`crates/ta-events/src/schema.rs:142`) and add a post-`draft apply` hook that runs a diff when constitution files changed.
+3. [ ] New `ConstitutionChanged` event and an optional file watcher that emits it.
+4. [ ] Pin the constitution file hash in the state dir like `config-hashes.json` does for personas (it pins no constitution file today) and **refuse** on mismatch with an actionable message.
+5. [ ] docs/USAGE.md section (how-to, no version annotations).
+
+**Effort**: M.
+
+#### Version: `0.18.6-alpha.3`
+
+### v0.18.6.4 - Constitution Skills: Security Boundaries
+<!-- status: pending -->
+**Depends on**: v0.18.6.3
+
+**Goal**: Skills can never weaken governance.
+
+1. [ ] The crate cannot write `.ta/constitution*` or policy paths (path guard in the writer; tested).
+2. [ ] Severity can only ratchet up between lock generations; lowering needs the constitution itself to change.
+3. [ ] Org-layer skills are read-only in project syncs.
+4. [ ] Document that enforcement stays in `constitution_v2` / `PolicyConstitution`; a test proves removing all skills changes no policy decision.
+
+**Effort**: S.
+
+#### Version: `0.18.6-alpha.4`
+
+### v0.18.6.5 - Plan-Scoped Micro-Constitutions
+<!-- status: pending -->
+**Depends on**: v0.18.6.2; VT architect role
+
+**Goal**: The VT `architect` role emits numbered must/should rules with ids `plan:<id>:R1`, ... inside each plan.
+
+1. [ ] Parse plan rules into a `ConstitutionSource`; render them as plan-scoped skills.
+2. [ ] They may only add or tighten relative to the project constitution (validated; a loosening rule is rejected).
+3. [ ] When the plan phase is done, the skills are retired via a reviewed draft, never silently.
+
+**Effort**: S.
+
+#### Version: `0.18.6-alpha.5`
+
+### v0.18.6.6 - Constitution Clauses Link to Docs by Stable Id; VT and Wayfinder Adoption
+<!-- status: pending -->
+**Depends on**: v0.18.6.3; doc-unification (`/Users/michael/development/doc-unification-proposal.md`, section 5.5 id scheme and 5.6 `docs=` key; being revised)
+
+**Goal**: Clauses reference docs by stable doc id, and other products reuse the crate.
+
+1. [ ] `ta-policy` schema change: accept a `docs=` key on constitution rules (unknown keys are rejected today, so the schema change and tests land **before** any real constitution file uses it).
+2. [ ] Rendered skills cite docs by id and resolve them to paths at render time; a dangling id is a sync error.
+3. [ ] VT implements its own `ConstitutionSource` and Wayfinder its own; each is a PR in its own repo. Acceptance: each repo renders its skills with the shared crate.
+
+**Effort**: M.
+
+#### Version: `0.18.6-alpha.6`
 
 ## Projects On Top (separate repos, built on TA)
 
