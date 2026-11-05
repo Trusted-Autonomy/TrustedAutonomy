@@ -251,6 +251,105 @@ fn unignored_cred_fix(unignored: &[(String, String)]) -> String {
     }
 }
 
+/// The resolved per-user state directory and which rule decided it; warns on
+/// an unmigrated old directory, a conflict between old and new, a
+/// `TA_STATE_DIR` that disagrees with the persisted pointer, an unusable
+/// pointer, and temp directories left by an interrupted migration.
+fn check_state_dir() -> CheckResult {
+    check_state_dir_with(&ta_credentials::state_dir::diagnose())
+}
+
+fn check_state_dir_with(d: &ta_credentials::state_dir::Diagnosis) -> CheckResult {
+    use ta_credentials::state_dir::{shell_quote, LegacyStatus};
+    let name = "State directory";
+    let resolved = match &d.resolved {
+        Ok(r) => r,
+        Err(e) => {
+            return CheckResult::warn(
+                name,
+                format!("TA cannot determine its state directory: {e}"),
+                "Run: ta state relocate --to <absolute dir>   (or set TA_STATE_DIR)",
+            )
+        }
+    };
+    let mut problems: Vec<String> = Vec::new();
+    let mut fixes: Vec<String> = Vec::new();
+    match &d.legacy {
+        LegacyStatus::NotApplicable | LegacyStatus::Absent => {}
+        LegacyStatus::Unmigrated(old) => {
+            problems.push(format!(
+                "TA state from before the move is still at the old location and was not migrated: {}",
+                old.describe()
+            ));
+            fixes.push(format!(
+                "Run: ta state relocate --to {}   (copies it once, verified; the old data is kept)",
+                shell_quote(&resolved.root)
+            ));
+        }
+        LegacyStatus::BothHaveState { legacy, current } => {
+            problems.push(format!(
+                "both the old and the current state directories hold state (nothing is merged automatically): old {}; current {}",
+                legacy.describe(),
+                current.describe()
+            ));
+            fixes.push(format!(
+                "Decide which is right: keep the current one with `ta state relocate --to {} --no-migrate`, or move it aside and re-run `ta state relocate --to <dir>` to bring the old state across",
+                shell_quote(&resolved.root)
+            ));
+        }
+        LegacyStatus::MigratedKept { to, info } => {
+            problems.push(format!(
+                "the old directory was migrated to {} and is still on disk: {}",
+                to.display(),
+                info.describe()
+            ));
+            fixes.push(format!(
+                "When you have checked the new directory, remove the old one: rm -rf {}",
+                shell_quote(&info.path)
+            ));
+        }
+    }
+    if d.diverged {
+        problems.push(format!(
+            "TA_STATE_DIR ({}) and the persisted pointer ({}) name different directories, so processes with the variable in their environment and processes without it use different state",
+            d.env_value.as_deref().unwrap_or("?"),
+            d.pointer_value
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ));
+        fixes.push(
+            "Unset TA_STATE_DIR (and remove it from your service definitions), or run `ta state relocate --to <dir>` with the one you want".into(),
+        );
+    }
+    if let Some(e) = &d.pointer_error {
+        problems.push(format!("the persisted state-dir pointer is unusable: {e}"));
+        fixes.push("Run: ta state relocate --to <absolute dir>   (rewrites the pointer)".into());
+    }
+    for t in &d.stale_temps {
+        problems.push(format!(
+            "interrupted migration leftover {} ({}); it is never used as state",
+            t.path.display(),
+            ta_credentials::state_dir::human_size(t.bytes)
+        ));
+        fixes.push(format!("Remove it: rm -rf {}", shell_quote(&t.path)));
+    }
+    let base = format!(
+        "{} (decided by {})",
+        resolved.root.display(),
+        resolved.source.describe()
+    );
+    if problems.is_empty() {
+        CheckResult::ok(name, base)
+    } else {
+        CheckResult::warn(
+            name,
+            format!("{base}. {}", problems.join(". ")),
+            fixes.join("\n"),
+        )
+    }
+}
+
 /// Old-location keys, tokens and NATS data inside the project tree, or bearer
 /// tokens left in team-session state. Fails under the `strict` posture.
 fn check_control_plane_secrets(config: &GatewayConfig) -> CheckResult {
@@ -433,6 +532,10 @@ fn run_all_checks_with(
     // 26. Credential vault key custody — loud warning when the encryption
     // key fell back to a file instead of the OS keychain (v0.17.6.2).
     results.push(check_credential_vault_key_custody(config));
+
+    // 26a. Where the per-user state lives, which rule decided it, and any
+    // old-location data that was never migrated.
+    results.push(check_state_dir());
 
     // 26b. Keychain custody with a binary that has no Team ID re-prompts on
     // every rebuild; warn and name the fix. Never reads the keychain.
@@ -2590,7 +2693,10 @@ fn check_credential_vault_key_custody_with(
             );
             let fix = "Run: ta doctor --fix --only secrets   (moves the key to the per-user state \
                        directory with a verified copy before removing this one)";
-            if Posture::resolve(&StateLocator::from_env()) == Posture::Strict {
+            if StateLocator::from_env()
+                .map(|l| Posture::resolve(&l) == Posture::Strict)
+                .unwrap_or(false)
+            {
                 CheckResult::fail("Credential vault", detail, fix)
             } else {
                 CheckResult::warn("Credential vault", detail, fix)
@@ -3938,5 +4044,74 @@ mod tests {
     fn windows_target_line_is_absent_outside_a_rust_workspace() {
         let dir = tempfile::tempdir().unwrap();
         assert!(check_windows_target(dir.path()).is_none());
+    }
+
+    fn state_host(home: &Path) -> ta_credentials::state_dir::Host {
+        ta_credentials::state_dir::Host {
+            os: ta_credentials::state_dir::Os::MacOs,
+            home: Some(home.to_path_buf()),
+            test_guard: false,
+            pid: 1,
+            temp_dir: std::env::temp_dir(),
+        }
+    }
+
+    #[test]
+    fn state_dir_check_reports_source_and_warns_on_an_unmigrated_old_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home
+            .path()
+            .join("Library")
+            .join("Application Support")
+            .join("TrustedAutonomy");
+        std::fs::create_dir_all(legacy.join("projects").join("p_a")).unwrap();
+        std::fs::write(
+            legacy.join("projects").join("p_a").join("project-path"),
+            "/x",
+        )
+        .unwrap();
+        let target = home.path().join("new-state");
+        let target_s = target.display().to_string();
+        let env = |k: &str| (k == "TA_STATE_DIR").then(|| target_s.clone());
+        let d = ta_credentials::state_dir::diagnose_with(&env, &state_host(home.path()));
+        let c = check_state_dir_with(&d);
+        assert_eq!(c.status, CheckStatus::Warn, "{}", c.detail);
+        assert!(c.detail.contains(&target_s), "{}", c.detail);
+        assert!(c.detail.contains("TA_STATE_DIR"), "{}", c.detail);
+        assert!(c.detail.contains("not migrated"), "{}", c.detail);
+        assert!(c.fix.contains("ta state relocate --to"), "{}", c.fix);
+
+        // Without an override the OS default is the old directory itself: clean.
+        let none = |_: &str| None::<String>;
+        let d = ta_credentials::state_dir::diagnose_with(&none, &state_host(home.path()));
+        let c = check_state_dir_with(&d);
+        assert_eq!(c.status, CheckStatus::Ok, "{}", c.detail);
+        assert!(c.detail.contains("OS default"), "{}", c.detail);
+    }
+
+    #[test]
+    fn state_dir_check_warns_when_the_environment_and_the_pointer_disagree() {
+        let home = tempfile::tempdir().unwrap();
+        let user_dir = home.path().join("user");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let pointer_target = home.path().join("from-pointer");
+        std::fs::write(
+            user_dir.join("state-dir"),
+            pointer_target.display().to_string(),
+        )
+        .unwrap();
+        let env_target = home.path().join("from-env").display().to_string();
+        let user_s = user_dir.display().to_string();
+        let env = |k: &str| match k {
+            "TA_STATE_DIR" => Some(env_target.clone()),
+            "TA_USER_STATE_DIR" => Some(user_s.clone()),
+            _ => None,
+        };
+        let d = ta_credentials::state_dir::diagnose_with(&env, &state_host(home.path()));
+        let c = check_state_dir_with(&d);
+        assert_eq!(c.status, CheckStatus::Warn, "{}", c.detail);
+        assert!(c.detail.contains("different directories"), "{}", c.detail);
+        assert!(c.detail.contains(&env_target), "{}", c.detail);
+        assert!(c.fix.contains("Unset TA_STATE_DIR"), "{}", c.fix);
     }
 }

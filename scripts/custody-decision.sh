@@ -8,15 +8,34 @@
 # The custody file `<user_state_dir>/custody` makes every TA process (ta,
 # ta-daemon, the Wayfinder poller) keep secrets in owner-only files instead.
 #
-# This file must never touch the Keychain and never run `ta`: it only inspects
-# a signature with `codesign` and writes one small file.
+# This file must never touch the Keychain: it inspects a signature with
+# `codesign`, writes one small file, and asks the installed `ta` one
+# project-independent question (`ta state user-dir`, which only prints a path).
 
-# ta_user_state_dir: same resolution as ta_credentials::human::user_state_dir.
+# ta_user_state_dir [BINARY]: the per-user TA directory (it holds `custody`
+# and the persisted `state-dir` pointer).
+#
+# The rule is owned by Rust (`ta_credentials::human::user_state_dir`), so when
+# BINARY is an executable `ta` that knows `ta state user-dir` we ask it, and
+# this file does not carry a second copy of the rule. Only when that is not
+# possible (no BINARY, or a `ta` that predates the subcommand) do we mirror the
+# documented precedence: $TA_USER_STATE_DIR, else $HOME/.config/ta/human.
+# With neither a usable `ta` nor a HOME it fails (exit 1) rather than guess a
+# relative path.
 ta_user_state_dir() {
+    local binary="${1:-}" dir=""
+    if [[ -n "$binary" && -x "$binary" ]]; then
+        dir="$("$binary" state user-dir 2>/dev/null || true)"
+        case "$dir" in
+            /*) printf '%s' "$dir"; return 0 ;;
+        esac
+    fi
     if [[ -n "${TA_USER_STATE_DIR:-}" ]]; then
         printf '%s' "$TA_USER_STATE_DIR"
-    else
+    elif [[ -n "${HOME:-}" ]]; then
         printf '%s' "${HOME}/.config/ta/human"
+    else
+        return 1
     fi
 }
 
@@ -60,7 +79,11 @@ ta_decide_custody() {
         return 0
     fi
     team="$(ta_team_identifier "$binary")"
-    dir="$(ta_user_state_dir)"
+    if ! dir="$(ta_user_state_dir "$binary")" || [[ -z "$dir" ]]; then
+        echo "Warning: cannot tell where TA keeps its per-user state (HOME is unset and TA_USER_STATE_DIR is not set)," \
+             "so the key-custody default was not written. Set HOME or TA_USER_STATE_DIR and re-run the installer, or run: ta credentials custody file"
+        return 0
+    fi
     file="$dir/custody"
 
     if [[ -n "$team" ]]; then

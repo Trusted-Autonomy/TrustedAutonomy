@@ -1391,7 +1391,7 @@ mod tests {
         // A poller holding the public registry (and nothing else) verifies it.
         let ps = ta_credentials::state::ProjectState::open(
             dir.path(),
-            &ta_credentials::state::StateLocator::from_env(),
+            &ta_credentials::state::StateLocator::from_env().unwrap(),
         )
         .unwrap();
         let raw = std::fs::read_to_string(
@@ -1507,7 +1507,7 @@ mod tests {
         // Re-sign with an old issued_at using the same key.
         let ps = ta_credentials::state::ProjectState::open(
             dir.path(),
-            &ta_credentials::state::StateLocator::from_env(),
+            &ta_credentials::state::StateLocator::from_env().unwrap(),
         )
         .unwrap();
         let (kid, key) = ta_credentials::outcome_keys::OutcomeKeyStore::open(&ps)

@@ -462,7 +462,7 @@ fn custody(config: &GatewayConfig, action: Option<&CustodyCommands>) -> anyhow::
         Some(CustodyCommands::File) => CustodyMode::File,
         Some(CustodyCommands::Keychain) => CustodyMode::Keychain,
     };
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env()?;
     let ps = ProjectState::open(&config.workspace_root, &locator).map_err(|e| {
         anyhow::anyhow!(
             "could not open the state directory for project {}: {e}. Nothing was changed.",

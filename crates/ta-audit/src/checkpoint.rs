@@ -246,7 +246,7 @@ impl CheckpointSink {
     /// audit key (the unsigned default) or its state directory cannot be
     /// used. Never creates a key or a state directory.
     pub fn for_project(project_root: &Path) -> Option<Self> {
-        let locator = StateLocator::from_env();
+        let locator = StateLocator::from_env().ok()?;
         let ps = ProjectState::locate(project_root, &locator)
             .ok()
             .flatten()?;

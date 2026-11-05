@@ -27,7 +27,8 @@ pub enum OutcomeKeyCommands {
 }
 
 fn open(project_root: &Path) -> anyhow::Result<(OutcomeKeyStore, ProjectState)> {
-    let ps = ProjectState::open(project_root, &StateLocator::from_env()).map_err(|e| {
+    let locator = StateLocator::from_env()?;
+    let ps = ProjectState::open(project_root, &locator).map_err(|e| {
         anyhow::anyhow!(
             "cannot open the TA state directory for {} ({e}). Run `ta show state` to see where it is."
             , project_root.display()

@@ -87,14 +87,22 @@ impl Custody {
 /// project tree. `$TA_USER_STATE_DIR` wins, otherwise `~/.config/ta/human`
 /// (the literal `~/.config/ta` TA uses everywhere, also on macOS and Windows).
 pub fn user_state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(STATE_DIR_ENV).filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
-    }
-    dirs::home_dir()
+    user_state_dir_with(&|k| std::env::var(k).ok(), dirs::home_dir().as_deref())
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config")
-        .join("ta")
-        .join("human")
+}
+
+/// The pure form of [`user_state_dir`]: `None` when the user has no home
+/// directory and `$TA_USER_STATE_DIR` is unset. The state-directory resolver
+/// (`state_dir`) uses this so it can report that case instead of falling back
+/// to the current directory.
+pub fn user_state_dir_with(
+    env: &dyn Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = env(STATE_DIR_ENV).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    home.map(|h| h.join(".config").join("ta").join("human"))
 }
 
 fn hash_secret(secret: &str) -> String {

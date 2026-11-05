@@ -140,7 +140,14 @@ pub fn start(
     shutdown: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let locator = StateLocator::from_env();
+        let locator = match StateLocator::from_env() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e,
+                    "the action queue worker could not resolve the state directory, so queued outside actions will NOT be sent. Fix the state directory (`ta state show`), then run `ta daemon restart`");
+                return;
+            }
+        };
         let root = project_root.clone();
         let loc = locator.clone();
         let startup = tokio::task::spawn_blocking(move || {

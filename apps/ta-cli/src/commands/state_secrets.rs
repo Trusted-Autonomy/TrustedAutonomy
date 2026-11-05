@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 use ta_audit::{AuditAction, AuditEvent, AuditLog};
 use ta_credentials::state::{
-    self, CustodyOpts, LegacyFinding, MigrationReport, MigrationStatus, Os, Posture, ProjectState,
+    self, CustodyOpts, LegacyFinding, MigrationReport, MigrationStatus, Posture, ProjectState,
     StateLocator,
 };
+use ta_credentials::state_dir::{Os, StateSource};
 use ta_mcp_gateway::GatewayConfig;
 
 /// What `ta doctor` needs to know about secrets in the project tree.
@@ -45,9 +46,9 @@ impl SecretsSummary {
 }
 
 pub fn summarize(project_root: &Path) -> SecretsSummary {
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env().ok();
     SecretsSummary {
-        posture: Posture::resolve(&locator),
+        posture: locator.map(|l| Posture::resolve(&l)).unwrap_or_default(),
         legacy: state::legacy_findings(project_root),
         token_files: token_bearing_files(project_root),
         cred_files: plaintext_cred_files(project_root),
@@ -251,7 +252,7 @@ pub struct SecretsFixOutcome {
 /// verified copy, and scrub bearer tokens. Never prompts; the caller has
 /// already decided. Safe to re-run.
 pub fn apply_fix(config: &GatewayConfig) -> anyhow::Result<SecretsFixOutcome> {
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env()?;
     let ps = ProjectState::open(&config.workspace_root, &locator)?;
     let opts = CustodyOpts::from_env(&locator);
     let report = state::migrate_project(&ps, opts);
@@ -338,7 +339,9 @@ pub fn pin_launch_configs(project_root: &Path, persona: Option<&str>, agent: &st
         rels.push(format!(".ta/personas/{p}.toml"));
     }
     rels.push(format!(".ta/agents/{agent}.yaml"));
-    let locator = StateLocator::from_env();
+    let Ok(locator) = StateLocator::from_env() else {
+        return;
+    };
     let Ok(ps) = ProjectState::open(project_root, &locator) else {
         return;
     };
@@ -376,10 +379,19 @@ pub fn pin_launch_configs(project_root: &Path, persona: Option<&str>, agent: &st
 /// directory and never touches the project tree. A project that has not stored
 /// a secret yet reports "no project id yet" and where state will go.
 pub fn show_state(project_root: &Path) -> anyhow::Result<()> {
-    show_state_with(project_root, &StateLocator::from_env())
+    let resolved = ta_credentials::state_dir::resolve()?;
+    show_state_with(
+        project_root,
+        &StateLocator::at(&resolved.root),
+        Some(&resolved.source),
+    )
 }
 
-pub(crate) fn show_state_with(project_root: &Path, locator: &StateLocator) -> anyhow::Result<()> {
+pub(crate) fn show_state_with(
+    project_root: &Path,
+    locator: &StateLocator,
+    source: Option<&StateSource>,
+) -> anyhow::Result<()> {
     let opts = CustodyOpts::from_env(locator);
     let os = match Os::current() {
         Os::MacOs => "macOS",
@@ -389,6 +401,12 @@ pub(crate) fn show_state_with(project_root: &Path, locator: &StateLocator) -> an
     let id_file = project_root.join(".ta").join(state::PROJECT_ID_FILENAME);
     println!("TA state directory ({os})");
     println!("  State root:       {}", locator.root().display());
+    if let Some(source) = source {
+        println!(
+            "  Decided by:       {} (see `ta state show`)",
+            source.describe()
+        );
+    }
     match ProjectState::locate(project_root, locator)? {
         Some(ps) => {
             println!(
@@ -496,7 +514,7 @@ mod tests {
         std::fs::create_dir_all(persona.parent().unwrap()).unwrap();
         std::fs::write(&persona, "v1").unwrap();
         pin_launch_configs(dir.path(), Some("cos"), "claude-code");
-        let ps = ProjectState::open(dir.path(), &StateLocator::from_env()).unwrap();
+        let ps = ProjectState::open(dir.path(), &StateLocator::from_env().unwrap()).unwrap();
         assert_eq!(
             state::check_config_hash(&ps, ".ta/personas/cos.toml", b"v1"),
             state::HashCheck::Match
@@ -552,7 +570,7 @@ mod tests {
         let (before_tree, before_state) = (snapshot(project.path()), snapshot(state.path()));
         let dirs_before = std::fs::read_dir(state.path()).unwrap().count();
 
-        show_state_with(project.path(), &locator).unwrap();
+        show_state_with(project.path(), &locator, None).unwrap();
 
         assert_eq!(snapshot(project.path()), before_tree);
         assert_eq!(snapshot(state.path()), before_state);
@@ -574,7 +592,7 @@ mod tests {
         // A real write path (what a command that stores a secret does).
         ProjectState::open(project.path(), &locator).unwrap();
         let (before_tree, before_state) = (snapshot(project.path()), snapshot(state.path()));
-        show_state_with(project.path(), &locator).unwrap();
+        show_state_with(project.path(), &locator, None).unwrap();
         assert_eq!(snapshot(project.path()), before_tree);
         assert_eq!(snapshot(state.path()), before_state);
     }

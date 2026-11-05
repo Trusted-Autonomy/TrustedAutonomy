@@ -27,7 +27,8 @@ use ta_mcp_gateway::GatewayConfig;
 /// The project's daemon-only state directory, created on first use. Refuses
 /// from a staging workspace.
 pub(crate) fn open_state(project_root: &Path) -> anyhow::Result<ProjectState> {
-    ProjectState::open(project_root, &StateLocator::from_env()).with_context(|| {
+    let locator = StateLocator::from_env()?;
+    ProjectState::open(project_root, &locator).with_context(|| {
         format!(
             "could not open the TA state directory for {}. Run this from the project root, \
              not from a staging workspace",

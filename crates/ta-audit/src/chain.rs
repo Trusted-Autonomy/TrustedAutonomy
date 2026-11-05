@@ -82,7 +82,7 @@ impl AuditHmacKey {
     /// Load the project's audit key from the state directory (or the legacy
     /// location in the default posture). `Ok(None)` when no key exists.
     pub fn load_for_project(project_root: &Path) -> Result<Option<Self>, AuditError> {
-        let locator = StateLocator::from_env();
+        let locator = StateLocator::from_env().map_err(state_err)?;
         let Some(ps) = ProjectState::locate(project_root, &locator).map_err(state_err)? else {
             // No state directory yet: only a legacy key could exist.
             let legacy = Self::path_for(project_root);
@@ -98,7 +98,7 @@ impl AuditHmacKey {
     /// Load the project's audit key, generating it in the state directory
     /// when none exists.
     pub fn load_or_generate_for_project(project_root: &Path) -> Result<Self, AuditError> {
-        let locator = StateLocator::from_env();
+        let locator = StateLocator::from_env().map_err(state_err)?;
         let ps = ProjectState::open(project_root, &locator).map_err(state_err)?;
         Self::load_or_generate_in_state(&ps, CustodyOpts::from_env(&locator))
     }

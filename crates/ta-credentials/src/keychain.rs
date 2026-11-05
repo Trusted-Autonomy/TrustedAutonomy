@@ -505,7 +505,7 @@ pub fn startup_items(project_root: &Path) -> Result<Vec<KeychainItem>, String> {
 /// ask what would be read.
 pub fn items_for_project(project_root: &Path) -> Result<Vec<KeychainItem>, String> {
     use crate::state::{ControlSecret, ProjectState, StateLocator};
-    let locator = StateLocator::from_env();
+    let locator = StateLocator::from_env().map_err(|e| e.to_string())?;
     let ps = ProjectState::open(project_root, &locator).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for (which, purpose) in [

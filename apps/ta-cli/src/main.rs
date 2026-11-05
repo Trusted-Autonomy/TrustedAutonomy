@@ -1478,6 +1478,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show or move TA's per-user state directory (`ta state show`, `ta state relocate`).
+    ///
+    /// One rule decides where TA keeps its keys, tokens and NATS data for every
+    /// ta and ta-daemon process of this user: TA_STATE_DIR, then the persisted
+    /// pointer file written by `ta state relocate`, then the OS default.
+    ///
+    /// Examples:
+    ///   ta state show                          # which directory, and why
+    ///   ta state relocate --to /data/ta-state  # move it once, verified
+    #[command(hide = true)]
+    State {
+        #[command(subcommand)]
+        command: commands::state_dir::StateCommands,
+    },
     /// Manage per-agent terms consent (v0.10.18.4).
     ///
     /// Subcommands: `ta terms show <agent>`, `ta terms accept <agent>`, `ta terms status`.
@@ -1666,6 +1680,8 @@ fn run() -> anyhow::Result<()> {
             // Read-only and project-independent: answered before any project or
             // daemon work so an installer can probe a machine with no project.
             Commands::Capabilities { json } => return commands::capabilities::execute(*json),
+            // The per-user state directory: which one is in use, and moving it.
+            Commands::State { command } => return commands::state_dir::execute(command),
             // Per-agent terms management (v0.10.18.4).
             Commands::Terms { action, agent } => {
                 let project_root = cli
@@ -1704,6 +1720,18 @@ fn run() -> anyhow::Result<()> {
     let needs_terms = cli.command.as_ref().is_some_and(requires_terms_acceptance);
     if needs_terms {
         commands::terms::ensure_accepted(json_stdout)?;
+    }
+
+    // The state directory may have been moved (TA_STATE_DIR or `ta state
+    // relocate`) since this machine's state was created: copy it over once,
+    // verified, before anything reads or writes a secret. `ta doctor` reports
+    // instead of migrating, and `ta daemon ...` must stay usable while a
+    // daemon holds the old directory.
+    if !matches!(
+        cli.command,
+        Some(Commands::Doctor { .. }) | Some(Commands::Daemon { .. }) | Some(Commands::Install)
+    ) {
+        commands::state_dir::auto_migrate_at_startup()?;
     }
 
     let project_root = cli.project_root.canonicalize().unwrap_or(cli.project_root);
@@ -2540,6 +2568,7 @@ fn dispatch_raw(
         | Commands::ViewTerms
         | Commands::TermsStatus { .. }
         | Commands::Capabilities { .. }
+        | Commands::State { .. }
         | Commands::Terms { .. } => unreachable!(),
     }
 }
@@ -2565,6 +2594,7 @@ fn command_prints_json(cmd: Option<&Commands>) -> bool {
         Some(Commands::Setup { command }) => commands::setup::prints_json(command),
         Some(Commands::Daemon { command }) => commands::daemon::prints_json(command),
         Some(Commands::TermsStatus { json }) | Some(Commands::Capabilities { json }) => *json,
+        Some(Commands::State { command }) => commands::state_dir::prints_json(command),
         _ => false,
     }
 }

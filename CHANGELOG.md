@@ -1,3 +1,30 @@
+## Unreleased — One state-directory resolver, `ta state`, and a verified one-time migration
+
+- **One resolver for the state directory** (`ta_credentials::state_dir`): `TA_STATE_DIR`, then a
+  persisted per-user pointer file (`<user dir>/state-dir`, owner-only, written atomically), then
+  the cargo-test temp dir, then the OS default. `ta`, `ta-daemon`, the credential broker, audit
+  and rules code all go through it (`StateLocator::from_env()` now returns a `Result`). With no
+  home directory and no override it fails with what to set instead of using the current
+  directory. Why: the root used to be decided independently per process by an environment
+  variable, so a daemon started without `TA_STATE_DIR` quietly used a different directory than
+  the installer that set it.
+- **`ta state show | relocate --to <dir> | user-dir`** — `show` prints the resolved directory and
+  which rule decided it (and the old location's status); `relocate` migrates once and records the
+  pointer, for installers; `user-dir` prints the per-user directory for shell scripts.
+- **One-time migration**: refuses while a daemon or NATS server runs against the old directory;
+  copies to a temp dir, verifies file count, permissions and the SHA-256 of every file, then
+  renames atomically; writes `.migrated-from` (new) and `MIGRATED-TO` (old); never deletes or
+  modifies the old data and prints its path, size and the `rm -rf` command; idempotent; never
+  merges when both sides hold state (reports both, sizes and mtimes); reports stale temp dirs.
+  `ta` and `ta-daemon` run it automatically, once, when the configured directory is empty and the
+  OS default holds unmigrated state.
+- **`ta doctor` "State directory" check** — shows the resolved directory and its source, warns on
+  an unmigrated or still-present old directory, on `TA_STATE_DIR` disagreeing with the pointer,
+  on an unusable pointer, and on leftover temp dirs.
+- **`scripts/custody-decision.sh`** no longer carries its own copy of the rule: it asks
+  `ta state user-dir`, and mirrors the documented precedence only when `ta` cannot answer; with
+  no HOME and no override it now writes nothing instead of a cwd-relative path.
+
 ## Unreleased — `ta doctor` flags a daemon started without an agent login
 
 - **`ta doctor` "Daemon agent login" check** — when a `ta-daemon` is running (pid from

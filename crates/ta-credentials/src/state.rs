@@ -10,6 +10,10 @@
 //            (default ~/.local/state/trusted-autonomy/projects/<project-id>/)
 //   Windows  %LOCALAPPDATA%\TrustedAutonomy\projects\<project-id>\
 //
+// (Those are the OS defaults. `TA_STATE_DIR` or a persisted per-user pointer
+// (`ta state relocate`) can move the root; see `state_dir.rs`, the one place
+// that decides, and the one-time migration from the old location.)
+//
 // `<project-id>` is a stable id minted once per project and recorded in
 // `<project>/.ta/project-id` (non-secret). Two projects never share a state
 // directory: a copied project (same id file, original still on disk) mints a
@@ -110,6 +114,8 @@ pub enum StateError {
          to the real project; run this command from the project root instead."
     )]
     StagingWorkspace { path: PathBuf },
+    #[error(transparent)]
+    Dir(#[from] crate::state_dir::StateDirError),
 }
 
 impl From<human::HumanCredentialError> for StateError {
@@ -127,78 +133,25 @@ impl From<human::HumanCredentialError> for StateError {
 
 // ── Locations ──────────────────────────────────────────────────────────────
 
-/// Operating system families with distinct state-directory conventions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Os {
-    MacOs,
-    Linux,
-    Windows,
-}
-
-impl Os {
-    pub fn current() -> Os {
-        if cfg!(target_os = "macos") {
-            Os::MacOs
-        } else if cfg!(windows) {
-            Os::Windows
-        } else {
-            Os::Linux
-        }
-    }
-}
-
-/// Pure computation of the state root for an OS, given an environment lookup
-/// and a home directory. Separated from the process environment so every OS
-/// is testable on every host.
-pub fn state_root_for(
-    os: Os,
-    env: &dyn Fn(&str) -> Option<String>,
-    home: Option<&Path>,
-) -> PathBuf {
-    if let Some(dir) = env(STATE_ROOT_ENV).filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
-    }
-    let home = home.map(Path::to_path_buf).unwrap_or_else(|| ".".into());
-    match os {
-        Os::MacOs => home
-            .join("Library")
-            .join("Application Support")
-            .join("TrustedAutonomy"),
-        Os::Linux => env("XDG_STATE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local").join("state"))
-            .join("trusted-autonomy"),
-        Os::Windows => env("LOCALAPPDATA")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData").join("Local"))
-            .join("TrustedAutonomy"),
-    }
-}
-
-/// Where state lives for the running process. Inside a cargo test binary with
-/// no override this is a per-process directory under the system temp dir, so
-/// a test can never write into the developer's real state directory.
+/// Where state lives for the running process. The directory is decided by the
+/// one resolver, [`crate::state_dir::resolve`] (`TA_STATE_DIR`, then the
+/// persisted per-user pointer, then a cargo-test temp dir, then the OS
+/// default); inside a cargo test binary with no override that is a per-process
+/// directory under the system temp dir, so a test can never write into the
+/// developer's real state directory.
 #[derive(Debug, Clone)]
 pub struct StateLocator {
     root: PathBuf,
 }
 
 impl StateLocator {
-    pub fn from_env() -> Self {
-        let env = |k: &str| std::env::var(k).ok();
-        let explicit = env(STATE_ROOT_ENV).filter(|v| !v.is_empty());
-        if explicit.is_none() && crate::encryption::keychain_guard_active() {
-            return Self {
-                root: std::env::temp_dir()
-                    .join(format!("ta-test-state-{}", std::process::id()))
-                    .join("TrustedAutonomy"),
-            };
-        }
-        Self {
-            root: state_root_for(Os::current(), &env, dirs::home_dir().as_deref()),
-        }
+    /// The state directory every TA process of this user agrees on. Fails
+    /// (with the fix spelled out) when none can be determined; it never
+    /// falls back to the current directory.
+    pub fn from_env() -> Result<Self, StateError> {
+        Ok(Self {
+            root: crate::state_dir::resolve()?.root,
+        })
     }
 
     /// A locator rooted at an explicit directory (tests, installers).
@@ -1330,58 +1283,11 @@ pub fn check_config_hash(ps: &ProjectState, rel: &str, bytes: &[u8]) -> HashChec
 mod tests {
     use super::*;
 
-    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |k| {
-            pairs
-                .iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| v.to_string())
-        }
-    }
-
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, StateLocator) {
         let project = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let loc = StateLocator::at(state.path());
         (project, state, loc)
-    }
-
-    #[test]
-    fn per_os_locations_are_exact() {
-        let home = Path::new("/home/u");
-        assert_eq!(
-            state_root_for(Os::MacOs, &env_of(&[]), Some(home)),
-            Path::new("/home/u/Library/Application Support/TrustedAutonomy")
-        );
-        assert_eq!(
-            state_root_for(Os::Linux, &env_of(&[]), Some(home)),
-            Path::new("/home/u/.local/state/trusted-autonomy")
-        );
-        assert_eq!(
-            state_root_for(
-                Os::Linux,
-                &env_of(&[("XDG_STATE_HOME", "/x/state")]),
-                Some(home)
-            ),
-            Path::new("/x/state/trusted-autonomy")
-        );
-        assert_eq!(
-            state_root_for(
-                Os::Windows,
-                &env_of(&[("LOCALAPPDATA", "C:/Users/u/AppData/Local")]),
-                Some(home)
-            ),
-            Path::new("C:/Users/u/AppData/Local/TrustedAutonomy")
-        );
-        assert_eq!(
-            state_root_for(Os::Windows, &env_of(&[]), Some(home)),
-            Path::new("/home/u/AppData/Local/TrustedAutonomy")
-        );
-        // The override wins on every OS.
-        assert_eq!(
-            state_root_for(Os::MacOs, &env_of(&[(STATE_ROOT_ENV, "/o")]), Some(home)),
-            Path::new("/o")
-        );
     }
 
     #[test]
@@ -1745,7 +1651,7 @@ mod tests {
 
     #[test]
     fn locator_is_isolated_under_test_and_keychain_is_off() {
-        let loc = StateLocator::from_env();
+        let loc = StateLocator::from_env().unwrap();
         assert!(
             loc.root().starts_with(std::env::temp_dir()),
             "{:?}",

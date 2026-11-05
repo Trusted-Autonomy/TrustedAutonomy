@@ -148,7 +148,7 @@ pub fn persona_sandbox(
 /// The TA state directory for `project_root`, when one exists (where the
 /// AppContainer grant ledger lives).
 pub fn project_state_dir(project_root: &Path) -> Option<PathBuf> {
-    let locator = ta_credentials::state::StateLocator::from_env();
+    let locator = ta_credentials::state::StateLocator::from_env().ok()?;
     ta_credentials::state::ProjectState::locate(project_root, &locator)
         .ok()
         .flatten()
@@ -164,7 +164,7 @@ pub fn prepare_staging(project_root: &Path, goal_id: &str, staging: &Path) -> Re
     if SandboxPolicy::detect_provider() != SandboxProvider::WindowsAppContainer {
         return Ok(());
     }
-    let state = ta_credentials::state::StateLocator::from_env();
+    let state = ta_credentials::state::StateLocator::from_env().map_err(|e| e.to_string())?;
     let state = ta_credentials::state::ProjectState::locate(project_root, &state)
         .ok()
         .flatten();
@@ -206,7 +206,7 @@ pub fn prepare_staging(project_root: &Path, goal_id: &str, staging: &Path) -> Re
 /// by default (balanced floor), so this is true unless the owner's policy sets
 /// the posture to `open`. `Err` is why the trusted policy could not be read.
 pub fn chat_launch_is_sandboxed(project_root: &Path) -> Result<bool, String> {
-    let locator = ta_credentials::state::StateLocator::from_env();
+    let locator = ta_credentials::state::StateLocator::from_env().map_err(|e| e.to_string())?;
     let state = ta_credentials::state::ProjectState::locate(project_root, &locator)
         .ok()
         .flatten();
@@ -235,7 +235,7 @@ pub fn chat_launch_is_sandboxed(project_root: &Path) -> Result<bool, String> {
 /// actionable (unreadable trusted policy, refused decision is NOT an error
 /// here: the caller inspects `decision`).
 pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
-    let locator = ta_credentials::state::StateLocator::from_env();
+    let locator = ta_credentials::state::StateLocator::from_env().map_err(|e| e.to_string())?;
     let state = ta_credentials::state::ProjectState::locate(input.project_root, &locator)
         .ok()
         .flatten();
