@@ -630,6 +630,19 @@ pub fn build_ta_run_args(
             args.push("--model".to_string());
             args.push(resolved.to_string());
         }
+        // TA model + reasoning-effort profile (`ta run --profile/--effort`): maps onto
+        // whichever framework `ta run` resolves, per the agent manifest's model_map /
+        // effort_map, and `ta run` itself reports anything the framework cannot
+        // express. A concrete `--model` from `model_tiers` above still beats the
+        // profile's tier mapping; the profile's effort applies either way.
+        if let Some(profile) = &member.profile {
+            args.push("--profile".to_string());
+            args.push(profile.clone());
+        }
+        if let Some(effort) = &member.effort {
+            args.push("--effort".to_string());
+            args.push(effort.clone());
+        }
     }
     // A role with no `.ta/team.toml` assignment yet falls through to
     // `ta run`'s own default resolution chain (workflow.toml, daemon.toml,
@@ -1739,6 +1752,77 @@ mod tests {
 
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn build_args_passes_profile_and_effort_when_the_member_sets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "claude-sonnet-4-6".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+        team_config.members[0].profile = Some("deep".to_string());
+        team_config.members[0].effort = Some("max".to_string());
+
+        let args = build_ta_run_args(
+            dir.path(),
+            &state,
+            &stage.name,
+            "analyst",
+            Uuid::nil(),
+            &team_config,
+            &context_path,
+            None,
+        )
+        .unwrap();
+
+        let at = |flag: &str| {
+            let i = args.iter().position(|a| a == flag).unwrap_or_else(|| {
+                panic!("{flag} missing from {args:?}");
+            });
+            args[i + 1].clone()
+        };
+        assert_eq!(at("--profile"), "deep");
+        assert_eq!(at("--effort"), "max");
+        // The concrete model from agent_id is still passed and beats the profile's tier.
+        assert_eq!(at("--model"), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn build_args_omits_profile_and_effort_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+        let stage = &state.stages[0];
+        let context_path =
+            write_session_context(dir.path(), &state, &stage.name, "analyst").unwrap();
+        let mut team_config = TeamConfig::default();
+        team_config.assign(
+            TeamRole::new("analyst"),
+            "claude-sonnet-4-6".to_string(),
+            ta_session::workflow_session::AdvisorSecurity::Auto,
+            None,
+        );
+        let args = build_ta_run_args(
+            dir.path(),
+            &state,
+            &stage.name,
+            "analyst",
+            Uuid::nil(),
+            &team_config,
+            &context_path,
+            None,
+        )
+        .unwrap();
+        assert!(!args.contains(&"--profile".to_string()));
+        assert!(!args.contains(&"--effort".to_string()));
     }
 
     #[test]

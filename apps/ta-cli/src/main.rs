@@ -240,17 +240,31 @@ enum Commands {
         /// recommendation (logged to .ta/agent-recommendations.jsonl).
         #[arg(long)]
         agent: Option<String>,
-        /// Model override forwarded to the resolved agent framework's CLI
-        /// (e.g. `claude --model <value>`), independent of --agent.
+        /// Concrete model id passed to the resolved agent framework, independent of
+        /// --agent (e.g. `claude --model <value>`, `codex --model <value>`).
         ///
-        /// --agent selects WHICH framework/binary runs (claude-code, codex,
-        /// a custom manifest); --model selects WHICH model that framework
-        /// uses once launched. Only forwarded for frameworks confirmed to
-        /// accept a `--model` flag (currently: claude-code) — ignored with
-        /// a warning for any other framework rather than silently passed
-        /// through to a binary that doesn't understand it.
+        /// --agent selects WHICH framework/binary runs; --model selects WHICH model
+        /// it uses. An explicit --model beats the model a --tier/--profile maps to.
+        /// A framework with no model delivery declared (`model_map`) ignores it with
+        /// a warning rather than passing it to a binary that may not understand it.
         #[arg(long)]
         model: Option<String>,
+        /// Named model + reasoning-effort profile: local, light, standard, deep
+        /// (standard model, xhigh effort), max (top model, max effort), or one
+        /// defined under [profiles.<name>] in .ta/model-profiles.toml.
+        ///
+        /// Each agent framework maps the profile onto its own model id and effort
+        /// setting; anything it cannot express is reported, never dropped silently.
+        /// See docs/USAGE.md "Model and effort profiles".
+        #[arg(long)]
+        profile: Option<String>,
+        /// Model tier: local, light, standard or max. Overrides the tier of --profile.
+        #[arg(long)]
+        tier: Option<String>,
+        /// Reasoning effort: default (pass nothing), low, medium, high, xhigh or max.
+        /// Overrides the effort of --profile.
+        #[arg(long)]
+        effort: Option<String>,
         /// Source directory to overlay (defaults to project root).
         #[arg(long)]
         source: Option<PathBuf>,
@@ -1971,6 +1985,9 @@ fn dispatch_raw(
             title,
             agent,
             model,
+            profile,
+            tier,
+            effort,
             source,
             objective,
             phase,
@@ -2167,19 +2184,29 @@ fn dispatch_raw(
                 project_root,
             );
 
+            // Everything the user asked of the model, validated at launch (unknown
+            // names fail there with the list of valid values).
+            let model_selection = ta_runtime::model_profile::Selection {
+                profile: profile.clone(),
+                tier: tier.clone(),
+                effort: effort.clone(),
+                model: model.clone(),
+            };
+
             // serial-phases: dispatch to execute_serial_phases when --phases is provided.
             if workflow.as_deref() == Some("serial-phases") || phases.is_some() {
                 if let Some(phase_list) = phases {
                     if !phase_list.is_empty() {
-                        // --model has no effect on this path yet -- neither
-                        // execute_serial_phases nor its per-phase subprocess
-                        // launches accept a model override today. Warn
-                        // rather than silently drop it (Observability
-                        // Mandate), found in code review, 2026-10-02.
-                        if model.is_some() {
+                        // The model selection has no effect on this path yet --
+                        // neither execute_serial_phases nor its per-phase subprocess
+                        // launches accept one today. Warn rather than silently drop
+                        // it (Observability Mandate).
+                        if !model_selection.is_empty() {
                             eprintln!(
-                                "Warning: --model is not yet supported for --phases/serial-phases runs \
-                                 -- ignoring --model for this run."
+                                "Warning: --model/--profile/--tier/--effort are not yet \
+                                 supported for --phases/serial-phases runs -- ignoring them \
+                                 for this run. Run each phase with `ta run --phase <id> \
+                                 --profile <name>` to set a model."
                             );
                         }
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
@@ -2203,12 +2230,12 @@ fn dispatch_raw(
 
             // swarm: dispatch to execute_swarm when --sub-goals is provided.
             if !sub_goals.is_empty() {
-                // --model has no effect on this path yet, same gap and
+                // The model selection has no effect on this path yet, same gap and
                 // same rationale as the serial-phases warning above.
-                if model.is_some() {
+                if !model_selection.is_empty() {
                     eprintln!(
-                        "Warning: --model is not yet supported for --sub-goals/swarm runs -- \
-                         ignoring --model for this run."
+                        "Warning: --model/--profile/--tier/--effort are not yet supported \
+                         for --sub-goals/swarm runs -- ignoring them for this run."
                     );
                 }
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
@@ -2253,7 +2280,7 @@ fn dispatch_raw(
                 agent_id.as_deref(),
                 workflow_tag.as_deref(),
                 shadow_experiment.as_ref(),
-                model.as_deref(),
+                Some(&model_selection),
             )
         }
         Commands::Events { command } => {

@@ -130,6 +130,8 @@ impl TeamConfig {
                 model_tier: None,
                 origin: None,
                 handles_tags: Vec::new(),
+                profile: None,
+                effort: None,
             });
         }
         self
@@ -169,6 +171,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         }
     }
 
@@ -191,6 +195,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         config.save(tmp.path()).unwrap();
 
@@ -217,6 +223,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         config.members.push(TeamMember {
             role: TeamRole::reviewer(),
@@ -226,6 +234,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         config.save(tmp.path()).unwrap();
 
@@ -248,6 +258,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         config.save(tmp.path()).unwrap();
 
@@ -346,6 +358,8 @@ persona = "strict-reviewer"
                 "task-delegation".to_string(),
                 "research-request".to_string(),
             ],
+            profile: None,
+            effort: None,
         });
         config.save(tmp.path()).unwrap();
 
@@ -363,6 +377,24 @@ persona = "strict-reviewer"
             loaded.model_tiers.get("highest"),
             Some(&"claude-opus-5".to_string())
         );
+    }
+
+    #[test]
+    fn team_toml_profile_and_effort_parse_and_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ta")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ta/team.toml"),
+            "[[members]]\nrole = \"analyst\"\nagent_id = \"claude-code\"\nsecurity = \"auto\"\n\
+             profile = \"deep\"\neffort = \"max\"\n",
+        )
+        .unwrap();
+        let loaded = TeamConfig::load(tmp.path()).unwrap();
+        assert_eq!(loaded.members[0].profile.as_deref(), Some("deep"));
+        assert_eq!(loaded.members[0].effort.as_deref(), Some("max"));
+        loaded.save(tmp.path()).unwrap();
+        let again = TeamConfig::load(tmp.path()).unwrap();
+        assert_eq!(again.members[0].profile.as_deref(), Some("deep"));
     }
 
     #[test]

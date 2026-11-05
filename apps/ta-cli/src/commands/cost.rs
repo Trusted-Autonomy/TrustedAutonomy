@@ -49,7 +49,7 @@ pub enum CostCommands {
         #[arg(long)]
         until: Option<String>,
         /// Group by a comma-separated list of: day, source, model, project,
-        /// context_bucket, origin_class, goal, session_family, entrypoint.
+        /// context_bucket, origin_class, goal, session_family, entrypoint, tier, effort.
         /// For one typed row per goal and session use `--json --rows` instead.
         #[arg(long, default_value = "source")]
         group_by: String,

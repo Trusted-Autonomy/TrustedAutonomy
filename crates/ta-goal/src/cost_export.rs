@@ -415,6 +415,8 @@ mod tests {
             origin_class: None,
             family: None,
             entrypoint: None,
+            tier: None,
+            effort: None,
             detail: None,
         }
     }

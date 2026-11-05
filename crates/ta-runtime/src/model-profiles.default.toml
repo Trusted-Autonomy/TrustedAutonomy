@@ -1,0 +1,118 @@
+# Shipped model/effort mappings, keyed by the agent COMMAND name (basename).
+# A manifest or a project/user `.ta/model-profiles.toml` overrides any entry.
+#
+# Every value below is taken from the vendor's own documentation; the URL and the
+# date it was read (2026-11-04) sit next to it. A tier or effort level with no
+# entry is deliberately UNMAPPED (not verifiable from official docs): TA warns
+# when it is requested and tells the user how to configure it. Never add an id
+# here that is not on a vendor page.
+
+# ── Claude Code (`claude`) ───────────────────────────────────────────────────
+# Model flag:  `--model <alias|id>`
+#   https://code.claude.com/docs/en/cli-reference.md  (read 2026-11-04)
+# Model ids (Claude API column): claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5
+#   https://platform.claude.com/docs/en/models/haiku-5-5/overview.md   (read 2026-11-04)
+#   https://platform.claude.com/docs/en/models/sonnet-5-5/overview.md  (read 2026-11-04)
+#   https://platform.claude.com/docs/en/models/opus-5-5/overview.md    (read 2026-11-04)
+# Effort: env CLAUDE_CODE_EFFORT_LEVEL = low|medium|high|xhigh|max. It takes precedence over
+#   `--effort`, `/effort` and settings files, and is an explicit env var so it survives the
+#   sandbox env scrub and the per-goal CLAUDE_CONFIG_DIR.
+#   https://code.claude.com/docs/en/env-vars.md       (read 2026-11-04)
+#   https://code.claude.com/docs/en/model-config.md   (read 2026-11-04)
+[frameworks.claude.model_map]
+args = ["--model", "{value}"]
+[frameworks.claude.model_map.tiers]
+light = "claude-haiku-5-5"
+standard = "claude-sonnet-5-5"
+max = "claude-opus-5-5"
+
+[frameworks.claude.effort_map]
+env = { CLAUDE_CODE_EFFORT_LEVEL = "{value}" }
+[frameworks.claude.effort_map.levels]
+low = "low"
+medium = "medium"
+high = "high"
+xhigh = "xhigh"
+max = "max"
+
+# ── OpenAI Codex CLI (`codex`) ───────────────────────────────────────────────
+# Model flag: `-m, --model <id>`; config override `-c, --config key=value` (value is TOML);
+# `model_reasoning_effort` accepts low, medium, high, xhigh, max (availability depends on the model).
+#   https://developers.openai.com/codex/cli/reference  (read 2026-11-04)
+#   https://developers.openai.com/codex/config-reference (read 2026-11-04)
+#   https://developers.openai.com/codex/config-advanced ("One-off overrides", read 2026-11-04)
+# Model ids and the efforts each supports (low..max):
+#   https://developers.openai.com/api/docs/models/gpt-6-luna.md  -> `gpt-6-luna`  (read 2026-11-04)
+#   https://developers.openai.com/api/docs/models/gpt-6.1-sol.md -> `gpt-6.1-sol` (read 2026-11-04)
+#   https://developers.openai.com/api/docs/models/gpt-6-astra.md -> `gpt-6-astra` (read 2026-11-04)
+[frameworks.codex.model_map]
+args = ["--model", "{value}"]
+[frameworks.codex.model_map.tiers]
+light = "gpt-6-luna"
+standard = "gpt-6.1-sol"
+max = "gpt-6-astra"
+
+[frameworks.codex.effort_map]
+config = ["-c", "model_reasoning_effort=\"{value}\""]
+hint = "Available levels depend on the model (https://developers.openai.com/codex/config-reference)."
+[frameworks.codex.effort_map.levels]
+low = "low"
+medium = "medium"
+high = "high"
+xhigh = "xhigh"
+max = "max"
+
+# ── Gemini CLI (`gemini`) ────────────────────────────────────────────────────
+# Model flag `-m, --model` accepts the aliases `pro`, `flash`, `flash-lite`.
+#   https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md (read 2026-11-04)
+# Reasoning effort has NO flag or env var: it is only settable through `modelConfigs`
+# (thinkingLevel / thinkingBudget) in settings.json, so effort stays unmapped.
+#   https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md (read 2026-11-04)
+[frameworks.gemini.model_map]
+args = ["--model", "{value}"]
+[frameworks.gemini.model_map.tiers]
+light = "flash-lite"
+standard = "flash"
+max = "pro"
+
+[frameworks.gemini.effort_map]
+hint = "Gemini CLI has no per-run effort flag; set thinkingLevel/thinkingBudget under modelConfigs in its settings.json (https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md)."
+
+# ── Antigravity CLI (`agy`) ──────────────────────────────────────────────────
+# `--effort low|medium|high|xhigh|max` per run (works with headless `-p`).
+#   https://antigravity.google/docs/cli/commands/effort (read 2026-11-04)
+# `--model` exists but its ids are only documented as "run `agy models`", so no tier
+# is mapped; use `--model <id>` or map tiers in .ta/model-profiles.toml.
+#   https://antigravity.google/docs/cli/reference (read 2026-11-04)
+[frameworks.agy.model_map]
+args = ["--model", "{value}"]
+hint = "Antigravity model ids are listed by `agy models`: map the ids you want under [frameworks.agy.model_map.tiers]."
+
+[frameworks.agy.effort_map]
+args = ["--effort", "{value}"]
+[frameworks.agy.effort_map.levels]
+low = "low"
+medium = "medium"
+high = "high"
+xhigh = "xhigh"
+max = "max"
+
+# ── Ollama via ta-agent-ollama ───────────────────────────────────────────────
+# `--model <ollama-model-name>` and `--thinking-mode true|false` are options of TA's own
+# agent (crates/ta-agent-ollama/src/main.rs; read 2026-11-04). Thinking is on/off only, so
+# low -> false and every higher level -> true. Local model names are specific to each
+# machine's `ollama list`, so NO tier is shipped: map `local` (and any other tier) in
+# .ta/model-profiles.toml.
+[frameworks.ta-agent-ollama.model_map]
+args = ["--model", "{value}"]
+hint = "Ollama model names are local to your machine (see `ollama list`): add e.g. [frameworks.ta-agent-ollama.model_map.tiers] local = \"qwen3.5:9b\" to .ta/model-profiles.toml (that key covers every agent whose command is ta-agent-ollama)."
+
+[frameworks.ta-agent-ollama.effort_map]
+args = ["--thinking-mode", "{value}"]
+hint = "Ollama thinking is on/off only (--thinking-mode); low turns it off, medium and above turn it on."
+[frameworks.ta-agent-ollama.effort_map.levels]
+low = "false"
+medium = "true"
+high = "true"
+xhigh = "true"
+max = "true"

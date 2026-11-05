@@ -279,6 +279,34 @@ pub const POST_AGENT_PHASE_REVIEWING: &str = "reviewing";
 /// Post-agent phase: the agent exited and the owning `ta run` is building the draft.
 pub const POST_AGENT_PHASE_BUILDING_DRAFT: &str = "building draft";
 
+/// The model tier, reasoning effort and concrete model a goal was LAUNCHED with, as
+/// resolved from `--profile/--tier/--effort/--model`, the plan phase, and
+/// `.ta/model-profiles.toml` (see `ta_runtime::model_profile`). What the agent
+/// actually ran is `GoalRun::agent_model` (reported by the runtime); this is what TA
+/// asked for and whether it could deliver it, so a cost report can group by effort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ModelEffortRecord {
+    /// The agent framework the mapping was resolved for.
+    pub agent: String,
+    /// Named profile that supplied the tier/effort, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Requested tier (`local|light|standard|max`); `None` when no tier was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Requested effort (`default|low|medium|high|xhigh|max`).
+    pub effort: String,
+    /// Concrete model id passed to the agent; `None` means the agent's own default ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `true` only when the effort was actually handed to the agent.
+    pub effort_applied: bool,
+    /// How the effort was delivered: `arg`, `config`, `env`, `unsupported`, or `none`.
+    pub effort_via: String,
+    /// How the model was delivered: `arg`, `config`, `env`, or `none`.
+    pub model_via: String,
+}
+
 /// A GoalRun — one unit of agent work from start to completion.
 ///
 /// This is the top-level execution unit introduced by the Plan Revision doc.
@@ -586,6 +614,11 @@ pub struct GoalRun {
     /// change later). Only set when that flag was used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_file_content: Option<String>,
+
+    /// Model tier / reasoning effort / concrete model this goal was launched with.
+    /// `None` on goals launched before the abstraction existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_effort: Option<ModelEffortRecord>,
 }
 
 fn is_zero_f64(v: &f64) -> bool {
@@ -798,6 +831,7 @@ impl GoalRun {
             start_dirty: false,
             start_branch: None,
             objective_file_content: None,
+            model_effort: None,
             agent_model: String::new(),
         }
     }

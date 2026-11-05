@@ -746,6 +746,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         team_config.save(tmp.path()).unwrap();
         let decision = route(&explicit("Add a new dashboard widget"), tmp.path());
@@ -764,6 +766,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         team_config.save(tmp.path()).unwrap();
         let mut req = ExplicitGoalRequest::new("Add a new dashboard widget");
@@ -849,6 +853,8 @@ mod tests {
             model_tier: None,
             origin: None,
             handles_tags: Vec::new(),
+            profile: None,
+            effort: None,
         });
         team_config.save(tmp.path()).unwrap();
         let decision = route(&explicit("Add a new dashboard widget"), tmp.path());

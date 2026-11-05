@@ -111,6 +111,19 @@ pub struct TeamMember {
     /// full tool surface. Validated by `ta_goal::origin::validate_origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// TA model + reasoning-effort profile every launch of this role asks for
+    /// (`local`, `light`, `standard`, `deep`, `max`, or one defined in
+    /// `.ta/model-profiles.toml`). The daemon passes `--profile <value>` on every
+    /// `ta run` it builds for this role; `ta run` maps it onto whichever agent
+    /// framework runs, and reports anything that framework cannot express. Composes
+    /// with `model_tier` (a concrete id from `model_tiers`, passed as `--model`,
+    /// which beats the profile's tier mapping but not its effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Reasoning effort override for this role (`--effort <value>`), beating the
+    /// effort of `profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 // ── RoleRef ───────────────────────────────────────────────────────────────────

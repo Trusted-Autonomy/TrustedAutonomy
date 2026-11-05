@@ -1890,20 +1890,110 @@ ta run "Fix the bug" --agent codex
 ta run "Write tests" --agent claude-flow
 ```
 
-#### Overriding the model
+#### Model and effort profiles
 
-`--agent` selects WHICH framework/binary runs; `--model` selects WHICH model that
-framework uses once launched -- two independent questions. `--model` is forwarded
-to the underlying agent CLI (currently supported for Claude Code only; any other
-framework logs a warning and ignores it rather than passing an unsupported flag):
+`--agent` selects WHICH framework/binary runs. Three more flags select WHICH model it
+runs and HOW HARD it reasons, in one vocabulary that works for every framework:
 
 ```bash
-ta run "Fix the bug" --model claude-opus-5
+ta run "Fix the bug" --profile deep          # standard model, xhigh reasoning effort
+ta run "Triage"      --profile light         # cheapest model
+ta run "Hard bug"    --profile max           # top model, max effort
+ta run "Review"      --tier standard --effort high
+ta run "Fix the bug" --model claude-opus-5   # a concrete model id, always wins over a tier
 ```
 
-This is also what `.ta/team.toml`'s `agent_id`/`model_tier` fields resolve to for
-team-session and wake-on-demand role launches -- they name a model, not a
-framework, and are forwarded via `--model` under the hood.
+- **Tier** (`--tier`): `local`, `light`, `standard`, `max` -- a capability class.
+- **Effort** (`--effort`): `low`, `medium`, `high`, `xhigh`, `max`, or `default` (pass nothing; the
+  agent uses its own default).
+- **Profile** (`--profile`): a named (tier, effort) pair. Shipped: `local` (local tier),
+  `light`, `standard` (both at the agent's default effort), `deep` (standard tier, `xhigh`)
+  and `max` (max tier, `max` effort). `--tier`/`--effort` override the matching half of
+  `--profile`; `--model` overrides the model the tier maps to (the effort still applies).
+- An unknown profile, tier or effort fails before anything launches and lists the valid values.
+
+Each framework maps the abstraction onto its own model ids and its own way of passing them.
+The mapping is data, not code (the shipped catalog is `crates/ta-runtime/src/model-profiles.default.toml`;
+every id in it carries the vendor doc URL and the date it was read):
+
+| Framework (command) | light / standard / max | Effort delivered as |
+|---|---|---|
+| Claude Code (`claude`) | `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-opus-5-5` via `--model` | env `CLAUDE_CODE_EFFORT_LEVEL` |
+| Codex (`codex`) | `gpt-6-luna` / `gpt-6.1-sol` / `gpt-6-astra` via `--model` | `-c model_reasoning_effort="<level>"` |
+| Gemini CLI (`gemini`) | `flash-lite` / `flash` / `pro` via `--model` | unsupported (no flag or env; only `modelConfigs` in its settings.json) |
+| Antigravity (`agy`) | none mapped (ids come from `agy models`) | `--effort <level>` |
+| Ollama (`ta-agent-ollama`) | none shipped (model names are per machine) | `--thinking-mode` (`low` = off, higher = on) |
+| Claude Flow and custom agents | unmapped unless you map them | unmapped unless you map them |
+
+Anything a framework cannot express is reported, never dropped silently: TA prints
+`[warning] ...` saying which tier or effort was not applied and how to configure it, and records
+`effort_applied=false`. Every launch prints (and logs) one line:
+
+```
+[model] agent=claude-code tier=standard effort=xhigh model=claude-sonnet-5-5 effort_applied=true via=env model_via=arg
+```
+
+The same values are stored on the goal: `ta goal status <id>` shows a `Model:` line, and
+`ta cost report --group-by tier,effort` groups cost by them (`effort` shows `unsupported` where an
+effort was requested but not applied, `default` where none was requested).
+
+**Where the choice comes from** (first match wins, per axis): command-line flags, then the
+`<!-- profile: deep -->` / `<!-- tier: ... -->` / `<!-- effort: ... -->` markers on the lines right
+under the goal's `PLAN.md` phase heading (used with `ta run --phase <id>`), then `[defaults]` in
+`.ta/model-profiles.toml`, then `[defaults]` in `~/.config/ta/model-profiles.toml`. Mappings
+layer the same way: shipped catalog, then the agent manifest, then your user file, then your
+project file.
+
+**Changing or adding a mapping** -- put it in `.ta/model-profiles.toml` (project) or
+`~/.config/ta/model-profiles.toml` (user). Keys under `[frameworks.<name>]` match the agent name
+(`claude-code`) or its command (`claude`):
+
+```toml
+[defaults]
+profile = "standard"                 # used when no flag and no PLAN.md marker asks for one
+
+[profiles.review]                    # your own named profile: ta run --profile review
+tier = "standard"
+effort = "high"
+
+# Map the local tier for Ollama-backed agents (model names come from `ollama list`).
+[frameworks.ta-agent-ollama.model_map.tiers]
+local = "qwen3.5:9b"
+
+# Pin a different Claude model for the standard tier.
+[frameworks.claude.model_map.tiers]
+standard = "claude-sonnet-5-5"
+```
+
+A mapping has a delivery (`args = [...]` for CLI flags, `config = [...]` for config-override
+arguments such as Codex's `-c key=value`, `env = { NAME = "..." }` for environment variables) and
+values (`tiers` / `levels`); `{value}` in the delivery is replaced by the mapped value. A level
+or tier missing from the table is unsupported for that agent (TA warns). An agent manifest
+(`.ta/agents/<name>.yaml` or `.toml`) can carry the same `model_map` / `effort_map` blocks inline,
+plus an `env` map of variables passed to the agent through the sandbox's environment scrub
+(variables on the sandbox deny list, such as `TA_*` secrets, are still dropped, with a warning):
+
+```yaml
+# .ta/agents/agy.yaml -- an Antigravity agent; models come from `agy models`
+name: agy
+command: agy
+args: ["{prompt}"]                   # your agent's launch options
+model_map:
+  args: ["--model", "{value}"]
+  tiers:
+    light: <an id from `agy models`>
+effort_map:
+  args: ["--effort", "{value}"]
+  levels: { low: low, medium: medium, high: high, xhigh: xhigh, max: max }
+```
+
+Virtual-team launches: a `[[members]]` entry in `.ta/team.toml` may set `profile = "deep"` and/or
+`effort = "max"`; the daemon passes `--profile` / `--effort` on every `ta run` it builds for that
+role. The existing `model_tier` / `[model_tiers]` mechanism still resolves to a concrete id passed
+as `--model` (which beats the profile's tier mapping; the profile's effort still applies).
+
+`--model`, `--profile`, `--tier` and `--effort` are not yet forwarded by `--phases`
+(serial-phases) or `--sub-goals` (swarm) runs: TA warns and ignores them there.
 
 #### List available frameworks
 
