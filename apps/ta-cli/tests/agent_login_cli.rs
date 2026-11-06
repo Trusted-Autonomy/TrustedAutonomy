@@ -10,7 +10,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -107,7 +107,7 @@ impl Sandbox {
     /// files themselves, as text: the places a secret must never reach.
     #[cfg(unix)]
     fn text_outside_secret_files(&self) -> String {
-        fn walk(dir: &Path, out: &mut String) {
+        fn walk(dir: &std::path::Path, out: &mut String) {
             let Ok(rd) = std::fs::read_dir(dir) else {
                 return;
             };
