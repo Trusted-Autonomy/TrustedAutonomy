@@ -1,3 +1,27 @@
+## Unreleased
+
+**CI cost and local validation**
+
+- **`scripts/ci-local.sh`**: one command that runs every CI check on a developer Mac (version
+  consistency, no-ip-docs, secret scan, actionlint, host fmt/clippy/test/Seatbelt conformance,
+  standalone plugins, Windows `clippy --target x86_64-pc-windows-msvc`, and Linux clippy/test/sandbox
+  containers in Docker), prints a PASS/FAIL table, what it did not cover, and an evidence line for
+  the pull request. Throwaway `HOME`, no Keychain, no paid agents. How-to: docs/USAGE.md
+  "Validating changes locally (ci-local)".
+- **Pull requests run one ubuntu job plus the cheap checks.** macOS, Windows and Linux Sandbox
+  Conformance run on push to `main`, `workflow_dispatch`, or a pull request labelled `full-ci`;
+  docs-only changes skip all compilation. Required check names are unchanged (a skipped job reports
+  success). The separate `Windows Check` job and the per-push release builds are gone.
+- **No Nix in CI.** Jobs install the toolchain pinned by `rust-toolchain.toml` with rustup
+  (`.github/actions/setup-rust`), which also fixes the ubuntu build cache that was saving 0 bytes.
+- **Nightly skips docs-only changes** (it already skipped when nothing changed).
+- `scripts/check-version-consistency.sh` also checks that CLAUDE.md "Current version" matches
+  `Cargo.toml`; `check-no-ip-docs.sh --all` now runs in CI.
+- **Fixes found by the first local Linux run.** `ta doctor` no longer treats a PID above `i32::MAX`
+  as alive (`kill -0 -1` signals everything, so a dead PID file read as live on some Linux
+  distributions). An external channel plugin that exits without reading its stdin now reports its
+  exit status and stderr instead of intermittently reporting a broken-pipe write error.
+
 ## v0.17.12-alpha.11 — Key custody, one state directory, model/effort profiles, sandboxing and cost tracking
 
 Covers `git log v0.17.11-alpha.7..main` (about 280 commits; PR numbers in parentheses). Not yet
