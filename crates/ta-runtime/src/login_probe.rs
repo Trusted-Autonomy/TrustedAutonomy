@@ -39,9 +39,11 @@ fn env_names(framework_id: &str) -> Option<(&'static [&'static str], bool)> {
     }
 }
 
+type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Reads the process environment (or any lookup, for tests).
 pub struct EnvLoginProbe {
-    lookup: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    lookup: EnvLookup,
 }
 
 impl EnvLoginProbe {
@@ -108,11 +110,24 @@ mod tests {
     #[test]
     fn api_key_frameworks_are_missing_without_their_variable() {
         let p = probe(&[]);
-        for id in ["codex", "openai", "gemini", "grok", "xai", "anthropic-api-key"] {
+        for id in [
+            "codex",
+            "openai",
+            "gemini",
+            "grok",
+            "xai",
+            "anthropic-api-key",
+        ] {
             assert_eq!(p.status(id), LoginStatus::Missing, "{id}");
         }
-        assert_eq!(probe(&[("GOOGLE_API_KEY", "g")]).status("gemini"), LoginStatus::Present);
-        assert_eq!(probe(&[("XAI_API_KEY", "  ")]).status("grok"), LoginStatus::Missing);
+        assert_eq!(
+            probe(&[("GOOGLE_API_KEY", "g")]).status("gemini"),
+            LoginStatus::Present
+        );
+        assert_eq!(
+            probe(&[("XAI_API_KEY", "  ")]).status("grok"),
+            LoginStatus::Missing
+        );
     }
 
     #[test]

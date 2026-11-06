@@ -346,6 +346,40 @@
       },
       "type": "object"
     },
+    "LaunchFailure": {
+      "description": "A classified launch failure.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/LaunchFailureCode"
+        },
+        "detail": {
+          "description": "What happened. One line, no trailing period, no secrets.",
+          "type": "string"
+        },
+        "fix": {
+          "description": "What the person should do. One line, no trailing period.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "detail",
+        "fix"
+      ],
+      "type": "object"
+    },
+    "LaunchFailureCode": {
+      "description": "Why a launch failed.",
+      "enum": [
+        "no_login",
+        "login_invalid",
+        "agent_missing",
+        "sandbox_denied",
+        "crashed",
+        "timed_out"
+      ],
+      "type": "string"
+    },
     "ModelEffortRecord": {
       "description": "The model tier, reasoning effort and concrete model a goal was LAUNCHED with, as\nresolved from `--profile/--tier/--effort/--model`, the plan phase, and\n`.ta/model-profiles.toml` (see `ta_runtime::model_profile`). What the agent\nactually ran is `GoalRun::agent_model` (reported by the runtime); this is what TA\nasked for and whether it could deliver it, so a cost report can group by effort.",
       "properties": {
@@ -578,6 +612,13 @@
       "minimum": 0,
       "type": "integer"
     },
+    "candidate_id": {
+      "description": "The external-intake candidate this goal works for, WITHOUT the\n`#<nonce>` suffix (the nonce is a secret the goal must not be able to\nread back). `wayfinder-task:<task id>` for a Wayfinder task. Set once at\ncreation by `ta run` from the provenance file's `ids.candidate_id` or the\n`--intake-file` record. `ta goal list/status --json` expose it as\n`candidate_id` (and `task_id`) so a poller can match a goal to its task\nwithout remembering anything itself.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "context_from": {
       "description": "Goals whose output feeds into this one's context (v0.9.8.2).",
       "items": {
@@ -655,6 +696,17 @@
     "is_macro": {
       "description": "Whether this is a macro goal (supports inner-loop iteration with sub-goals).",
       "type": "boolean"
+    },
+    "launch_failure": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaunchFailure"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Why the launch failed, when the goal ended in `Failed` because the agent\ncould not start (see `crate::launch_failure`). Matches the\n`launch_failed` outcome published for the same goal. `None` for every\nother goal."
     },
     "manifest_id": {
       "description": "The capability manifest issued for this goal run.",

@@ -880,6 +880,8 @@ mod tests {
             source_dir: None,
             plan_phase: None,
             request_provenance: None,
+            candidate_id: None,
+            launch_failure: None,
             parent_goal_id: None,
             source_snapshot: None,
             is_macro: false,

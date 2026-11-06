@@ -348,6 +348,8 @@ pub(crate) async fn run_listener_loop(
     let mut recovered = false;
 
     'poll: loop {
+        // Re-send any launch_failed outcome the stream could not take earlier.
+        crate::launch_failed::flush_outbox(transport.as_ref(), &project_root).await;
         // Live pause/stop check, re-read fresh every round -- not just once
         // at startup -- so `ta team-session pause <id>` actually stops new
         // inference from being spawned by this listener, the same way it
@@ -763,26 +765,60 @@ fn run_and_record_launch(
         );
     }
 
-    if timed_out {
-        Err(std::io::Error::other(format!(
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // An agent that never started its model session (the sandbox denied its
+    // login helper, its system prompt was unreadable, it printed one fatal
+    // line) did no work even when the process exits 0. Treat it as a failed
+    // launch so the retry / dead-letter path runs instead of acking the
+    // message as handled. A `ta run` that printed its own launch-failure marker
+    // said the same thing explicitly.
+    let never_started = ta_goal::agent_start::classify_stderr(&stderr);
+    let marked = ta_goal::launch_failure::parse_marker(&stderr).is_some();
+    if !timed_out && output.status.success() && never_started.is_none() && !marked {
+        return Ok(output);
+    }
+
+    // Classify with everything known, ONCE, here: the retry layer only reads
+    // the result (`launch_failed::encode_error`).
+    let log_str = log_path.display().to_string();
+    let stdout_lines = output
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    let marker = ta_goal::launch_failure::parse_marker_full(&stderr);
+    let login = marker
+        .as_ref()
+        .and_then(|m| m.agent.as_deref())
+        .map(|agent| ta_runtime::login_probe::default_probe().status(agent));
+    let quoted = crate::launch_failed::evidence_line(&stderr, env);
+    let failure =
+        ta_goal::launch_failure::classify_and_describe(&ta_goal::launch_failure::LaunchEvidence {
+            agent: "",
+            command: None,
+            exit_code: output.status.code(),
+            timed_out,
+            timeout_secs: Some(launch_timeout.as_secs()),
+            stderr: &stderr,
+            output_lines: Some(stdout_lines),
+            login,
+            log_path: Some(&log_str),
+            evidence_line: quoted.as_deref(),
+        });
+    if let Some(goal) = marker.as_ref().and_then(|m| m.goal.as_deref()) {
+        crate::launch_failed::refine_goal_record(project_root, goal, &failure);
+    }
+
+    let human = if timed_out {
+        format!(
             "wake_listener: ta run for role '{role}' (session '{session_id}', msg {msg_id}) was \
              killed after {}s without finishing. Output so far: {}. Raise \
              wake_launch_timeout_secs (and wake_ack_wait_secs if you set it) in [whiteboard] of \
              .ta/workflow.toml if launches legitimately run this long.",
             launch_timeout.as_secs(),
             log_path.display()
-        )))
+        )
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // An agent that never started its model session (the sandbox denied its
-        // login helper, its system prompt was unreadable, it printed one fatal
-        // line) did no work even when the process exits 0. Treat it as a failed
-        // launch so the retry / dead-letter path runs instead of acking the
-        // message as handled.
-        let never_started = ta_goal::agent_start::classify_stderr(&stderr);
-        if output.status.success() && never_started.is_none() {
-            return Ok(output);
-        }
         let why = match never_started {
             Some(_) => format!(
                 "the agent never started: {}",
@@ -795,18 +831,22 @@ fn run_and_record_launch(
             role = %role,
             msg_id = %msg_id,
             exit_code = ?output.status.code(),
+            reason_code = %failure.code,
             log = %log_path.display(),
             "wake_listener: {why}"
         );
-        Err(std::io::Error::other(format!(
+        format!(
             "wake_listener: ta run for role '{role}' (session '{session_id}', msg {msg_id}) \
              exited with status {:?}; {why}. Full stdout and stderr: {}\n\
              Last {STDERR_TAIL_LINES} lines of stderr:\n{}",
             output.status.code(),
             log_path.display(),
             tail_lines(&redact_lines(stderr.trim_end()), STDERR_TAIL_LINES)
-        )))
-    }
+        )
+    };
+    Err(std::io::Error::other(crate::launch_failed::encode_error(
+        &failure, &human,
+    )))
 }
 
 /// Runs `command` to completion like `Command::output`, but kills it if it
@@ -1596,6 +1636,292 @@ mod tests {
             Duration::from_secs(60),
         )
         .expect("ordinary launch succeeds");
+    }
+
+    // ---- launch_failed: the reason a wake launch failed, from real evidence ----
+
+    /// Run a fake `ta` (a shell script) through the real recording runner and
+    /// return the failure it classified.
+    #[cfg(unix)]
+    fn classified_launch(
+        script_body: &str,
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> ta_goal::LaunchFailure {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("fake-ta.sh");
+        std::fs::write(&fake, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = run_and_record_launch(
+            tmp.path(),
+            "sess-1",
+            "chief-of-staff",
+            "seq-1",
+            &fake,
+            &["run".to_string(), "--headless".to_string()],
+            env,
+            timeout,
+        )
+        .expect_err("a failed launch is an error")
+        .to_string();
+        crate::launch_failed::decode_error(&err)
+            .unwrap_or_else(|| panic!("the first line of the error carries the failure: {err}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_that_prints_not_logged_in_is_no_login() {
+        let f = classified_launch(
+            "echo 'Not logged in · Please run /login' >&2\nexit 1",
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::NoLogin);
+        assert!(f.fix.contains("ta agent-login login claude-code"), "{f:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_the_vendor_rejected_is_login_invalid() {
+        let f = classified_launch(
+            "echo 'API Error: 401 Invalid API key' >&2\nexit 1",
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::LoginInvalid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_whose_agent_binary_is_missing_is_agent_missing() {
+        let f = classified_launch(
+            "echo \"'claude' command not found\" >&2\n\
+             echo 'ta-launch-failure: code=agent_missing agent=claude-code command=claude' >&2\nexit 1",
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::AgentMissing);
+        assert!(f.detail.contains("claude"), "{f:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_the_sandbox_refused_is_sandbox_denied() {
+        let f = classified_launch(
+            "echo 'Launch refused by the sandbox policy (goal g): network denied' >&2\n\
+             echo 'ta-launch-failure: code=sandbox_denied agent=claude-code command=claude' >&2\nexit 1",
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::SandboxDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_that_dies_without_a_cause_is_crashed() {
+        let f = classified_launch(
+            "echo 'segfault-ish' >&2\nexit 3",
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::Crashed);
+        assert!(f.detail.contains("status 3"), "{f:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_killed_by_the_timeout_is_timed_out_and_names_the_knob() {
+        let f = classified_launch("sleep 20", &[], Duration::from_secs(1));
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::TimedOut);
+        assert!(f.fix.contains("wake_launch_timeout_secs"), "{f:?}");
+    }
+
+    /// An agent's stderr, and the value of a secret in the launch environment,
+    /// can both end up on the line that is quoted. Neither may reach the text.
+    #[cfg(unix)]
+    #[test]
+    fn the_classified_text_never_contains_a_secret() {
+        let token = "tok-0123456789abcdefSECRET";
+        let key = format!(
+            "{}{}",
+            "sk-ant-api", "03-FAKESECRETFAKESECRETFAKESECRET0123456789"
+        );
+        let f = classified_launch(
+            &format!("echo 'Invalid API key {key} / {token}' >&2\nexit 1"),
+            &[("SOME_SERVICE_TOKEN".to_string(), token.to_string())],
+            Duration::from_secs(30),
+        );
+        let all = format!("{} {} {:?}", f.detail, f.fix, f.code);
+        assert!(!all.contains(token), "{all}");
+        assert!(!all.contains("sk-ant-api03"), "{all}");
+    }
+
+    /// A healthy launch is not an error, so nothing downstream can publish.
+    #[cfg(unix)]
+    #[test]
+    fn a_healthy_launch_is_not_classified_as_a_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("fake-ta.sh");
+        std::fs::write(&fake, "#!/bin/sh\necho '{\"type\":\"result\"}'\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run_and_record_launch(
+            tmp.path(),
+            "sess-1",
+            "chief-of-staff",
+            "seq-ok",
+            &fake,
+            &["run".to_string()],
+            &[],
+            Duration::from_secs(30),
+        )
+        .expect("healthy launch");
+    }
+
+    /// The reproduction, hermetic: a candidate is dispatched to a daemon whose
+    /// agent has no login. A fake `ta` stands in for `ta run`, writing what
+    /// `ta run` writes (a goal record failed with its own classification, and
+    /// the marker) and the agent's stderr. The outcome the poller receives and
+    /// the goal `ta goal status` shows must name the same failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatching_a_candidate_with_no_login_publishes_an_outcome_the_goal_agrees_with() {
+        use crate::wake_retry::{
+            AttemptStore, LaunchRateGuard, ListenerIds, MessageOutcome, WakeRetryPolicy,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+
+        // The goal `ta run` recorded before it exited: failed, classified "crashed".
+        let config = ta_mcp_gateway::GatewayConfig::for_project(tmp.path());
+        let goals = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "Fix the login page",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/w"),
+            std::path::PathBuf::from("/s"),
+        );
+        goal.candidate_id = Some("wayfinder-task:T-42".to_string());
+        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
+        goal.transition(ta_goal::GoalRunState::Running).unwrap();
+        goal.transition(ta_goal::GoalRunState::Failed {
+            reason: "the agent never started".to_string(),
+        })
+        .unwrap();
+        goal.launch_failure = Some(ta_goal::LaunchFailure {
+            code: ta_goal::LaunchFailureCode::Crashed,
+            detail: "the agent exited with status 1".to_string(),
+            fix: "Read the launch log".to_string(),
+        });
+        goals.save(&goal).unwrap();
+
+        let fake = tmp.path().join("fake-ta.sh");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n\
+                 echo 'Not logged in · Please run /login' >&2\n\
+                 echo 'ta-launch-failure: code=crashed agent=claude-code command=claude goal={}' >&2\n\
+                 exit 1\n",
+                goal.goal_run_id
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let transport = InMemoryTransport::new();
+        transport.connect().await.unwrap();
+        let candidate = "wayfinder-task:T-42#nonce-9";
+        transport
+            .stream_append(
+                "intake",
+                serde_json::json!({"candidate_id": candidate})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .unwrap();
+        let env = transport
+            .stream_read_next("intake", "wake-listener:chief-of-staff")
+            .await
+            .unwrap()
+            .unwrap();
+        let store = AttemptStore::for_listener(tmp.path(), "sess-1", "chief-of-staff");
+        let ids = ListenerIds {
+            project_root: tmp.path(),
+            session: "sess-1",
+            role: "chief-of-staff",
+            key: "intake",
+            consumer: "wake-listener:chief-of-staff",
+        };
+        let outcome = crate::wake_retry::process_message(
+            &transport,
+            &store,
+            &WakeRetryPolicy::default(),
+            &mut LaunchRateGuard::default(),
+            &ids,
+            &env,
+            chrono::Utc::now,
+            || async {
+                run_and_record_launch(
+                    tmp.path(),
+                    "sess-1",
+                    "chief-of-staff",
+                    &env.msg_id,
+                    &fake,
+                    &["run".to_string(), "--headless".to_string()],
+                    &[],
+                    Duration::from_secs(30),
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            },
+        )
+        .await;
+        assert_eq!(outcome, MessageOutcome::DeadLettered);
+
+        // What the poller drains.
+        let msg = transport
+            .stream_read_next(crate::api::whiteboard::EXTERNAL_OUTCOME_STREAM, "poller")
+            .await
+            .unwrap()
+            .expect("a launch_failed outcome was published");
+        crate::outcome_stamp::check_payload(tmp.path(), &msg.payload, true)
+            .expect("the outcome is daemon-signed and verifies");
+        let out: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!(out["candidate_id"], candidate);
+        assert_eq!(out["outcome"], "launch_failed");
+        assert_eq!(out["reason_code"], "no_login");
+        assert!(out["fix"]
+            .as_str()
+            .unwrap()
+            .contains("ta agent-login login claude-code"));
+        transport
+            .stream_ack(
+                crate::api::whiteboard::EXTERNAL_OUTCOME_STREAM,
+                "poller",
+                &msg.msg_id,
+            )
+            .await
+            .unwrap();
+        assert!(transport
+            .stream_read_next(crate::api::whiteboard::EXTERNAL_OUTCOME_STREAM, "poller")
+            .await
+            .unwrap()
+            .is_none());
+
+        // What `ta goal status` shows for the goal: the same failure.
+        let after = goals.get(goal.goal_run_id).unwrap().unwrap();
+        let shown = after
+            .launch_failure
+            .clone()
+            .expect("goal keeps its launch failure");
+        assert_eq!(shown.code.as_str(), out["reason_code"].as_str().unwrap());
+        assert_eq!(shown.detail, out["detail"].as_str().unwrap());
+        assert_eq!(shown.fix, out["fix"].as_str().unwrap());
+        assert_eq!(after.poller_state(), "failed");
     }
 
     #[test]

@@ -66,10 +66,10 @@ pub use goal_run::BudgetAbort;
 pub use goal_run::{slugify_title, GoalRun, GoalRunState, ModelEffortRecord};
 pub use goal_run::{POST_AGENT_PHASE_BUILDING_DRAFT, POST_AGENT_PHASE_REVIEWING};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
-pub use launch_failure::{LaunchFailure, LaunchFailureCode, LoginState};
 pub use human_review::{
     extract_human_review_items, HumanReviewRecord, HumanReviewStatus, HumanReviewStore,
 };
+pub use launch_failure::{LaunchFailure, LaunchFailureCode, LoginState};
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{
     is_low_disk_alert, ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog,

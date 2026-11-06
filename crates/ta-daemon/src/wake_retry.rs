@@ -172,6 +172,10 @@ pub struct AttemptRecord {
     /// retried later does not write a second record.
     #[serde(default)]
     pub dead_lettered: bool,
+    /// How the most recent launch failed, classified (see `ta_goal::launch_failure`).
+    /// It becomes the `launch_failed` outcome if the message is dead-lettered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_failure: Option<ta_goal::launch_failure::LaunchFailure>,
 }
 
 /// On-disk attempt records for ONE listener (`.ta/wake-attempts/
@@ -500,6 +504,9 @@ pub struct DeadLetterRecord {
     pub key: String,
     pub attempts: u32,
     pub last_error_tail: String,
+    /// The `reason_code` of the `launch_failed` outcome published for this message.
+    #[serde(default)]
+    pub launch_failure_code: Option<String>,
     pub payload_bytes: usize,
     pub first_attempt_at: DateTime<Utc>,
     pub last_attempt_at: DateTime<Utc>,
@@ -844,6 +851,7 @@ where
                         next_eligible_at: now + IN_FLIGHT_LEASE,
                         last_error: existing.map(|r| r.last_error).unwrap_or_default(),
                         dead_lettered: false,
+                        launch_failure: None,
                     };
                     match store.put_unlocked(&rec) {
                         Ok(()) => {
@@ -965,10 +973,17 @@ where
                 );
             }
             rec.last_error = tail_lines(&err, 40);
+            let lf = crate::launch_failed::failure_from_error(&err);
+            let permanent = lf.code.is_permanent();
+            rec.launch_failure = Some(lf);
             rec.next_eligible_at = failed_at
                 + chrono::Duration::from_std(policy.backoff_after(rec.attempts))
                     .unwrap_or_else(|_| chrono::Duration::seconds(30));
-            if rec.attempts >= policy.max_attempts {
+            // A launch that cannot succeed until a person acts (no login, agent
+            // missing, sandbox refusal) gains nothing from retries: dead-letter it
+            // now so the poller hears about it within the minute, not after the
+            // whole backoff schedule.
+            if permanent || rec.attempts >= policy.max_attempts {
                 rec.dead_lettered = true;
                 let _ = store.put(&rec);
                 return dead_letter(transport, store, ids, envelope, rec, true, failed_at).await;
@@ -1154,6 +1169,47 @@ pub async fn recover_pending(
     total
 }
 
+/// Tell the poller the agent for this message's candidate could not start
+/// (`launch_failed`). Called exactly once per dead-lettered message. A message
+/// without a `candidate_id` (not Wayfinder work) publishes nothing.
+async fn report_launch_failed(
+    transport: &dyn WhiteboardTransport,
+    ids: &ListenerIds<'_>,
+    envelope: &StreamEnvelope,
+    rec: &AttemptRecord,
+) {
+    let Some(candidate_id) = crate::launch_failed::candidate_id_from_payload(&envelope.payload)
+    else {
+        tracing::debug!(
+            msg_id = %envelope.msg_id,
+            "wake_listener: dead-lettered message has no candidate_id, so no launch_failed \
+             outcome is published (it is not external-intake work)"
+        );
+        return;
+    };
+    let failure = match (&rec.launch_failure, rec.last_error.is_empty()) {
+        (Some(f), _) => f.clone(),
+        (None, false) => crate::launch_failed::failure_from_error(&rec.last_error),
+        (None, true) => ta_goal::launch_failure::LaunchFailure {
+            code: ta_goal::launch_failure::LaunchFailureCode::Crashed,
+            detail: format!(
+                "the agent launch was interrupted before it finished (the daemon stopped while it ran) and the retry limit of {} was reached",
+                rec.attempts
+            ),
+            fix: "Check the daemon log and the launch logs under .ta/logs/wake-launches/, then retry from Wayfinder".to_string(),
+        },
+    };
+    crate::launch_failed::publish_or_queue(
+        transport,
+        ids.project_root,
+        ids.session,
+        None,
+        &candidate_id,
+        &failure,
+    )
+    .await;
+}
+
 async fn dead_letter(
     transport: &dyn WhiteboardTransport,
     store: &AttemptStore,
@@ -1174,6 +1230,10 @@ async fn dead_letter(
             attempts: rec.attempts,
             last_error_tail: rec.last_error.clone(),
             payload_bytes: envelope.payload.len(),
+            launch_failure_code: rec
+                .launch_failure
+                .as_ref()
+                .map(|f| f.code.as_str().to_string()),
             first_attempt_at: rec.first_attempt_at,
             last_attempt_at: rec.last_attempt_at,
             dead_lettered_at: now,
@@ -1182,6 +1242,12 @@ async fn dead_letter(
         if let Err(e) = append_dead_letter(ids.project_root, &dl) {
             tracing::error!(path = %path.display(), error = %e, "wake_listener: could not write dead-letter record");
         }
+        let why = match &rec.launch_failure {
+            Some(f) if f.code.is_permanent() => {
+                format!("because retrying cannot help ({})", f.code)
+            }
+            _ => "after reaching the retry cap".to_string(),
+        };
         tracing::error!(
             session = %ids.session,
             role = %ids.role,
@@ -1190,10 +1256,9 @@ async fn dead_letter(
             attempts = rec.attempts,
             dead_letter_file = %path.display(),
             last_error = %rec.last_error,
-            "wake_listener: DEAD-LETTERED message after reaching the retry cap. It will not be \
-             redelivered. Inspect the dead-letter file and the launch logs under \
-             .ta/logs/wake-launches/, fix the cause, then re-send the message if it still \
-             matters."
+            "wake_listener: DEAD-LETTERED message {why}. It will not be redelivered. Inspect the \
+             dead-letter file and the launch logs under .ta/logs/wake-launches/, fix the cause, \
+             then re-send the message if it still matters."
         );
         {
             use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
@@ -1214,6 +1279,7 @@ async fn dead_letter(
                 tracing::warn!(error = %e, "wake_listener: could not emit dead-letter event");
             }
         }
+        report_launch_failed(transport, ids, envelope, &rec).await;
     }
 
     // Before acking, so a redelivery after a failed ack is skipped.
@@ -1298,6 +1364,23 @@ mod tests {
         /// Read the next message and process it with a launcher that
         /// succeeds or fails as told.
         async fn step(&mut self, now: DateTime<Utc>, succeed: bool) -> Option<MessageOutcome> {
+            self.step_with(
+                now,
+                if succeed {
+                    Ok(())
+                } else {
+                    Err("Error: No changes detected in staging workspace.".to_string())
+                },
+            )
+            .await
+        }
+
+        /// Like `step`, with the launcher's exact result.
+        async fn step_with(
+            &mut self,
+            now: DateTime<Utc>,
+            result: Result<(), String>,
+        ) -> Option<MessageOutcome> {
             if let Ok(d) = (now - self.clock).to_std() {
                 self.transport.advance(d);
                 self.clock = now;
@@ -1327,11 +1410,7 @@ mod tests {
                     move || now,
                     move || async move {
                         launches.fetch_add(1, Ordering::SeqCst);
-                        if succeed {
-                            Ok(())
-                        } else {
-                            Err("Error: No changes detected in staging workspace.".to_string())
-                        }
+                        result
                     },
                 )
                 .await,
@@ -1514,6 +1593,7 @@ mod tests {
                 next_eligible_at: t0(),
                 last_error: String::new(),
                 dead_lettered: false,
+                launch_failure: None,
             })
             .unwrap();
         assert_eq!(
@@ -1598,6 +1678,7 @@ mod tests {
     struct Spy {
         inner: InMemoryTransport,
         fail_acks: AtomicU32,
+        fail_appends: AtomicU32,
         progress: AtomicU32,
     }
 
@@ -1606,11 +1687,11 @@ mod tests {
             Self {
                 inner: InMemoryTransport::new(),
                 fail_acks: AtomicU32::new(fail_acks),
+                fail_appends: AtomicU32::new(0),
                 progress: AtomicU32::new(0),
             }
         }
     }
-
     #[async_trait]
     impl WhiteboardTransport for Spy {
         fn backend_name(&self) -> &str {
@@ -1641,6 +1722,16 @@ mod tests {
             self.inner.kv_list(b).await
         }
         async fn stream_append(&self, s: &str, p: Vec<u8>) -> WbResult<()> {
+            if self
+                .fail_appends
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(ta_agent_whiteboard::error::WhiteboardError::Stream {
+                    stream: s.to_string(),
+                    detail: "simulated append failure".to_string(),
+                });
+            }
             self.inner.stream_append(s, p).await
         }
         async fn stream_read_next(&self, s: &str, c: &str) -> WbResult<Option<StreamEnvelope>> {
@@ -1961,6 +2052,7 @@ mod tests {
                 next_eligible_at: t0(),
                 last_error: "boom".into(),
                 dead_lettered: false,
+                launch_failure: None,
             })
             .unwrap();
         let launches = Arc::new(AtomicU32::new(0));
@@ -2276,6 +2368,7 @@ mod tests {
                 next_eligible_at: t0() + secs(next_in),
                 last_error: "earlier failure".into(),
                 dead_lettered: dead,
+                launch_failure: None,
             })
             .unwrap();
     }
@@ -2407,5 +2500,334 @@ mod tests {
         )
         .await;
         assert_eq!(other.total(), 0);
+    }
+
+    // ---- launch_failed: what the poller is told when a launch gives up ----------
+
+    use ta_goal::launch_failure::LaunchFailureCode as Code;
+
+    const CANDIDATE: &str = "wayfinder-task:T-42#n-1";
+    /// Shaped like a real key, built at run time so no such literal is committed.
+    fn fake_secret() -> String {
+        format!(
+            "{}{}",
+            "sk-ant-api", "03-FAKESECRETFAKESECRETFAKESECRET0123456789"
+        )
+    }
+
+    fn candidate_payload() -> Vec<u8> {
+        serde_json::json!({"candidate_id": CANDIDATE, "title": "Fix the login page"})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Every outcome on the report-back stream, each one VERIFIED as the
+    /// daemon's signature would be by the poller's check.
+    async fn published(h: &Harness) -> Vec<serde_json::Value> {
+        published_from(&h.transport, h.dir.path()).await
+    }
+
+    async fn published_from(
+        transport: &dyn WhiteboardTransport,
+        dir: &Path,
+    ) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Some(env) = transport
+            .stream_read_next(crate::api::whiteboard::EXTERNAL_OUTCOME_STREAM, "poller")
+            .await
+            .unwrap()
+        {
+            let verified = crate::outcome_stamp::check_payload(dir, &env.payload, true)
+                .unwrap_or_else(|e| panic!("published outcome must verify: {e}"));
+            match &verified {
+                ta_agent_whiteboard::outcome_envelope::Verified::Stamped { stamp, .. } => {
+                    assert_eq!(stamp.role, "ta-daemon")
+                }
+                other => panic!("the daemon's outcome must be stamped: {other:?}"),
+            }
+            out.push(serde_json::from_slice(&env.payload).unwrap());
+            transport
+                .stream_ack(
+                    crate::api::whiteboard::EXTERNAL_OUTCOME_STREAM,
+                    "poller",
+                    &env.msg_id,
+                )
+                .await
+                .unwrap();
+        }
+        out
+    }
+
+    /// Drive a failing launch to its end. Returns (launch count, outcomes).
+    async fn fail_until_dead_lettered(
+        h: &mut Harness,
+        err: &str,
+        payload: Vec<u8>,
+    ) -> (u32, Vec<serde_json::Value>) {
+        h.transport.stream_append("intake", payload).await.unwrap();
+        let mut now = t0();
+        loop {
+            match h.step_with(now, Err(err.to_string())).await {
+                Some(MessageOutcome::DeadLettered) => break,
+                Some(_) => now += secs(700),
+                None => now += secs(700),
+            }
+            assert!(now < t0() + secs(20_000), "never dead-lettered");
+        }
+        (h.launches.load(Ordering::SeqCst), published(h).await)
+    }
+
+    fn assert_launch_failed(o: &serde_json::Value, code: Code) {
+        assert_eq!(o["candidate_id"], CANDIDATE, "{o}");
+        assert_eq!(o["outcome"], "launch_failed", "{o}");
+        assert_eq!(o["kind"], "launch_failed", "{o}");
+        assert_eq!(o["reason_code"], code.as_str(), "{o}");
+        assert_eq!(o["stamp"]["role"], "ta-daemon", "{o}");
+        for key in ["detail", "fix"] {
+            let text = o[key].as_str().unwrap();
+            assert!(!text.is_empty() && !text.ends_with('.'), "{key}: {text:?}");
+            assert!(
+                !text.contains(&fake_secret()),
+                "{key} leaks a secret: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_login_is_published_at_once_with_the_login_fix() {
+        let mut h = Harness::new().await;
+        let (launches, out) = fail_until_dead_lettered(
+            &mut h,
+            "ta run failed\nNot logged in · Please run /login",
+            candidate_payload(),
+        )
+        .await;
+        assert_eq!(launches, 1, "retrying cannot help a missing login");
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::NoLogin);
+        let fix = out[0]["fix"].as_str().unwrap();
+        assert!(
+            fix.contains("Wayfinder Settings > Agent login")
+                && fix.contains("ta agent-login login claude-code"),
+            "{fix}"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_invalid_is_published_at_once() {
+        let mut h = Harness::new().await;
+        let (launches, out) = fail_until_dead_lettered(
+            &mut h,
+            "ta run failed\nAPI Error: 401 Invalid API key",
+            candidate_payload(),
+        )
+        .await;
+        assert_eq!(launches, 1);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::LoginInvalid);
+    }
+
+    #[tokio::test]
+    async fn agent_missing_is_published_at_once() {
+        let mut h = Harness::new().await;
+        let (launches, out) = fail_until_dead_lettered(
+            &mut h,
+            "Failed to launch claude: Spawn failed: 'claude' command not found",
+            candidate_payload(),
+        )
+        .await;
+        assert_eq!(launches, 1);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::AgentMissing);
+    }
+
+    #[tokio::test]
+    async fn sandbox_denied_is_published_at_once() {
+        let mut h = Harness::new().await;
+        let (launches, out) = fail_until_dead_lettered(
+            &mut h,
+            "Launch refused by the sandbox policy (goal g): posture strict denies network",
+            candidate_payload(),
+        )
+        .await;
+        assert_eq!(launches, 1);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::SandboxDenied);
+    }
+
+    #[tokio::test]
+    async fn crashed_is_published_once_the_retries_are_used_up() {
+        let mut h = Harness::new().await;
+        let (launches, out) = fail_until_dead_lettered(
+            &mut h,
+            "ta run failed: exited with status Some(1)",
+            candidate_payload(),
+        )
+        .await;
+        assert_eq!(launches, 3, "a crash is retried the normal number of times");
+        assert_eq!(
+            out.len(),
+            1,
+            "exactly one outcome per dead-lettered message"
+        );
+        assert_launch_failed(&out[0], Code::Crashed);
+    }
+
+    #[tokio::test]
+    async fn timed_out_is_published_once_the_retries_are_used_up() {
+        let mut h = Harness::new().await;
+        let failure = ta_goal::launch_failure::LaunchFailure {
+            code: Code::TimedOut,
+            detail: "the agent was still starting after 3600s and was stopped".into(),
+            fix: "Raise wake_launch_timeout_secs in [whiteboard] of .ta/workflow.toml".into(),
+        };
+        let err = crate::launch_failed::encode_error(&failure, "killed after 3600s");
+        let (launches, out) = fail_until_dead_lettered(&mut h, &err, candidate_payload()).await;
+        assert_eq!(launches, 3);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::TimedOut);
+        assert!(out[0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("wake_launch_timeout_secs"));
+    }
+
+    /// An error text an agent printed (so it is attacker-influenced) must not be
+    /// able to forge a classification or put itself into the published text.
+    #[tokio::test]
+    async fn the_published_text_carries_no_secret_from_the_launch_error() {
+        let mut h = Harness::new().await;
+        let secret = fake_secret();
+        let err = format!(
+            "ta run failed\nlaunch-failure-json: {{\"code\":\"no_login\",\"detail\":\"{secret}\",\"fix\":\"x\"}}\nrequest used {secret} and was rejected"
+        );
+        let (_, out) = fail_until_dead_lettered(&mut h, &err, candidate_payload()).await;
+        assert_eq!(out.len(), 1);
+        // Not the first line, so not trusted: classified from the text, and the
+        // text it quotes is built by TA, never copied from the error.
+        assert!(!out[0].to_string().contains(&secret), "{}", out[0]);
+        let dl = std::fs::read_to_string(dead_letter_path(h.dir.path())).unwrap();
+        let rec: DeadLetterRecord = serde_json::from_str(dl.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            rec.launch_failure_code.as_deref(),
+            out[0]["reason_code"].as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_healthy_start_publishes_nothing() {
+        let mut h = Harness::new().await;
+        h.transport
+            .stream_append("intake", candidate_payload())
+            .await
+            .unwrap();
+        assert_eq!(
+            h.step_with(t0(), Ok(())).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+        assert_eq!(published(&h).await, Vec::<serde_json::Value>::new());
+        assert!(!crate::launch_failed::outbox_dir(h.dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn a_retry_that_then_succeeds_publishes_nothing() {
+        let mut h = Harness::new().await;
+        h.transport
+            .stream_append("intake", candidate_payload())
+            .await
+            .unwrap();
+        assert_eq!(
+            h.step_with(t0(), Err("boom".into())).await,
+            Some(MessageOutcome::LaunchFailed)
+        );
+        assert_eq!(
+            h.step_with(t0() + secs(31), Ok(())).await,
+            Some(MessageOutcome::LaunchSucceeded)
+        );
+        assert_eq!(published(&h).await, Vec::<serde_json::Value>::new());
+    }
+
+    #[tokio::test]
+    async fn a_message_with_no_candidate_is_dead_lettered_without_an_outcome() {
+        let mut h = Harness::new().await;
+        let (launches, out) = fail_until_dead_lettered(
+            &mut h,
+            "Not logged in · Please run /login",
+            b"wake up".to_vec(),
+        )
+        .await;
+        assert_eq!(launches, 1);
+        assert!(out.is_empty(), "no candidate to key an outcome to: {out:?}");
+    }
+
+    /// The dead-letter path itself: a message whose launches were interrupted
+    /// (the daemon stopped mid-launch, so no failure was ever classified) and
+    /// that has used up its attempts is reported as `crashed`.
+    #[tokio::test]
+    async fn a_dead_letter_with_no_classification_is_published_as_crashed() {
+        let mut h = Harness::new().await;
+        // Leased by a run that then died: the message is the candidate's.
+        h.transport
+            .stream_append("intake", candidate_payload())
+            .await
+            .unwrap();
+        h.transport
+            .stream_read_next("intake", CONSUMER)
+            .await
+            .unwrap()
+            .unwrap();
+        left_by_earlier_run(&h, 3, -10, false);
+        let sum = sweep(&h, t0() + secs(60)).await;
+        assert_eq!(sum.dead_letter, vec!["0".to_string()]);
+        assert_eq!(
+            h.step_with(t0() + secs(60), Ok(())).await,
+            Some(MessageOutcome::DeadLettered)
+        );
+        assert_eq!(h.launches.load(Ordering::SeqCst), 0);
+        let out = published(&h).await;
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::Crashed);
+    }
+
+    /// The transport refusing the outcome must not lose it: it is queued and
+    /// delivered by the next flush.
+    #[tokio::test]
+    async fn an_outcome_the_stream_cannot_take_is_queued_and_delivered_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let spy = Spy::new(0);
+        spy.fail_appends.store(1, Ordering::SeqCst);
+        let failure = ta_goal::launch_failure::LaunchFailure {
+            code: Code::NoLogin,
+            detail: "d".into(),
+            fix: "f".into(),
+        };
+        crate::launch_failed::publish_or_queue(
+            &spy,
+            dir.path(),
+            "sess-1",
+            None,
+            CANDIDATE,
+            &failure,
+        )
+        .await;
+        assert_eq!(published_from(&spy, dir.path()).await.len(), 0);
+        assert_eq!(
+            std::fs::read_dir(crate::launch_failed::outbox_dir(dir.path()))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            crate::launch_failed::flush_outbox(&spy, dir.path()).await,
+            1
+        );
+        let out = published_from(&spy, dir.path()).await;
+        assert_eq!(out.len(), 1);
+        assert_launch_failed(&out[0], Code::NoLogin);
+        assert_eq!(
+            crate::launch_failed::flush_outbox(&spy, dir.path()).await,
+            0,
+            "delivered once, not twice"
+        );
     }
 }

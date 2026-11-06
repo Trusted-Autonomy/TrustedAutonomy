@@ -585,6 +585,44 @@ An agent that never starts its model session is a **failed launch**, not a finis
 
 A goal's origin is fixed when the goal is created. A later `ta run --goal-id <id>` with a different `--origin` or `TA_GOAL_ORIGIN` keeps the recorded origin and prints a warning.
 
+### When an Agent Cannot Start (`launch_failed`)
+
+When a goal started for a Wayfinder candidate (or any external-intake candidate) fails before the agent does useful work, TA tells the source instead of leaving the task looking busy. The daemon publishes one message on the `external-outcome` stream, keyed to the candidate:
+
+```json
+{"candidate_id":"wayfinder-task:T-42#n-1","outcome":"launch_failed","kind":"launch_failed",
+ "reason_code":"no_login","detail":"the agent said it is not logged in (claude-code)",
+ "fix":"Log in from Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"}
+```
+
+`detail` is what happened and `fix` is what to do; neither ends with a full stop, so a reader can join them. Both are built by TA from identifiers and exit codes, never copied from agent output, so they carry no secret. The message is signed with the daemon's own `ta-daemon` role (see `[whiteboard] outcome_roles`). An agent cannot send `launch_failed`: the agent token path refuses it, and an unsigned one is refused by the verifier.
+
+| `reason_code` | When | Retried first? |
+|---|---|---|
+| `no_login` | The agent reported it is not logged in, or no login for it is stored | No, published at once |
+| `login_invalid` | The vendor rejected the stored login (401, invalid or expired key or token) | No, published at once |
+| `agent_missing` | The agent's command is not installed or not on `PATH` | No, published at once |
+| `sandbox_denied` | The sandbox policy refused the launch or its setup failed | No, published at once |
+| `crashed` | The launch exited non-zero (or by signal) for a reason TA cannot name. With no output at all it exited before doing any work. | Yes, `wake_max_attempts` times |
+| `timed_out` | The launch was still running after `wake_launch_timeout_secs` and was stopped | Yes, `wake_max_attempts` times |
+
+A message is reported when the daemon gives up on it: immediately for the first four (retrying cannot fix them), and after the last attempt for `crashed` and `timed_out`. A launch that works, including one that works on a retry, publishes nothing, and neither does a wake message that has no `candidate_id`. A launch that is dead-lettered with no recorded cause (for example the daemon stopped mid-launch three times) is published as `crashed`. If the stream cannot take the message it is kept in `.ta/launch-failed-outbox/` and sent on the next pass; a copy is never sent twice.
+
+A worker goal that the Wayfinder poller starts itself (`ta run --provenance-file ...`) is a child of the poller, so `ta run` records the reason on the goal and the daemon reports it within about ten seconds, keyed by the bare candidate id (no `#nonce`). Each goal is reported once (`.ta/launch-failed-published/<goal id>`); goals older than 24 hours are not reported.
+
+**The goal shows the same thing.** `ta goal status <id>` prints `Launch:`, `Detail:` and `Fix:` lines for a failed launch, and the JSON forms are machine-readable:
+
+```bash
+ta goal list --json          # array of rows, newest first
+ta goal status <id> --json   # the full record plus the fields below
+```
+
+Added fields (existing fields are unchanged): `state_name` and `poller_state` (one of `launching`, `running`, `waiting_for_review`, `failed`, `finished`), `candidate_id` (without `#nonce`), `task_id` (the Wayfinder task id when the candidate is `wayfinder-task:<id>`), `started_at` / `started_at_epoch`, `updated_at` / `updated_at_epoch`, `agent_pid`, `failure_reason`, and `launch_failure` (`code`, `detail`, `fix`). In `ta goal list --json` the row's `state` is the plain `poller_state` string; in `ta goal status --json` `state` stays the record's tagged object.
+
+When `ta run` fails to start an agent it prints a headline and one identifier-only line on stderr, `ta-launch-failure: code=<code> agent=<id> command=<id> goal=<uuid>`. The daemon reads it to name the code and goal; it is a hint, and a `crashed` hint is refined from the agent's own stderr when the daemon can see it. The daemon then updates the goal's `launch_failure` so the goal and the published message always agree.
+
+Knobs, both in `[whiteboard]` of `.ta/workflow.toml`: `wake_launch_timeout_secs` (the `timed_out` limit) and `wake_max_attempts` (retries before `crashed`/`timed_out` are published).
+
 ---
 
 ## Using TA Studio

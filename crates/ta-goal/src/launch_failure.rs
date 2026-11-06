@@ -34,15 +34,13 @@ use crate::agent_start::{classify_stderr, StartFailureKind};
 /// reads it so it never has to guess from free text. It carries the code only:
 /// the explanation is rebuilt by the reader from its own evidence, so a line an
 /// agent prints to its own stderr can at worst pick a code, never inject text.
-pub const LAUNCH_FAILURE_MARKER: &str = "ta-launch-failure: code=";
+pub const LAUNCH_FAILURE_MARKER: &str = "ta-launch-failure:";
 
 /// Longest `detail` or `fix` produced, in characters.
 pub const MAX_TEXT_CHARS: usize = 400;
 
 /// Why a launch failed.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchFailureCode {
     NoLogin,
@@ -199,24 +197,80 @@ fn contains_any(lower: &str, needles: &[&str]) -> bool {
 /// The code a `ta run` marker line in `text` names, if any. The last valid
 /// marker line wins.
 pub fn parse_marker(text: &str) -> Option<LaunchFailureCode> {
-    text.lines()
-        .rev()
-        .filter_map(|l| l.trim().strip_prefix(LAUNCH_FAILURE_MARKER))
-        .find_map(|rest| LaunchFailureCode::parse(rest.trim()))
+    parse_marker_full(text).map(|m| m.code)
 }
 
-/// The marker line for `code`.
-pub fn marker_line(code: LaunchFailureCode) -> String {
-    format!("{LAUNCH_FAILURE_MARKER}{}", code.as_str())
+/// A parsed `ta run` marker line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marker {
+    pub code: LaunchFailureCode,
+    /// The agent id `ta run` resolved, when it printed one that is a plain identifier.
+    pub agent: Option<String>,
+    /// The agent program `ta run` tried to run, when it printed a plain one.
+    pub command: Option<String>,
+    /// The goal id `ta run` created for this launch.
+    pub goal: Option<String>,
+}
+
+fn plain_identifier(v: &str) -> Option<String> {
+    let ok = !v.is_empty()
+        && v.len() <= 64
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    ok.then(|| v.to_string())
+}
+
+/// Parse the last valid marker line of `text`.
+pub fn parse_marker_full(text: &str) -> Option<Marker> {
+    text.lines().rev().find_map(|l| {
+        let rest = l.trim().strip_prefix(LAUNCH_FAILURE_MARKER)?;
+        let mut code = None;
+        let (mut agent, mut command, mut goal) = (None, None, None);
+        for token in rest.split_whitespace() {
+            match token.split_once('=') {
+                Some(("code", v)) => code = LaunchFailureCode::parse(v),
+                Some(("agent", v)) => agent = plain_identifier(v),
+                Some(("command", v)) => command = plain_identifier(v),
+                Some(("goal", v)) => goal = plain_identifier(v),
+                _ => {}
+            }
+        }
+        Some(Marker {
+            code: code?,
+            agent,
+            command,
+            goal,
+        })
+    })
+}
+
+/// The marker line for `code`:
+/// `ta-launch-failure: code=no_login agent=claude-code command=claude goal=<uuid>`.
+/// An identifier that is not plain is left out.
+pub fn marker_line(
+    code: LaunchFailureCode,
+    agent: Option<&str>,
+    command: Option<&str>,
+    goal: Option<&str>,
+) -> String {
+    let mut line = format!("{LAUNCH_FAILURE_MARKER} code={}", code.as_str());
+    for (key, value) in [("agent", agent), ("command", command), ("goal", goal)] {
+        if let Some(v) = value.and_then(plain_identifier) {
+            line.push_str(&format!(" {key}={v}"));
+        }
+    }
+    line
 }
 
 /// Decide the code from the evidence. Order, first match wins:
-/// the `ta run` marker; the sandbox refusing or denying; the agent missing; the
+/// a `ta run` marker naming anything but `crashed` (`ta run` knows its own
+/// refusals; `crashed` is its "unclassified", which the evidence may refine);
+/// the sandbox refusing or denying; the agent missing; the
 /// vendor rejecting the credential; a fatal "no login" message; the launch
 /// being killed by its timeout; the login probe saying `Invalid` or `Missing`
 /// for an agent that wrote nothing; otherwise `crashed`.
 pub fn classify(ev: &LaunchEvidence<'_>) -> LaunchFailureCode {
-    if let Some(code) = parse_marker(ev.stderr) {
+    if let Some(code) = parse_marker(ev.stderr).filter(|c| *c != LaunchFailureCode::Crashed) {
         return code;
     }
     let lower = ev.stderr.to_ascii_lowercase();
@@ -275,7 +329,12 @@ pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailu
     } else {
         ev.agent
     };
-    let framework = framework_for_agent(ev.agent);
+    // TA's default agent when none is named.
+    let framework = if ev.agent.is_empty() {
+        "claude-code"
+    } else {
+        framework_for_agent(ev.agent)
+    };
     let quoted = ev
         .evidence_line
         .map(one_line)
@@ -312,7 +371,7 @@ pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailu
             let exit = ev
                 .exit_code
                 .map(|c| format!("exited with status {c}"))
-                .unwrap_or_else(|| "was stopped by a signal".to_string());
+                .unwrap_or_else(|| "exited abnormally (no exit status)".to_string());
             let log = ev
                 .log_path
                 .map(|p| format!("Read the launch log {p}, fix the cause, then retry"))
@@ -343,9 +402,21 @@ pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailu
     }
 }
 
-/// Classify and describe in one step.
+/// Classify and describe in one step. The agent and command a `ta run` marker
+/// names (`ta run` resolved them, the caller may only be guessing) are used in
+/// the explanation.
 pub fn classify_and_describe(ev: &LaunchEvidence<'_>) -> LaunchFailure {
-    describe(classify(ev), ev)
+    let marker = parse_marker_full(ev.stderr);
+    let mut ev = *ev;
+    if let Some(m) = &marker {
+        if let Some(a) = m.agent.as_deref() {
+            ev.agent = a;
+        }
+        if let Some(c) = m.command.as_deref() {
+            ev.command = Some(c);
+        }
+    }
+    describe(classify(&ev), &ev)
 }
 
 impl LaunchFailure {
@@ -386,7 +457,12 @@ mod tests {
             .collect();
         assert_eq!(
             permanent,
-            ["no_login", "login_invalid", "agent_missing", "sandbox_denied"]
+            [
+                "no_login",
+                "login_invalid",
+                "agent_missing",
+                "sandbox_denied"
+            ]
         );
     }
 
@@ -456,12 +532,24 @@ mod tests {
 
     #[test]
     fn the_marker_wins_and_forged_text_cannot_inject_an_explanation() {
-        let text = format!("noise\n{}\nmore", marker_line(LaunchFailureCode::SandboxDenied));
+        let text = format!(
+            "noise\n{}\nmore",
+            marker_line(
+                LaunchFailureCode::SandboxDenied,
+                Some("codex"),
+                Some("codex"),
+                Some("0b6f3c5e-1111-2222-3333-444455556666")
+            )
+        );
         assert_eq!(classify(&ev(&text)), LaunchFailureCode::SandboxDenied);
         assert_eq!(parse_marker("ta-launch-failure: code=nonsense"), None);
-        // The marker carries the code only: detail and fix are always rebuilt.
+        // The marker carries the code and two identifiers only: detail and fix are always rebuilt.
         let f = classify_and_describe(&ev(&text));
         assert!(!f.detail.contains("noise"), "{f:?}");
+        assert!(f.detail.contains("codex"), "{f:?}");
+        let forged = "ta-launch-failure: code=no_login agent=evil;rm -rf command=$(x)";
+        let m = parse_marker_full(forged).unwrap();
+        assert_eq!((m.agent, m.command), (None, None));
     }
 
     #[test]
@@ -481,7 +569,9 @@ mod tests {
             assert!(!f.detail.is_empty() && !f.fix.is_empty(), "{f:?}");
             assert!(!f.detail.ends_with('.') && !f.fix.ends_with('.'), "{f:?}");
             assert!(!f.detail.contains('\n') && !f.fix.contains('\n'), "{f:?}");
-            assert!(f.headline().starts_with(&format!("Agent could not start ({c}): ")));
+            assert!(f
+                .headline()
+                .starts_with(&format!("Agent could not start ({c}): ")));
         }
         let nl = describe(
             LaunchFailureCode::NoLogin,
@@ -491,8 +581,9 @@ mod tests {
             },
         );
         assert!(
-            nl.fix
-                .contains("Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"),
+            nl.fix.contains(
+                "Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"
+            ),
             "{nl:?}"
         );
     }
