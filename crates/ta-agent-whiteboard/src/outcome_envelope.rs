@@ -61,7 +61,31 @@ pub const MAX_MSG_ID_BYTES: usize = 64;
 pub const MAX_KID_BYTES: usize = 64;
 
 /// Outcome kinds the poller understands.
-pub const ALLOWED_OUTCOMES: [&str; 5] = ["done", "blocked", "new_work", "reply", "delegate"];
+pub const ALLOWED_OUTCOMES: [&str; 6] = [
+    "done",
+    "blocked",
+    "new_work",
+    "reply",
+    "delegate",
+    "launch_failed",
+];
+
+/// The outcome only the daemon publishes: the agent for a candidate could not start.
+pub const OUTCOME_LAUNCH_FAILED: &str = "launch_failed";
+/// The stamped role of the daemon itself. The only role that may publish
+/// `launch_failed`, and the only thing it may publish.
+pub const DAEMON_ROLE: &str = "ta-daemon";
+/// The `reason_code` values of a `launch_failed` outcome. Must equal
+/// `ta_goal::LaunchFailureCode::ALL` (the daemon tests assert it).
+pub const LAUNCH_FAILURE_CODES: [&str; 6] = [
+    "no_login",
+    "login_invalid",
+    "agent_missing",
+    "sandbox_denied",
+    "crashed",
+    "timed_out",
+];
+pub const MAX_FIX_BYTES: usize = 1024;
 
 /// An envelope more than this many seconds in the future is refused (clock
 /// skew allowance).
@@ -78,6 +102,13 @@ pub struct OutcomeBody {
     pub detail: String,
     #[serde(default)]
     pub new_task_title: Option<String>,
+    /// `launch_failed` only: why the agent could not start (see
+    /// [`LAUNCH_FAILURE_CODES`]). Signed when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// `launch_failed` only: what the person should do. Signed when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 /// What the daemon asserts about the sender. Never taken from the client.
@@ -114,6 +145,15 @@ pub struct OutcomeEnvelope {
     pub detail: String,
     #[serde(default)]
     pub new_task_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+    /// Present on `launch_failed` and equal to `outcome`: the poller reads
+    /// this spelling (`{"kind":"launch_failed", ...}`). Derived, not signed
+    /// separately; it must match the signed `outcome`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub v: u32,
     pub stamp: Stamp,
     pub sig: SigBlock,
@@ -126,6 +166,8 @@ impl OutcomeEnvelope {
             outcome: self.outcome.clone(),
             detail: self.detail.clone(),
             new_task_title: self.new_task_title.clone(),
+            reason_code: self.reason_code.clone(),
+            fix: self.fix.clone(),
         }
     }
 
@@ -171,6 +213,8 @@ pub enum EnvelopeError {
     Replay(String),
     #[error("outcome came from role {role:?}, which may not post outcomes (allowed: {allowed}). Discard it.")]
     RoleNotPermitted { role: String, allowed: String },
+    #[error("outcome launch_failed came from role {role:?}; only the daemon (role ta-daemon) publishes launch_failed, in a signed envelope. Discard it: an agent cannot report its own launch failure.")]
+    LaunchFailedNotFromDaemon { role: String },
 }
 
 fn b64() -> base64::engine::GeneralPurpose {
@@ -247,6 +291,49 @@ pub fn validate_body(body: &OutcomeBody) -> Result<(), EnvelopeError> {
             return Err(bad("new_task_title", "contains control characters".into()));
         }
     }
+    validate_launch_failed_fields(body)?;
+    Ok(())
+}
+
+fn validate_launch_failed_fields(body: &OutcomeBody) -> Result<(), EnvelopeError> {
+    let bad = |field: &'static str, why: String| EnvelopeError::InvalidField { field, why };
+    if body.outcome != OUTCOME_LAUNCH_FAILED {
+        if body.reason_code.is_some() || body.fix.is_some() {
+            return Err(bad(
+                "reason_code",
+                format!(
+                    "reason_code and fix belong only to outcome {OUTCOME_LAUNCH_FAILED:?}, not {:?}",
+                    body.outcome
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    match body.reason_code.as_deref() {
+        Some(code) if LAUNCH_FAILURE_CODES.contains(&code) => {}
+        other => {
+            return Err(bad(
+                "reason_code",
+                format!(
+                    "{other:?} is not one of {}",
+                    LAUNCH_FAILURE_CODES.join(", ")
+                ),
+            ))
+        }
+    }
+    match body.fix.as_deref() {
+        Some(f) if !f.trim().is_empty() && f.len() <= MAX_FIX_BYTES && !has_control_chars(f) => {}
+        Some(_) => {
+            return Err(bad(
+                "fix",
+                format!("must be 1..={MAX_FIX_BYTES} bytes with no control characters"),
+            ))
+        }
+        None => return Err(bad("fix", "is required for launch_failed".into())),
+    }
+    if body.detail.trim().is_empty() {
+        return Err(bad("detail", "is required for launch_failed".into()));
+    }
     Ok(())
 }
 
@@ -280,6 +367,17 @@ pub fn body_sha256(body: &OutcomeBody) -> String {
         Some(t) => push_len_prefixed(&mut h, t.as_bytes()),
         None => h.update(u64::MAX.to_be_bytes()),
     }
+    // The launch_failed fields are signed too, but only when present, so every
+    // pre-existing envelope keeps the exact digest it was signed with.
+    if body.reason_code.is_some() || body.fix.is_some() {
+        push_len_prefixed(&mut h, b"launch_failed/v1");
+        for field in [&body.reason_code, &body.fix] {
+            match field {
+                Some(t) => push_len_prefixed(&mut h, t.as_bytes()),
+                None => h.update(u64::MAX.to_be_bytes()),
+            }
+        }
+    }
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -309,11 +407,15 @@ pub fn sign_outcome(
     validate_stamp(&stamp)?;
     check_ident("kid", kid, MAX_KID_BYTES)?;
     let sig = key.sign(&canonical_signing_input(kid, &stamp, &body));
+    let kind = (body.outcome == OUTCOME_LAUNCH_FAILED).then(|| OUTCOME_LAUNCH_FAILED.to_string());
     let env = OutcomeEnvelope {
         candidate_id: body.candidate_id,
         outcome: body.outcome,
         detail: body.detail,
         new_task_title: body.new_task_title,
+        reason_code: body.reason_code,
+        fix: body.fix,
+        kind,
         v: ENVELOPE_VERSION,
         stamp,
         sig: SigBlock {
@@ -459,6 +561,13 @@ pub fn verify_payload(
     let has = |k: &str| obj.contains_key(k);
     let stamped_keys = [has("v"), has("stamp"), has("sig")];
     if stamped_keys.iter().all(|b| !b) {
+        if obj.get("outcome").and_then(|v| v.as_str()) == Some(OUTCOME_LAUNCH_FAILED) {
+            // launch_failed is only ever a signed envelope from the daemon, so
+            // an unstamped one is a forgery whatever the policy says.
+            return Err(EnvelopeError::LaunchFailedNotFromDaemon {
+                role: "(unstamped)".into(),
+            });
+        }
         if policy.require_stamped {
             return Err(EnvelopeError::Unstamped);
         }
@@ -484,6 +593,8 @@ pub fn verify_payload(
                 .get("new_task_title")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            reason_code: None,
+            fix: None,
         };
         return Ok(Verified::Legacy { body });
     }
@@ -502,6 +613,14 @@ pub fn verify_payload(
         .map_err(|e| EnvelopeError::Malformed(format!("does not match the v1 schema ({e})")))?;
     if env.v != ENVELOPE_VERSION {
         return Err(EnvelopeError::UnsupportedVersion(env.v));
+    }
+    if let Some(kind) = &env.kind {
+        if kind != &env.outcome {
+            return Err(EnvelopeError::Malformed(format!(
+                "`kind` ({kind:?}) must equal `outcome` ({:?}) when present",
+                env.outcome
+            )));
+        }
     }
     let body = env.body();
     validate_body(&body)?;
@@ -577,7 +696,23 @@ pub fn verify_payload(
             max_secs: policy.max_future_skew_secs,
         });
     }
-    if !policy.allowed_roles.is_empty() && !policy.allowed_roles.contains(&env.stamp.role) {
+    let daemon_launch_failed =
+        body.outcome == OUTCOME_LAUNCH_FAILED && env.stamp.role == DAEMON_ROLE;
+    if body.outcome == OUTCOME_LAUNCH_FAILED && env.stamp.role != DAEMON_ROLE {
+        return Err(EnvelopeError::LaunchFailedNotFromDaemon {
+            role: env.stamp.role.clone(),
+        });
+    }
+    if env.stamp.role == DAEMON_ROLE && body.outcome != OUTCOME_LAUNCH_FAILED {
+        return Err(EnvelopeError::RoleNotPermitted {
+            role: env.stamp.role.clone(),
+            allowed: "none (ta-daemon may only publish launch_failed)".into(),
+        });
+    }
+    if !daemon_launch_failed
+        && !policy.allowed_roles.is_empty()
+        && !policy.allowed_roles.contains(&env.stamp.role)
+    {
         return Err(EnvelopeError::RoleNotPermitted {
             role: env.stamp.role.clone(),
             allowed: policy.allowed_roles.join(", "),
@@ -626,6 +761,8 @@ mod tests {
             outcome: "reply".into(),
             detail: "hello".into(),
             new_task_title: None,
+            reason_code: None,
+            fix: None,
         }
     }
 
@@ -1058,6 +1195,8 @@ mod tests {
                 outcome: "done".into(),
                 detail: "d".into(),
                 new_task_title: None,
+                reason_code: None,
+                fix: None,
             },
         );
         let text = String::from_utf8(input).unwrap();
@@ -1106,5 +1245,165 @@ mod tests {
         // Re-signing reproduces the published signature byte for byte.
         let again = sign_outcome(env.body(), env.stamp.clone(), &env.sig.kid, &k).unwrap();
         assert_eq!(again.sig.value, env.sig.value);
+    }
+
+    // ── launch_failed ──────────────────────────────────────────────────────
+
+    fn lf_body(code: &str) -> OutcomeBody {
+        OutcomeBody {
+            candidate_id: "wayfinder-task:t1#abc".into(),
+            outcome: OUTCOME_LAUNCH_FAILED.into(),
+            detail: "claude-code has no usable login, so it could not start".into(),
+            new_task_title: None,
+            reason_code: Some(code.into()),
+            fix: Some("Log in from Wayfinder Settings > Agent login".into()),
+        }
+    }
+
+    fn daemon_stamp(msg: &str, at: i64) -> Stamp {
+        Stamp {
+            role: DAEMON_ROLE.into(),
+            ..stamp(msg, at)
+        }
+    }
+
+    #[test]
+    fn launch_failed_round_trips_for_every_reason_code_and_reads_as_kind() {
+        let k = key(3);
+        for (i, code) in LAUNCH_FAILURE_CODES.iter().enumerate() {
+            let env = sign_outcome(
+                lf_body(code),
+                daemon_stamp(&format!("lf{i}"), NOW),
+                "k1",
+                &k,
+            )
+            .unwrap();
+            let wire: serde_json::Value = serde_json::from_slice(&env.to_bytes()).unwrap();
+            assert_eq!(wire["kind"], "launch_failed");
+            assert_eq!(wire["outcome"], "launch_failed");
+            assert_eq!(wire["reason_code"], *code);
+            assert!(wire["fix"].as_str().unwrap().contains("Agent login"));
+            // The signed policy lists only chief-of-staff: the daemon role still verifies.
+            let v = verify_payload(
+                &env.to_bytes(),
+                &ring_for("k1", &k, RingStatus::Active),
+                &policy(),
+                &mut ReplayCache::new(),
+                NOW + 1,
+            )
+            .unwrap();
+            match v {
+                Verified::Stamped { body, stamp, .. } => {
+                    assert_eq!(body.reason_code.as_deref(), Some(*code));
+                    assert_eq!(stamp.role, DAEMON_ROLE);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn launch_failed_fields_are_signed() {
+        let k = key(3);
+        let env = sign_outcome(lf_body("no_login"), daemon_stamp("lf", NOW), "k1", &k).unwrap();
+        for tamper in [
+            |e: &mut OutcomeEnvelope| e.reason_code = Some("crashed".into()),
+            |e: &mut OutcomeEnvelope| e.fix = Some("Do something else".into()),
+        ] {
+            let mut forged = env.clone();
+            tamper(&mut forged);
+            let err = verify_payload(
+                &forged.to_bytes(),
+                &ring_for("k1", &k, RingStatus::Active),
+                &policy(),
+                &mut ReplayCache::new(),
+                NOW + 1,
+            )
+            .unwrap_err();
+            assert_eq!(err, EnvelopeError::BadSignature);
+        }
+    }
+
+    #[test]
+    fn an_agent_role_cannot_publish_launch_failed_and_unstamped_is_refused() {
+        let k = key(3);
+        let env = sign_outcome(lf_body("no_login"), stamp("lf", NOW), "k1", &k).unwrap();
+        let err = verify_payload(
+            &env.to_bytes(),
+            &ring_for("k1", &k, RingStatus::Active),
+            &policy(),
+            &mut ReplayCache::new(),
+            NOW + 1,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EnvelopeError::LaunchFailedNotFromDaemon { .. }),
+            "{err:?}"
+        );
+        let legacy = br#"{"candidate_id":"c","outcome":"launch_failed","detail":"d"}"#;
+        let err = verify_payload(
+            legacy,
+            &KeyRing::default(),
+            &VerifyPolicy::default(),
+            &mut ReplayCache::new(),
+            NOW,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EnvelopeError::LaunchFailedNotFromDaemon { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_daemon_role_may_publish_nothing_but_launch_failed() {
+        let k = key(3);
+        let env = sign_outcome(body(), daemon_stamp("d1", NOW), "k1", &k).unwrap();
+        let err = verify_payload(
+            &env.to_bytes(),
+            &ring_for("k1", &k, RingStatus::Active),
+            &VerifyPolicy::default(),
+            &mut ReplayCache::new(),
+            NOW + 1,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EnvelopeError::RoleNotPermitted { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn launch_failed_needs_a_valid_code_and_a_fix_and_others_may_not_carry_them() {
+        let k = key(3);
+        let mut bad_code = lf_body("no_login");
+        bad_code.reason_code = Some("exploded".into());
+        let mut no_fix = lf_body("no_login");
+        no_fix.fix = None;
+        let mut empty_fix = lf_body("no_login");
+        empty_fix.fix = Some("  ".into());
+        let mut stray = body();
+        stray.reason_code = Some("no_login".into());
+        for b in [bad_code, no_fix, empty_fix, stray] {
+            let err = sign_outcome(b, daemon_stamp("x", NOW), "k1", &k).unwrap_err();
+            assert!(matches!(err, EnvelopeError::InvalidField { .. }), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn kind_must_match_outcome() {
+        let k = key(3);
+        let env = sign_outcome(lf_body("crashed"), daemon_stamp("k", NOW), "k1", &k).unwrap();
+        let mut v: serde_json::Value = serde_json::from_slice(&env.to_bytes()).unwrap();
+        v["kind"] = "done".into();
+        let err = verify_payload(
+            v.to_string().as_bytes(),
+            &ring_for("k1", &k, RingStatus::Active),
+            &policy(),
+            &mut ReplayCache::new(),
+            NOW + 1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EnvelopeError::Malformed(_)), "{err:?}");
     }
 }

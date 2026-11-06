@@ -26,6 +26,7 @@ sha2 = { workspace = true }
 
 ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.11" }
 ta-plugin = { path = "../ta-plugin", version = "0.17.12-alpha.11" }
+ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.11" }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

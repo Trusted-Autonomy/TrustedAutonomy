@@ -213,6 +213,10 @@ pub enum GoalCommands {
         /// Show all goals including terminal states.
         #[arg(long)]
         all: bool,
+        /// Output a JSON array (one object per goal: id, state, candidate_id,
+        /// task_id, started_at, launch_failure, ...) instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Show details for a specific goal run.
     Status {
@@ -473,9 +477,12 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
             follow_up.as_ref(),
             objective_file.as_deref(),
         ),
-        GoalCommands::List { state, active, all } => {
-            list_goals(&store, config, state.as_deref(), *active, *all)
-        }
+        GoalCommands::List {
+            state,
+            active,
+            all,
+            json,
+        } => list_goals(&store, config, state.as_deref(), *active, *all, *json),
         GoalCommands::History {
             phase,
             agent,
@@ -742,6 +749,7 @@ fn list_goals(
     state: Option<&str>,
     active: bool,
     all: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     let mut goals = if let Some(state_filter) = state {
         store.list_by_state(state_filter)?
@@ -766,6 +774,12 @@ fn list_goals(
             }
             true
         });
+    }
+
+    if json {
+        let rows: Vec<serde_json::Value> = goals.iter().map(list_row_json).collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
     }
 
     if goals.is_empty() {
@@ -1466,7 +1480,10 @@ fn diagnose_goal(
 
 /// The goal record plus its machine-readable completion record under
 /// `completion` (tokens of all four kinds, usd, cost_estimated, origin,
-/// origin_class, aborted). Every key of the goal record is unchanged.
+/// origin_class, aborted) and the poller-facing fields of
+/// `GoalRun::machine_fields` (`poller_state`, `candidate_id`, `task_id`,
+/// `started_at`, `launch_failure`, ...). Every key of the goal record is
+/// unchanged: `state` stays the record's tagged object.
 fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
     let mut value = serde_json::to_value(g)?;
     if let Some(obj) = value.as_object_mut() {
@@ -1474,8 +1491,22 @@ fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
             "completion".to_string(),
             serde_json::to_value(ta_goal::spend::CompletionRecord::from_goal(g))?,
         );
+        for (key, field) in g.machine_fields() {
+            obj.entry(key).or_insert(field);
+        }
     }
     Ok(value)
+}
+
+/// One row of `ta goal list --json`: `GoalRun::machine_fields`, with `state`
+/// the poller state (`launching|running|waiting_for_review|failed|finished`).
+fn list_row_json(g: &ta_goal::GoalRun) -> serde_json::Value {
+    let mut row = g.machine_fields();
+    row.insert(
+        "state".to_string(),
+        serde_json::Value::String(g.poller_state().to_string()),
+    );
+    serde_json::Value::Object(row)
 }
 
 /// One-line description of the model/effort a goal was launched with, for
@@ -1557,6 +1588,11 @@ fn show_status(
                 println!("State:    TA Building Draft [{}s elapsed]", elapsed);
             } else {
                 println!("State:    {}", g.state);
+            }
+            if let Some(lf) = &g.launch_failure {
+                println!("Launch:   could not start ({})", lf.code);
+                println!("  Detail: {}", lf.detail);
+                println!("  Fix:    {}", lf.fix);
             }
             if let Some(ref note) = g.progress_note {
                 println!("Progress: {}", note);
@@ -4120,6 +4156,68 @@ mod spend_status_tests {
         assert_eq!(v["start_commit"], "a".repeat(40));
         assert_eq!(v["start_branch"], "main");
         assert_eq!(v["start_dirty"], true);
+    }
+
+    fn plain_goal() -> ta_goal::GoalRun {
+        ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/tmp/w"),
+            std::path::PathBuf::from("/tmp/s"),
+        )
+    }
+
+    #[test]
+    fn goal_json_exposes_the_poller_state_for_each_lifecycle_stage() {
+        use ta_goal::GoalRunState as S;
+        let mut g = plain_goal();
+        assert_eq!(list_row_json(&g)["state"], "launching");
+        g.transition(S::Configured).unwrap();
+        assert_eq!(status_json(&g).unwrap()["poller_state"], "launching");
+        g.transition(S::Running).unwrap();
+        assert_eq!(list_row_json(&g)["state"], "running");
+        assert_eq!(status_json(&g).unwrap()["poller_state"], "running");
+        g.transition(S::PrReady).unwrap();
+        assert_eq!(list_row_json(&g)["state"], "waiting_for_review");
+        g.transition(S::UnderReview).unwrap();
+        g.transition(S::Approved {
+            approved_by: "me".into(),
+        })
+        .unwrap();
+        g.transition(S::Applied).unwrap();
+        assert_eq!(list_row_json(&g)["state"], "finished");
+    }
+
+    #[test]
+    fn goal_json_links_the_candidate_and_carries_the_launch_failure() {
+        use ta_goal::GoalRunState as S;
+        let mut g = plain_goal();
+        g.candidate_id = Some("wayfinder-task:T-42".into());
+        g.transition(S::Configured).unwrap();
+        g.transition(S::Running).unwrap();
+        g.transition(S::Failed {
+            reason: "the agent never started".into(),
+        })
+        .unwrap();
+        g.launch_failure = Some(ta_goal::LaunchFailure {
+            code: ta_goal::LaunchFailureCode::NoLogin,
+            detail: "not logged in".into(),
+            fix: "ta agent-login login claude-code".into(),
+        });
+        for v in [status_json(&g).unwrap(), list_row_json(&g)] {
+            assert_eq!(v["candidate_id"], "wayfinder-task:T-42");
+            assert_eq!(v["task_id"], "T-42");
+            assert_eq!(v["poller_state"], "failed");
+            assert_eq!(v["launch_failure"]["code"], "no_login");
+            assert_eq!(
+                v["launch_failure"]["fix"],
+                "ta agent-login login claude-code"
+            );
+            assert!(v["started_at"].is_string(), "{v}");
+        }
+        // `status --json` keeps the record's tagged state object.
+        assert!(status_json(&g).unwrap()["state"].is_object());
     }
 
     #[test]

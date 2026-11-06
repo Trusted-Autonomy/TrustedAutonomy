@@ -40,6 +40,8 @@ One JSON object per stream message on stream `external-outcome` (NATS subject `w
 
 A stamped envelope has exactly these top-level keys: `candidate_id`, `outcome`, `detail`, `new_task_title` (may be `null` or absent), `v`, `stamp`, `sig`. **Any other top-level key makes it invalid** (this blocks smuggling `tag`/`objective` onto a genuine envelope). `stamp` and `sig` also reject unknown keys. Having some but not all of `v`, `stamp`, `sig` is invalid, never "legacy".
 
+**`launch_failed` (additive).** The daemon itself publishes one more outcome, `launch_failed`, when the agent for a candidate could not start. Its envelope additionally carries `reason_code` (`no_login`, `login_invalid`, `agent_missing`, `sandbox_denied`, `crashed` or `timed_out`), `fix` (what the person should do), and `kind` (always equal to `outcome`; derived, not signed separately), so `{"kind":"launch_failed","reason_code":...,"detail":...,"fix":...}` is readable directly. Rules: `stamp.role` MUST be `ta-daemon` (and `ta-daemon` may publish nothing else); `reason_code` and `fix` appear only on `launch_failed` and `detail` and `fix` must be non-empty; an unstamped `launch_failed` is never accepted. `reason_code` and `fix`, when present, are signed: after the four original fields the digest appends the length-prefixed marker `launch_failed/v1` and then `reason_code` and `fix` (an absent value is eight `ff` bytes). Envelopes without them keep exactly their old digest.
+
 ### Fields and limits
 
 | Field | Type | Limit | Rules |
