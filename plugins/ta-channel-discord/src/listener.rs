@@ -72,6 +72,11 @@ fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         use std::process::Command;
+        // pid_t is signed: a value above i32::MAX reaches kill(2) as a negative number, and
+        // `kill -0 -1` means "every process I may signal" and succeeds. No such PID exists.
+        if pid > i32::MAX as u32 {
+            return false;
+        }
         Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
