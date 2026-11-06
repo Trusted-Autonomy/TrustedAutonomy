@@ -32,6 +32,7 @@ pub mod goal_run;
 pub mod golden;
 pub mod history;
 pub mod human_review;
+pub mod launch_failure;
 pub mod messaging_audit;
 pub mod operations;
 pub mod origin;
@@ -65,6 +66,7 @@ pub use goal_run::BudgetAbort;
 pub use goal_run::{slugify_title, GoalRun, GoalRunState, ModelEffortRecord};
 pub use goal_run::{POST_AGENT_PHASE_BUILDING_DRAFT, POST_AGENT_PHASE_REVIEWING};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
+pub use launch_failure::{LaunchFailure, LaunchFailureCode, LoginState};
 pub use human_review::{
     extract_human_review_items, HumanReviewRecord, HumanReviewStatus, HumanReviewStore,
 };
