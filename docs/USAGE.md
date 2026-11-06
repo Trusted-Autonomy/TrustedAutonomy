@@ -19660,6 +19660,42 @@ New code that can spawn `claude`, `codex`, `ollama`, `meridian` or `ta run` must
 
 To confirm a test run spent nothing, run `ta cost report --detail --group-by session_family --since <time>` after `cargo test -p ta-cli` and check that no new title-extraction sessions appear.
 
+### Validating changes locally (ci-local)
+
+GitHub Actions minutes are limited (macOS runners bill 10x, Windows 2x), so changes are proven on your machine first and CI is only the final, cheap confirmation. `scripts/ci-local.sh` is the one command that runs every CI check with CI's own commands:
+
+```bash
+scripts/ci-local.sh                 # everything below; ends with the evidence line
+scripts/ci-local.sh --quick         # checks + host fmt/clippy only (inner loop)
+scripts/ci-local.sh --only windows  # one group: checks, host, windows, linux
+scripts/ci-local.sh --skip-docker   # no Linux container (Docker not running)
+scripts/ci-local.sh -v -x           # stream output, stop at the first failure
+scripts/ci-local.sh --clean         # delete the caches and Docker volumes it made
+```
+
+| Group | What runs | CI job it mirrors |
+|-------|-----------|-------------------|
+| `checks` | version consistency (Cargo.toml, CLAUDE.md, manifests), no-ip-docs, secret scan, script self-tests, `actionlint` (if installed) | `Version consistency` |
+| `host` | fmt, `clippy -D warnings`, `cargo test --workspace`, the three standalone channel plugins, `ta --version`, leftover-process guard (as a before/after delta, because your own `ta-daemon` may be running), and on macOS the Seatbelt conformance suite with skips treated as failures | `Lint and Test (macos-latest)`, the fmt/clippy/test part of `Lint and Test (ubuntu-latest)` |
+| `windows` | `cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings` on the rustup toolchain pinned by `rust-toolchain.toml` | the compile gate of `Windows Build` |
+| `linux` | clippy, `cargo test --workspace` and the sandbox-conformance container cases inside a Docker container on the Docker VM's native architecture (aarch64 on Apple silicon), as a non-root user like a CI runner | `Lint and Test (ubuntu-latest)`, `Linux Sandbox Conformance` |
+
+The run prints a PASS/FAIL table, then what it did **not** cover, then one line. When every selected step passed and the working tree is committed, that line is `ci-local: all green at <sha> <date>`; paste it into the pull request body. A partial run prints `ci-local: green at <sha> <date> (NOT covered: ...)`, and a run with uncommitted changes prints no evidence line (the sha would not describe what was tested) unless you pass `--allow-dirty`. Failed steps print their last 40 lines and a log path under the cache directory.
+
+What a local run cannot show, and the script says so every time: Windows tests are type-checked and linted but never executed (the C dependencies `ring` and `aws-lc-sys` are replaced by empty stand-ins for that one target, which is sound only because `clippy` never links), AppContainer and Credential Manager behaviour, the x86_64 Linux architecture, the Linux sandbox host suite on a bare runner kernel, the real macOS Keychain (never touched), and release packaging.
+
+Safety: the script runs every cargo command under `env -i` with a throwaway `HOME`, sets `TA_NO_KEYCHAIN=1` and `TA_TEST_NO_EXTERNAL_AGENTS=1`, and replaces the macOS codesigning cargo runner with `/usr/bin/env`, so it never reads the Keychain or your `~/.ta` and never reaches a paid agent.
+
+Caching makes re-runs incremental. Host and Windows build directories live under `~/.cache/ci-local/ta` (override with `CI_LOCAL_CACHE`); the Linux group uses Docker volumes `ta-ci-local-src`, `ta-ci-local-target`, `ta-ci-local-cargo` and `ta-ci-local-sandbox-target`. Expect roughly 8-12 GB for the host build, 4-6 GB for Windows and 8-12 GB for the Linux volume once warm. `scripts/ci-local.sh --clean` removes all of it, including the `ta-ci-local:<rust version>` Docker image. The script refuses to start with less than 10 GB free.
+
+What CI itself runs, so you know what is left after a green `ci-local`:
+
+- **Pull request:** `Version consistency` (seconds) and one ubuntu job (`Lint and Test (ubuntu-latest)`: fmt, clippy, test). Docs-only pull requests stop after the cheap checks. A newer push cancels the stale run.
+- **Push to `main`** (the merge of a composite pull request), **`workflow_dispatch`** (`gh workflow run ci.yml --ref <branch>`), or a pull request labelled **`full-ci`** (add the label before pushing; it is read when the pull request is opened or pushed to): the macOS, Windows and Linux Sandbox Conformance jobs run too. On an ordinary pull request those jobs are skipped, and a skipped job reports success so the required check names still resolve. Linux Sandbox Conformance also runs on a pull request that touches `crates/ta-runtime` or `crates/ta-sandbox`.
+- **Nightly:** builds the five release targets only when code (not just docs) changed since the last nightly; it does not repeat the tests CI already ran on `main`.
+
+Never push again just to trigger CI: fix locally, re-run `scripts/ci-local.sh`, push once. Re-run a red CI job from the Actions page instead of pushing an empty commit.
+
 ---
 
 ## Getting Help

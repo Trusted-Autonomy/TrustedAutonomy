@@ -45,6 +45,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          # Full history: the docs-only check diffs against the last nightly's commit.
+          fetch-depth: 0
 
       - name: Check commit SHA against last nightly
         id: check
@@ -90,8 +93,20 @@ jobs:
             echo "Skipping — no commits since last nightly (SHA: ${HEAD_SHA})."
             echo "should_build=false" >> $GITHUB_OUTPUT
           else
-            echo "New commits detected since last nightly (${LAST_SHA} → ${HEAD_SHA})."
-            echo "should_build=true" >> $GITHUB_OUTPUT
+            # A nightly is a packaging run (release builds of five targets, the
+            # expensive macOS ones at 10x). CI already tested main on push, so
+            # skip it when nothing but docs changed (same rule as ci.yml:
+            # repo-root *.md and docs/**). If the diff cannot be computed
+            # (last nightly's commit not in history) build anyway.
+            if CHANGED=$(git diff --name-only "$LAST_SHA" "$HEAD_SHA" 2>/dev/null) && [ -n "$CHANGED" ] \
+               && printf '%s\n' "$CHANGED" | scripts/ci-changes.sh | grep -qx 'code=false'; then
+              echo "Skipping — only docs changed since last nightly (${LAST_SHA} → ${HEAD_SHA}); a nightly would ship identical binaries."
+              echo "Changed: $(echo "$CHANGED" | tr '\n' ' ')"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+            else
+              echo "New code commits detected since last nightly (${LAST_SHA} → ${HEAD_SHA})."
+              echo "should_build=true" >> $GITHUB_OUTPUT
+            fi
           fi
 
       # Fails the whole run (visibly) when Cargo.toml lags or leads PLAN.md, so

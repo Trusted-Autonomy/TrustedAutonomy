@@ -158,7 +158,17 @@ locally with `./dev cargo test --manifest-path plugins/ta-channel-slack/Cargo.to
 
 ### Before Every Commit
 
-Run these four checks (all must pass):
+Validate locally first, then push once. The one-command CI mirror runs every
+check CI runs, on the platforms this machine can reach:
+
+```bash
+scripts/ci-local.sh          # fmt, clippy, tests, Seatbelt (macOS), Windows clippy, Linux in Docker
+scripts/ci-local.sh --quick  # checks + host fmt/clippy for the inner loop
+```
+
+It ends with `ci-local: all green at <sha> <date>`; paste that line into the
+pull request body. Details and caching: docs/USAGE.md "Validating changes
+locally (ci-local)". The fast inner loop (all must pass) is:
 
 ```bash
 ./dev cargo build --workspace
@@ -289,11 +299,22 @@ For testing unreleased features:
 
 ### Continuous Integration
 
-`.github/workflows/ci.yml` runs on every push and PR:
-- Build all workspace crates
-- Run all tests
-- Clippy lint checks (warnings as errors)
-- Formatting validation
+CI is the cheap final check of work already proven locally (see "Before Every
+Commit"). `.github/workflows/ci.yml`:
+
+- **Pull request**: `Version consistency` (version sources, no-ip-docs, secret
+  scan) plus ONE ubuntu job, `Lint and Test (ubuntu-latest)`: fmt, clippy
+  (warnings as errors), tests. Docs-only pull requests stop after the cheap
+  checks. New runs on the same PR cancel the stale one.
+- **Push to `main`** (the merge of a composite PR), **`workflow_dispatch`**
+  (`gh workflow run ci.yml --ref <branch>`), or a PR labelled **`full-ci`**
+  (add the label before pushing; it is read when the PR is opened or pushed to):
+  the full matrix as well: `Lint and Test (macos-latest)`, `Windows Build` and
+  `Linux Sandbox Conformance`. On an ordinary PR those jobs are skipped, and a
+  skipped job reports success so the required check names still resolve.
+- Not in CI on purpose: release builds on every push (the nightly and release
+  workflows build them) and a separate Windows compile job (the Windows job
+  runs clippy first, which is the compile gate).
 
 ### Release Pipeline
 

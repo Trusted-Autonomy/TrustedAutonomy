@@ -1,0 +1,26 @@
+name: Set up Rust toolchain
+description: >
+  Install exactly the toolchain rust-toolchain.toml pins (minimal profile plus
+  clippy and rustfmt) and select it for every later step. No Nix: the hosted
+  runners already ship rustup, so this takes seconds, and the cache key and the
+  compiled artifacts then come from the same compiler on every run. The pin is
+  read from rust-toolchain.toml so there is one place to bump it.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      run: |
+        ver=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+        if [ -z "$ver" ]; then
+          echo "::error title=No Rust channel found::rust-toolchain.toml has no 'channel = \"...\"' line. Fix: add one, e.g. channel = \"1.97.0\"."
+          exit 1
+        fi
+        echo "Installing Rust $ver (minimal profile + clippy + rustfmt)"
+        rustup toolchain install "$ver" --profile minimal --component clippy --component rustfmt --no-self-update
+        # RUSTUP_TOOLCHAIN beats rust-toolchain.toml, so rustup does not fetch
+        # the file's extra components (rust-analyzer, rust-src) on first use.
+        echo "RUSTUP_TOOLCHAIN=$ver" >> "$GITHUB_ENV"
+        rustc --version
+        cargo --version
