@@ -902,6 +902,8 @@ mod tests {
             vcs_isolation: None,
             initiated_by: None,
             origin: None,
+            candidate_id: None,
+            launch_failure: None,
             memory_entries_created: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -726,9 +726,15 @@ impl GoalRun {
         m.insert("candidate_id".into(), json!(self.bare_candidate_id()));
         m.insert("task_id".into(), json!(self.task_id()));
         m.insert("started_at".into(), json!(self.created_at.to_rfc3339()));
-        m.insert("started_at_epoch".into(), json!(self.created_at.timestamp()));
+        m.insert(
+            "started_at_epoch".into(),
+            json!(self.created_at.timestamp()),
+        );
         m.insert("updated_at".into(), json!(self.updated_at.to_rfc3339()));
-        m.insert("updated_at_epoch".into(), json!(self.updated_at.timestamp()));
+        m.insert(
+            "updated_at_epoch".into(),
+            json!(self.updated_at.timestamp()),
+        );
         m.insert("agent_pid".into(), json!(self.agent_pid));
         let reason = match &self.state {
             GoalRunState::Failed { reason } => Value::String(reason.clone()),

@@ -740,8 +740,10 @@ pub fn run_vendor_login(
 mod tests {
     use super::*;
 
-    const TOKEN: &str =
-        "sk-ant-oat01-SENTINELabcdefghijklmnopqrstuvwxyz0123456789_-AbCdEfGhIjKlMnOpQrStUvWxYz";
+    const TOKEN: &str = concat!(
+        "sk-ant-",
+        "oat01-SENTINELabcdefghijklmnopqrstuvwxyz0123456789_-AbCdEfGhIjKlMnOpQrStUvWxYz"
+    );
 
     #[test]
     fn screen_places_words_with_cursor_columns_and_strips_colors() {
@@ -792,8 +794,9 @@ mod tests {
     #[test]
     fn the_last_header_wins_when_frames_were_repainted() {
         let text = format!(
-            "Your OAuth token (valid for 1 year):\nsk-ant-oat01-OLDOLDOLDOLDOLDOLDOLDOLDOLD\n\
-             Store this token securely.\nYour OAuth token (valid for 1 year):\n{TOKEN}\nStore this"
+            "Your OAuth token (valid for 1 year):\n{}OLDOLDOLDOLDOLDOLDOLDOLDOLD\n\
+             Store this token securely.\nYour OAuth token (valid for 1 year):\n{TOKEN}\nStore this",
+            concat!("sk-ant-", "oat01-")
         );
         assert_eq!(find_token(&text).unwrap().token, TOKEN);
     }

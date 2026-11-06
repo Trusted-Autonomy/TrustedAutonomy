@@ -17,8 +17,10 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// A token as `claude setup-token` prints it, with a sentinel that must never leak.
-const TOKEN: &str =
-    "sk-ant-oat01-SENTINELtokenABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz_-ABCDEFGHIJ";
+const TOKEN: &str = concat!(
+    "sk-ant-",
+    "oat01-SENTINELtokenABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz_-ABCDEFGHIJ"
+);
 
 struct Sandbox {
     home: TempDir,

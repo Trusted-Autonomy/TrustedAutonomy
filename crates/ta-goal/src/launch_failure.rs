@@ -40,9 +40,7 @@ pub const LAUNCH_FAILURE_MARKER: &str = "ta-launch-failure: code=";
 pub const MAX_TEXT_CHARS: usize = 400;
 
 /// Why a launch failed.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchFailureCode {
     NoLogin,
@@ -386,7 +384,12 @@ mod tests {
             .collect();
         assert_eq!(
             permanent,
-            ["no_login", "login_invalid", "agent_missing", "sandbox_denied"]
+            [
+                "no_login",
+                "login_invalid",
+                "agent_missing",
+                "sandbox_denied"
+            ]
         );
     }
 
@@ -456,7 +459,10 @@ mod tests {
 
     #[test]
     fn the_marker_wins_and_forged_text_cannot_inject_an_explanation() {
-        let text = format!("noise\n{}\nmore", marker_line(LaunchFailureCode::SandboxDenied));
+        let text = format!(
+            "noise\n{}\nmore",
+            marker_line(LaunchFailureCode::SandboxDenied)
+        );
         assert_eq!(classify(&ev(&text)), LaunchFailureCode::SandboxDenied);
         assert_eq!(parse_marker("ta-launch-failure: code=nonsense"), None);
         // The marker carries the code only: detail and fix are always rebuilt.
@@ -481,7 +487,9 @@ mod tests {
             assert!(!f.detail.is_empty() && !f.fix.is_empty(), "{f:?}");
             assert!(!f.detail.ends_with('.') && !f.fix.ends_with('.'), "{f:?}");
             assert!(!f.detail.contains('\n') && !f.fix.contains('\n'), "{f:?}");
-            assert!(f.headline().starts_with(&format!("Agent could not start ({c}): ")));
+            assert!(f
+                .headline()
+                .starts_with(&format!("Agent could not start ({c}): ")));
         }
         let nl = describe(
             LaunchFailureCode::NoLogin,
@@ -491,8 +499,9 @@ mod tests {
             },
         );
         assert!(
-            nl.fix
-                .contains("Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"),
+            nl.fix.contains(
+                "Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"
+            ),
             "{nl:?}"
         );
     }

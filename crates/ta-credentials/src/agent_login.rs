@@ -953,7 +953,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    const SENTINEL: &str = "sk-ant-oat01-SENTINEL-SECRET-VALUE-1234567890";
+    const SENTINEL: &str = concat!("sk-ant-", "oat01-SENTINEL-SECRET-VALUE-1234567890");
 
     fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs

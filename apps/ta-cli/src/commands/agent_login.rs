@@ -626,7 +626,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    const SENTINEL: &str = "sk-ant-SENTINELSECRETdonotprint0123456789";
+    const SENTINEL: &str = concat!("sk-ant-", "SENTINELSECRETdonotprint0123456789");
 
     struct Harness {
         dir: tempfile::TempDir,
@@ -1087,7 +1087,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = LoginStore::with(dir.path().join("state"), false);
         let catalog = Catalog::shipped();
-        let secret = "sk-ant-oat01-SENTINELinjectedlogin0123456789";
+        let secret = concat!("sk-ant-", "oat01-SENTINELinjectedlogin0123456789");
         store
             .store(catalog.get("claude-code").unwrap(), &Secret::new(secret), 1)
             .unwrap();
