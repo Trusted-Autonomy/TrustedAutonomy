@@ -72,6 +72,45 @@ fn no_changes_error(message: String) -> anyhow::Error {
     anyhow::Error::new(NoChangesInStaging { message })
 }
 
+/// The agent finished and left nothing to review. A goal `ta run` already moved
+/// to `finalizing` (agent exited) is finished, not stuck: complete it with no
+/// draft so `ta goal status` / `ta goal list --json` report `finished`, and
+/// print the marker the daemon reads to tell this from a launch failure. A
+/// goal in any other state (a manual build on a running goal) is left alone.
+fn finish_goal_without_changes(config: &GatewayConfig, goal_run_id: uuid::Uuid) {
+    eprintln!(
+        "{}",
+        ta_goal::launch_failure::no_changes_marker_line(&goal_run_id.to_string())
+    );
+    let store = match GoalRunStore::new(&config.goals_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(goal_id = %goal_run_id, error = %e, "no-changes goal not completed: cannot open the goal store. Run `ta goal status` to check it");
+            return;
+        }
+    };
+    let Ok(Some(mut g)) = store.get(goal_run_id) else {
+        return;
+    };
+    if !matches!(g.state, ta_goal::GoalRunState::Finalizing { .. }) {
+        return;
+    }
+    match g.transition(ta_goal::GoalRunState::Completed) {
+        Ok(()) => {
+            if let Err(e) = store.save(&g) {
+                tracing::warn!(goal_id = %goal_run_id, error = %e, "no-changes goal not completed: could not save it. Run `ta goal status {goal_run_id}`");
+                return;
+            }
+            let _ = store
+                .update_progress_note(goal_run_id, "agent finished: no changes, no draft needed");
+            tracing::info!(goal_id = %goal_run_id, "agent finished with no changes; goal completed without a draft");
+        }
+        Err(e) => {
+            tracing::warn!(goal_id = %goal_run_id, error = %e, "no-changes goal not completed: invalid transition from {}", g.state)
+        }
+    }
+}
+
 /// Whether `err` (anywhere in its chain) is a `NoChangesInStaging`.
 pub fn is_no_changes_error(err: &anyhow::Error) -> bool {
     err.chain()
@@ -2183,6 +2222,7 @@ pub(crate) fn build_package(
             );
         }
 
+        finish_goal_without_changes(config, goal.goal_run_id);
         // Diagnose why there are no changes to produce a helpful error.
         let uncommitted = count_working_tree_changes(source_dir);
         if uncommitted > 0 {

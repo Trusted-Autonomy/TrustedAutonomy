@@ -1203,7 +1203,7 @@ async fn report_launch_failed(
         transport,
         ids.project_root,
         ids.session,
-        None,
+        crate::launch_failed::resolve_goal_id(ids.project_root, &candidate_id).as_deref(),
         &candidate_id,
         &failure,
     )

@@ -642,6 +642,10 @@ Added fields (existing fields are unchanged): `state_name` and `poller_state` (o
 
 When `ta run` fails to start an agent it prints a headline and one identifier-only line on stderr, `ta-launch-failure: code=<code> agent=<id> command=<id> goal=<uuid>`. The daemon reads it to name the code and goal; it is a hint, and a `crashed` hint is refined from the agent's own stderr when the daemon can see it. The daemon then updates the goal's `launch_failure` so the goal and the published message always agree.
 
+**An agent that ran and changed nothing is not a launch failure.** If the agent started, ran and exited without producing any file changes, there is nothing to review: `ta run` still reports "No changes detected" (exit status 1) and prints `ta-run-finished: result=no_changes goal=<uuid>`, the goal is completed with no draft (`poller_state: finished`), the wake message is acked, and no `launch_failed` is published. The exception is the sandbox: if the same run's stderr shows the sandbox blocking something (for example `Operation not permitted` on a path outside the project), that is why nothing changed, so the launch is reported as `sandbox_denied` with the denied path in `detail` (`... (denied path: /Users/you/outside/notes.txt)`), and the goal is marked failed with the same `launch_failure`. A non-zero exit with no such marker (a crash, a missing binary, a rejected login) stays a `launch_failed` with the matching code.
+
+**`poller_state` follows the process, not only the record.** A goal recorded as `running` or `finalizing` whose `ta run` and agent processes have all exited is reported `failed` (with a `failure_reason` explaining that its processes are gone) instead of `running` for ever; a goal with a live process, or one whose draft build is pending (`DraftPending`), stays `running`. The `stamp.goal_id` of a published `launch_failed` is the real goal TA created for the candidate, or `none-created` when the launch died before any goal existed.
+
 Knobs, both in `[whiteboard]` of `.ta/workflow.toml`: `wake_launch_timeout_secs` (the `timed_out` limit) and `wake_max_attempts` (retries before `crashed`/`timed_out` are published).
 
 ---

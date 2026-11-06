@@ -116,6 +116,26 @@ pub fn refine_goal_record(project_root: &Path, goal_id: &str, failure: &LaunchFa
                 tracing::warn!(goal_id = %goal_id, error = %e, "could not update the goal's launch_failure; `ta goal status` may name a different reason than the launch_failed outcome");
             }
         }
+        // The goal was left `completed` (an empty diff) or still `running` /
+        // `finalizing`, but the launcher saw evidence the agent never got to work
+        // (a sandbox denial). The outcome says failed, so the goal must too.
+        Ok(Some(mut goal))
+            if matches!(
+                goal.state,
+                ta_goal::GoalRunState::Completed
+                    | ta_goal::GoalRunState::Running
+                    | ta_goal::GoalRunState::Finalizing { .. }
+            ) && goal.pr_package_id.is_none() =>
+        {
+            goal.state = ta_goal::GoalRunState::Failed {
+                reason: format!("{} {}", failure.detail, failure.fix),
+            };
+            goal.launch_failure = Some(failure.clone());
+            goal.updated_at = chrono::Utc::now();
+            if let Err(e) = store.save(&goal) {
+                tracing::warn!(goal_id = %goal_id, error = %e, "could not mark the goal failed; `ta goal status` may disagree with the launch_failed outcome");
+            }
+        }
         _ => {}
     }
 }
@@ -139,6 +159,26 @@ pub fn candidate_id_from_payload(payload: &[u8]) -> Option<String> {
         .as_str()
         .map(str::to_string)
         .filter(|id| !id.is_empty())
+}
+
+/// The stamp's `goal_id` when no goal was ever created for the candidate (the
+/// launch died before `ta run` made one).
+pub const NO_GOAL_ID: &str = "none-created";
+
+/// The goal TA created for `candidate_id` (the newest one whose bare candidate id
+/// matches), so the outcome's stamp names the real goal. `None` when there is no
+/// such goal.
+pub fn resolve_goal_id(project_root: &Path, candidate_id: &str) -> Option<String> {
+    let bare = candidate_id.split('#').next().unwrap_or(candidate_id);
+    let goals_dir = ta_mcp_gateway::GatewayConfig::for_project(project_root).goals_dir;
+    let store = ta_goal::GoalRunStore::new(&goals_dir).ok()?;
+    store
+        .list()
+        .ok()?
+        .into_iter()
+        .filter(|g| g.bare_candidate_id().as_deref() == Some(bare))
+        .max_by_key(|g| g.created_at)
+        .map(|g| g.goal_run_id.to_string())
 }
 
 /// The outcome body for `failure`, keyed to `candidate_id`.
@@ -174,7 +214,7 @@ pub async fn publish(
     let subject = StampSubject {
         team_session: team_session.to_string(),
         role: DAEMON_ROLE.to_string(),
-        goal_id: goal_id.unwrap_or("unresolved").to_string(),
+        goal_id: goal_id.unwrap_or(NO_GOAL_ID).to_string(),
         target: "local".to_string(),
     };
     let envelope = stamp_and_sign(project_root, &subject, outcome_body(candidate_id, failure))?;
@@ -361,5 +401,32 @@ mod tests {
         assert!(!line.contains("tok-1234567890abc"), "{line}");
         assert!(!line.contains("sk-ant-api03"), "{line}");
         assert_eq!(evidence_line("\n  \n", &env), None);
+    }
+
+    #[test]
+    fn the_stamp_goal_id_is_the_real_goal_of_the_candidate_or_a_clear_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_goal_id(tmp.path(), "wayfinder-task:T-7#n1"), None);
+        let config = ta_mcp_gateway::GatewayConfig::for_project(tmp.path());
+        let store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/w"),
+            std::path::PathBuf::from("/s"),
+        );
+        goal.candidate_id = Some("wayfinder-task:T-7".to_string());
+        store.save(&goal).unwrap();
+        let mut other = goal.clone();
+        other.goal_run_id = uuid::Uuid::new_v4();
+        other.candidate_id = Some("wayfinder-task:T-8".to_string());
+        store.save(&other).unwrap();
+        assert_eq!(
+            resolve_goal_id(tmp.path(), "wayfinder-task:T-7#n1"),
+            Some(goal.goal_run_id.to_string()),
+            "the wake path's full id (with #nonce) finds the goal"
+        );
+        assert_ne!(NO_GOAL_ID, "unresolved");
     }
 }

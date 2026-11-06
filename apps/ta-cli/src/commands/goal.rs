@@ -1485,13 +1485,20 @@ fn diagnose_goal(
 /// `started_at`, `launch_failure`, ...). Every key of the goal record is
 /// unchanged: `state` stays the record's tagged object.
 fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
+    status_json_with(g, &pid_alive)
+}
+
+fn status_json_with(
+    g: &ta_goal::GoalRun,
+    alive: &dyn Fn(u32) -> bool,
+) -> anyhow::Result<serde_json::Value> {
     let mut value = serde_json::to_value(g)?;
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
             "completion".to_string(),
             serde_json::to_value(ta_goal::spend::CompletionRecord::from_goal(g))?,
         );
-        for (key, field) in g.machine_fields() {
+        for (key, field) in g.machine_fields(alive) {
             obj.entry(key).or_insert(field);
         }
     }
@@ -1501,12 +1508,36 @@ fn status_json(g: &ta_goal::GoalRun) -> anyhow::Result<serde_json::Value> {
 /// One row of `ta goal list --json`: `GoalRun::machine_fields`, with `state`
 /// the poller state (`launching|running|waiting_for_review|failed|finished`).
 fn list_row_json(g: &ta_goal::GoalRun) -> serde_json::Value {
-    let mut row = g.machine_fields();
+    list_row_json_with(g, &pid_alive)
+}
+
+fn list_row_json_with(g: &ta_goal::GoalRun, alive: &dyn Fn(u32) -> bool) -> serde_json::Value {
+    let mut row = g.machine_fields(alive);
     row.insert(
         "state".to_string(),
-        serde_json::Value::String(g.poller_state().to_string()),
+        serde_json::Value::String(g.poller_state_live(alive).to_string()),
     );
     serde_json::Value::Object(row)
+}
+
+/// Whether `pid` is a live process (no signal is sent).
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(pid, 0) only probes for existence; it sends no signal.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(true)
+    }
 }
 
 /// One-line description of the model/effort a goal was launched with, for
@@ -4168,6 +4199,55 @@ mod spend_status_tests {
         )
     }
 
+    /// A goal recorded as running/finalizing whose processes are gone is not
+    /// `running`: it reads `failed` (with a reason) in both JSON forms. While a
+    /// process is alive, or a draft build is pending, it stays `running`.
+    #[test]
+    fn poller_state_is_never_running_for_a_goal_whose_processes_are_gone() {
+        use ta_goal::GoalRunState as S;
+        let (dead, live) = (|_: u32| false, |_: u32| true);
+        let mut g = plain_goal();
+        g.transition(S::Configured).unwrap();
+        g.transition(S::Running).unwrap();
+        g.owner_pid = Some(4_000_001);
+        g.agent_pid = Some(4_000_002);
+        assert_eq!(list_row_json_with(&g, &dead)["state"], "failed");
+        let st = status_json_with(&g, &dead).unwrap();
+        assert_eq!(st["poller_state"], "failed");
+        assert!(st["failure_reason"].as_str().unwrap().contains("gone"));
+        assert_eq!(list_row_json_with(&g, &live)["state"], "running");
+
+        g.transition(S::Finalizing {
+            exit_code: 0,
+            finalize_started_at: chrono::Utc::now(),
+            run_pid: Some(4_000_003),
+        })
+        .unwrap();
+        assert_eq!(list_row_json_with(&g, &dead)["state"], "failed");
+        assert_eq!(list_row_json_with(&g, &live)["state"], "running");
+
+        // No pid recorded: nothing to judge by, the recorded state stands.
+        g.owner_pid = None;
+        g.agent_pid = None;
+        g.state = S::Finalizing {
+            exit_code: 0,
+            finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
+        };
+        assert_eq!(list_row_json_with(&g, &dead)["state"], "running");
+
+        // A pending draft build is a pending finalize, not a dead process.
+        g.state = S::DraftPending {
+            pending_since: chrono::Utc::now(),
+            exit_code: 0,
+        };
+        g.owner_pid = Some(4_000_001);
+        assert_eq!(list_row_json_with(&g, &dead)["state"], "running");
+
+        // A finalizing goal that completed with no changes is finished.
+        g.state = S::Completed;
+        assert_eq!(list_row_json_with(&g, &dead)["state"], "finished");
+    }
     #[test]
     fn goal_json_exposes_the_poller_state_for_each_lifecycle_stage() {
         use ta_goal::GoalRunState as S;

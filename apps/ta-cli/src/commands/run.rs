@@ -7685,6 +7685,12 @@ fn complete_chat_session_without_draft(
             config.goals_dir.display()
         )
     })?;
+    // `ta draft build` completes a finalizing goal whose diff is empty, so by
+    // now the goal may already be finished.
+    if matches!(g.state, ta_goal::GoalRunState::Completed) {
+        println!("Chat session finished: no draft needed.");
+        return Ok(());
+    }
     g.transition(ta_goal::GoalRunState::Completed)
         .map_err(|e| {
             anyhow::anyhow!(

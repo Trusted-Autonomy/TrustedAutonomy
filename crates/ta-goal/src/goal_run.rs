@@ -706,6 +706,35 @@ impl GoalRun {
         }
     }
 
+    /// [`Self::poller_state`], corrected for a dead process: a goal in
+    /// `running`/`finalizing` whose `ta run` owner and agent processes are all
+    /// gone is not running any more, so it is reported `failed` instead of
+    /// `running` forever. `alive` says whether a pid is a live process. A goal
+    /// with no recorded pid cannot be judged and keeps its recorded state; a
+    /// `DraftPending` goal is a pending finalize and stays `running`.
+    pub fn poller_state_live(&self, alive: &dyn Fn(u32) -> bool) -> &'static str {
+        let base = self.poller_state();
+        if base == "running"
+            && matches!(
+                self.state,
+                GoalRunState::Running | GoalRunState::Finalizing { .. }
+            )
+        {
+            let finalize_pid = match &self.state {
+                GoalRunState::Finalizing { run_pid, .. } => *run_pid,
+                _ => None,
+            };
+            let pids: Vec<u32> = [self.owner_pid, self.agent_pid, finalize_pid]
+                .into_iter()
+                .flatten()
+                .collect();
+            if !pids.is_empty() && !pids.iter().any(|p| alive(*p)) {
+                return "failed";
+            }
+        }
+        base
+    }
+
     /// The machine-readable fields `ta goal list --json` and `ta goal status
     /// --json` add for pollers. Additive: a flat map of plain values.
     ///
@@ -715,14 +744,17 @@ impl GoalRun {
     /// task (null when it has none); `started_at` is when the goal was created;
     /// `failure_reason` is the text of a `failed` state; `launch_failure` is the
     /// `{code, detail, fix}` of a launch that never started, null otherwise.
-    pub fn machine_fields(&self) -> serde_json::Map<String, serde_json::Value> {
+    pub fn machine_fields(
+        &self,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> serde_json::Map<String, serde_json::Value> {
         use serde_json::{json, Value};
         let mut m = serde_json::Map::new();
         m.insert("goal_run_id".into(), json!(self.goal_run_id.to_string()));
         m.insert("tag".into(), json!(self.display_tag()));
         m.insert("title".into(), json!(self.title));
         m.insert("state_name".into(), json!(self.state.to_string()));
-        m.insert("poller_state".into(), json!(self.poller_state()));
+        m.insert("poller_state".into(), json!(self.poller_state_live(alive)));
         m.insert("candidate_id".into(), json!(self.bare_candidate_id()));
         m.insert("task_id".into(), json!(self.task_id()));
         m.insert("started_at".into(), json!(self.created_at.to_rfc3339()));
@@ -736,8 +768,13 @@ impl GoalRun {
             json!(self.updated_at.timestamp()),
         );
         m.insert("agent_pid".into(), json!(self.agent_pid));
+        let live = self.poller_state_live(alive);
         let reason = match &self.state {
             GoalRunState::Failed { reason } => Value::String(reason.clone()),
+            _ if live == "failed" => Value::String(format!(
+                "goal is recorded as {} but its ta run and agent processes are gone; it will not finish on its own. Inspect it with `ta goal status {}`",
+                self.state, self.goal_run_id
+            )),
             _ => Value::Null,
         };
         m.insert("failure_reason".into(), reason);
