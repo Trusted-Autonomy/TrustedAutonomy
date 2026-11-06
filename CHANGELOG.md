@@ -1,3 +1,23 @@
+## Unreleased
+
+- **Agent logins: `ta agent-login list|login|logout|verify`.** Give Claude, OpenAI, Gemini, xAI
+  (and any framework you add) a login once; TA keeps it in its per-user credential custody (OS
+  keychain or an owner-only file) and `ta run` puts the stored login of the launching agent, and
+  only that agent's, into every sandboxed launch, including the ones `ta-daemon` starts. A login
+  variable already set in the launch environment wins. The framework catalog is data
+  (`agent-frameworks.default.toml`, overridable in `~/.config/ta/agent-frameworks.toml` and
+  `.ta/agent-frameworks.toml`). `ta agent-login login claude-code` runs `claude setup-token` in a
+  pseudo-terminal and captures the token (timeout `TA_AGENT_LOGIN_TIMEOUT_SECS`); `verify` checks
+  a login with the cheapest real request the vendor offers. Secrets travel only on standard input
+  or in the vendor's terminal, never in arguments, output, logs or audit lines. `--json` output
+  and exit codes (0, 2 usage, 3 vendor login failed, 4 vendor command missing) are scripted
+  against by the Wayfinder poller. `ta doctor`'s `Daemon agent login` line is `ok` when a login is
+  stored, naming what and where (never the value). `XAI_API_KEY` joins the variables the sandbox
+  forwards. See "Logging your agents in" in docs/USAGE.md.
+- **`ta init` creates the project's state directory.** A freshly initialized project now has its
+  id (`.ta/project-id`) and state directory straight away, so `ta show state` prints every
+  location, NATS JetStream included, before anything has been stored.
+
 ## v0.17.12-alpha.11 — Key custody, one state directory, model/effort profiles, sandboxing and cost tracking
 
 Covers `git log v0.17.11-alpha.7..main` (about 280 commits; PR numbers in parentheses). Not yet

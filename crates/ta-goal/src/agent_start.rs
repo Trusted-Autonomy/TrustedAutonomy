@@ -60,10 +60,12 @@ pub fn classify_stderr(stderr: &str) -> Option<StartFailure> {
 /// forwards exactly those, and a login in the macOS Keychain is never reachable
 /// from inside the box.
 pub const NO_LOGIN_ADVICE: &str = "The sandboxed agent has no usable login: a login stored in \
-the macOS Keychain (or ~/.claude) is not reachable from inside the sandbox. Set ANTHROPIC_API_KEY \
-(or ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) in the \
-environment of the process that starts the agent (for wake launches: where `ta-daemon` is \
-started, then `ta daemon restart`). See \"Agent login inside the sandbox\" in docs/USAGE.md.";
+the macOS Keychain (or ~/.claude) is not reachable from inside the sandbox. Run `ta agent-login \
+login claude-code` once (TA stores the login and hands it to every sandboxed launch), or set \
+ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN from `claude \
+setup-token`) in the environment of the process that starts the agent (for wake launches: where \
+`ta-daemon` is started, then `ta daemon restart`). See \"Logging your agents in\" and \"Agent \
+login inside the sandbox\" in docs/USAGE.md.";
 
 /// The failure reason for a launch whose agent never started its model session.
 /// `output_lines` is how many lines the agent wrote to stdout, when the caller

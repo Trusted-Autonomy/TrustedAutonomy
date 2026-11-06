@@ -153,6 +153,10 @@ notify = { version = "7", default-features = false, features = ["macos_kqueue"] 
 # Binary discovery — resolves .cmd/.bat wrappers on Windows (v0.13.4).
 which = "7"
 
+# Cross-platform pseudo-terminal (ConPTY on Windows): `ta agent-login` runs a
+# vendor login command (`claude setup-token`) in a pty and captures its token.
+portable-pty = "0.9"
+
 # SQLite — bundled build (no system sqlite3 required) for db proxy plugin (v0.13.5).
 rusqlite = { version = "0.31", features = ["bundled"] }
 
