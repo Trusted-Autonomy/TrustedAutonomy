@@ -792,7 +792,7 @@ impl LoginStore {
                     let d = if r.detail.is_empty() {
                         format!("stored in {custody}")
                     } else {
-                        format!("{}; stored in {custody}", r.detail)
+                        format!("{}; stored in {custody}", r.detail.trim_end_matches('.'))
                     };
                     (r.state, r.checked_at, d)
                 }
