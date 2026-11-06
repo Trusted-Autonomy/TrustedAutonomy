@@ -3552,6 +3552,23 @@ pub fn execute(
         // only; nothing here reaches the agent's prompt.
         super::review_packet::stamp_goal(&mut updated_goal, quiet)?;
 
+        // Which Wayfinder candidate (and so task) this goal works on, for
+        // `ta goal list/status --json`: the provenance's id, else the intake
+        // message's. Stored bare: a `#nonce` belongs to the dispatch, not the work.
+        if updated_goal.candidate_id.is_none() {
+            let raw = updated_goal
+                .request_provenance
+                .as_ref()
+                .and_then(|p| p.ids.candidate_id.clone())
+                .or_else(|| {
+                    untrusted_intake
+                        .as_ref()
+                        .and_then(|i| i.candidate_id.clone())
+                });
+            updated_goal.candidate_id =
+                raw.map(|id| id.split('#').next().unwrap_or("").to_string());
+        }
+
         // v0.17.12.15: stamp why the goal started (`--origin-class`, the
         // provenance file or the inherited environment). Accounting data only:
         // nothing below reads it to decide anything. Set once at creation.
@@ -4834,7 +4851,18 @@ pub fn execute(
                 Some(agent_tokens_out.output_lines),
                 None,
             );
-            mark_goal_agent_never_started(config, goal.goal_run_id, &reason, exit.code());
+            let failure = ta_goal::launch_failure::classify_and_describe(
+                &ta_goal::launch_failure::LaunchEvidence {
+                    agent,
+                    command: Some(&agent_config.command),
+                    exit_code: exit.code(),
+                    output_lines: Some(agent_tokens_out.output_lines),
+                    login: Some(ta_runtime::login_probe::default_probe().status(agent)),
+                    ..Default::default()
+                },
+            );
+            mark_goal_agent_never_started(config, goal.goal_run_id, &reason, exit.code(), &failure);
+            print_launch_failure(agent, &agent_config.command, goal.goal_run_id, &failure);
             {
                 use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
                 let events_dir = config.workspace_root.join(".ta").join("events");
@@ -5009,6 +5037,20 @@ pub fn execute(
             // - RuntimeAdapter path: kind() is Other but message says "Spawn failed:"
             let is_not_found =
                 e.kind() == std::io::ErrorKind::NotFound || e.to_string().contains("Spawn failed:");
+            // Nobody is at the terminal to read guidance: record why on the goal and
+            // say it on stderr, where the launcher (daemon, poller) looks.
+            let unattended_failure = (headless || quiet).then(|| {
+                let failure = launch_error_failure(agent, &agent_config.command, &e, is_not_found);
+                mark_goal_agent_never_started(
+                    config,
+                    goal.goal_run_id,
+                    &format!("Failed to launch agent: {e}"),
+                    None,
+                    &failure,
+                );
+                print_launch_failure(agent, &agent_config.command, goal.goal_run_id, &failure);
+                failure
+            });
             if is_not_found {
                 // Restore injected files before returning — agent won't run.
                 if agent_config.injects_context_file {
@@ -5020,6 +5062,14 @@ pub fn execute(
                 // Unconditional restore (v0.13.17.5 Bug 1 fix): no-op if no backup exists.
                 restore_mcp_server_config(&staging_path)?;
 
+                if let Some(failure) = &unattended_failure {
+                    return Err(anyhow::anyhow!(
+                        "Goal {} failed: {}. No draft was built. Inspect it with `ta goal status {}`.",
+                        goal.goal_run_id,
+                        failure.headline(),
+                        goal.goal_run_id
+                    ));
+                }
                 println!(
                     "\n'{}' command not found. To use manually:",
                     agent_config.command
@@ -6410,14 +6460,59 @@ fn headless_agent_never_started(tokens: &AgentTokens) -> bool {
     ta_goal::agent_start::never_started(tokens.output_lines, None)
 }
 
+/// Classify a launch error from the runtime (the agent could not be started at
+/// all: spawn failed, sandbox refused) into a `launch_failed` reason.
+fn launch_error_failure(
+    agent: &str,
+    command: &str,
+    err: &std::io::Error,
+    is_not_found: bool,
+) -> ta_goal::LaunchFailure {
+    let text = if is_not_found {
+        format!("'{command}' command not found ({err})")
+    } else {
+        err.to_string()
+    };
+    ta_goal::launch_failure::classify_and_describe(&ta_goal::launch_failure::LaunchEvidence {
+        agent,
+        command: Some(command),
+        stderr: &text,
+        ..Default::default()
+    })
+}
+
+/// Tell whoever started this `ta run` (the wake listener, the poller, a person)
+/// why the agent did not start: a plain explanation, then the marker line the
+/// daemon reads. Only identifiers are on the marker; see `ta_goal::launch_failure`.
+fn print_launch_failure(
+    agent: &str,
+    command: &str,
+    goal_run_id: uuid::Uuid,
+    failure: &ta_goal::LaunchFailure,
+) {
+    eprintln!("{}", failure.headline());
+    eprintln!(
+        "{}",
+        ta_goal::launch_failure::marker_line(
+            failure.code,
+            Some(agent),
+            Some(command),
+            Some(&goal_run_id.to_string())
+        )
+    );
+}
+
 /// Record on the goal that its agent never started: state `Failed` with the
-/// precise reason (shown by `ta goal status`), the reason as the progress note,
-/// and a journal entry. Best effort on each write, but a failure is logged.
+/// precise reason (shown by `ta goal status`), the classified `launch_failure`
+/// (the same reason code, detail and fix `launch_failed` publishes), the reason
+/// as the progress note, and a journal entry. Best effort on each write, but a
+/// failure is logged.
 fn mark_goal_agent_never_started(
     config: &GatewayConfig,
     goal_run_id: uuid::Uuid,
     reason: &str,
     exit_code: Option<i32>,
+    failure: &ta_goal::LaunchFailure,
 ) {
     tracing::error!(
         goal_id = %goal_run_id,
@@ -6429,6 +6524,7 @@ fn mark_goal_agent_never_started(
         Ok(store) => match store.get(goal_run_id) {
             Ok(Some(mut g)) => {
                 g.agent_pid = None;
+                g.launch_failure = Some(failure.clone());
                 if let Err(e) = g.transition(ta_goal::GoalRunState::Failed {
                     reason: reason.to_string(),
                 }) {
@@ -7165,6 +7261,27 @@ fn launch_agent_via_runtime(
     if let Some(plan) = sandbox_plan.as_ref().filter(|p| p.scrubs_env) {
         removed_env = plan.apply_env(&mut env, baseline_is_cleared, &goal_id.to_string());
         clear_env = true;
+        // The scrub drops the daemon's own login variables; give the child the
+        // login stored with `ta agent-login` for THIS agent (an allowlisted
+        // variable already set wins).
+        let agent_name = config
+            .name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .or_else(|| is_claude_code_launch(config).then(|| "claude-code".to_string()))
+            .or_else(|| {
+                Path::new(&config.command)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            });
+        if let Some(agent_name) = agent_name {
+            super::agent_login::inject_stored_login(
+                &agent_name,
+                project_root_opt.as_deref(),
+                &mut env,
+            );
+        }
     }
     if let Some(plan) = &sandbox_plan {
         plan.print(&removed_env, is_claude_code_launch(config), &env);
@@ -17713,6 +17830,32 @@ mod spend_tests {
     }
 
     #[test]
+    fn a_launch_error_is_classified_for_the_goal_and_the_marker() {
+        use ta_goal::LaunchFailureCode as C;
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file");
+        let f = launch_error_failure("claude-code", "claude", &missing, true);
+        assert_eq!(f.code, C::AgentMissing);
+        assert!(f.detail.contains("claude"), "{f:?}");
+        let denied = std::io::Error::other(
+            "Launch refused by the sandbox policy (goal g): posture strict denies network",
+        );
+        let f = launch_error_failure("claude-code", "claude", &denied, false);
+        assert_eq!(f.code, C::SandboxDenied);
+        // What is printed is identifiers only and round-trips to the same code.
+        let goal = uuid::Uuid::new_v4();
+        let marker = ta_goal::launch_failure::marker_line(
+            f.code,
+            Some("claude-code"),
+            Some("claude"),
+            Some(&goal.to_string()),
+        );
+        assert_eq!(
+            ta_goal::launch_failure::parse_marker(&marker),
+            Some(C::SandboxDenied)
+        );
+    }
+
+    #[test]
     fn never_started_agent_marks_the_goal_failed_with_the_reason() {
         let project = tempfile::tempdir().unwrap();
         let config = GatewayConfig::for_project(project.path());
@@ -17728,7 +17871,16 @@ mod spend_tests {
         goal.transition(ta_goal::GoalRunState::Running).unwrap();
         store.save(&goal).unwrap();
         let reason = ta_goal::agent_start::never_started_reason(Some(0), None);
-        mark_goal_agent_never_started(&config, goal.goal_run_id, &reason, Some(0));
+        let failure = ta_goal::launch_failure::classify_and_describe(
+            &ta_goal::launch_failure::LaunchEvidence {
+                agent: "claude-code",
+                exit_code: Some(0),
+                output_lines: Some(0),
+                login: Some(ta_goal::LoginState::Missing),
+                ..Default::default()
+            },
+        );
+        mark_goal_agent_never_started(&config, goal.goal_run_id, &reason, Some(0), &failure);
         let saved = store.get(goal.goal_run_id).unwrap().unwrap();
         match saved.state {
             ta_goal::GoalRunState::Failed { reason: r } => {
@@ -17741,6 +17893,11 @@ mod spend_tests {
             .as_deref()
             .unwrap_or_default()
             .contains("never started"));
+        // The classified reason is on the goal, for `ta goal status --json` and
+        // the poller's `launch_failed` outcome.
+        let recorded = saved.launch_failure.expect("launch_failure recorded");
+        assert_eq!(recorded.code, ta_goal::LaunchFailureCode::NoLogin);
+        assert_eq!(recorded, failure);
     }
 
     /// End to end with a real child process standing in for the agent runtime

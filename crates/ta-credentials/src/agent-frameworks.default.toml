@@ -1,0 +1,131 @@
+# Shipped catalog of agent frameworks a person can log in to on this computer
+# (`ta agent-login`). It is DATA: nothing in TA branches on a framework id.
+#
+# Override or extend it per user in `~/.config/ta/agent-frameworks.toml` and per
+# project in `.ta/agent-frameworks.toml` (project beats user beats shipped). An
+# entry with the same `id` replaces the whole shipped entry; a new `id` adds a
+# framework. A framework appears in `ta agent-login list` and in the Wayfinder
+# "Agent login" panel as soon as it is in the catalog.
+#
+# Fields of each [[framework]]:
+#   id        stable key; also the name of the stored item
+#   label     what a person sees
+#   kind      "token" (a login minted by a vendor command) or "api_key"
+#   how       one sentence shown next to the login button
+#   agents    ta agent names (`ta run --agent <name>`) this login serves
+#   env       environment variables the agent reads its login from. The FIRST one
+#             receives the stored secret at launch; a launch whose environment
+#             already sets ANY of them is left alone (an environment variable
+#             already set wins)
+#
+# [framework.login]
+#   method    "oauth_cli": TA runs `command` in a pseudo-terminal and captures the
+#             token it prints; "prompt": the caller asks the person for the secret
+#             (hidden input) and sends it on stdin (`--secret-stdin`)
+#   command   the vendor command (oauth_cli only)
+#   timeout_secs  how long the vendor command may take (a person signing in in a
+#             browser); override per run with TA_AGENT_LOGIN_TIMEOUT_SECS
+#
+# [framework.verify]  the cheapest real call that proves the stored secret works
+#   method    "http_get", or "none" (the state stays `unknown`)
+#   url       the endpoint
+#   auth      "bearer" (Authorization: Bearer <secret>) or "header" (the secret in
+#             the header named by `header`)
+#   headers   extra fixed headers
+#   invalid_status  response codes that mean "rejected" (default [401]); any 2xx
+#             means "works"; every other response or a network error means
+#             "unknown"
+
+[[framework]]
+id = "claude-code"
+label = "Claude"
+kind = "token"
+how = "Opens your browser to sign in to Claude, then stores the login on this computer."
+agents = ["claude-code"]
+env = ["CLAUDE_CODE_OAUTH_TOKEN"]
+
+[framework.login]
+method = "oauth_cli"
+command = ["claude", "setup-token"]
+timeout_secs = 300
+
+[framework.verify]
+method = "http_get"
+url = "https://api.anthropic.com/v1/models"
+auth = "bearer"
+invalid_status = [401]
+[framework.verify.headers]
+anthropic-version = "2023-06-01"
+anthropic-beta = "oauth-2025-04-20"
+
+[[framework]]
+id = "anthropic-api-key"
+label = "Anthropic API key"
+kind = "api_key"
+how = "Asks for an Anthropic API key on this computer (billed per use)."
+agents = ["claude-code"]
+env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+
+[framework.login]
+method = "prompt"
+
+[framework.verify]
+method = "http_get"
+url = "https://api.anthropic.com/v1/models"
+auth = "header"
+header = "x-api-key"
+invalid_status = [401]
+[framework.verify.headers]
+anthropic-version = "2023-06-01"
+
+[[framework]]
+id = "openai"
+label = "OpenAI"
+kind = "api_key"
+how = "Asks for an OpenAI API key on this computer."
+agents = ["codex"]
+env = ["OPENAI_API_KEY"]
+
+[framework.login]
+method = "prompt"
+
+[framework.verify]
+method = "http_get"
+url = "https://api.openai.com/v1/models"
+auth = "bearer"
+invalid_status = [401]
+
+[[framework]]
+id = "gemini"
+label = "Gemini"
+kind = "api_key"
+how = "Asks for a Gemini API key (from Google AI Studio) on this computer."
+agents = ["gemini"]
+env = ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+
+[framework.login]
+method = "prompt"
+
+[framework.verify]
+method = "http_get"
+url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+auth = "header"
+header = "x-goog-api-key"
+invalid_status = [400, 401, 403]
+
+[[framework]]
+id = "xai"
+label = "Grok (xAI)"
+kind = "api_key"
+how = "Asks for an xAI API key on this computer."
+agents = ["grok"]
+env = ["XAI_API_KEY"]
+
+[framework.login]
+method = "prompt"
+
+[framework.verify]
+method = "http_get"
+url = "https://api.x.ai/v1/api-key"
+auth = "bearer"
+invalid_status = [400, 401, 403]

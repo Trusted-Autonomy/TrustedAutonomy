@@ -1319,6 +1319,7 @@ fn is_allowed_inherited_env(key: &str) -> bool {
         "OPENAI_ORG_ID",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "XAI_API_KEY",
         // Windows needs these to start processes at all.
         "SystemRoot",
         "SystemDrive",

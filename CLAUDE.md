@@ -37,13 +37,19 @@ This is the same script real installs use (just a faster debug profile), so the 
 
 ## Verification Before Every Commit
 
-Run these four checks (all must pass):
-```bash
-./dev cargo build --workspace
-./dev cargo test --workspace
-./dev cargo clippy --workspace --all-targets -- -D warnings
-./dev cargo fmt --all -- --check
-```
+**Validate locally first. CI is the final, cheap confirmation, not the development loop.** GitHub Actions minutes are limited (macOS runners bill 10x, Windows 2x), so a change is proven on this machine before anything is pushed.
+
+1. **Inner loop** while working (fast, nix toolchain):
+   ```bash
+   ./dev cargo build --workspace
+   ./dev cargo test --workspace
+   ./dev cargo clippy --workspace --all-targets -- -D warnings
+   ./dev cargo fmt --all -- --check
+   ```
+2. **Before every push, run the one-command CI mirror:** `scripts/ci-local.sh`. It runs every CI check with CI's own commands: version consistency, no-ip-docs, secret scan, actionlint, host (macOS) fmt/clippy/test/Seatbelt conformance/plugins, Windows `clippy --target x86_64-pc-windows-msvc -- -D warnings`, and Linux clippy/test/sandbox-conformance containers in Docker. It prints a PASS/FAIL table, lists what it did NOT cover, and ends with the evidence line `ci-local: all green at <sha> <date>` (printed only when the tree is committed). Paste that line into the PR body. `--quick` (checks + host fmt/clippy) is for the inner loop only; re-runs are incremental (`--clean` frees the caches and Docker volumes). Details: docs/USAGE.md "Validating changes locally (ci-local)".
+3. **Composite PRs.** Work is collected into one composite pull request per repo after it is fully vetted locally across platforms. Do not open a pull request per fix, and do not use CI as a test runner.
+4. **Never re-push to trigger CI.** Every push to an open PR re-runs it. Fix locally, re-run `scripts/ci-local.sh`, then push once. To re-run a red CI job use the Actions "Re-run failed jobs" button, not an empty commit.
+5. **What CI runs (keep it cheap; do not add jobs).** A pull request runs `Version consistency` (seconds) and ONE ubuntu job (`Lint and Test (ubuntu-latest)`: fmt, clippy, test); docs-only pull requests stop after the cheap checks. macOS (`Lint and Test (macos-latest)`), `Windows Build` and `Linux Sandbox Conformance` run for real only on push to `main` (the composite-PR merge), `workflow_dispatch` (`gh workflow run ci.yml --ref <branch>`), or a pull request carrying the `full-ci` label when it is opened or pushed to; otherwise they are skipped (a skipped job reports success, so required check names still resolve). Linux Sandbox Conformance also runs on a PR that touches `crates/ta-runtime`. The nightly builds only when code (not just docs) changed since the last nightly. See the header of `.github/workflows/ci.yml`.
 
 ## Git Workflow — Feature Branches + Pull Requests
 

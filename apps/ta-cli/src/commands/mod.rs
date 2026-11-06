@@ -1,6 +1,9 @@
 pub mod adapter;
 pub mod advisor;
 pub mod agent;
+pub mod agent_login;
+pub mod agent_login_capture;
+pub mod agent_login_verify;
 pub mod analysis;
 pub mod apply_base;
 pub mod apply_queue;

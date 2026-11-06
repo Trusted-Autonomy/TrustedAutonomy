@@ -560,19 +560,40 @@ Launches with no restriction are unchanged: they still load `CLAUDE.md` normally
 
 The sandbox lets the agent read exactly that one file (read-only, never the rest of `.ta/logs`) on macOS and Linux. Windows AppContainer launches do not get this exception yet.
 
+#### Logging your agents in
+
+Give each agent framework its login once; TA stores it and hands it to the agents it launches, so neither your shell profile nor the daemon's environment has to carry it.
+
+```bash
+ta agent-login list                       # what is logged in (no network)
+ta agent-login login claude-code          # opens your browser; TA captures the token
+printf %s "$OPENAI_API_KEY" | ta agent-login login openai --secret-stdin
+ta agent-login verify                     # check every login with a real request
+ta agent-login logout openai
+```
+
+- **Frameworks** are data: Claude (`claude-code`, a subscription token from `claude setup-token`), Anthropic API key (`anthropic-api-key`), OpenAI (`openai`), Gemini (`gemini`) and Grok/xAI (`xai`). Add your own, or change one, in `~/.config/ta/agent-frameworks.toml` (your user) or `.ta/agent-frameworks.toml` (one project); an entry with an existing `id` replaces it, a new `id` adds a framework. The shipped catalog (`agent-frameworks.default.toml` in the `ta-credentials` crate) documents every field.
+- **Claude** runs `claude setup-token` for you in a pseudo-terminal, shows you the sign-in address if the browser did not open, and captures the long-lived token it prints. The token is never printed. If the sign-in is not finished within 300 seconds the command is stopped and nothing is stored; raise the limit with `TA_AGENT_LOGIN_TIMEOUT_SECS` (or `timeout_secs` in the catalog). If `claude` is not installed, `ta agent-login login claude-code` exits with status 4 and tells you to install it or to pipe an existing token in with `--secret-stdin`.
+- **Key frameworks** take the key on standard input only (`--secret-stdin`); it is never a command-line argument, so it stays out of `ps` and shell history.
+- **Where logins live**: per user, not per project, in the same custody as `ta login` (`ta credentials custody status` shows which): the OS keychain (service `trusted-autonomy-agent-login`, one item per framework), or an owner-only (`0600`) file under `~/.config/ta/human/agent-logins/` when file custody is chosen (`ta credentials custody file`, or `TA_NO_KEYCHAIN=1`). Next to it a small non-secret record (`<id>.json`: state, time, custody) lets `list`, `ta doctor` and the daemon say what is stored without reading the secret.
+- **States** (`ta agent-login list --json`): `ok` (the vendor accepted it), `invalid` (the vendor rejected it; log in again), `unknown` (stored but not checked, or the vendor could not be reached), `missing`, `logging_in` (a sign-in is open). `login` verifies unless you pass `--no-verify`; `verify` makes the cheapest real request the catalog names for that framework. A key is only ever sent in a request header to the vendor's own address.
+- **At launch**: for a sandboxed agent, `ta run` (and so every launch `ta-daemon` makes) adds the stored login of the agent being launched, as that framework's environment variable (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, ...), and nothing for any other framework. If the launch environment already sets a login variable for that agent, that variable wins and the stored login is not used. The launch log lists variable names and where the login is held, never values.
+- **Exit codes** (for scripts): `0` done, `2` usage (unknown framework, no secret supplied, bad catalog file), `3` the vendor login failed, was cancelled or timed out, `4` the vendor command is not installed. `--json` prints one document: `list` gives `{"active", "frameworks": [{"id", "label", "kind", "method", "how", "state", "checked_at", "detail", "source"}]}`; `login`, `logout` and `verify <id>` give `{"id", "state", "checked_at", "detail"}`.
+
 #### Agent login inside the sandbox
 
-A sandboxed agent cannot use a login stored in the macOS Keychain or `~/.claude`: its home is a fresh per-goal directory and the Keychain helper cannot be run inside the box. Give it one of these in the environment of the process that starts the launch (for wake-on-demand launches that is where `ta-daemon` starts, so set it there and run `ta daemon restart`):
+A sandboxed agent cannot use a login stored in the macOS Keychain or `~/.claude`: its home is a fresh per-goal directory and the Keychain helper cannot be run inside the box. The simplest fix is `ta agent-login` (see [Logging your agents in](#logging-your-agents-in)), which keeps the login in TA's own credential custody and gives it to every sandboxed launch, including the ones `ta-daemon` starts. The alternative is to give the agent one of these in the environment of the process that starts the launch (for wake-on-demand launches that is where `ta-daemon` starts, so set it there and run `ta daemon restart`). A variable that is already set always wins over the stored login:
 
 - `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`): an API key.
 - `CLAUDE_CODE_OAUTH_TOKEN`: a Claude subscription token, created with `claude setup-token`.
 
-The sandbox forwards exactly these (plus the `ANTHROPIC_BASE_URL` family and the OpenAI/Gemini keys); everything else secret is withheld. A launch that passes `--credential-scopes` starts from a cleared environment and only gets what those scopes cover.
+The sandbox forwards exactly these (plus the `ANTHROPIC_BASE_URL` family and the OpenAI, Gemini and xAI keys); everything else secret is withheld. A launch that passes `--credential-scopes` starts from a cleared environment and only gets what those scopes cover.
 
-**`ta doctor` checks the running daemon.** When a `ta-daemon` is running for the project, the active agent is `claude-code`, and chat-class launches run in the sandbox (the default unless the owner's sandbox policy sets the posture to `open`), `ta doctor` reads the daemon's environment and prints a `Daemon agent login` line:
+**`ta doctor` checks the running daemon.** When a `ta-daemon` is running for the project, the active agent is `claude-code`, and chat-class launches run in the sandbox (the default unless the owner's sandbox policy sets the posture to `open`), `ta doctor` prints a `Daemon agent login` line:
 
+- `[ok]`: a login is stored with `ta agent-login` (the line says which and where: the OS keychain or the file path; never the value). The daemon needs nothing in its own environment, because `ta run` gives the stored login to the sandboxed agent when it starts.
 - `[ok]`: one of `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` is set (non-empty) in the daemon's environment. Only the variable's name is shown, never its value.
-- `[warn]`: none of them is set, so every goal the daemon starts will fail with "The sandboxed agent has no usable login". The line says what to set and to run `ta daemon restart` afterwards.
+- `[warn]`: no login is stored and none of those variables is set, so every goal the daemon starts will fail with "The sandboxed agent has no usable login". The line says to run `ta agent-login login claude-code` (or what to set and to run `ta daemon restart` afterwards). A stored login the vendor rejected on its last check is reported the same way.
 - `[ok] cannot check ...`: the daemon's environment could not be read, so nothing is claimed either way. TA reads it with `/proc/<pid>/environ` on Linux and `/bin/ps -E -p <pid>` on macOS, which work only for your own user's processes; there is no reader on Windows.
 
 No line is printed when no daemon is running, the agent is not `claude-code`, or the sandbox is off.
@@ -584,6 +605,44 @@ An agent that never starts its model session is a **failed launch**, not a finis
 - the wake launch takes the normal retry path (30 s, 2 min, 10 min, then the dead-letter file) instead of the message being acknowledged as handled.
 
 A goal's origin is fixed when the goal is created. A later `ta run --goal-id <id>` with a different `--origin` or `TA_GOAL_ORIGIN` keeps the recorded origin and prints a warning.
+
+### When an Agent Cannot Start (`launch_failed`)
+
+When a goal started for a Wayfinder candidate (or any external-intake candidate) fails before the agent does useful work, TA tells the source instead of leaving the task looking busy. The daemon publishes one message on the `external-outcome` stream, keyed to the candidate:
+
+```json
+{"candidate_id":"wayfinder-task:T-42#n-1","outcome":"launch_failed","kind":"launch_failed",
+ "reason_code":"no_login","detail":"the agent said it is not logged in (claude-code)",
+ "fix":"Log in from Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"}
+```
+
+`detail` is what happened and `fix` is what to do; neither ends with a full stop, so a reader can join them. Both are built by TA from identifiers and exit codes, never copied from agent output, so they carry no secret. The message is signed with the daemon's own `ta-daemon` role (see `[whiteboard] outcome_roles`). An agent cannot send `launch_failed`: the agent token path refuses it, and an unsigned one is refused by the verifier.
+
+| `reason_code` | When | Retried first? |
+|---|---|---|
+| `no_login` | The agent reported it is not logged in, or no login for it is stored | No, published at once |
+| `login_invalid` | The vendor rejected the stored login (401, invalid or expired key or token) | No, published at once |
+| `agent_missing` | The agent's command is not installed or not on `PATH` | No, published at once |
+| `sandbox_denied` | The sandbox policy refused the launch or its setup failed | No, published at once |
+| `crashed` | The launch exited non-zero (or by signal) for a reason TA cannot name. With no output at all it exited before doing any work. | Yes, `wake_max_attempts` times |
+| `timed_out` | The launch was still running after `wake_launch_timeout_secs` and was stopped | Yes, `wake_max_attempts` times |
+
+A message is reported when the daemon gives up on it: immediately for the first four (retrying cannot fix them), and after the last attempt for `crashed` and `timed_out`. A launch that works, including one that works on a retry, publishes nothing, and neither does a wake message that has no `candidate_id`. A launch that is dead-lettered with no recorded cause (for example the daemon stopped mid-launch three times) is published as `crashed`. If the stream cannot take the message it is kept in `.ta/launch-failed-outbox/` and sent on the next pass; a copy is never sent twice.
+
+A worker goal that the Wayfinder poller starts itself (`ta run --provenance-file ...`) is a child of the poller, so `ta run` records the reason on the goal and the daemon reports it within about ten seconds, keyed by the bare candidate id (no `#nonce`). Each goal is reported once (`.ta/launch-failed-published/<goal id>`); goals older than 24 hours are not reported.
+
+**The goal shows the same thing.** `ta goal status <id>` prints `Launch:`, `Detail:` and `Fix:` lines for a failed launch, and the JSON forms are machine-readable:
+
+```bash
+ta goal list --json          # array of rows, newest first
+ta goal status <id> --json   # the full record plus the fields below
+```
+
+Added fields (existing fields are unchanged): `state_name` and `poller_state` (one of `launching`, `running`, `waiting_for_review`, `failed`, `finished`), `candidate_id` (without `#nonce`), `task_id` (the Wayfinder task id when the candidate is `wayfinder-task:<id>`), `started_at` / `started_at_epoch`, `updated_at` / `updated_at_epoch`, `agent_pid`, `failure_reason`, and `launch_failure` (`code`, `detail`, `fix`). In `ta goal list --json` the row's `state` is the plain `poller_state` string; in `ta goal status --json` `state` stays the record's tagged object.
+
+When `ta run` fails to start an agent it prints a headline and one identifier-only line on stderr, `ta-launch-failure: code=<code> agent=<id> command=<id> goal=<uuid>`. The daemon reads it to name the code and goal; it is a hint, and a `crashed` hint is refined from the agent's own stderr when the daemon can see it. The daemon then updates the goal's `launch_failure` so the goal and the published message always agree.
+
+Knobs, both in `[whiteboard]` of `.ta/workflow.toml`: `wake_launch_timeout_secs` (the `timed_out` limit) and `wake_max_attempts` (retries before `crashed`/`timed_out` are published).
 
 ---
 
@@ -19600,6 +19659,42 @@ The team coordinator (`ta intake coordinate --dispatch`, above) uses the identic
 New code that can spawn `claude`, `codex`, `ollama`, `meridian` or `ta run` must check `ta_goal::external_agents_blocked!()` before spawning. `apps/ta-cli/tests/no_external_agents.rs` fails if the guard is no longer exported to tests.
 
 To confirm a test run spent nothing, run `ta cost report --detail --group-by session_family --since <time>` after `cargo test -p ta-cli` and check that no new title-extraction sessions appear.
+
+### Validating changes locally (ci-local)
+
+GitHub Actions minutes are limited (macOS runners bill 10x, Windows 2x), so changes are proven on your machine first and CI is only the final, cheap confirmation. `scripts/ci-local.sh` is the one command that runs every CI check with CI's own commands:
+
+```bash
+scripts/ci-local.sh                 # everything below; ends with the evidence line
+scripts/ci-local.sh --quick         # checks + host fmt/clippy only (inner loop)
+scripts/ci-local.sh --only windows  # one group: checks, host, windows, linux
+scripts/ci-local.sh --skip-docker   # no Linux container (Docker not running)
+scripts/ci-local.sh -v -x           # stream output, stop at the first failure
+scripts/ci-local.sh --clean         # delete the caches and Docker volumes it made
+```
+
+| Group | What runs | CI job it mirrors |
+|-------|-----------|-------------------|
+| `checks` | version consistency (Cargo.toml, CLAUDE.md, manifests), no-ip-docs, secret scan, script self-tests, `actionlint` (if installed) | `Version consistency` |
+| `host` | fmt, `clippy -D warnings`, `cargo test --workspace`, the three standalone channel plugins, `ta --version`, leftover-process guard (as a before/after delta, because your own `ta-daemon` may be running), and on macOS the Seatbelt conformance suite with skips treated as failures | `Lint and Test (macos-latest)`, the fmt/clippy/test part of `Lint and Test (ubuntu-latest)` |
+| `windows` | `cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings` on the rustup toolchain pinned by `rust-toolchain.toml` | the compile gate of `Windows Build` |
+| `linux` | clippy, `cargo test --workspace` and the sandbox-conformance container cases inside a Docker container on the Docker VM's native architecture (aarch64 on Apple silicon), as a non-root user like a CI runner | `Lint and Test (ubuntu-latest)`, `Linux Sandbox Conformance` |
+
+The run prints a PASS/FAIL table, then what it did **not** cover, then one line. When every selected step passed and the working tree is committed, that line is `ci-local: all green at <sha> <date>`; paste it into the pull request body. A partial run prints `ci-local: green at <sha> <date> (NOT covered: ...)`, and a run with uncommitted changes prints no evidence line (the sha would not describe what was tested) unless you pass `--allow-dirty`. Failed steps print their last 40 lines and a log path under the cache directory.
+
+What a local run cannot show, and the script says so every time: Windows tests are type-checked and linted but never executed (the C dependencies `ring` and `aws-lc-sys` are replaced by empty stand-ins for that one target, which is sound only because `clippy` never links), AppContainer and Credential Manager behaviour, the x86_64 Linux architecture, the Linux sandbox host suite on a bare runner kernel, the real macOS Keychain (never touched), and release packaging.
+
+Safety: the script runs every cargo command under `env -i` with a throwaway `HOME`, sets `TA_NO_KEYCHAIN=1` and `TA_TEST_NO_EXTERNAL_AGENTS=1`, and replaces the macOS codesigning cargo runner with `/usr/bin/env`, so it never reads the Keychain or your `~/.ta` and never reaches a paid agent.
+
+Caching makes re-runs incremental. Host and Windows build directories live under `~/.cache/ci-local/ta` (override with `CI_LOCAL_CACHE`); the Linux group uses Docker volumes `ta-ci-local-src`, `ta-ci-local-target`, `ta-ci-local-cargo` and `ta-ci-local-sandbox-target`. Expect roughly 8-12 GB for the host build, 4-6 GB for Windows and 8-12 GB for the Linux volume once warm. `scripts/ci-local.sh --clean` removes all of it, including the `ta-ci-local:<rust version>` Docker image. The script refuses to start with less than 10 GB free.
+
+What CI itself runs, so you know what is left after a green `ci-local`:
+
+- **Pull request:** `Version consistency` (seconds) and one ubuntu job (`Lint and Test (ubuntu-latest)`: fmt, clippy, test). Docs-only pull requests stop after the cheap checks. A newer push cancels the stale run.
+- **Push to `main`** (the merge of a composite pull request), **`workflow_dispatch`** (`gh workflow run ci.yml --ref <branch>`), or a pull request labelled **`full-ci`** (add the label before pushing; it is read when the pull request is opened or pushed to): the macOS, Windows and Linux Sandbox Conformance jobs run too. On an ordinary pull request those jobs are skipped, and a skipped job reports success so the required check names still resolve. Linux Sandbox Conformance also runs on a pull request that touches `crates/ta-runtime` or `crates/ta-sandbox`.
+- **Nightly:** builds the five release targets only when code (not just docs) changed since the last nightly; it does not repeat the tests CI already ran on `main`.
+
+Never push again just to trigger CI: fix locally, re-run `scripts/ci-local.sh`, push once. Re-run a red CI job from the Actions page instead of pushing an empty commit.
 
 ---
 

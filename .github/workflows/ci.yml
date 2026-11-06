@@ -1,10 +1,41 @@
 name: CI
 
+# Cost shape (GitHub Actions minutes; macOS bills 10x and Windows 2x on private
+# repos, so the expensive runners are the last thing to start and the first
+# thing to skip):
+#
+#   pull request   Version consistency (seconds) + ONE ubuntu job
+#                  (fmt, clippy, test). Docs-only pull requests stop after the
+#                  version/secret checks. The macOS, Windows and Linux sandbox
+#                  jobs are SKIPPED (a skipped job reports success, so the
+#                  required check names still resolve) unless the pull request
+#                  carries the `full-ci` label when it is opened or pushed to,
+#                  or touches the Linux sandbox code (Linux Sandbox Conformance
+#                  runs, nothing else changes).
+#   push to main   everything: the composite-PR merge is the one place the full
+#                  macOS + Windows + Linux matrix runs. Docs-only pushes are
+#                  ignored by the trigger.
+#   workflow_dispatch  everything, on any branch:
+#                  gh workflow run ci.yml --ref <branch>
+#
+# Work is validated locally first with scripts/ci-local.sh (see CLAUDE.md,
+# "Verification Before Every Commit"); CI is the final cheap check, not the
+# development loop.
+
 on:
   push:
     branches: [main]
+    # Same rule as the docs-only detection below: repo-root *.md and docs/**.
+    # Markdown under crates/, apps/ or templates/ is code (include_str!).
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
   pull_request:
     branches: [main]
+    # No paths filter here: a workflow skipped by a path filter never reports
+    # the required check names and leaves the pull request pending forever.
+    # Docs-only pull requests are detected by scripts/ci-changes.sh instead.
+  workflow_dispatch: {}
 
 # Supersede stale PR runs; never cancel runs on main (each push to main must
 # finish so the post-merge result and the save-on-main cache are complete).
@@ -26,21 +57,26 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Cheap, always runs, and decides what the expensive jobs below do. Name is
+  # stable: "Version consistency" is part of the proposed required set.
   version-check:
     name: Version consistency
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      # 'false' only when a pull request touches nothing but docs. The heavy
-      # steps in the jobs below key off this. The jobs themselves always run,
-      # so the required check names always report (a job-level skip of a matrix
-      # job reports an unexpanded name and leaves required checks pending).
+      # code=false only when a pull request touches nothing but docs. The jobs
+      # below key off these with job-level `if`: a skipped job with a literal
+      # name reports success, so required checks never hang pending (a skipped
+      # MATRIX job reports an unexpanded name; that is why there is no matrix).
       code: ${{ steps.changes.outputs.code }}
+      sandbox: ${{ steps.changes.outputs.sandbox }}
+      plugins: ${{ steps.changes.outputs.plugins }}
+      full: ${{ steps.changes.outputs.full }}
     steps:
       - uses: actions/checkout@v5
         timeout-minutes: 5
 
-      - name: Detect docs-only pull request
+      - name: Classify the change
         id: changes
         timeout-minutes: 5
         env:
@@ -48,55 +84,41 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
-          # Docs-only means every changed file is a repo-root *.md or under
-          # docs/. Markdown under crates/, apps/ or templates/ is NOT docs-only
-          # because include_str! compiles it into binaries. Anything uncertain
-          # (push events, API failure, empty list) runs the full pipeline.
-          code=true
+          # Anything uncertain (API failure, empty list, dispatch) runs the
+          # full pipeline: scripts/ci-changes.sh answers true for an empty list.
+          files=""
           if [ "$EVENT" = "pull_request" ]; then
-            if files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename') && [ -n "$files" ]; then
-              echo "Changed files:"; echo "$files"
-              if ! echo "$files" | grep -qvE '^([^/]+\.md|docs/.*)$'; then
-                code=false
-              fi
-            else
-              echo "Could not list PR files; running full pipeline."
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename') || files=""
+          elif [ "$EVENT" = "push" ]; then
+            if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git fetch --no-tags --depth=1 origin "$BEFORE" 2>/dev/null; then
+              files=$(git diff --name-only "$BEFORE" "$SHA") || files=""
             fi
           fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "Code changes present: $code"
-      - name: Verify Cargo.toml, CLAUDE.md, and .release.toml agree on version
-        timeout-minutes: 5
-        run: |
-          # Cargo.toml is the single source of truth for semver.
-          CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Changed files:"; echo "$files"
+          printf '%s\n' "$files" | scripts/ci-changes.sh | tee -a "$GITHUB_OUTPUT"
 
-          # CLAUDE.md must echo it for agent context.
-          CLAUDE_VER=$(grep 'Current version' CLAUDE.md | head -1 | sed "s/.*\`\(.*\)\`.*/\1/")
-
-          # .release.toml must not be present with a stale version comment.
-          # (It doesn't store version directly — Cargo.toml is authoritative — so we
-          # just verify the two human-editable files agree with each other.)
-
-          echo "Cargo.toml version : $CARGO_VER"
-          echo "CLAUDE.md version  : $CLAUDE_VER"
-
-          if [ "$CARGO_VER" != "$CLAUDE_VER" ]; then
-            echo ""
-            echo "ERROR: Version mismatch."
-            echo "  Cargo.toml says: $CARGO_VER"
-            echo "  CLAUDE.md says:  $CLAUDE_VER"
-            echo ""
-            echo "Fix: run ./scripts/bump-version.sh $CARGO_VER"
-            echo "  or update CLAUDE.md manually to match Cargo.toml."
-            exit 1
+          full=false
+          case "$EVENT" in
+            push|workflow_dispatch) full=true ;;
+            pull_request) case ",$LABELS," in *,full-ci,*) full=true ;; esac ;;
+          esac
+          echo "full=$full" | tee -a "$GITHUB_OUTPUT"
+          if [ "$full" = "false" ] && printf '%s\n' "$files" | grep -qE '^(crates/ta-runtime/|crates/ta-sandbox/)'; then
+            echo "::notice title=Platform sandbox code changed::macOS Seatbelt and Windows AppContainer conformance only run on push to main, workflow_dispatch, or a pull request labelled full-ci. Validate locally with scripts/ci-local.sh or add the full-ci label (before pushing) for a real run."
           fi
-          echo "OK: versions consistent ($CARGO_VER)"
 
-      - name: Verify every crate manifest agrees with the workspace version
+      - name: Verify Cargo.toml, CLAUDE.md and every crate manifest agree on the version
         timeout-minutes: 5
         run: ./scripts/check-version-consistency.sh
+
+      - name: No IP-sensitive documents in this public repository
+        timeout-minutes: 5
+        run: ./scripts/check-no-ip-docs.sh --all
 
       - name: Secret scan (real-shaped secrets outside the allowlist)
         timeout-minutes: 5
@@ -106,80 +128,60 @@ jobs:
           ./scripts/secret-scan.sh --self-test
           ./scripts/secret-scan.sh
 
-  lint-and-test:
-    name: Lint and Test
+      - name: Scripts self-tests (change classifier, leftover-process guard)
+        timeout-minutes: 5
+        run: |
+          ./scripts/ci-changes.sh --self-test
+          ./scripts/ci-leftover-processes.sh --self-test
+
+  # The ONE job a normal pull request runs. Cheap-first: formatting needs no
+  # compilation, clippy type-checks the whole workspace (including every
+  # platform-independent test target) before the slower test build, so a red
+  # change fails in the first minutes.
+  lint-and-test-ubuntu:
+    name: Lint and Test (ubuntu-latest)
     needs: version-check
-    runs-on: ${{ matrix.os }}
+    if: needs.version-check.outputs.code == 'true'
+    runs-on: ubuntu-latest
     # Ceiling for the whole job. Every step below also has its own
     # timeout-minutes, so a hung step ends at its own limit, not here.
-    timeout-minutes: 90
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    env:
-      CODE: ${{ needs.version-check.outputs.code }}
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         timeout-minutes: 5
 
-      - name: Docs-only change, skipping build and test
-        if: env.CODE != 'true'
-        run: echo "Only docs changed (see Version consistency job); code checks not required."
-        timeout-minutes: 2
+      - name: Set up Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
+        timeout-minutes: 10
 
-      - name: Install Nix
-        if: env.CODE == 'true'
-        uses: DeterminateSystems/nix-installer-action@main
-        timeout-minutes: 15
-
-      # Fast failure first: formatting needs no compilation.
       - name: Check formatting
-        if: env.CODE == 'true'
-        run: nix develop --command bash -c "cargo fmt --all -- --check"
+        run: cargo fmt --all -- --check
         timeout-minutes: 5
 
       - name: Cache cargo registry and target
-        if: env.CODE == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.os }}
+          key: ubuntu-latest
           save-if: ${{ github.ref == 'refs/heads/main' }}
         timeout-minutes: 15
 
-      - name: Build all crates
-        if: env.CODE == 'true'
-        run: nix develop --command bash -c "cargo build --workspace --all-targets"
-        timeout-minutes: 30
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        timeout-minutes: 20
 
       - name: Run tests
-        if: env.CODE == 'true'
-        run: nix develop --command bash -c "cargo test --workspace -- --test-threads=4"
-        timeout-minutes: 15
-
-      - name: Run clippy
-        if: env.CODE == 'true'
-        run: nix develop --command bash -c "cargo clippy --workspace --all-targets -- -D warnings"
-        timeout-minutes: 15
-
-      # macOS Seatbelt conformance (v0.17.12.7): runs `ta-sandbox-probe` inside the
-      # generated profile. The workspace test step above skips this suite on a host
-      # that cannot run sandbox-exec; here a skip is a failure, so a runner image
-      # change cannot silently turn the isolation proof off.
-      - name: Seatbelt conformance (ta-sandbox-probe)
-        if: env.CODE == 'true' && matrix.os == 'macos-latest'
-        env:
-          TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
-        run: nix develop --command bash -c "cargo test -p ta-runtime --test seatbelt_conformance -- --test-threads=1"
-        timeout-minutes: 10
+        run: cargo test --workspace -- --test-threads=4
+        timeout-minutes: 20
 
       # The three channel plugins each have their own [workspace], so none of
       # the workspace steps above build them. A plugin manifest that cannot
-      # parse once shipped because nothing compiled it. Ubuntu is enough: the
-      # plugins are platform independent. They have their own target dirs and
-      # a separate cache key; this adds no required check name.
+      # parse once shipped because nothing compiled it. They depend on nothing
+      # in this workspace, so they run only when a plugin (or the toolchain or
+      # this workflow) changed, or on a full run. They have their own target
+      # dirs and a separate cache key; this adds no required check name.
       - name: Cache standalone plugin builds
-        if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
+        if: needs.version-check.outputs.plugins == 'true' || needs.version-check.outputs.full == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: standalone-plugins
@@ -191,69 +193,109 @@ jobs:
         timeout-minutes: 15
 
       - name: Test standalone plugins (discord, slack, email)
-        if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
+        if: needs.version-check.outputs.plugins == 'true' || needs.version-check.outputs.full == 'true'
         run: |
           for plugin in ta-channel-discord ta-channel-slack ta-channel-email; do
             echo "::group::cargo test --manifest-path plugins/$plugin/Cargo.toml"
-            nix develop --command bash -c "cargo test --manifest-path plugins/$plugin/Cargo.toml" || { echo "::endgroup::"; echo "FAILED: plugins/$plugin. Re-run: nix develop --command cargo test --manifest-path plugins/$plugin/Cargo.toml"; exit 1; }
+            cargo test --manifest-path plugins/$plugin/Cargo.toml || { echo "::endgroup::"; echo "FAILED: plugins/$plugin. Re-run: cargo test --manifest-path plugins/$plugin/Cargo.toml"; exit 1; }
             echo "::endgroup::"
           done
         timeout-minutes: 20
 
-      # Pull requests smoke-test the debug binary already built above. The
-      # optimized release build runs on pushes to main (and in the release and
-      # nightly workflows).
+      # Smoke-test the debug binary the test step already built. Optimized
+      # release builds are exercised by the nightly and release workflows, not
+      # here (a release build on every push cost ~6 minutes per platform).
       - name: Test ta-cli --version (debug)
-        if: env.CODE == 'true'
-        run: nix develop --command bash -c "./target/debug/ta --version"
-        timeout-minutes: 5
-
-      - name: Build ta-cli binary (release)
-        if: env.CODE == 'true' && github.event_name == 'push'
-        run: nix develop --command bash -c "cargo build --release -p ta-cli"
-        timeout-minutes: 30
-
-      - name: Test ta-cli --version (release)
-        if: env.CODE == 'true' && github.event_name == 'push'
-        run: nix develop --command bash -c "./target/release/ta --version"
+        run: ./target/debug/ta --version
         timeout-minutes: 5
 
       # Regression guard: a test run must not leave gh, ta-daemon or ta
       # processes behind (a Windows run once left about 7,000 gh processes).
       # Runs even when an earlier step failed so the leftovers are listed
       # next to the original failure; it never masks that failure because it
-      # only adds its own red step. Skipped on docs-only changes.
+      # only adds its own red step.
       - name: Check for leftover gh, ta-daemon and ta processes
-        if: always() && env.CODE == 'true'
-        run: |
-          ./scripts/ci-leftover-processes.sh --self-test
-          ./scripts/ci-leftover-processes.sh
+        if: always()
+        run: ./scripts/ci-leftover-processes.sh
+        timeout-minutes: 5
+
+  # macOS: full run only (push to main, workflow_dispatch, `full-ci` label).
+  # Starts after the ubuntu job is green so an obviously red change never pays
+  # for a 10x runner. Job id and cache key match the old matrix job so the
+  # existing macOS cache keeps hitting.
+  lint-and-test:
+    name: Lint and Test (macos-latest)
+    needs: [version-check, lint-and-test-ubuntu]
+    if: needs.version-check.outputs.code == 'true' && needs.version-check.outputs.full == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        timeout-minutes: 5
+
+      - name: Set up Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
+        timeout-minutes: 10
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: macos-latest
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+        timeout-minutes: 15
+
+      # Formatting is platform independent and already checked on ubuntu;
+      # clippy is not (cfg(target_os = "macos") code is linted only here).
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        timeout-minutes: 20
+
+      - name: Run tests
+        run: cargo test --workspace -- --test-threads=4
+        timeout-minutes: 20
+
+      # macOS Seatbelt conformance (v0.17.12.7): runs `ta-sandbox-probe` inside the
+      # generated profile. The workspace test step above skips this suite on a host
+      # that cannot run sandbox-exec; here a skip is a failure, so a runner image
+      # change cannot silently turn the isolation proof off.
+      - name: Seatbelt conformance (ta-sandbox-probe)
+        env:
+          TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
+        run: cargo test -p ta-runtime --test seatbelt_conformance -- --test-threads=1
+        timeout-minutes: 10
+
+      - name: Test ta-cli --version (debug)
+        run: ./target/debug/ta --version
+        timeout-minutes: 5
+
+      - name: Check for leftover gh, ta-daemon and ta processes
+        if: always()
+        run: ./scripts/ci-leftover-processes.sh
         timeout-minutes: 5
 
   # Linux sandbox conformance (v0.17.12.8). The full bubblewrap + Landlock +
   # seccomp suite runs on the runner itself; the container steps remove one
   # layer at a time (no user namespaces, no Landlock) and check TA reports it.
   # A skipped test is a failure here, so a runner image change cannot quietly
-  # turn the isolation proof off.
+  # turn the isolation proof off. Runs on a full run, or when a change touches
+  # the sandbox code (scripts/ci-changes.sh `sandbox`).
   linux-sandbox-conformance:
     name: Linux Sandbox Conformance
     needs: version-check
+    if: needs.version-check.outputs.code == 'true' && (needs.version-check.outputs.full == 'true' || needs.version-check.outputs.sandbox == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      CODE: ${{ needs.version-check.outputs.code }}
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         timeout-minutes: 5
 
-      - name: Install Nix
-        if: env.CODE == 'true'
-        uses: cachix/install-nix-action@v31
+      - name: Set up Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
         timeout-minutes: 10
 
       - name: Install bubblewrap and allow user namespaces
-        if: env.CODE == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap
@@ -264,7 +306,6 @@ jobs:
         timeout-minutes: 5
 
       - name: Cache cargo registry and target
-        if: env.CODE == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: linux-sandbox
@@ -272,117 +313,61 @@ jobs:
         timeout-minutes: 15
 
       - name: Host conformance (bubblewrap, Landlock, seccomp, relay)
-        if: env.CODE == 'true'
         env:
           TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
-        run: nix develop --command bash -c "cargo test -p ta-runtime --test linux_conformance -- --test-threads=1"
+        run: cargo test -p ta-runtime --test linux_conformance -- --test-threads=1
         timeout-minutes: 30
 
       - name: Probe and unit tests for the Linux layers
-        if: env.CODE == 'true'
-        run: nix develop --command bash -c "cargo test -p ta-runtime linux_"
+        run: cargo test -p ta-runtime linux_
         timeout-minutes: 15
 
       - name: Degraded containers (no user namespaces, no Landlock)
-        if: env.CODE == 'true'
         run: scripts/ci-linux-sandbox-containers.sh all
         timeout-minutes: 30
 
-  # Fast Windows compile gate (v0.17.12.25 item 6). Compile only, warnings
-  # denied: catches `dead_code` on cfg(unix)-only helpers and other
-  # Windows-only compile failures well before the full Windows Build job
-  # (build + test + clippy) finishes, so a fix commit does not wait for it.
-  windows-check:
-    name: Windows Check
-    needs: version-check
-    runs-on: windows-latest
-    timeout-minutes: 30
-    env:
-      CODE: ${{ needs.version-check.outputs.code }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        timeout-minutes: 5
-
-      - name: Docs-only change, skipping check
-        if: env.CODE != 'true'
-        run: echo "Only docs changed (see Version consistency job); code checks not required."
-        timeout-minutes: 2
-
-      - name: Cache cargo registry and target
-        if: env.CODE == 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: windows-check
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-        timeout-minutes: 15
-
-      - name: cargo check --all-targets (-D warnings)
-        if: env.CODE == 'true'
-        env:
-          RUSTFLAGS: -D warnings
-        run: cargo check --workspace --all-targets
-        timeout-minutes: 25
-
-  # Windows build verification (v0.9.1)
+  # Windows: full run only. One job: clippy with warnings denied is the compile
+  # gate that the separate "Windows Check" job used to be (it catches
+  # `dead_code` on cfg(unix)-only helpers and other Windows-only compile
+  # failures), and it runs FIRST so a Windows-only compile failure ends the job
+  # in minutes instead of after the build and test. Required check name stable.
   windows-build:
     name: Windows Build
-    needs: version-check
+    needs: [version-check, lint-and-test-ubuntu]
+    if: needs.version-check.outputs.code == 'true' && needs.version-check.outputs.full == 'true'
     runs-on: windows-latest
-    # A healthy run takes under 20 minutes; a run that reaches this ceiling is
+    # A healthy run takes under 30 minutes; a run that reaches this ceiling is
     # hung (see the leftover-process check at the end of the job).
     timeout-minutes: 60
-    env:
-      CODE: ${{ needs.version-check.outputs.code }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         timeout-minutes: 5
 
-      - name: Docs-only change, skipping build and test
-        if: env.CODE != 'true'
-        run: echo "Only docs changed (see Version consistency job); code checks not required."
-        timeout-minutes: 2
-
-      - name: Show Rust toolchain
-        if: env.CODE == 'true'
-        # windows-latest ships rustup preinstalled; it auto-installs and selects
-        # whatever `rust-toolchain.toml` pins on the first cargo/rustc invocation
-        # below, the same file `flake.nix` reads for the ubuntu/macos Nix jobs.
-        # No install step needed. This just makes the resolved version visible
-        # in CI logs instead of relying on silent auto-resolution.
-        run: rustc --version && cargo --version
+      - name: Set up Rust (pinned by rust-toolchain.toml)
+        uses: ./.github/actions/setup-rust
         timeout-minutes: 10
 
       - name: Cache cargo registry and target
-        if: env.CODE == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: windows-latest
           save-if: ${{ github.ref == 'refs/heads/main' }}
         timeout-minutes: 15
 
-      - name: Build all crates
-        if: env.CODE == 'true'
-        run: cargo build --workspace --all-targets
-        timeout-minutes: 30
+      - name: Run clippy (compile gate, warnings denied)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        timeout-minutes: 25
 
       - name: Run tests
-        if: env.CODE == 'true'
         run: cargo test --workspace -- --test-threads=4
-        timeout-minutes: 15
-
-      - name: Run clippy
-        if: env.CODE == 'true'
-        run: cargo clippy --workspace --all-targets -- -D warnings
-        timeout-minutes: 15
+        timeout-minutes: 25
 
       # AppContainer conformance and the Credential Manager / DPAPI probe
       # (v0.17.12.9). A runner that cannot create an AppContainer profile fails
       # the step instead of skipping. The FINDING lines record what an
       # AppContainer process can reach; they are uploaded with the job.
       - name: AppContainer conformance and Credential Manager probe
-        if: env.CODE == 'true'
         env:
           TA_REQUIRE_SANDBOX_CONFORMANCE: "1"
           TA_WINDOWS_FINDINGS: ${{ runner.temp }}\windows-findings.txt
@@ -390,7 +375,7 @@ jobs:
         timeout-minutes: 20
 
       - name: Upload Windows sandbox findings
-        if: always() && env.CODE == 'true'
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: windows-sandbox-findings
@@ -399,26 +384,15 @@ jobs:
         timeout-minutes: 5
 
       - name: Test ta-cli --version (debug)
-        if: env.CODE == 'true'
         run: target\debug\ta.exe --version
         timeout-minutes: 5
 
-      - name: Build ta-cli binary (release)
-        if: env.CODE == 'true' && github.event_name == 'push'
-        run: cargo build --release -p ta-cli
-        timeout-minutes: 30
-
-      - name: Test ta-cli --version (release)
-        if: env.CODE == 'true' && github.event_name == 'push'
-        run: target\release\ta.exe --version
-        timeout-minutes: 5
-
-      # Regression guard (see the same step in the Lint and Test job). On
-      # Windows `cargo test` puts target\debug on PATH, so a test that spawns
-      # `gh`, `ta` or `ta-daemon` by name runs the freshly built binary and can
+      # Regression guard (see the same step in the ubuntu job). On Windows
+      # `cargo test` puts target\debug on PATH, so a test that spawns `gh`,
+      # `ta` or `ta-daemon` by name runs the freshly built binary and can
       # leave it behind.
       - name: Check for leftover gh, ta-daemon and ta processes
-        if: always() && env.CODE == 'true'
+        if: always()
         shell: pwsh
         run: ./scripts/ci-leftover-processes.ps1
         timeout-minutes: 5

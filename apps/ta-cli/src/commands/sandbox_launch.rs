@@ -831,9 +831,10 @@ impl SandboxPlan {
                 eprintln!(
                     "[warn] sandbox: no ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or \
                      CLAUDE_CODE_OAUTH_TOKEN reaches the agent, and its home is a fresh \
-                     per-goal directory. Set one in your shell before `ta run`, or the agent \
-                     may not be able to authenticate (a login stored in the macOS Keychain is \
-                     not available inside the box)."
+                     per-goal directory. Run `ta agent-login login claude-code` once (TA keeps \
+                     the login and gives it to sandboxed launches), or set one of those in \
+                     your shell before `ta run`; a login stored in the macOS Keychain by \
+                     Claude Code itself is not available inside the box."
                 );
             }
         }

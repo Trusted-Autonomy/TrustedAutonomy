@@ -141,6 +141,9 @@ impl ExternalChannelAdapter {
 
             match write_result {
                 Ok(Ok(())) => {}
+                // The plugin exited without reading stdin: not a write failure. Fall through so its
+                // exit status and stderr (the useful part) are reported below.
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
                 Ok(Err(e)) => {
                     let _ = child.kill().await;
                     return DeliveryResult {
@@ -403,6 +406,9 @@ impl ExternalChannelAdapter {
 
             match write_result {
                 Ok(Ok(())) => {}
+                // The plugin exited without reading stdin: not a write failure. Fall through so its
+                // exit status and stderr (the useful part) are reported below.
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
                 Ok(Err(e)) => {
                     let _ = child.kill().await;
                     return DeliveryResult {

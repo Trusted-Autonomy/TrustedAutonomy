@@ -32,6 +32,7 @@ pub mod goal_run;
 pub mod golden;
 pub mod history;
 pub mod human_review;
+pub mod launch_failure;
 pub mod messaging_audit;
 pub mod operations;
 pub mod origin;
@@ -68,6 +69,7 @@ pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use human_review::{
     extract_human_review_items, HumanReviewRecord, HumanReviewStatus, HumanReviewStore,
 };
+pub use launch_failure::{LaunchFailure, LaunchFailureCode, LoginState};
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{
     is_low_disk_alert, ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog,

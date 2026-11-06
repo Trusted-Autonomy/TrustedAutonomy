@@ -54,7 +54,8 @@ pub fn execute(
              subcommand, or `ta setup vcs --json` for VCS detection alone"
         );
     }
-    match command {
+    let mints_state = matches!(command, None | Some(InitCommands::Run { .. }));
+    let result = match command {
         None => run_onboard(config, json),
         Some(InitCommands::Run {
             template,
@@ -74,6 +75,33 @@ pub fn execute(
             *overwrite,
         ),
         Some(InitCommands::Templates) => list_templates(),
+    };
+    if result.is_ok() && mints_state {
+        mint_project_state(&config.workspace_root);
+    }
+    result
+}
+
+/// Give a freshly initialized project its id (`.ta/project-id`) and state
+/// directory now, so `ta show state` can print every location (NATS JetStream
+/// included) before the first secret is stored. Idempotent; silent on success
+/// (`ta init --json` output stays one document). A failure is reported with
+/// what to do and does not fail `ta init`: the id is minted anyway the first
+/// time a command needs the state directory.
+fn mint_project_state(project_root: &Path) {
+    use ta_credentials::state::{ProjectState, StateLocator};
+    let opened = StateLocator::from_env().and_then(|l| ProjectState::open(project_root, &l));
+    match opened {
+        Ok(ps) => tracing::debug!(
+            project_id = %ps.project_id,
+            state_dir = %ps.dir.display(),
+            "project state directory ready"
+        ),
+        Err(e) => eprintln!(
+            "[warn] ta init could not create this project's state directory: {e}. The project \
+             is initialized; the state directory is created the first time it is needed. Run \
+             `ta state show` to see where state will go and `ta doctor` to check it."
+        ),
     }
 }
 
@@ -2870,5 +2898,43 @@ members = [
         let config = test_config(&dir);
         let err = execute(Some(&InitCommands::Templates), true, &config).unwrap_err();
         assert!(err.to_string().contains("bare `ta init`"));
+    }
+
+    #[test]
+    fn init_gives_a_fresh_project_its_id_and_state_directory() {
+        use ta_credentials::state::{ProjectState, StateLocator};
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // The state root is the per-process temp directory of the test binary.
+        let locator = StateLocator::from_env().unwrap();
+        assert!(ProjectState::locate(dir.path(), &locator)
+            .unwrap()
+            .is_none());
+
+        execute(
+            Some(&InitCommands::Run {
+                template: None,
+                detect: false,
+                name: Some("fresh".into()),
+                vcs: None,
+                remote: None,
+                non_interactive: true,
+                overwrite: false,
+            }),
+            false,
+            &config,
+        )
+        .unwrap();
+
+        let ps = ProjectState::locate(dir.path(), &locator)
+            .unwrap()
+            .expect("ta init mints the project state directory");
+        assert!(ps.dir.exists(), "{}", ps.dir.display());
+        let recorded = std::fs::read_to_string(dir.path().join(".ta").join("project-id")).unwrap();
+        assert_eq!(recorded.trim(), ps.project_id);
+        // Minting again is idempotent: same id.
+        mint_project_state(dir.path());
+        let again = ProjectState::locate(dir.path(), &locator).unwrap().unwrap();
+        assert_eq!(again.project_id, ps.project_id);
     }
 }

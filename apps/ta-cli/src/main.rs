@@ -1475,6 +1475,22 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Give your agent frameworks (Claude, OpenAI, Gemini, ...) their login once.
+    ///
+    /// Stores each login in TA's per-user credential custody (OS keychain or an
+    /// owner-only file) so sandboxed and daemon-launched agents get it without
+    /// any shell profile or daemon environment. Subcommands: list, login,
+    /// logout, verify. Frameworks are defined in agent-frameworks.toml.
+    ///
+    /// Examples:
+    ///   ta agent-login list --json
+    ///   ta agent-login login claude-code            # runs `claude setup-token`
+    ///   printf %s "$KEY" | ta agent-login login openai --secret-stdin
+    #[command(name = "agent-login")]
+    AgentLogin {
+        #[command(subcommand)]
+        command: commands::agent_login::AgentLoginCommands,
+    },
     /// Show what this installation can safely do (for scripts and installers).
     ///
     /// Reports, per capability, whether the code path is really wired: the
@@ -1696,6 +1712,16 @@ fn run() -> anyhow::Result<()> {
             Commands::Capabilities { json } => return commands::capabilities::execute(*json),
             // The per-user state directory: which one is in use, and moving it.
             Commands::State { command } => return commands::state_dir::execute(command),
+            // Agent logins: per-user and project-independent; answered before
+            // the stale-draft check and state migration so stdout is only the
+            // JSON a caller (the poller) parses.
+            Commands::AgentLogin { command } => {
+                let project_root = cli
+                    .project_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| cli.project_root.clone());
+                return commands::agent_login::execute(command, &project_root);
+            }
             // Per-agent terms management (v0.10.18.4).
             Commands::Terms { action, agent } => {
                 let project_root = cli
@@ -2596,6 +2622,7 @@ fn dispatch_raw(
         | Commands::TermsStatus { .. }
         | Commands::Capabilities { .. }
         | Commands::State { .. }
+        | Commands::AgentLogin { .. }
         | Commands::Terms { .. } => unreachable!(),
     }
 }
@@ -2622,6 +2649,7 @@ fn command_prints_json(cmd: Option<&Commands>) -> bool {
         Some(Commands::Daemon { command }) => commands::daemon::prints_json(command),
         Some(Commands::TermsStatus { json }) | Some(Commands::Capabilities { json }) => *json,
         Some(Commands::State { command }) => commands::state_dir::prints_json(command),
+        Some(Commands::AgentLogin { command }) => commands::agent_login::prints_json(command),
         _ => false,
     }
 }

@@ -1583,6 +1583,8 @@ pub async fn serve_daemon_api(
     // instance would not share state with this one, silently breaking
     // delivery between ta_whiteboard_* tool calls and this watcher.
     crate::wake_listener::start(&app_state, shutdown.clone());
+    // Report worker goals that could not start (`launch_failed` outcome).
+    crate::goal_watch::start(&app_state, shutdown.clone());
 
     // Attention feed event tracker (CR-02 item 7).
     crate::attention::start(&app_state, shutdown.clone());

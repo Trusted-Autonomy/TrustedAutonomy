@@ -1,3 +1,63 @@
+## Unreleased
+
+**Agent login and launch failures**
+
+- **Agent logins: `ta agent-login list|login|logout|verify`.** Give Claude, OpenAI, Gemini, xAI
+  (and any framework you add) a login once; TA keeps it in its per-user credential custody (OS
+  keychain or an owner-only file) and `ta run` puts the stored login of the launching agent, and
+  only that agent's, into every sandboxed launch, including the ones `ta-daemon` starts. A login
+  variable already set in the launch environment wins. The framework catalog is data
+  (`agent-frameworks.default.toml`, overridable in `~/.config/ta/agent-frameworks.toml` and
+  `.ta/agent-frameworks.toml`). `ta agent-login login claude-code` runs `claude setup-token` in a
+  pseudo-terminal and captures the token (timeout `TA_AGENT_LOGIN_TIMEOUT_SECS`); `verify` checks
+  a login with the cheapest real request the vendor offers. Secrets travel only on standard input
+  or in the vendor's terminal, never in arguments, output, logs or audit lines. `--json` output
+  and exit codes (0, 2 usage, 3 vendor login failed, 4 vendor command missing) are scripted
+  against by the Wayfinder poller. `ta doctor`'s `Daemon agent login` line is `ok` when a login is
+  stored, naming what and where (never the value). `XAI_API_KEY` joins the variables the sandbox
+  forwards. See "Logging your agents in" in docs/USAGE.md.
+- **`ta init` creates the project's state directory.** A freshly initialized project now has its
+  id (`.ta/project-id`) and state directory straight away, so `ta show state` prints every
+  location, NATS JetStream included, before anything has been stored.
+
+**Launch failures reported to the source**
+
+- **`launch_failed` outcome** — when a goal started for an external-intake candidate fails to start,
+  exits non-zero before doing work, runs past `wake_launch_timeout_secs`, is refused by the
+  sandbox, has no or a rejected login, or its wake message is dead-lettered, the daemon publishes
+  `{"kind":"launch_failed","reason_code":"no_login|login_invalid|agent_missing|sandbox_denied|crashed|timed_out","detail","fix"}`
+  on the `external-outcome` stream, keyed to the candidate. Signed with the new `ta-daemon` role; an
+  agent cannot send it. Detail and fix text never contain secrets. Undelivered outcomes wait in
+  `.ta/launch-failed-outbox/`.
+- **`ta goal list --json`** (new) and **`ta goal status --json`** (extended) expose `poller_state`
+  (`launching|running|waiting_for_review|failed|finished`), `candidate_id`, `task_id`, `started_at`,
+  `launch_failure`; `ta goal status` also prints `Launch:`/`Detail:`/`Fix:` for a failed launch.
+- **`ta run`** records the classified reason on the failed goal and prints a
+  `ta-launch-failure:` marker line (identifiers only); a missing agent command in a headless run
+  now exits non-zero instead of exiting 0.
+
+**CI cost and local validation**
+
+- **`scripts/ci-local.sh`**: one command that runs every CI check on a developer Mac (version
+  consistency, no-ip-docs, secret scan, actionlint, host fmt/clippy/test/Seatbelt conformance,
+  standalone plugins, Windows `clippy --target x86_64-pc-windows-msvc`, and Linux clippy/test/sandbox
+  containers in Docker), prints a PASS/FAIL table, what it did not cover, and an evidence line for
+  the pull request. Throwaway `HOME`, no Keychain, no paid agents. How-to: docs/USAGE.md
+  "Validating changes locally (ci-local)".
+- **Pull requests run one ubuntu job plus the cheap checks.** macOS, Windows and Linux Sandbox
+  Conformance run on push to `main`, `workflow_dispatch`, or a pull request labelled `full-ci`;
+  docs-only changes skip all compilation. Required check names are unchanged (a skipped job reports
+  success). The separate `Windows Check` job and the per-push release builds are gone.
+- **No Nix in CI.** Jobs install the toolchain pinned by `rust-toolchain.toml` with rustup
+  (`.github/actions/setup-rust`), which also fixes the ubuntu build cache that was saving 0 bytes.
+- **Nightly skips docs-only changes** (it already skipped when nothing changed).
+- `scripts/check-version-consistency.sh` also checks that CLAUDE.md "Current version" matches
+  `Cargo.toml`; `check-no-ip-docs.sh --all` now runs in CI.
+- **Fixes found by the first local Linux run.** `ta doctor` no longer treats a PID above `i32::MAX`
+  as alive (`kill -0 -1` signals everything, so a dead PID file read as live on some Linux
+  distributions). An external channel plugin that exits without reading its stdin now reports its
+  exit status and stderr instead of intermittently reporting a broken-pipe write error.
+
 ## v0.17.12-alpha.11 — Key custody, one state directory, model/effort profiles, sandboxing and cost tracking
 
 Covers `git log v0.17.11-alpha.7..main` (about 280 commits; PR numbers in parentheses). Not yet

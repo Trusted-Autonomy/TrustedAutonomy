@@ -21,14 +21,14 @@ fn every_required_job_checks_for_leftover_processes_even_after_failure() {
     let step = "Check for leftover gh, ta-daemon and ta processes";
     assert_eq!(
         ci.matches(step).count(),
-        2,
-        "the unix matrix job and the Windows job each need the leftover-process step"
+        3,
+        "the ubuntu, macOS and Windows jobs each need the leftover-process step"
     );
     for part in ci.split(&format!("- name: {step}\n")).skip(1) {
         let head: String = part.lines().take(6).collect::<Vec<_>>().join("\n");
         assert!(
-            head.contains("if: always() && env.CODE == 'true'"),
-            "leftover step must run on failure and keep the docs-only fast path:\n{head}"
+            head.contains("if: always()\n"),
+            "leftover step must run on failure so the leftovers print next to the real failure:\n{head}"
         );
         assert!(head.contains("timeout-minutes"), "step needs a timeout");
     }
@@ -48,8 +48,8 @@ fn standalone_plugins_are_tested_with_their_own_cache_key() {
     assert!(ci.contains("cargo test --manifest-path plugins/$plugin/Cargo.toml"));
     assert!(ci.contains("key: standalone-plugins"));
     assert!(
-        ci.contains("matrix.os == 'ubuntu-latest'"),
-        "plugin tests run on the ubuntu leg only"
+        ci.contains("needs.version-check.outputs.plugins == 'true'"),
+        "plugin tests run on the ubuntu job, only when a plugin changed or on a full run"
     );
 }
 

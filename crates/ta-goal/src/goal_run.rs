@@ -523,6 +523,23 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_provenance: Option<crate::provenance::RequestProvenance>,
 
+    /// The external-intake candidate this goal works for, WITHOUT the
+    /// `#<nonce>` suffix (the nonce is a secret the goal must not be able to
+    /// read back). `wayfinder-task:<task id>` for a Wayfinder task. Set once at
+    /// creation by `ta run` from the provenance file's `ids.candidate_id` or the
+    /// `--intake-file` record. `ta goal list/status --json` expose it as
+    /// `candidate_id` (and `task_id`) so a poller can match a goal to its task
+    /// without remembering anything itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+
+    /// Why the launch failed, when the goal ended in `Failed` because the agent
+    /// could not start (see `crate::launch_failure`). Matches the
+    /// `launch_failed` outcome published for the same goal. `None` for every
+    /// other goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_failure: Option<crate::launch_failure::LaunchFailure>,
+
     /// Memory entry IDs written during this goal run (v0.15.13.2).
     ///
     /// Populated by `ta draft build` when it detects an empty overlay diff but
@@ -642,6 +659,93 @@ impl GoalRun {
     /// The goal's origin class, `unasked` for records that predate the field.
     pub fn effective_origin_class(&self) -> crate::origin::OriginClass {
         self.origin_class.unwrap_or_default()
+    }
+
+    /// The candidate this goal works for, without any `#<nonce>` suffix:
+    /// the recorded `candidate_id`, else the provenance file's.
+    pub fn bare_candidate_id(&self) -> Option<String> {
+        self.candidate_id
+            .as_deref()
+            .or_else(|| {
+                self.request_provenance
+                    .as_ref()
+                    .and_then(|p| p.ids.candidate_id.as_deref())
+            })
+            .map(|id| id.split('#').next().unwrap_or(id).to_string())
+            .filter(|id| !id.is_empty())
+    }
+
+    /// The Wayfinder task id when the candidate is `wayfinder-task:<id>`.
+    pub fn task_id(&self) -> Option<String> {
+        self.bare_candidate_id()
+            .and_then(|c| c.strip_prefix("wayfinder-task:").map(str::to_string))
+            .filter(|id| !id.is_empty())
+    }
+
+    /// The state a poller acts on, from TA's own goal state:
+    /// `launching` (not yet running), `running` (the agent or its draft build is
+    /// alive), `waiting_for_review` (a person must act: review, approve, answer),
+    /// `failed`, or `finished`.
+    pub fn poller_state(&self) -> &'static str {
+        match &self.state {
+            GoalRunState::Created | GoalRunState::Configured => "launching",
+            GoalRunState::Running
+            | GoalRunState::Finalizing { .. }
+            | GoalRunState::DraftPending { .. } => "running",
+            GoalRunState::PrReady
+            | GoalRunState::UnderReview
+            | GoalRunState::Approved { .. }
+            | GoalRunState::AwaitingInput { .. } => "waiting_for_review",
+            GoalRunState::Failed { .. } => "failed",
+            GoalRunState::Applied
+            | GoalRunState::Merged
+            | GoalRunState::Completed
+            | GoalRunState::Closed { .. } => "finished",
+            GoalRunState::Custom { tag } if tag == "conflict_resolution" => "waiting_for_review",
+            GoalRunState::Custom { .. } => "running",
+        }
+    }
+
+    /// The machine-readable fields `ta goal list --json` and `ta goal status
+    /// --json` add for pollers. Additive: a flat map of plain values.
+    ///
+    /// `state` is the plain snake_case state name (`running`, `pr_ready`,
+    /// `failed`, ...); `poller_state` is the five-value summary; `candidate_id`
+    /// and `task_id` link the goal to its external-intake candidate / Wayfinder
+    /// task (null when it has none); `started_at` is when the goal was created;
+    /// `failure_reason` is the text of a `failed` state; `launch_failure` is the
+    /// `{code, detail, fix}` of a launch that never started, null otherwise.
+    pub fn machine_fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        use serde_json::{json, Value};
+        let mut m = serde_json::Map::new();
+        m.insert("goal_run_id".into(), json!(self.goal_run_id.to_string()));
+        m.insert("tag".into(), json!(self.display_tag()));
+        m.insert("title".into(), json!(self.title));
+        m.insert("state_name".into(), json!(self.state.to_string()));
+        m.insert("poller_state".into(), json!(self.poller_state()));
+        m.insert("candidate_id".into(), json!(self.bare_candidate_id()));
+        m.insert("task_id".into(), json!(self.task_id()));
+        m.insert("started_at".into(), json!(self.created_at.to_rfc3339()));
+        m.insert(
+            "started_at_epoch".into(),
+            json!(self.created_at.timestamp()),
+        );
+        m.insert("updated_at".into(), json!(self.updated_at.to_rfc3339()));
+        m.insert(
+            "updated_at_epoch".into(),
+            json!(self.updated_at.timestamp()),
+        );
+        m.insert("agent_pid".into(), json!(self.agent_pid));
+        let reason = match &self.state {
+            GoalRunState::Failed { reason } => Value::String(reason.clone()),
+            _ => Value::Null,
+        };
+        m.insert("failure_reason".into(), reason);
+        m.insert(
+            "launch_failure".into(),
+            serde_json::to_value(&self.launch_failure).unwrap_or(Value::Null),
+        );
+        m
     }
 
     /// This goal's recorded token counts as a [`crate::token_cost::TokenUsage`].
@@ -815,6 +919,8 @@ impl GoalRun {
             initiated_by: None,
             origin: None,
             request_provenance: None,
+            candidate_id: None,
+            launch_failure: None,
             memory_entries_created: Vec::new(),
             created_at: now,
             updated_at: now,

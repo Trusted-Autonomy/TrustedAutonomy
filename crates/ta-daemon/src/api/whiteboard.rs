@@ -405,6 +405,21 @@ pub async fn send_outcome(
             .into_response();
         }
     };
+    if body.outcome == ta_agent_whiteboard::outcome_envelope::OUTCOME_LAUNCH_FAILED
+        || body.reason_code.is_some()
+        || body.fix.is_some()
+    {
+        tracing::warn!(
+            role = %role,
+            team_session = %caller.team_session,
+            "whiteboard outcome refused: an agent role tried to publish launch_failed"
+        );
+        return err(
+            StatusCode::FORBIDDEN,
+            "outcome refused: `launch_failed`, `reason_code` and `fix` are published only by the daemon itself when an agent cannot start; an agent cannot report its own launch failure. Use outcome done, blocked, new_work, reply or delegate. Nothing was sent.".to_string(),
+        )
+        .into_response();
+    }
     let goal_id = match resolve_goal_id(&state.goals_dir, &role, req.goal_id.as_deref()) {
         Ok(g) => g,
         Err(msg) => return err(StatusCode::FORBIDDEN, msg).into_response(),
@@ -1501,6 +1516,8 @@ mod tests {
                 outcome: "done".into(),
                 detail: String::new(),
                 new_task_title: None,
+                reason_code: None,
+                fix: None,
             },
         )
         .unwrap();
