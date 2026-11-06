@@ -560,19 +560,40 @@ Launches with no restriction are unchanged: they still load `CLAUDE.md` normally
 
 The sandbox lets the agent read exactly that one file (read-only, never the rest of `.ta/logs`) on macOS and Linux. Windows AppContainer launches do not get this exception yet.
 
+#### Logging your agents in
+
+Give each agent framework its login once; TA stores it and hands it to the agents it launches, so neither your shell profile nor the daemon's environment has to carry it.
+
+```bash
+ta agent-login list                       # what is logged in (no network)
+ta agent-login login claude-code          # opens your browser; TA captures the token
+printf %s "$OPENAI_API_KEY" | ta agent-login login openai --secret-stdin
+ta agent-login verify                     # check every login with a real request
+ta agent-login logout openai
+```
+
+- **Frameworks** are data: Claude (`claude-code`, a subscription token from `claude setup-token`), Anthropic API key (`anthropic-api-key`), OpenAI (`openai`), Gemini (`gemini`) and Grok/xAI (`xai`). Add your own, or change one, in `~/.config/ta/agent-frameworks.toml` (your user) or `.ta/agent-frameworks.toml` (one project); an entry with an existing `id` replaces it, a new `id` adds a framework. The shipped catalog (`agent-frameworks.default.toml` in the `ta-credentials` crate) documents every field.
+- **Claude** runs `claude setup-token` for you in a pseudo-terminal, shows you the sign-in address if the browser did not open, and captures the long-lived token it prints. The token is never printed. If the sign-in is not finished within 300 seconds the command is stopped and nothing is stored; raise the limit with `TA_AGENT_LOGIN_TIMEOUT_SECS` (or `timeout_secs` in the catalog). If `claude` is not installed, `ta agent-login login claude-code` exits with status 4 and tells you to install it or to pipe an existing token in with `--secret-stdin`.
+- **Key frameworks** take the key on standard input only (`--secret-stdin`); it is never a command-line argument, so it stays out of `ps` and shell history.
+- **Where logins live**: per user, not per project, in the same custody as `ta login` (`ta credentials custody status` shows which): the OS keychain (service `trusted-autonomy-agent-login`, one item per framework), or an owner-only (`0600`) file under `~/.config/ta/human/agent-logins/` when file custody is chosen (`ta credentials custody file`, or `TA_NO_KEYCHAIN=1`). Next to it a small non-secret record (`<id>.json`: state, time, custody) lets `list`, `ta doctor` and the daemon say what is stored without reading the secret.
+- **States** (`ta agent-login list --json`): `ok` (the vendor accepted it), `invalid` (the vendor rejected it; log in again), `unknown` (stored but not checked, or the vendor could not be reached), `missing`, `logging_in` (a sign-in is open). `login` verifies unless you pass `--no-verify`; `verify` makes the cheapest real request the catalog names for that framework. A key is only ever sent in a request header to the vendor's own address.
+- **At launch**: for a sandboxed agent, `ta run` (and so every launch `ta-daemon` makes) adds the stored login of the agent being launched, as that framework's environment variable (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, ...), and nothing for any other framework. If the launch environment already sets a login variable for that agent, that variable wins and the stored login is not used. The launch log lists variable names and where the login is held, never values.
+- **Exit codes** (for scripts): `0` done, `2` usage (unknown framework, no secret supplied, bad catalog file), `3` the vendor login failed, was cancelled or timed out, `4` the vendor command is not installed. `--json` prints one document: `list` gives `{"active", "frameworks": [{"id", "label", "kind", "method", "how", "state", "checked_at", "detail", "source"}]}`; `login`, `logout` and `verify <id>` give `{"id", "state", "checked_at", "detail"}`.
+
 #### Agent login inside the sandbox
 
-A sandboxed agent cannot use a login stored in the macOS Keychain or `~/.claude`: its home is a fresh per-goal directory and the Keychain helper cannot be run inside the box. Give it one of these in the environment of the process that starts the launch (for wake-on-demand launches that is where `ta-daemon` starts, so set it there and run `ta daemon restart`):
+A sandboxed agent cannot use a login stored in the macOS Keychain or `~/.claude`: its home is a fresh per-goal directory and the Keychain helper cannot be run inside the box. The simplest fix is `ta agent-login` (see [Logging your agents in](#logging-your-agents-in)), which keeps the login in TA's own credential custody and gives it to every sandboxed launch, including the ones `ta-daemon` starts. The alternative is to give the agent one of these in the environment of the process that starts the launch (for wake-on-demand launches that is where `ta-daemon` starts, so set it there and run `ta daemon restart`). A variable that is already set always wins over the stored login:
 
 - `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`): an API key.
 - `CLAUDE_CODE_OAUTH_TOKEN`: a Claude subscription token, created with `claude setup-token`.
 
-The sandbox forwards exactly these (plus the `ANTHROPIC_BASE_URL` family and the OpenAI/Gemini keys); everything else secret is withheld. A launch that passes `--credential-scopes` starts from a cleared environment and only gets what those scopes cover.
+The sandbox forwards exactly these (plus the `ANTHROPIC_BASE_URL` family and the OpenAI, Gemini and xAI keys); everything else secret is withheld. A launch that passes `--credential-scopes` starts from a cleared environment and only gets what those scopes cover.
 
-**`ta doctor` checks the running daemon.** When a `ta-daemon` is running for the project, the active agent is `claude-code`, and chat-class launches run in the sandbox (the default unless the owner's sandbox policy sets the posture to `open`), `ta doctor` reads the daemon's environment and prints a `Daemon agent login` line:
+**`ta doctor` checks the running daemon.** When a `ta-daemon` is running for the project, the active agent is `claude-code`, and chat-class launches run in the sandbox (the default unless the owner's sandbox policy sets the posture to `open`), `ta doctor` prints a `Daemon agent login` line:
 
+- `[ok]`: a login is stored with `ta agent-login` (the line says which and where: the OS keychain or the file path; never the value). The daemon needs nothing in its own environment, because `ta run` gives the stored login to the sandboxed agent when it starts.
 - `[ok]`: one of `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` is set (non-empty) in the daemon's environment. Only the variable's name is shown, never its value.
-- `[warn]`: none of them is set, so every goal the daemon starts will fail with "The sandboxed agent has no usable login". The line says what to set and to run `ta daemon restart` afterwards.
+- `[warn]`: no login is stored and none of those variables is set, so every goal the daemon starts will fail with "The sandboxed agent has no usable login". The line says to run `ta agent-login login claude-code` (or what to set and to run `ta daemon restart` afterwards). A stored login the vendor rejected on its last check is reported the same way.
 - `[ok] cannot check ...`: the daemon's environment could not be read, so nothing is claimed either way. TA reads it with `/proc/<pid>/environ` on Linux and `/bin/ps -E -p <pid>` on macOS, which work only for your own user's processes; there is no reader on Windows.
 
 No line is printed when no daemon is running, the agent is not `claude-code`, or the sandbox is off.

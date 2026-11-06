@@ -40,6 +40,10 @@ pub const VAULT_ITEM: &str = "credential-vault-age-identity";
 pub const HUMAN_SERVICE: &str = "trusted-autonomy-human";
 pub const HUMAN_ITEM: &str = "human-credential";
 
+/// Keychain service of the logins a person gives their agent frameworks
+/// (`ta agent-login`); the item name is the framework id.
+pub const AGENT_LOGIN_SERVICE: &str = "trusted-autonomy-agent-login";
+
 /// Seconds a keychain call may take before it is abandoned, unless configured.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// Environment variable that sets the wait in whole seconds. It wins over the
@@ -234,6 +238,7 @@ pub fn describe_item(service: &str, user: &str) -> String {
     let purpose = match (service, user) {
         (VAULT_SERVICE, VAULT_ITEM) => Some("credential vault encryption key"),
         (HUMAN_SERVICE, HUMAN_ITEM) => Some("human credential from `ta login`"),
+        (AGENT_LOGIN_SERVICE, _) => Some("agent login from `ta agent-login`"),
         (CONTROL_PLANE_SERVICE, u) if u.ends_with("/broker-root-key") => {
             Some("capability-token root key")
         }

@@ -101,6 +101,45 @@ pub fn read_process_environment(pid: u32) -> Result<EnvScan, String> {
     }
 }
 
+/// What `ta agent-login` holds for the agent, without reading any secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoredLogin {
+    /// Nothing stored.
+    None,
+    /// A login is stored; the text says which and where (never its value).
+    Present(String),
+    /// A login is stored but its last check was rejected by the vendor.
+    Rejected(String),
+}
+
+/// The stored login of `agent_name` in TA's custody: names and places only.
+pub(crate) fn stored_login(project_root: &std::path::Path, agent_name: &str) -> StoredLogin {
+    use ta_credentials::agent_login::{Catalog, LoginStore, Source, State};
+    let Ok(catalog) = Catalog::load(Some(project_root)) else {
+        return StoredLogin::None;
+    };
+    let store = LoginStore::open();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut rejected = None;
+    for fw in catalog.serving(agent_name) {
+        // Environment excluded on purpose: only what TA itself holds counts here.
+        let st = store.status(fw, &|_| None, now);
+        let Source::Stored(place) = &st.source else {
+            continue;
+        };
+        let text = format!("the {} login stored in {place}", fw.label);
+        if st.state == State::Invalid {
+            rejected.get_or_insert(text);
+        } else {
+            return StoredLogin::Present(text);
+        }
+    }
+    rejected.map_or(StoredLogin::None, StoredLogin::Rejected)
+}
+
 /// The doctor line for the running daemon's agent login, or `None` when the
 /// question does not apply (no running daemon, a non-Anthropic agent, no
 /// sandbox).
@@ -112,19 +151,23 @@ pub fn check(config: &GatewayConfig, agent_name: &str) -> Option<CheckResult> {
         pid,
         &super::doctor::is_pid_alive,
         &read_process_environment,
+        &|| stored_login(&config.workspace_root, agent_name),
     )
 }
 
 /// [`check`] with every outside fact injected, so tests use fake readers and
 /// never touch a real process.
 ///
-/// `sandboxed` is called only after a live daemon is found.
+/// `sandboxed` is called only after a live daemon is found. A login stored with
+/// `ta agent-login` makes the check pass whatever the daemon's environment holds:
+/// `ta run` gives it to the sandboxed agent itself.
 pub(crate) fn daemon_login_result(
     agent_name: &str,
     sandboxed: impl FnOnce() -> Result<bool, String>,
     daemon_pid: Option<u32>,
     pid_alive: &dyn Fn(u32) -> bool,
     read_env: &dyn Fn(u32) -> Result<EnvScan, String>,
+    stored: &dyn Fn() -> StoredLogin,
 ) -> Option<CheckResult> {
     // Only the Anthropic agent takes these variables as its login.
     if agent_name != "claude-code" {
@@ -143,6 +186,16 @@ pub(crate) fn daemon_login_result(
                 ),
             ))
         }
+    }
+    let stored = stored();
+    if let StoredLogin::Present(what) = &stored {
+        return Some(CheckResult::ok(
+            CHECK_NAME,
+            format!(
+                "{what} (value not read); sandboxed agents get it when they start, so \
+                 ta-daemon (pid {pid}) needs no login in its own environment"
+            ),
+        ));
     }
     let scan = match read_env(pid) {
         Ok(scan) => scan,
@@ -173,19 +226,29 @@ pub(crate) fn daemon_login_result(
             ),
         ));
     }
+    let rejected = match &stored {
+        StoredLogin::Rejected(what) => format!(
+            " {what} was rejected by the vendor the last time it was checked, so it is not \
+             used."
+        ),
+        _ => String::new(),
+    };
     Some(CheckResult::warn(
         CHECK_NAME,
         format!(
             "ta-daemon (pid {pid}) was started without an agent login: none of {} is set in its \
-             environment, and agents in this project run in the sandbox, which cannot use a login \
-             stored in the macOS Keychain or ~/.claude. Goals the daemon starts (wake launches) \
-             will fail with \"The sandboxed agent has no usable login\".",
+             environment, no login is stored with `ta agent-login`, and agents in this project \
+             run in the sandbox, which cannot use a login stored in the macOS Keychain or \
+             ~/.claude. Goals the daemon starts (wake launches) will fail with \"The sandboxed \
+             agent has no usable login\".{rejected}",
             LOGIN_VARS.join(", ")
         ),
-        "Set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN from \
-         `claude setup-token`) in the environment of whatever starts ta-daemon (the shell you run \
-         `ta daemon start` or `ta daemon restart` from, or the service definition), then run \
-         `ta daemon restart`. See \"Agent login inside the sandbox\" in docs/USAGE.md.",
+        "Run `ta agent-login login claude-code` once: TA keeps the login in its credential \
+         custody and gives it to every sandboxed launch, no daemon restart needed. Or set \
+         ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN from `claude \
+         setup-token`) in the environment of whatever starts ta-daemon, then run `ta daemon \
+         restart`. See \"Logging your agents in\" and \"Agent login inside the sandbox\" in \
+         docs/USAGE.md.",
     ))
 }
 
@@ -208,7 +271,76 @@ mod tests {
         alive: bool,
         env: Result<EnvScan, String>,
     ) -> Option<CheckResult> {
-        daemon_login_result(agent, || sandboxed, pid, &|_| alive, &|_| env.clone())
+        run_stored(agent, sandboxed, pid, alive, env, StoredLogin::None)
+    }
+
+    fn run_stored(
+        agent: &str,
+        sandboxed: Result<bool, String>,
+        pid: Option<u32>,
+        alive: bool,
+        env: Result<EnvScan, String>,
+        stored: StoredLogin,
+    ) -> Option<CheckResult> {
+        daemon_login_result(
+            agent,
+            || sandboxed,
+            pid,
+            &|_| alive,
+            &|_| env.clone(),
+            &|| stored.clone(),
+        )
+    }
+
+    #[test]
+    fn a_stored_login_is_ok_even_when_the_daemon_environment_has_none() {
+        let r = run_stored(
+            "claude-code",
+            Ok(true),
+            Some(42),
+            true,
+            scan(&[], true),
+            StoredLogin::Present("the Claude login stored in the OS keychain".into()),
+        )
+        .unwrap();
+        assert_eq!(r.status, CheckStatus::Ok, "{r:?}");
+        assert!(
+            r.detail.contains("stored in the OS keychain"),
+            "{}",
+            r.detail
+        );
+        assert!(r.detail.contains("value not read"), "{}", r.detail);
+    }
+
+    #[test]
+    fn a_stored_login_does_not_need_the_daemon_environment_to_be_readable() {
+        let r = run_stored(
+            "claude-code",
+            Ok(true),
+            Some(42),
+            true,
+            Err("permission denied".into()),
+            StoredLogin::Present("the Claude login stored in /x/claude-code.secret".into()),
+        )
+        .unwrap();
+        assert_eq!(r.status, CheckStatus::Ok, "{r:?}");
+        assert!(r.detail.contains("/x/claude-code.secret"), "{}", r.detail);
+    }
+
+    #[test]
+    fn a_rejected_stored_login_still_warns_and_says_so() {
+        let r = run_stored(
+            "claude-code",
+            Ok(true),
+            Some(42),
+            true,
+            scan(&[], true),
+            StoredLogin::Rejected("the Claude login stored in the OS keychain".into()),
+        )
+        .unwrap();
+        assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+        assert!(r.detail.contains("was rejected"), "{}", r.detail);
+        assert!(r.fix.contains("ta agent-login login claude-code"), "{r:?}");
     }
 
     #[test]
@@ -351,8 +483,23 @@ mod tests {
             read.set(read.get() + 1);
             scan(&[], true)
         };
-        let _ = daemon_login_result("claude-code", || Ok(true), Some(1), &|_| false, &count);
-        let _ = daemon_login_result("claude-code", || Ok(false), Some(1), &|_| true, &count);
+        let none = || StoredLogin::None;
+        let _ = daemon_login_result(
+            "claude-code",
+            || Ok(true),
+            Some(1),
+            &|_| false,
+            &count,
+            &none,
+        );
+        let _ = daemon_login_result(
+            "claude-code",
+            || Ok(false),
+            Some(1),
+            &|_| true,
+            &count,
+            &none,
+        );
         assert_eq!(read.get(), 0);
     }
 

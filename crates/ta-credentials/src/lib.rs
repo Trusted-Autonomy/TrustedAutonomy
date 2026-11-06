@@ -19,6 +19,7 @@
 //! let token = vault.issue_token(cred.id, "agent-1", vec!["gmail.send".into()], 3600)?;
 //! ```
 
+pub mod agent_login;
 pub mod config;
 pub mod connector_registry;
 pub mod custody;

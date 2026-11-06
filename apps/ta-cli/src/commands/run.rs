@@ -7165,6 +7165,27 @@ fn launch_agent_via_runtime(
     if let Some(plan) = sandbox_plan.as_ref().filter(|p| p.scrubs_env) {
         removed_env = plan.apply_env(&mut env, baseline_is_cleared, &goal_id.to_string());
         clear_env = true;
+        // The scrub drops the daemon's own login variables; give the child the
+        // login stored with `ta agent-login` for THIS agent (an allowlisted
+        // variable already set wins).
+        let agent_name = config
+            .name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .or_else(|| is_claude_code_launch(config).then(|| "claude-code".to_string()))
+            .or_else(|| {
+                Path::new(&config.command)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            });
+        if let Some(agent_name) = agent_name {
+            super::agent_login::inject_stored_login(
+                &agent_name,
+                project_root_opt.as_deref(),
+                &mut env,
+            );
+        }
     }
     if let Some(plan) = &sandbox_plan {
         plan.print(&removed_env, is_claude_code_launch(config), &env);
