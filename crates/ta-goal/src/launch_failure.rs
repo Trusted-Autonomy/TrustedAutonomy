@@ -163,6 +163,12 @@ const SANDBOX_NEEDLES: &[&str] = &[
     "sandbox setup failed",
     "sandbox-exec:",
     "bwrap:",
+    // What an OS sandbox prints when it blocks a write the agent (or its
+    // wrapper script) tried: macOS sandbox-exec, bubblewrap, a read-only mount.
+    "operation not permitted",
+    "read-only file system",
+    "deny file-write",
+    "sandbox: deny",
 ];
 
 const MISSING_NEEDLES: &[&str] = &["command not found", "spawn failed:", "program not found"];
@@ -260,6 +266,68 @@ pub fn marker_line(
         }
     }
     line
+}
+
+/// Printed by `ta run` / `ta draft build` when the agent process finished and
+/// the goal produced no changes: the goal was completed with no draft. It is
+/// NOT a launch failure.
+pub const NO_CHANGES_MARKER: &str = "ta-run-finished: result=no_changes";
+
+/// `ta-run-finished: result=no_changes goal=<uuid>`.
+pub fn no_changes_marker_line(goal: &str) -> String {
+    match plain_identifier(goal) {
+        Some(g) => format!("{NO_CHANGES_MARKER} goal={g}"),
+        None => NO_CHANGES_MARKER.to_string(),
+    }
+}
+
+/// The goal id (empty when the line carried none) of the last
+/// `no_changes` marker line in `text`; `None` when there is no such line.
+pub fn parse_no_changes_marker(text: &str) -> Option<String> {
+    text.lines().rev().find_map(|l| {
+        let rest = l.trim().strip_prefix(NO_CHANGES_MARKER)?;
+        Some(
+            rest.split_whitespace()
+                .find_map(|t| t.strip_prefix("goal=").and_then(plain_identifier))
+                .unwrap_or_default(),
+        )
+    })
+}
+
+/// The first path a sandbox denial in `stderr` names (a token starting with
+/// `/` or a drive path on the same line as a denial phrase), if any.
+pub fn denied_path(stderr: &str) -> Option<String> {
+    const DENIAL: &[&str] = &[
+        "operation not permitted",
+        "read-only file system",
+        "deny file-write",
+        "sandbox: deny",
+    ];
+    stderr
+        .lines()
+        .filter(|l| {
+            let lower = l.to_ascii_lowercase();
+            DENIAL.iter().any(|n| lower.contains(n))
+        })
+        .find_map(|l| {
+            l.split_whitespace()
+                .filter_map(|tok| {
+                    let t = tok.trim_matches(|c: char| {
+                        matches!(c, ':' | ',' | ';' | '\'' | '"' | '(' | ')')
+                    });
+                    let abs = t.starts_with('/')
+                        || (t.len() > 2
+                            && t.as_bytes()[1] == b':'
+                            && t.as_bytes()[0].is_ascii_alphabetic());
+                    (abs && t.len() > 1).then(|| one_line(t))
+                })
+                .next_back()
+        })
+}
+
+/// True when `stderr` carries a sandbox refusal or denial.
+pub fn sandbox_denial(stderr: &str) -> bool {
+    contains_any(&stderr.to_ascii_lowercase(), SANDBOX_NEEDLES)
 }
 
 /// Decide the code from the evidence. Order, first match wins:
@@ -363,10 +431,15 @@ pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailu
                 ),
             )
         }
-        LaunchFailureCode::SandboxDenied => (
-            format!("the sandbox refused to start {agent} or denied it something it needs to start{quoted}"),
-            "Run: ta sandbox explain to see what was blocked, then adjust the sandbox policy (see Sandbox in docs/USAGE.md)".to_string(),
-        ),
+        LaunchFailureCode::SandboxDenied => {
+            let denied = denied_path(ev.stderr)
+                .map(|p| format!(" (denied path: {p})"))
+                .unwrap_or_default();
+            (
+                format!("the sandbox refused to start {agent} or denied it something it needs to start{denied}{quoted}"),
+                "Run: ta sandbox explain to see what was blocked, then adjust the sandbox policy (see Sandbox in docs/USAGE.md)".to_string(),
+            )
+        }
         LaunchFailureCode::Crashed => {
             let exit = ev
                 .exit_code
@@ -592,5 +665,41 @@ mod tests {
     fn codex_maps_to_the_openai_framework() {
         assert_eq!(framework_for_agent("codex"), "openai");
         assert_eq!(framework_for_agent("claude-code"), "claude-code");
+    }
+
+    #[test]
+    fn the_no_changes_marker_round_trips_and_is_not_a_failure_marker() {
+        let line = no_changes_marker_line("0b6a2f1e-0000-4000-8000-000000000001");
+        let text = format!("noise\n{line}\nError: No changes detected\n");
+        assert_eq!(
+            parse_no_changes_marker(&text).as_deref(),
+            Some("0b6a2f1e-0000-4000-8000-000000000001")
+        );
+        assert_eq!(parse_marker(&text), None, "not a launch-failure marker");
+        assert_eq!(parse_no_changes_marker("nothing here"), None);
+        assert_eq!(
+            parse_no_changes_marker(&no_changes_marker_line("bad id; rm -rf")).as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn a_sandbox_write_denial_is_sandbox_denied_and_names_the_path() {
+        let stderr = "/bin/sh: /Users/someone/outside/notes.txt: Operation not permitted\n";
+        let f = classify_and_describe(&ev(stderr));
+        assert_eq!(f.code, LaunchFailureCode::SandboxDenied);
+        assert!(
+            f.detail.contains("/Users/someone/outside/notes.txt"),
+            "{f:?}"
+        );
+        assert_eq!(
+            denied_path("Sandbox: deny(1) file-write-create /tmp/x/y").as_deref(),
+            Some("/tmp/x/y")
+        );
+        assert_eq!(denied_path("all fine"), None);
+        assert!(sandbox_denial(
+            "bwrap: Can't mkdir /x: Read-only file system"
+        ));
+        assert!(!sandbox_denial("agent said hello"));
     }
 }

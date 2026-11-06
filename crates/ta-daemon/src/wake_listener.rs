@@ -774,7 +774,36 @@ fn run_and_record_launch(
     // said the same thing explicitly.
     let never_started = ta_goal::agent_start::classify_stderr(&stderr);
     let marked = ta_goal::launch_failure::parse_marker(&stderr).is_some();
-    if !timed_out && output.status.success() && never_started.is_none() && !marked {
+    // The agent ran, exited and left nothing to review (`ta draft build` printed
+    // the no-changes marker and completed the goal). That is a finished launch,
+    // not a failed one -- unless the stderr shows the sandbox blocked what the
+    // agent tried, which is why it changed nothing.
+    let no_changes_goal = ta_goal::launch_failure::parse_no_changes_marker(&stderr);
+    let sandbox_denied = ta_goal::launch_failure::sandbox_denial(&stderr);
+    if !timed_out
+        && !marked
+        && never_started.is_none()
+        && !sandbox_denied
+        && no_changes_goal.is_some()
+    {
+        tracing::info!(
+            session = %session_id,
+            role = %role,
+            msg_id = %msg_id,
+            exit_code = ?output.status.code(),
+            log = %log_path.display(),
+            "wake_listener: the agent ran and finished without changing anything, so there is \
+             nothing to review. This is a finished launch, not a failed one: the message is \
+             acked and no launch_failed outcome is published"
+        );
+        return Ok(output);
+    }
+    if !timed_out
+        && output.status.success()
+        && never_started.is_none()
+        && !marked
+        && !(no_changes_goal.is_some() && sandbox_denied)
+    {
         return Ok(output);
     }
 
@@ -805,7 +834,11 @@ fn run_and_record_launch(
             log_path: Some(&log_str),
             evidence_line: quoted.as_deref(),
         });
-    if let Some(goal) = marker.as_ref().and_then(|m| m.goal.as_deref()) {
+    let goal_for_record = marker
+        .as_ref()
+        .and_then(|m| m.goal.clone())
+        .or_else(|| no_changes_goal.clone().filter(|g| !g.is_empty()));
+    if let Some(goal) = goal_for_record.as_deref() {
         crate::launch_failed::refine_goal_record(project_root, goal, &failure);
     }
 
@@ -1777,6 +1810,117 @@ mod tests {
             Duration::from_secs(30),
         )
         .expect("healthy launch");
+    }
+
+    /// Run a fake `ta` through the real runner and return its result.
+    #[cfg(unix)]
+    fn raw_launch(
+        root: &std::path::Path,
+        script_body: &str,
+    ) -> std::io::Result<std::process::Output> {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = root.join("fake-ta.sh");
+        std::fs::write(&fake, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run_and_record_launch(
+            root,
+            "sess-1",
+            "chief-of-staff",
+            "seq-nc",
+            &fake,
+            &["run".to_string(), "--headless".to_string()],
+            &[],
+            Duration::from_secs(30),
+        )
+    }
+
+    /// An agent that started, ran and finished without changing anything makes
+    /// `ta run` exit 1 with "No changes detected". That is a finished launch:
+    /// no failure, so nothing is retried and no `launch_failed` is published.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_that_finished_without_changes_is_not_a_launch_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        raw_launch(
+            tmp.path(),
+            "echo 'agent said hello'\n\
+             echo 'ta-run-finished: result=no_changes goal=0b6a2f1e-0000-4000-8000-000000000001' >&2\n\
+             echo 'Error: No changes detected in staging workspace.' >&2\nexit 1",
+        )
+        .expect("an agent that finished with no changes is not an error");
+    }
+
+    /// The same empty diff, but the sandbox blocked the agent's write outside
+    /// the project: that is why nothing changed. `sandbox_denied`, with the path.
+    #[cfg(unix)]
+    #[test]
+    fn no_changes_because_the_sandbox_denied_a_write_is_sandbox_denied_with_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = raw_launch(
+            tmp.path(),
+            "echo '/bin/sh: /Users/someone/outside/notes.txt: Operation not permitted' >&2\n\
+             echo 'ta-run-finished: result=no_changes' >&2\n\
+             echo 'Error: No changes detected in staging workspace.' >&2\nexit 1",
+        )
+        .expect_err("a sandbox denial is a failed launch")
+        .to_string();
+        let f = crate::launch_failed::decode_error(&err).expect("classified");
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::SandboxDenied, "{f:?}");
+        assert!(
+            f.detail.contains("/Users/someone/outside/notes.txt"),
+            "the denied path is named: {f:?}"
+        );
+    }
+
+    /// A non-zero exit that is not a no-changes finish stays a crash, even if
+    /// the agent printed something first.
+    #[cfg(unix)]
+    #[test]
+    fn a_nonzero_exit_with_no_finish_marker_is_still_a_crash() {
+        let f = classified_launch(
+            "echo 'agent said hello'\necho 'Error: boom' >&2\nexit 1",
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::Crashed, "{f:?}");
+    }
+
+    /// A goal `ta draft build` already completed (empty diff) is failed by the
+    /// daemon when the sandbox denial explains why, so the goal and the
+    /// outcome agree.
+    #[cfg(unix)]
+    #[test]
+    fn a_sandbox_denied_no_changes_goal_is_failed_to_agree_with_the_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(tmp.path());
+        let goals = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/w"),
+            std::path::PathBuf::from("/s"),
+        );
+        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
+        goal.transition(ta_goal::GoalRunState::Running).unwrap();
+        goal.transition(ta_goal::GoalRunState::Finalizing {
+            exit_code: 0,
+            finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
+        })
+        .unwrap();
+        goal.transition(ta_goal::GoalRunState::Completed).unwrap();
+        goals.save(&goal).unwrap();
+        let script = format!(
+            "echo '/bin/sh: /Users/someone/outside/notes.txt: Operation not permitted' >&2\n\
+             echo 'ta-run-finished: result=no_changes goal={}' >&2\nexit 1",
+            goal.goal_run_id
+        );
+        let err = raw_launch(tmp.path(), &script).unwrap_err().to_string();
+        let f = crate::launch_failed::decode_error(&err).unwrap();
+        let after = goals.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(after.poller_state(), "failed");
+        assert_eq!(after.launch_failure.as_ref(), Some(&f));
     }
 
     /// The reproduction, hermetic: a candidate is dispatched to a daemon whose

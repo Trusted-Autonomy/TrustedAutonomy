@@ -35,6 +35,13 @@
 - **`ta run`** records the classified reason on the failed goal and prints a
   `ta-launch-failure:` marker line (identifiers only); a missing agent command in a headless run
   now exits non-zero instead of exiting 0.
+- **An agent that ran and changed nothing is no longer a launch failure.** `ta run`'s "No changes
+  detected" now completes the goal with no draft (`poller_state: finished`), prints
+  `ta-run-finished: result=no_changes`, and the daemon acks the wake message without publishing
+  `launch_failed`. A sandbox denial in that run's stderr is reported as `sandbox_denied` with the
+  denied path in `detail` and the goal marked failed to agree. The outcome's `stamp.goal_id` is the
+  real goal id (`none-created` when no goal exists), and `poller_state` reports `failed` for a
+  `running`/`finalizing` goal whose processes are gone.
 
 **CI cost and local validation**
 
