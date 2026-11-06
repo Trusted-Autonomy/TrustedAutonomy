@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// A token as `claude setup-token` prints it, with a sentinel that must never leak.
+#[cfg(unix)]
 const TOKEN: &str = concat!(
     "sk-ant-",
     "oat01-SENTINELtokenABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz_-ABCDEFGHIJ"
@@ -104,6 +105,7 @@ impl Sandbox {
 
     /// Every file under the sandbox (home, project, state) except the secret
     /// files themselves, as text: the places a secret must never reach.
+    #[cfg(unix)]
     fn text_outside_secret_files(&self) -> String {
         fn walk(dir: &Path, out: &mut String) {
             let Ok(rd) = std::fs::read_dir(dir) else {
