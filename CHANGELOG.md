@@ -20,6 +20,22 @@
   id (`.ta/project-id`) and state directory straight away, so `ta show state` prints every
   location, NATS JetStream included, before anything has been stored.
 
+**Launch failures reported to the source**
+
+- **`launch_failed` outcome** — when a goal started for an external-intake candidate fails to start,
+  exits non-zero before doing work, runs past `wake_launch_timeout_secs`, is refused by the
+  sandbox, has no or a rejected login, or its wake message is dead-lettered, the daemon publishes
+  `{"kind":"launch_failed","reason_code":"no_login|login_invalid|agent_missing|sandbox_denied|crashed|timed_out","detail","fix"}`
+  on the `external-outcome` stream, keyed to the candidate. Signed with the new `ta-daemon` role; an
+  agent cannot send it. Detail and fix text never contain secrets. Undelivered outcomes wait in
+  `.ta/launch-failed-outbox/`.
+- **`ta goal list --json`** (new) and **`ta goal status --json`** (extended) expose `poller_state`
+  (`launching|running|waiting_for_review|failed|finished`), `candidate_id`, `task_id`, `started_at`,
+  `launch_failure`; `ta goal status` also prints `Launch:`/`Detail:`/`Fix:` for a failed launch.
+- **`ta run`** records the classified reason on the failed goal and prints a
+  `ta-launch-failure:` marker line (identifiers only); a missing agent command in a headless run
+  now exits non-zero instead of exiting 0.
+
 **CI cost and local validation**
 
 - **`scripts/ci-local.sh`**: one command that runs every CI check on a developer Mac (version
@@ -87,22 +103,6 @@ release checksums are Sigstore-signed), and model-mapping correctness for Codex/
   (#720).
 
 ### Per-change detail
-
-### Agent launch failures are reported (`launch_failed`) and visible in `ta goal`
-
-- **`launch_failed` outcome** — when a goal started for an external-intake candidate fails to start,
-  exits non-zero before doing work, runs past `wake_launch_timeout_secs`, is refused by the
-  sandbox, has no or a rejected login, or its wake message is dead-lettered, the daemon publishes
-  `{"kind":"launch_failed","reason_code":"no_login|login_invalid|agent_missing|sandbox_denied|crashed|timed_out","detail","fix"}`
-  on the `external-outcome` stream, keyed to the candidate. Signed with the new `ta-daemon` role; an
-  agent cannot send it. Detail and fix text never contain secrets. Undelivered outcomes wait in
-  `.ta/launch-failed-outbox/`.
-- **`ta goal list --json`** (new) and **`ta goal status --json`** (extended) expose `poller_state`
-  (`launching|running|waiting_for_review|failed|finished`), `candidate_id`, `task_id`, `started_at`,
-  `launch_failure`; `ta goal status` also prints `Launch:`/`Detail:`/`Fix:` for a failed launch.
-- **`ta run`** records the classified reason on the failed goal and prints a
-  `ta-launch-failure:` marker line (identifiers only); a missing agent command in a headless run
-  now exits non-zero instead of exiting 0.
 
 ### One state-directory resolver, `ta state`, and a verified one-time migration
 
