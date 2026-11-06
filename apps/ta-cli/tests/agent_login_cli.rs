@@ -615,6 +615,56 @@ printf 'Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\r\r\n'
     }
 
     #[test]
+    fn ctrl_c_during_a_vendor_login_stops_it_prints_the_result_and_exits_3() {
+        let sb = Sandbox::new();
+        let bin = TempDir::new().unwrap();
+        let marker = bin.path().join("vendor-started");
+        let script = write_script(
+            bin.path(),
+            "fake-vendor-wait",
+            &format!(
+                "#!/bin/sh\nprintf 'Opening browser to sign in\\r\\r\\n'\ntouch '{}'\nexec sleep 60\n",
+                marker.display()
+            ),
+        );
+        sb.write_catalog(&vendor_catalog(
+            script.to_str().unwrap(),
+            "http://127.0.0.1:9/",
+            300,
+        ));
+        let mut cmd = sb.command(&["login", "claude-code", "--json"]);
+        let child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !marker.exists() {
+            assert!(
+                started.elapsed().as_secs() < 30,
+                "the fake vendor never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // What the terminal sends on Ctrl-C.
+        // SAFETY: plain kill(2) on the child this test spawned.
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("was interrupted"), "{stderr}");
+        let v = stdout_json(&out);
+        assert_eq!(v["state"], "missing");
+        assert!(!sb.secret_file("claude-code").exists());
+        // The record is not left saying a login prompt is still open.
+        let doc = stdout_json(&sb.run(&["list", "--json"]));
+        assert_eq!(state_of(&doc, "claude-code"), "missing");
+    }
+
+    #[test]
     fn a_missing_vendor_binary_exits_4_and_points_at_secret_stdin() {
         let sb = Sandbox::new();
         sb.write_catalog(&vendor_catalog(

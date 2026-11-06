@@ -34,6 +34,8 @@ const MAX_TOKEN_LEN: usize = 4096;
 const QUIET_AFTER_TOKEN: Duration = Duration::from_secs(3);
 /// How long a vendor that already printed its token may take to exit.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
+/// How long the vendor must be quiet before a sign-in address is shown.
+const URL_SETTLE: Duration = Duration::from_millis(400);
 
 // ── Virtual screen ─────────────────────────────────────────────────────────
 
@@ -444,6 +446,10 @@ pub enum VendorError {
         command: String,
         secs: u64,
     },
+    /// `ta` itself was interrupted (Ctrl-C / SIGTERM) while the vendor ran.
+    Cancelled {
+        command: String,
+    },
     /// The command ended without printing a token (closed, cancelled, failed).
     NoToken {
         command: String,
@@ -476,6 +482,11 @@ impl std::fmt::Display for VendorError {
                  limit with {LOGIN_TIMEOUT_ENV} (seconds) or `timeout_secs` in \
                  agent-frameworks.toml, then retry."
             ),
+            VendorError::Cancelled { command } => write!(
+                f,
+                "`{command}` was interrupted (Ctrl-C or a termination signal), so it was stopped \
+                 and nothing was stored. Retry `ta agent-login login <framework>` when ready."
+            ),
             VendorError::NoToken {
                 command,
                 code,
@@ -502,6 +513,7 @@ impl VendorError {
     pub fn exit_code(&self) -> i32 {
         match self {
             VendorError::NotFound { .. } => 4,
+            // Blocked, Spawn, Timeout, Cancelled and NoToken are all "the vendor login failed".
             _ => 3,
         }
     }
@@ -556,6 +568,61 @@ pub fn find_binary(program: &str, search: &std::ffi::OsStr) -> Option<PathBuf> {
     which::which_in(program, Some(search), cwd).ok()
 }
 
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// While alive, Ctrl-C (SIGINT) and SIGTERM do not kill `ta` outright: they set a
+/// flag the login loop polls, so it can stop the vendor, restore the recorded
+/// state and print the result JSON (exit 3) instead of leaving a `logging_in`
+/// record behind. On Windows the default console behaviour is unchanged.
+struct InterruptGuard {
+    #[cfg(unix)]
+    previous: [(libc::c_int, libc::sighandler_t); 2],
+}
+
+impl InterruptGuard {
+    fn install() -> Self {
+        INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(unix)]
+        {
+            extern "C" fn on_signal(_: libc::c_int) {
+                INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let mut previous = [(0, 0); 2];
+            for (slot, sig) in previous.iter_mut().zip([libc::SIGINT, libc::SIGTERM]) {
+                // SAFETY: the handler only stores to an atomic (async-signal-safe).
+                let old = unsafe {
+                    libc::signal(
+                        sig,
+                        on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+                    )
+                };
+                *slot = (sig, old);
+            }
+            Self { previous }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+
+    fn requested(&self) -> bool {
+        INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for (sig, old) in self.previous {
+            // SAFETY: restores the handler that was installed before `install`.
+            unsafe {
+                libc::signal(sig, old);
+            }
+        }
+    }
+}
+
 /// Run `command` (program and arguments) in a pty and capture the login token
 /// it prints. `progress` receives plain, secret-free lines for the person.
 pub fn run_vendor_login(
@@ -584,6 +651,8 @@ pub fn run_vendor_login(
         });
     };
 
+    // Before the vendor starts, so no interrupt can arrive unhandled while it runs.
+    let interrupt = InterruptGuard::install();
     let spawn_err = |reason: String| VendorError::Spawn {
         command: shown.clone(),
         reason,
@@ -645,6 +714,8 @@ pub fn run_vendor_login(
     let mut token_seen_at: Option<Instant> = None;
     let mut exited: Option<Option<u32>> = None;
     let mut timed_out = false;
+    let mut cancelled = false;
+    let mut latest_urls: Vec<String> = Vec::new();
 
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -652,14 +723,7 @@ pub fn run_vendor_login(
                 screen.feed(&chunk);
                 last_output = Instant::now();
                 let text = screen.text();
-                for url in find_urls(&text) {
-                    if !shown_urls.contains(&url) {
-                        progress(&format!(
-                            "If the browser did not open, open this address to sign in: {url}"
-                        ));
-                        shown_urls.push(url);
-                    }
-                }
+                latest_urls = find_urls(&text);
                 if let Some(found) = find_token(&text) {
                     token_seen_at.get_or_insert_with(Instant::now);
                     if found.complete {
@@ -672,6 +736,21 @@ pub fn run_vendor_login(
                 // The vendor closed the terminal: take what was printed.
                 let code = child.wait().ok().map(|s| s.exit_code());
                 exited = Some(code);
+            }
+        }
+        // Show a sign-in address only once the vendor has stopped painting, so a
+        // half-received address is never offered to the person.
+        if last_output.elapsed() >= URL_SETTLE {
+            for url in latest_urls.drain(..) {
+                if !shown_urls.contains(&url) {
+                    progress(&format!(
+                        "If the browser did not open, open this address to sign in: {url} \
+                         (if that page shows a code to paste, this command cannot receive it: \
+                         run `claude setup-token` yourself and pipe the token to \
+                         `ta agent-login login <framework> --secret-stdin`)"
+                    ));
+                    shown_urls.push(url);
+                }
             }
         }
         if result.is_some() {
@@ -698,6 +777,10 @@ pub fn run_vendor_login(
             }
             break;
         }
+        if interrupt.requested() {
+            cancelled = true;
+            break;
+        }
         if Instant::now() >= deadline {
             timed_out = true;
             break;
@@ -708,7 +791,7 @@ pub fn run_vendor_login(
     if exited.is_none() {
         let grace = Instant::now() + EXIT_GRACE;
         while Instant::now() < grace && matches!(child.try_wait(), Ok(None)) {
-            if timed_out {
+            if timed_out || cancelled {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -722,6 +805,9 @@ pub fn run_vendor_login(
 
     if let Some(secret) = result {
         return Ok(secret);
+    }
+    if cancelled {
+        return Err(VendorError::Cancelled { command: shown });
     }
     if timed_out {
         return Err(VendorError::Timeout {

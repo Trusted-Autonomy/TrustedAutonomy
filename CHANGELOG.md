@@ -16,6 +16,11 @@
   against by the Wayfinder poller. `ta doctor`'s `Daemon agent login` line is `ok` when a login is
   stored, naming what and where (never the value). `XAI_API_KEY` joins the variables the sandbox
   forwards. See "Logging your agents in" in docs/USAGE.md.
+- **`ta agent-login login` handles Ctrl-C and shows complete sign-in addresses.** Interrupting a
+  login (Ctrl-C or SIGTERM) now stops `claude setup-token`, stores nothing, prints the result JSON
+  and exits 3, instead of dying silently and leaving the login marked `logging_in`. The sign-in
+  address is shown only once the vendor has finished painting it, and the message says that a
+  code shown on a manually opened page cannot be pasted into TA (use `--secret-stdin`).
 - **`ta init` creates the project's state directory.** A freshly initialized project now has its
   id (`.ta/project-id`) and state directory straight away, so `ta show state` prints every
   location, NATS JetStream included, before anything has been stored.
