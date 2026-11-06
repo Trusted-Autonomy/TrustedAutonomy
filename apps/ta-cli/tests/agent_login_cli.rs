@@ -471,7 +471,7 @@ invalid_status = [401]
         )
     }
 
-    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
