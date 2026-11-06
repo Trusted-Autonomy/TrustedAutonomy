@@ -55,7 +55,8 @@
   `Cargo.toml`; `check-no-ip-docs.sh --all` now runs in CI.
 - **Fixes found by the first local Linux run.** `ta doctor` no longer treats a PID above `i32::MAX`
   as alive (`kill -0 -1` signals everything, so a dead PID file read as live on some Linux
-  distributions). An external channel plugin that exits without reading its stdin now reports its
+  distributions); the Discord channel plugin's PID-file check had the same flaw (its test failed on GitHub's
+  Linux runner). An external channel plugin that exits without reading its stdin now reports its
   exit status and stderr instead of intermittently reporting a broken-pipe write error.
 
 ## v0.17.12-alpha.11 — Key custody, one state directory, model/effort profiles, sandboxing and cost tracking
