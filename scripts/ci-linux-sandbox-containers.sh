@@ -21,9 +21,13 @@ WORK="$(mktemp -d)"
 # The build cache lives in a Docker named volume, not a bind mount: the container
 # runs as root, so a bind-mounted target dir leaves root-owned files on the runner
 # that `rm -rf "$WORK"` cannot delete, which turned a passing run into exit 1.
-VOLUME="ta-sandbox-conformance-$$"
+# scripts/ci-local.sh sets TA_CI_SANDBOX_VOLUME to a long-lived volume so re-runs
+# are incremental; it is then NOT removed here (scripts/ci-local.sh --clean does).
+VOLUME="${TA_CI_SANDBOX_VOLUME:-ta-sandbox-conformance-$$}"
 cleanup() {
-  docker volume rm -f "$VOLUME" >/dev/null 2>&1 || echo "[ci] warning: could not remove docker volume $VOLUME"
+  if [ -z "${TA_CI_SANDBOX_VOLUME:-}" ]; then
+    docker volume rm -f "$VOLUME" >/dev/null 2>&1 || echo "[ci] warning: could not remove docker volume $VOLUME"
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT

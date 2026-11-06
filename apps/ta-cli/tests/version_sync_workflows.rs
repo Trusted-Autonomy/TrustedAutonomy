@@ -17,13 +17,19 @@ fn read(rel: &str) -> String {
 #[test]
 fn required_ci_check_names_are_unchanged() {
     let ci = read(".github/workflows/ci.yml");
+    for name in [
+        "    name: Lint and Test (ubuntu-latest)\n",
+        "    name: Lint and Test (macos-latest)\n",
+        "    name: Version consistency\n",
+    ] {
+        assert!(
+            ci.contains(name),
+            "required check renamed or removed: {name}"
+        );
+    }
     assert!(
-        ci.contains("    name: Lint and Test\n"),
-        "Lint and Test job renamed"
-    );
-    assert!(
-        ci.contains("os: [ubuntu-latest, macos-latest]"),
-        "Lint and Test matrix changed"
+        !ci.contains("matrix:"),
+        "a matrix job reports an unexpanded name when skipped and leaves required checks pending"
     );
     assert!(
         ci.contains("name: Windows Build"),
