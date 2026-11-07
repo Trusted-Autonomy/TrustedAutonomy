@@ -190,7 +190,7 @@ if want checks; then
     run_step "version consistency" ./scripts/check-version-consistency.sh
     run_step "no IP docs in public repo" ./scripts/check-no-ip-docs.sh --all
     run_step "secret scan" bash -c './scripts/secret-scan.sh --self-test && ./scripts/secret-scan.sh'
-    run_step "script self-tests" bash -c './scripts/ci-changes.sh --self-test && ./scripts/ci-leftover-processes.sh --self-test'
+    run_step "script self-tests" bash -c './scripts/ci-changes.sh --self-test && ./scripts/ci-leftover-processes.sh --self-test && ./scripts/test-publish-order.sh'
     if command -v actionlint >/dev/null 2>&1; then
         # shellcheck findings of style/info level in pre-existing workflow scripts are not CI failures.
         # plugin-release.yml names the retired runner label macos-13 (pre-existing; not a CI-cost topic).

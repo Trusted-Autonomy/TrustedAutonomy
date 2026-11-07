@@ -9394,8 +9394,22 @@ CARGO_REGISTRY_TOKEN=<token> ./scripts/publish-crates.sh --dry-run
 CARGO_REGISTRY_TOKEN=<token> ./scripts/publish-crates.sh
 ```
 
-The script publishes 35 crates in 6 dependency tiers with a 20-second delay between each
-to allow crates.io index propagation. Total publish time is approximately 15 minutes.
+The script computes the order itself from `cargo metadata` (a crate is published only after
+every workspace crate it depends on; ties break by name), so adding a crate needs no edit.
+It publishes all 50 workspace crates with a 20-second delay between each to allow crates.io
+index propagation. Total publish time is roughly 20 to 30 minutes.
+`./scripts/publish-crates.sh --list-order` prints the order (no token, no network), and
+`./scripts/test-publish-order.sh` checks that every crate is listed once, after its
+dependencies, and that internal dependencies carry a version.
+
+**Before the first publish: four git dependencies must be on crates.io.** crates.io cannot
+resolve a git source, so these standalone crates (all `Trusted-Autonomy/<name>`, Apache-2.0,
+tag `v0.1.0`) have to be published first, in this order: `decision-gate`, `typed-ask`,
+`task-graph`, then `consensus-panel` (which itself needs `version = "0.1.0"` added to its own
+`decision-gate` git dependency). The workspace already carries `version = "0.1.0"` next to each
+`git = ...` (cargo uses the git source for local builds and the version when packaging).
+The script checks this before publishing anything and stops with the crate names if one is
+missing from crates.io.
 
 #### Verifying cargo install works
 
@@ -9411,8 +9425,10 @@ ta --version
 
 - **"crate version already exists"**: The version is already published — this is harmless,
   the script skips already-published versions automatically.
-- **"no matching package named ta-foo found in registry"**: A dependency was not published
-  yet. Run `./scripts/publish-crates.sh --skip-check` to force-attempt all crates in order.
+- **"is a git dependency and is not on crates.io"**: publish that crate first (see above),
+  then re-run. Nothing was published by the failed run.
+- **"no matching package named ta-foo found in registry"**: a workspace dependency was not
+  published yet. Re-run; the script skips versions that are already published.
 - **"CARGO_REGISTRY_TOKEN not set"**: Set the env var or add the GitHub secret.
 - **"insufficient permissions"**: The token does not have publish rights. Regenerate it
   with the correct scopes at <https://crates.io/settings/tokens>.

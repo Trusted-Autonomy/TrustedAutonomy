@@ -22,8 +22,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 ta-changeset = { path = "../ta-changeset", version = "0.17.12-alpha.11" }
-typed-ask = { git = "https://github.com/Trusted-Autonomy/typed-ask", tag = "v0.1.0" }
-task-graph = { git = "https://github.com/Trusted-Autonomy/task-graph", tag = "v0.1.0" }
+typed-ask = { git = "https://github.com/Trusted-Autonomy/typed-ask", tag = "v0.1.0", version = "0.1.0" }
+task-graph = { git = "https://github.com/Trusted-Autonomy/task-graph", tag = "v0.1.0", version = "0.1.0" }
 # Reused by graph::nodes::PolicyReviewer (v0.17.7.1) — wraps the existing
 # should_auto_approve_draft rule evaluation as one ReviewerNode, per
 # constitution §1.7 (reuse before reinventing). Leaf crate, no cycle risk.
@@ -32,11 +32,11 @@ ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.11" }
 # Reused by graph::nodes::AdvisorConfidenceReviewer (v0.17.7.1) — wraps the
 # existing gate::decide() confidence check as one ReviewerNode. Leaf crate,
 # no cycle risk.
-ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
+ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", version = "0.1.0", package = "decision-gate" }
 # Multi-agent consensus (Raft/Paxos/weighted), extracted v0.17.10 Part 4.
 # `decision-gate` feature enables the consensus -> decision-gate adapter
 # (decision_bridge), reused by graph::nodes::WeightedDecisionNode.
-consensus-panel = { git = "https://github.com/Trusted-Autonomy/consensus-panel", tag = "v0.1.0", features = ["decision-gate"] }
+consensus-panel = { git = "https://github.com/Trusted-Autonomy/consensus-panel", tag = "v0.1.0", version = "0.1.0", features = ["decision-gate"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

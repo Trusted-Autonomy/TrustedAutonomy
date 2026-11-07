@@ -27,7 +27,7 @@ toml = { workspace = true }
 # Workspace crates
 ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.11" }
 ta-changeset = { path = "../ta-changeset", version = "0.17.12-alpha.11" }
-ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
+ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", version = "0.1.0", package = "decision-gate" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
