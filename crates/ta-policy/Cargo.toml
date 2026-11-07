@@ -25,4 +25,4 @@ ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.11" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-typed-ask = { git = "https://github.com/Trusted-Autonomy/typed-ask", tag = "v0.1.0" }
+typed-ask = { git = "https://github.com/Trusted-Autonomy/typed-ask", tag = "v0.1.0", version = "0.1.0" }

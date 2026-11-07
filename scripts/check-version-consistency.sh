@@ -43,7 +43,9 @@ while IFS= read -r manifest; do
       echo "MISMATCH $rel: requires $name $req"
       bad=1
     fi
-  done < <(grep -E '^[[:space:]]*ta-[a-z0-9-]+[[:space:]]*=.*version[[:space:]]*=[[:space:]]*"' "$manifest" || true)
+  # Workspace path deps only: an alias such as ta-decision = { git = ..., version = "0.1.0" }
+  # is an external crate, not a workspace crate, so its crates.io version is not compared.
+  done < <(grep -E '^[[:space:]]*ta-[a-z0-9-]+[[:space:]]*=.*version[[:space:]]*=[[:space:]]*"' "$manifest" | grep -v -E 'git[[:space:]]*=' || true)
 done < <(find "$root/apps" "$root/crates" -name Cargo.toml -not -path '*/target/*' | sort)
 
 if [ "$bad" -ne 0 ]; then

@@ -16,14 +16,21 @@
 # Options:
 #   --dry-run     Run `cargo publish --dry-run` for each crate (no actual publish)
 #   --skip-check  Skip the crates.io version check (always attempt publish)
+#   --list-order  Print the publish order (one crate per line) and exit. Needs
+#                 no token and no network; used by scripts/test-publish-order.sh.
 #
-# Publish order (dependency tiers, leaf crates first):
-#   Tier 1: no internal deps
-#   Tier 2: depends on tier 1 only
-#   Tier 3: depends on tiers 1-2
-#   Tier 4: depends on tiers 1-3
-#   Tier 5: depends on tiers 1-4 (ta-daemon)
-#   Tier 6: ta-cli (depends on everything)
+# Publish order: COMPUTED, not hand-written. `cargo metadata` gives every
+# workspace crate and its internal dependencies; crates are published in
+# topological order (a crate only after every workspace crate it depends on
+# through [dependencies] or [build-dependencies]; dev-dependencies are ignored
+# because `cargo publish` drops path-only dev-dependencies). Ties break by
+# name, so the order is stable. A hand-kept list went stale (it listed a crate
+# that no longer exists, omitted a dozen that do, and published ta-audit
+# before ta-credentials, which it depends on), so adding or moving a crate
+# needs no edit here. A dependency cycle or an unversioned path dependency is
+# an error that names the crates involved.
+#
+# Requires python3 (present on ubuntu runners and macOS).
 
 set -euo pipefail
 
@@ -32,14 +39,56 @@ cd "$REPO_ROOT"
 
 DRY_RUN=false
 SKIP_CHECK=false
+LIST_ORDER=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)    DRY_RUN=true;    shift ;;
     --skip-check) SKIP_CHECK=true; shift ;;
+    --list-order) LIST_ORDER=true; shift ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+compute_order() {
+  # Prints "<crate>\t<manifest dir relative to the repo root>" per line, in publish order.
+  cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, os, sys
+m = json.load(sys.stdin)
+root = m["workspace_root"]
+pkgs = {p["name"]: p for p in m["packages"] if p.get("publish") != []}
+deps, errors = {}, []
+for name, p in pkgs.items():
+    deps[name] = set()
+    for d in p["dependencies"]:
+        if d["name"] not in pkgs or d["kind"] == "dev":
+            continue
+        deps[name].add(d["name"])
+        if d["req"] == "*":
+            errors.append("%s depends on %s by path without a version; crates.io rejects that. Add version = \"<workspace version>\" to the dependency." % (name, d["name"]))
+order, done = [], set()
+while len(done) < len(pkgs):
+    ready = sorted(n for n in pkgs if n not in done and deps[n] <= done)
+    if not ready:
+        left = sorted(n for n in pkgs if n not in done)
+        errors.append("dependency cycle among: " + ", ".join(left) + ". Break it (a path-only dev-dependency is fine) before publishing.")
+        break
+    for n in ready:
+        order.append(n)
+        done.add(n)
+if errors:
+    for e in errors:
+        sys.stderr.write("publish order ERROR: " + e + "\n")
+    sys.exit(1)
+for n in order:
+    print("%s\t%s" % (n, os.path.relpath(os.path.dirname(pkgs[n]["manifest_path"]), root)))
+'
+}
+
+if [[ "$LIST_ORDER" == "true" ]]; then
+  compute_order | cut -f1
+  exit 0
+fi
 
 if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
   echo "ERROR: CARGO_REGISTRY_TOKEN is not set."
@@ -59,12 +108,55 @@ is_published() {
   local crate_name="$1"
   local version="$2"
   local result
-  result=$(curl -sf "https://crates.io/api/v1/crates/${crate_name}/${version}" 2>/dev/null || true)
+  result=$(curl -sf -A "ta-publish-crates (https://github.com/Trusted-Autonomy/TrustedAutonomy)" "https://crates.io/api/v1/crates/${crate_name}/${version}" 2>/dev/null || true)
   if echo "$result" | grep -q '"num"'; then
     return 0  # already published
   fi
   return 1  # not published
 }
+
+# Preflight: refuse to start if a workspace crate depends on a crate that is not a
+# workspace member and lives only in git. crates.io cannot resolve a git source, so
+# without this the run would publish half the workspace and then fail. The
+# dependency must be published to crates.io first, and the dependency
+# declaration must carry `version = "..."` next to `git = "..."` (cargo uses the
+# git source locally and the version when publishing).
+preflight_external_deps() {
+  local missing=""
+  local line name req users
+  while IFS=$'\t' read -r name req users; do
+    [[ -z "$name" ]] && continue
+    if [[ "$req" == "*" ]]; then
+      echo "ERROR: $users depend on '$name' from git without a version. Add version = \"<its crates.io version>\" next to git = \"...\"." >&2
+      missing="yes"
+      continue
+    fi
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' -A "ta-publish-crates (https://github.com/Trusted-Autonomy/TrustedAutonomy)" "https://crates.io/api/v1/crates/${name}/" || true)
+    if [[ "$code" != "200" ]]; then
+      echo "ERROR: '$name' (used by: $users) is a git dependency and is not on crates.io (HTTP $code). Publish '$name' to crates.io first, then re-run; nothing was published." >&2
+      missing="yes"
+    fi
+  done < <(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+ws = {p["name"] for p in m["packages"]}
+ext = {}
+for p in m["packages"]:
+    for d in p["dependencies"]:
+        if d["name"] in ws or not (d.get("source") or "").startswith("git+"):
+            continue
+        e = ext.setdefault(d["name"], {"req": d["req"], "users": set()})
+        e["users"].add(p["name"])
+for n, e in sorted(ext.items()):
+    print("%s\t%s\t%s" % (n, e["req"], ",".join(sorted(e["users"]))))
+')
+  if [[ -n "$missing" ]]; then
+    return 1
+  fi
+}
+
+preflight_external_deps || exit 1
 
 # Publish a single crate. Skips if already on crates.io (idempotent).
 publish_crate() {
@@ -139,55 +231,21 @@ publish_crate() {
   fi
 }
 
-echo "Publishing ${WORKSPACE_VERSION} to crates.io in dependency order..."
+ORDER_FILE="$(mktemp)"
+trap 'rm -f "$ORDER_FILE"' EXIT
+if ! compute_order > "$ORDER_FILE"; then
+  echo "ERROR: could not compute the publish order from 'cargo metadata' (see above). Nothing was published."
+  exit 1
+fi
+CRATE_COUNT=$(wc -l < "$ORDER_FILE" | tr -d ' ')
+
+echo "Publishing ${WORKSPACE_VERSION} to crates.io in dependency order (${CRATE_COUNT} crates)..."
 echo ""
 
-# ── Tier 1: leaf crates (no internal workspace deps) ──────────────────────────
-publish_crate "ta-audit"             "crates/ta-audit"
-publish_crate "ta-output-schema"     "crates/ta-output-schema"
-publish_crate "ta-events"            "crates/ta-events"
-publish_crate "ta-credentials"       "crates/ta-credentials"
-publish_crate "ta-changeset"         "crates/ta-changeset"
-publish_crate "ta-goal"              "crates/ta-goal"
-publish_crate "ta-actions"           "crates/ta-actions"
-publish_crate "ta-build"             "crates/ta-build"
-publish_crate "ta-db-overlay"        "crates/ta-db-overlay"
-publish_crate "ta-extension"         "crates/ta-extension"
-publish_crate "ta-agent-ollama"      "crates/ta-agent-ollama"
-publish_crate "ta-memory"            "crates/ta-memory"
-publish_crate "ta-policy"            "crates/ta-policy"
-publish_crate "ta-connector-web"     "crates/ta-connectors/web"
-publish_crate "ta-connector-mock-drive"  "crates/ta-connectors/mock-drive"
-publish_crate "ta-connector-mock-gmail" "crates/ta-connectors/mock-gmail"
-publish_crate "ta-connector-unity"   "crates/ta-connectors/unity"
-
-# ── Tier 2: depends on tier 1 ─────────────────────────────────────────────────
-publish_crate "ta-workspace"         "crates/ta-workspace"
-publish_crate "ta-sandbox"           "crates/ta-sandbox"
-publish_crate "ta-runtime"           "crates/ta-runtime"
-publish_crate "ta-db-proxy"          "crates/ta-db-proxy"
-publish_crate "ta-session"           "crates/ta-session"
-publish_crate "ta-workflow"          "crates/ta-workflow"
-publish_crate "ta-connector-slack"   "crates/ta-connectors/slack"
-publish_crate "ta-connector-discord" "crates/ta-connectors/discord"
-publish_crate "ta-connector-email"   "crates/ta-connectors/email"
-publish_crate "ta-connector-unreal"  "crates/ta-connectors/unreal"
-publish_crate "ta-connector-comfyui" "crates/ta-connectors/comfyui"
-
-# ── Tier 3: depends on tiers 1-2 ──────────────────────────────────────────────
-publish_crate "ta-db-proxy-sqlite"   "crates/ta-db-proxy-sqlite"
-publish_crate "ta-connector-fs"      "crates/ta-connectors/fs"
-publish_crate "ta-submit"            "crates/ta-submit"
-publish_crate "ta-mediation"         "crates/ta-mediation"
-
-# ── Tier 4: depends on tiers 1-3 ──────────────────────────────────────────────
-publish_crate "ta-mcp-gateway"       "crates/ta-mcp-gateway"
-
-# ── Tier 5: depends on tiers 1-4 ──────────────────────────────────────────────
-publish_crate "ta-daemon"            "crates/ta-daemon"
-
-# ── Tier 6: ta-cli (depends on everything) ────────────────────────────────────
-publish_crate "ta-cli"               "apps/ta-cli"
+# The order file is read on fd 3 so a child process (cargo) cannot consume it as stdin.
+while IFS=$'\t' read -r -u 3 crate_name crate_path; do
+  publish_crate "$crate_name" "$crate_path"
+done 3< "$ORDER_FILE"
 
 echo ""
 echo "──────────────────────────────────────────"

@@ -1,5 +1,12 @@
 ## Unreleased
 
+**crates.io release step**
+
+- **`scripts/publish-crates.sh` computes the publish order** from `cargo metadata` instead of a hand-kept list. The old list published `ta-audit` before `ta-credentials` (its dependency), named a crate that no longer exists (`ta-db-proxy-sqlite`) and omitted 16 that do, so a release would have failed at the first crate. `--list-order` prints the order; `scripts/test-publish-order.sh` (part of `ci-local`) checks that every crate is listed once, after its dependencies, with versioned internal dependencies.
+- **Preflight before anything is published:** the run stops with the crate names if a workspace crate depends on a git-only crate that is not on crates.io. The four such crates (`decision-gate`, `typed-ask`, `task-graph`, `consensus-panel`) now carry `version = "0.1.0"` next to their `git = ...` source; they must be published first (see "Publishing to crates.io" in `docs/USAGE.md`).
+- The crates.io existence check now sends a User-Agent (crates.io requires one).
+
+
 **Agent login and launch failures**
 
 - **Agent logins: `ta agent-login list|login|logout|verify`.** Give Claude, OpenAI, Gemini, xAI

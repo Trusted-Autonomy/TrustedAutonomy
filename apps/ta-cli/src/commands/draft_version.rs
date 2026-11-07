@@ -191,7 +191,9 @@ fn manifests(dir: &Path) -> Vec<PathBuf> {
 /// Find manifests that disagree with `workspace_version`: a literal
 /// `[package] version`, or a `ta-*` path dependency with a different `version`
 /// requirement. This is the condition that makes cargo fail with
-/// `failed to select a version for the requirement`.
+/// `failed to select a version for the requirement`. A dependency that comes from
+/// `git` is not a workspace crate even when its alias starts with `ta-` (for
+/// example `ta-decision`), so its own crates.io `version` is not compared.
 pub fn find_version_mismatches(dir: &Path, workspace_version: &str) -> Vec<VersionMismatch> {
     let dep_re = regex::Regex::new(r#"(ta-[a-z0-9-]+)\s*=\s*\{[^}]*version\s*=\s*"([^"]+)""#)
         .expect("static regex");
@@ -215,6 +217,9 @@ pub fn find_version_mismatches(dir: &Path, workspace_version: &str) -> Vec<Versi
             }
         }
         for c in dep_re.captures_iter(&text) {
+            if c[0].contains("git") && !c[0].contains("path") {
+                continue;
+            }
             let req = c[2].trim_start_matches(['^', '=', '~']);
             if req != workspace_version {
                 out.push(VersionMismatch {
@@ -365,6 +370,31 @@ mod tests {
         assert!(err.contains("crates/ta-b/Cargo.toml"), "{err}");
         assert!(err.contains("ta-x ^0.1.0-alpha.4"), "{err}");
         assert!(err.contains("bump-version.sh 0.1.0-alpha.5"), "{err}");
+    }
+
+    #[test]
+    fn git_dependency_with_ta_alias_is_not_a_workspace_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(
+            d,
+            "Cargo.toml",
+            "[workspace.package]\nversion = \"0.17.12-alpha.11\"\n",
+        );
+        write(
+            d,
+            "crates/ta-a/Cargo.toml",
+            "[package]\nname = \"ta-a\"\nversion.workspace = true\n[dependencies]\nta-decision = { git = \"https://example.com/decision-gate\", tag = \"v0.1.0\", version = \"0.1.0\", package = \"decision-gate\" }\nta-x = { path = \"../ta-x\", version = \"0.17.12-alpha.11\" }\n",
+        );
+        assert!(find_version_mismatches(d, "0.17.12-alpha.11").is_empty());
+        write(
+            d,
+            "crates/ta-a/Cargo.toml",
+            "[package]\nname = \"ta-a\"\nversion.workspace = true\n[dependencies]\nta-decision = { git = \"https://example.com/decision-gate\", version = \"0.1.0\" }\nta-x = { path = \"../ta-x\", version = \"0.1.0\" }\n",
+        );
+        let found = find_version_mismatches(d, "0.17.12-alpha.11");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].detail.contains("ta-x"), "{found:?}");
     }
 
     #[test]

@@ -45,7 +45,7 @@ ta-workflow = { path = "../ta-workflow", version = "0.17.12-alpha.11" }
 ta-actions = { path = "../ta-actions", version = "0.17.12-alpha.11" }
 ta-submit = { path = "../ta-submit", version = "0.17.12-alpha.11" }
 ta-task-intake = { path = "../ta-task-intake", version = "0.17.12-alpha.11" }
-ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", package = "decision-gate" }
+ta-decision = { git = "https://github.com/Trusted-Autonomy/decision-gate", tag = "v0.1.0", version = "0.1.0", package = "decision-gate" }
 ta-credentials = { path = "../ta-credentials", version = "0.17.12-alpha.11" }
 ta-session = { path = "../ta-session", version = "0.17.12-alpha.11" }
 ta-credential-broker = { path = "../ta-credential-broker", version = "0.17.12-alpha.11" }
