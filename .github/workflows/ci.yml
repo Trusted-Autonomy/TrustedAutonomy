@@ -116,6 +116,10 @@ jobs:
         timeout-minutes: 5
         run: ./scripts/check-version-consistency.sh
 
+      - name: PLAN.md status markers stand on their own lines
+        timeout-minutes: 2
+        run: ./scripts/check-plan-markers.sh --self-test && ./scripts/check-plan-markers.sh
+
       - name: No IP-sensitive documents in this public repository
         timeout-minutes: 5
         run: ./scripts/check-no-ip-docs.sh --all

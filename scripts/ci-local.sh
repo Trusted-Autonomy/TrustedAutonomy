@@ -188,6 +188,7 @@ skip_step() { # name reason
 # ---- group: checks ------------------------------------------------------------------
 if want checks; then
     run_step "version consistency" ./scripts/check-version-consistency.sh
+    run_step "plan status markers" bash -c './scripts/check-plan-markers.sh --self-test && ./scripts/check-plan-markers.sh'
     run_step "no IP docs in public repo" ./scripts/check-no-ip-docs.sh --all
     run_step "secret scan" bash -c './scripts/secret-scan.sh --self-test && ./scripts/secret-scan.sh'
     run_step "script self-tests" bash -c './scripts/ci-changes.sh --self-test && ./scripts/ci-leftover-processes.sh --self-test && ./scripts/test-publish-order.sh'
