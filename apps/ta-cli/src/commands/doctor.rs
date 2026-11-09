@@ -1080,6 +1080,28 @@ fn check_gc(config: &GatewayConfig) -> Vec<CheckResult> {
         }
     }
 
+    // Per-goal staging size against the goal build budget: a goal's own `target/`
+    // (no shared cache, or a sandboxed agent) is the usual way a disk fills.
+    {
+        let used = super::build_budget::staging_use(&config.workspace_root);
+        if !used.is_empty() {
+            let staging = ta_submit::WorkflowConfig::load_or_default(
+                &config.workspace_root.join(".ta").join("workflow.toml"),
+            )
+            .staging;
+            let (lines, over) = super::build_budget::doctor_staging_lines(&staging, &used);
+            if over {
+                results.push(CheckResult::warn(
+                    "Goal build output",
+                    lines.join("\n"),
+                    "A goal's build output is over [staging] goal_build_max_gb in .ta/workflow.toml: run `ta cleanup --only staging`, or raise the budget",
+                ));
+            } else {
+                results.push(CheckResult::ok("Goal build output", lines.join("\n")));
+            }
+        }
+    }
+
     if config.pr_packages_dir.exists() {
         match super::cleanup::findings(config, &[ta_cleanup::Category::Drafts], true) {
             Ok(found) => {

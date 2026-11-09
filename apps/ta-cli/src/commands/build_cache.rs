@@ -112,6 +112,8 @@ struct GoalBuild {
     own_target: PathBuf,
     /// False once a sandboxed agent was sent back to `own_target`.
     agent_in_cache: bool,
+    /// Lean-build variables the agent was given; the gates get the same.
+    lean_env: Vec<(String, String)>,
 }
 
 type Registry = Mutex<HashMap<PathBuf, GoalBuild>>;
@@ -203,6 +205,7 @@ pub fn start_goal_build(
                     cache: Some(used),
                     own_target,
                     agent_in_cache: true,
+                    lean_env: Vec::new(),
                 },
             );
             target
@@ -225,6 +228,7 @@ pub fn start_goal_build(
                     cache: None,
                     own_target: own_target.clone(),
                     agent_in_cache: false,
+                    lean_env: Vec::new(),
                 },
             );
             own_target
@@ -241,6 +245,80 @@ pub fn gate_target_dir(staging_path: &Path) -> Option<PathBuf> {
         .get(staging_path)
         .and_then(|g| g.cache.as_ref())
         .map(|c| c.selection.target_dir.clone())
+}
+
+/// Give the goal's agent the lean-build variables (`[staging] lean_builds`) and
+/// remember the values the agent ends up with for the verification gates, so both
+/// build with the same flags and share fingerprints. A variable already in `env`
+/// (from `[agent_env]` in workflow.toml) is left as the project set it, and the
+/// gates get that value. Call after `start_goal_build`.
+pub fn apply_lean_build_env(
+    config: &GatewayConfig,
+    staging_path: &Path,
+    env: &mut HashMap<String, String>,
+) {
+    let wf = ta_submit::WorkflowConfig::load_or_default(
+        &config.workspace_root.join(".ta/workflow.toml"),
+    );
+    if !wf.staging.lean_builds {
+        return;
+    }
+    for (k, v) in super::build_budget::lean_env(&wf.staging, env) {
+        env.insert(k, v);
+    }
+    let effective: Vec<(String, String)> = super::build_budget::LEAN_VARS
+        .iter()
+        .filter_map(|(k, _)| env.get(*k).map(|v| (k.to_string(), v.clone())))
+        .collect();
+    let shown = effective
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    tracing::info!(
+        vars = %shown,
+        "Goal cargo builds run lean (no debug info, no incremental cache); set `[staging] lean_builds = false` in .ta/workflow.toml to turn this off"
+    );
+    println!(
+        "Lean builds: cargo runs with {shown} (`[staging] lean_builds = false` turns this off)."
+    );
+    if let Some(g) = registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_mut(staging_path)
+    {
+        g.lean_env = effective;
+    }
+}
+
+/// The lean-build variables `apply_lean_build_env` gave this goal's agent.
+pub fn gate_lean_env(staging_path: &Path) -> Vec<(String, String)> {
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(staging_path)
+        .map(|g| g.lean_env.clone())
+        .unwrap_or_default()
+}
+
+/// Where the agent's build output lands, and how big that already was: the shared
+/// cache (growth is measured from its size when the goal started) or the goal's own
+/// `<staging>/target`. `None` when `ta run` did not choose a build directory for
+/// this goal (not a Cargo project, or `CARGO_TARGET_DIR` set in `[agent_env]`), so
+/// there is nothing to watch. Call after `use_own_target_in_sandbox`.
+pub fn agent_build_dir(staging_path: &Path) -> Option<(PathBuf, u64)> {
+    let reg = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let g = reg.get(staging_path)?;
+    Some(match g.cache.as_ref().filter(|_| g.agent_in_cache) {
+        Some(c) => (c.selection.target_dir.clone(), c.bytes_before),
+        None => (g.own_target.clone(), 0),
+    })
+}
+
+/// Budget settings from the project's workflow.toml.
+pub fn budget_settings(project_root: &Path) -> super::build_budget::BudgetSettings {
+    let wf = ta_submit::WorkflowConfig::load_or_default(&project_root.join(".ta/workflow.toml"));
+    super::build_budget::BudgetSettings::from_config(&wf.staging)
 }
 
 /// A sandboxed agent cannot write to `.ta/` (a protected path), so it cannot use
@@ -548,5 +626,60 @@ mod tests {
             "only the first ten are listed:\n{text}"
         );
         assert!(text.contains("shared cache") && text.contains("own target/"));
+    }
+
+    fn goal_in(p: &Path, id: &str) -> PathBuf {
+        let staging = p.join(".ta/staging").join(id);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("Cargo.toml"), "[package]\n").unwrap();
+        staging
+    }
+
+    #[test]
+    fn lean_env_reaches_the_agent_and_the_gates_and_yields_to_agent_env() {
+        let p = project();
+        let staging = goal_in(p.path(), "g-lean");
+        let config = GatewayConfig::for_project(p.path());
+        start_goal_build(&config, uuid::Uuid::new_v4(), &staging, p.path());
+
+        // The project already chose CARGO_INCREMENTAL in [agent_env]: it wins.
+        let mut env = HashMap::from([("CARGO_INCREMENTAL".to_string(), "1".to_string())]);
+        apply_lean_build_env(&config, &staging, &mut env);
+        assert_eq!(env["CARGO_PROFILE_DEV_DEBUG"], "0");
+        assert_eq!(env["CARGO_INCREMENTAL"], "1");
+
+        // The gates build with the variables the agent got, not the project's own.
+        let gate = crate::commands::verify::goal_cargo_env(&staging);
+        assert!(gate.contains(&("CARGO_PROFILE_DEV_DEBUG".to_string(), "0".to_string())));
+        assert!(gate.contains(&("CARGO_INCREMENTAL".to_string(), "1".to_string())));
+        assert!(gate.iter().any(|(k, _)| k == "CARGO_TARGET_DIR"));
+
+        assert!(agent_build_dir(&staging).is_some());
+        release_goal_build(&staging);
+        assert!(agent_build_dir(&staging).is_none());
+        assert!(gate_lean_env(&staging).is_empty());
+    }
+
+    #[test]
+    fn lean_builds_false_in_workflow_toml_leaves_the_environment_alone() {
+        let p = project();
+        std::fs::create_dir_all(p.path().join(".ta")).unwrap();
+        std::fs::write(
+            p.path().join(".ta/workflow.toml"),
+            "[staging]\nlean_builds = false\ngoal_build_max_gb = 3\ngoal_build_over_budget = \"warn\"\n",
+        )
+        .unwrap();
+        let staging = goal_in(p.path(), "g-off");
+        let config = GatewayConfig::for_project(p.path());
+        start_goal_build(&config, uuid::Uuid::new_v4(), &staging, p.path());
+        let mut env = HashMap::new();
+        apply_lean_build_env(&config, &staging, &mut env);
+        assert!(env.is_empty());
+        assert!(gate_lean_env(&staging).is_empty());
+
+        let s = budget_settings(p.path());
+        assert_eq!(s.max_bytes, 3 * 1_073_741_824);
+        assert_eq!(s.action, ta_submit::config::BuildBudgetAction::Warn);
+        release_goal_build(&staging);
     }
 }
