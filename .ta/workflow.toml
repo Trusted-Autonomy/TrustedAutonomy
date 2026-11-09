@@ -5,10 +5,42 @@ context_budget_chars = 100000   # reviewer agent budget (default 40k is too smal
 commands = [
     "./dev 'cargo fmt --all -- --check'",
     "./dev 'cargo clippy --workspace --all-targets -- -D warnings'",
+    # Compile-only check for the Windows target (dead_code on cfg(unix) helpers etc.), so such
+    # failures are found here and not 20 minutes into CI. Skips loudly when rustup or the
+    # target is missing; `ta doctor` says how to install it.
+    "scripts/check-windows.sh --skip-if-unavailable",
     "./dev 'cargo test --workspace -- --test-threads=4'",
 ]
 on_failure = "block"     # "block" (fail draft), "warn", or "agent" (let agent fix)
 timeout = 2400           # seconds per command (workspace full test+compile ~20min)
+
+# End-to-end smoke stage: runs before every draft is built (ta run, ta draft build), no human
+# needed. Each case runs the real command in a scratch git repo. `ta smoke` runs them by hand.
+[smoke]
+on_failure = "block"     # "block" (no draft is created) or "warn" (failures ride along as draft warnings)
+default_timeout_secs = 1800   # a case that runs `cargo run` may build ta first
+# A draft that ADDS one of these files adds a command: it must carry a [[smoke.cases]] entry
+# covering it, including one bad-input case (expect = "failure"). Helper modules that are
+# not commands can opt out by living outside this directory or by adding a trivial case.
+new_command_paths = ["apps/ta-cli/src/commands/*.rs"]
+
+# v0.17.12.20: `ta golden replay` launched a real agent from a prompt that no longer matched
+# the hash recorded at capture. Unit tests passed; only a hand run found it.
+[[smoke.cases]]
+name = "golden-replay-swapped-prompt"
+covers = "apps/ta-cli/src/commands/golden.rs"
+setup = ['''
+set -e
+mkdir -p .ta/golden/swapped
+cd .ta/golden/swapped
+printf 'the captured task\n' > prompt.md
+sha=$( (shasum -a 256 prompt.md 2>/dev/null || sha256sum prompt.md) | cut -d' ' -f1)
+printf '{"id":"swapped","title":"swapped prompt","source_goal_id":"00000000-0000-0000-0000-000000000000","start_commit":"%s","prompt_sha256":"%s","baseline":{"cost_usd":0,"input_tokens":0,"output_tokens":0,"outcome":"applied","files_changed":0,"lines_added":0,"lines_removed":0,"diff_sha256":"x","captured_at":"2026-01-01T00:00:00Z"}}' "$(git rev-parse HEAD)" "$sha" > entry.json
+printf 'a DIFFERENT task, swapped in after capture\n' > prompt.md
+''']
+run = "$TA_SMOKE_TA golden replay swapped"
+expect = "failure"
+expect_output = "no longer matches the hash"
 
 [commit]
 # Files auto-staged alongside every `ta draft apply --git-commit`.

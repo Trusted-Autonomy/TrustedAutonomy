@@ -502,6 +502,15 @@ Values that look like secrets (keys such as `token`, `api_key`, `password`, `aut
 - The block sits between two boundary lines made from a random token chosen for that launch. The token never appears in the data, so text in the intake cannot end the block early, even if it contains fake boundaries or "ignore previous instructions".
 - The `candidate_id` is read from the intake record by TA's code and stated above the block as a trusted value. The agent uses that id when it reports the outcome (`ta_whiteboard_outcome_send`), never an id found inside the block. If the record has no usable `candidate_id`, TA says so instead.
 
+**Other text TA puts in an agent's prompt.** The same rule applies to every place TA copies text that someone else wrote into a prompt: the stdout summary a previous role left in a team session (`.ta/team-sessions/<session>/`), the title, description, hold reason and other free-text fields of a Wayfinder task or KPI read through the `ta_wayfinder_*` tools, and, in the governed-workflow reviewer's prompt, the change summary, the decision log and the changed file names that came from the draft and your version-control diff. One shared rule in the code (`ta_goal::untrusted`) handles all of them:
+
+- Block text (a prior role's findings, the reviewer's summary, decision log and file list) is quoted line by line with `| ` between two boundary lines that carry a random token chosen for that prompt. The token never appears in the text, so the text cannot close the block. A header line says where the text came from, how many bytes it is, and when it was cut to its size limit (16 KB per prior-role finding).
+- Short fields in the Wayfinder tool answers are wrapped as `«untrusted TOKEN» ... «/untrusted TOKEN»` on one line with a token the text does not contain; line breaks inside become spaces. `description` keeps its line breaks. Ids, statuses, dates and numbers are not wrapped. Every answer also carries an `untrusted_text_notice` field.
+- Escape sequences, control characters, bidirectional overrides and zero-width characters are removed before the text is quoted.
+- A standing line in the prompt tells the agent that fenced or marked text is data to read, never instructions.
+
+The Wayfinder poller that writes tasks into TA's intake runs in the ta-virtual-team repository; the intake text it delivers is covered by the wake-launch fence above.
+
 **Chief-of-Staff outcome vocabulary.** In a chat-mode launch the `ta_whiteboard_outcome_send` tool accepts only three `outcome` values, and rejects anything else (including `new_work` and `blocked`) with an error that lists them:
 
 - `reply`: answer the requester directly. `detail` is the plain text for them.
@@ -2855,6 +2864,36 @@ The scan is static and grep-based (no agent), runs in under a second, and is non
 
 The scanner counts `inject_*` and `restore_*` call sites in each changed `.rs` file. If a file has more inject calls than restore calls and contains early `return` statements, it is flagged as a candidate for review.
 
+### Smoke Cases (Run the Real Command Before the Draft)
+
+Unit tests can pass for behaviour that is wrong in real use. A smoke case runs the real command in a scratch git repository (a temporary directory with one commit) and checks that it succeeds, or, for a bad-input case, that it is refused with the message you expect. The smoke stage runs on every draft build (`ta run`, the background build, `ta draft build`) without a human.
+
+```toml
+# .ta/workflow.toml
+[smoke]
+on_failure = "block"                       # "block" (default): no draft is created. "warn": failures ride along as draft warnings.
+default_timeout_secs = 900                 # per case; a case can set timeout_secs
+new_command_paths = ["src/commands/*.rs"]  # adding one of these files adds a command: it needs smoke cases
+
+[[smoke.cases]]
+name = "replay-swapped-prompt"
+covers = "src/commands/golden.rs"          # run when the draft changes this path; omit to run on every draft
+setup = ["echo a > a.txt"]                 # shell steps run in the scratch repo first
+run = "$TA_SMOKE_TA golden replay swapped" # the command under test
+expect = "failure"                         # "success" (default) or "failure"
+expect_output = "no longer matches the hash"  # required for "failure": a crash must not pass as a refusal
+```
+
+The command runs with the scratch repository as its working directory and these variables set: `TA_SMOKE_PROJECT` (the tree under test, the goal's staging copy), `TA_SMOKE_SCRATCH`, and `TA_SMOKE_TA` (a command prefix that runs this project's `ta` through `cargo run`; set it yourself to use a prebuilt binary). `HOME` points into the scratch directory, and `TA_NO_KEYCHAIN=1` and `TA_TEST_NO_EXTERNAL_AGENTS=1` are always set, so a case cannot reach the keychain or start a paid agent.
+
+What the stage enforces:
+
+- Cases whose `covers` matches a changed file (and cases without `covers`) run. The draft may add cases of its own in its copy of `.ta/workflow.toml`, but it cannot relax the project's `on_failure` or replace a project case.
+- A draft that adds a file matching `new_command_paths` must have a case covering that exact file, and at least one covering case must be a bad-input case (`expect = "failure"`). Otherwise the build stops and names the `[[smoke.cases]]` entry to add.
+- Each case and the checklist item "smoke-tested the headline behaviour, including bad input" are recorded in the draft's validation log (`ta draft view`). A failing entry also blocks `ta draft approve`.
+
+Run the cases by hand with `ta smoke` (all), `ta smoke --case <name>`, `ta smoke --list`, or `ta smoke --dir <staging>` to test a goal's staging copy. `TA_SMOKE_TA=target/debug/ta ta smoke` uses a prebuilt binary instead of `cargo run`.
+
 ### Constitution Config (`constitution.toml`)
 
 You can define project-specific invariants, inject/restore rules, and validation steps in `.ta/constitution.toml`. This makes TA's scanner and release gate aware of your codebase's conventions — not just TA's own internal patterns.
@@ -4655,6 +4694,23 @@ The cap is applied when a goal starts: least-recently-used keys are removed firs
 
 If a build behaves differently with the cache than without it, rerun the goal with `--no-build-cache` to rule the cache out, and tell us which crates were involved.
 
+#### Keeping goal builds from filling the disk
+
+A goal that builds a large Rust workspace can write tens of GB of build output in minutes. Two settings in `.ta/workflow.toml` keep that bounded:
+
+```toml
+[staging]
+lean_builds = true               # default: true
+goal_build_max_gb = 10           # default: 10; 0 = no budget
+goal_build_over_budget = "stop"  # default: "stop"; or "warn"
+min_disk_mb = 2048               # default: 2048; free-disk floor, 0 = none
+```
+
+- **Lean builds.** With `lean_builds = true`, `ta run` starts the agent with `CARGO_PROFILE_DEV_DEBUG=0` (no debug info) and `CARGO_INCREMENTAL=0` (no incremental cache), and runs the verification gates with the same two values so they reuse what the agent compiled. It prints `Lean builds: ...` when it does. A value you set for either variable under `[agent_env]` is kept as you set it, and the gates use that value too. Set `lean_builds = false` if an agent needs debug info. The first goal after turning lean builds on or off compiles the dependencies again, because the flags change cargo's fingerprints.
+- **Budget while the agent runs.** Every 30 seconds `ta run` measures the goal's build output: the growth of the shared build cache since the goal started, or the goal's own `<staging>/target` when it builds there. It also checks free disk against `min_disk_mb`. If the goal is over `goal_build_max_gb` or the disk is below the floor, `ta run` prints an `[error]` line that names the directory, the sizes and the setting, and with `"stop"` it ends the agent and its child processes (SIGTERM, then SIGKILL after 5 seconds). The work done so far is kept and the draft is built from it as after any agent exit; the run ends with `Agent stopped: build output over budget`. With `"warn"` the message is printed once and the agent keeps running.
+- **Limits.** The budget is measured for goals that build with a TA-chosen directory (a Cargo project without `CARGO_TARGET_DIR` set under `[agent_env]`). When several goals share one cache key, the growth other goals cause in the same window counts too. Interactive (PTY) launches are not watched, and on Windows an over-budget agent is reported but not stopped.
+- **Seeing the sizes.** `ta doctor` lists each goal's staging size and build output against the budget (`Goal build output`) and warns when one is over; `ta cleanup --only staging` removes finished goals' staging.
+
 #### Viewing staging status
 
 ```bash
@@ -4958,7 +5014,7 @@ The daemon line separates four cases, so a busy daemon is not mistaken for a dea
 
 When you run `ta doctor` inside the TA source tree, it also reports whether the Windows build target is installed (`rustup target add x86_64-pc-windows-msvc`), because `scripts/check-windows.sh` needs it.
 
-`scripts/check-windows.sh` runs a compile-only `cargo check --workspace --all-targets` for `x86_64-pc-windows-msvc` with warnings denied, the same check the `Windows Check` CI job runs. Run it before opening a PR that touches `cfg(unix)`/`cfg(windows)` code, paths or process handling. From a Mac or Linux host the crates that build C code for TLS (`ring`, `aws-lc-sys`) need a Windows C toolchain and cannot be checked; the script reports exactly which crates it could not check, and CI covers those.
+`scripts/check-windows.sh` runs a compile-only `cargo check --workspace --all-targets` for `x86_64-pc-windows-msvc` with warnings denied, the same check the `Windows Check` CI job runs. It gives the C dependencies for TLS (`ring`, `aws-lc-sys`) a stand-in C toolchain (`scripts/lib/win-stubs.sh`, shared with `scripts/ci-local.sh`), so the whole workspace is checked from a Mac or Linux host; nothing is linked or run, so Windows test execution stays a CI job. This repository's `[verify]` gate runs `scripts/check-windows.sh --skip-if-unavailable` before a draft is built, so a Windows-only compile error (such as `dead_code` on a helper only `cfg(unix)` code calls) stops the draft instead of failing CI 20 minutes later. With `--skip-if-unavailable`, a machine without `rustup` or the Windows target prints a loud `SKIPPED` line and the gate passes; without the flag the script exits 2 there. You can also run it before opening a PR that touches `cfg(unix)`/`cfg(windows)` code, paths or process handling.
 
 **Diagnosing and fixing health issues:** `ta doctor --fix` lists every fixable finding once, each with a stable id, and then acts on that same list. The count in "Found N issue(s)" is the number of prompts you are asked, and applying one fix never reorders the others.
 
@@ -6326,6 +6382,8 @@ A refused launch prints what is missing and how to fix it (install a provider, d
 **macOS profile: what is and is not confined.** Writes are deny-by-default: only the goal's staging directory, its agent home and any `allow_write` paths are writable (`/tmp` is not). Reads are NOT confined: the profile allows reads and denies specific locations (the project's `.ta/` content other than the goal's own staging copy, the TA state directory, `~/.ssh`, `~/.gnupg`, `~/.aws`, browser profiles and similar), so other files in your home directory remain readable to the agent. Paths are matched after resolving symlinks and case-insensitively. The profile also refuses Apple events, the Keychain and LaunchServices services, signalling or inspecting other processes, and running `/usr/bin/security` or `ta-daemon`. Known limits: a *copy* of `security` under another name can be exec'd but cannot reach the Keychain (that service is refused); a server the agent starts on loopback inside the box cannot be reached by its own tools; and Rosetta-translated x86_64 binaries are supported.
 
 **Seeing what was refused.** On macOS the sandbox refuses the read, write or connection every time, and each refusal is tagged with the goal and, when the system log delivers it, recorded as a `sandbox_violation` event (printed as `[sandbox] denied: ...` during the run). The macOS unified log is lossy: the live `log stream` drops some denials that the persisted log still has, and the OS keeps no record of some isolated denials at all, with no loss marker. So TA does not rely on the stream alone. Before the agent starts it denies a read of a scratch file on purpose, retrying until the stream shows it, which proves the stream is attached; after the agent exits it does the same again, reads the persisted log (`log show`) once that log contains the second canary, and records any denial the stream missed. The result is a `sandbox_capture` event, and `ta sandbox explain <goal-id>` prints it: when both canaries arrived and the persisted log was read, an empty list is strong evidence but still not proof, because the OS can omit one denial under heavy load; when a check failed, the line says which one and the list may be incomplete. Goals recorded before capture checks existed show the plain caveat. Unprivileged log access is required; if the `log` tool cannot start, goals still run sandboxed and you get a warning that denial events are off. The egress proxy also writes every blocked connection to its own audit log and reports it as the same event on every platform. `ta events` lists them. The conformance suite that proves the refusals is `cargo test -p ta-runtime --test seatbelt_conformance` (it drives `ta-sandbox-probe` inside the generated profile); it runs in macOS CI.
+
+**Measuring denial delivery on your Mac.** `cargo test -p ta-runtime --test seatbelt_conformance burst_of_hundred -- --nocapture` runs the `ta-sandbox-probe` helper under the generated Seatbelt profile in temporary directories (no agent, no Keychain). It makes 100 refused reads, three times, with no per-denial retry, then prints for each round how many occurrences the live stream alone delivered, how many were delivered after the persisted-log reconciliation, and how many `log show` holds for that goal's tag. The test fails when TA delivered fewer than `log show` holds, which would mean a denial the OS logged was lost by TA's capture. When a round is below 100 and the three numbers agree, the OS itself never logged those denials, which TA cannot recover; in our runs this happened only in the first round of a run (94 to 97 of 100). If the test cannot bind its socket (`path must be shorter than SUN_LEN`), run it with `TMPDIR=/tmp`: a long `TMPDIR` makes the test's socket path too long.
 
 Two things to know about the network. On Linux with bubblewrap, a goal that is not granted unrestricted network (`*`) runs in its own network namespace and reaches the network only through TA's egress proxy, so loopback on the host is not reachable. In the Landlock-only fallback (bubblewrap unavailable) the network is limited only when the kernel has Landlock ABI 4 (Linux 6.7 or later); see "Sandboxing on Linux". A chat or reviewer goal that is given network hosts has them stripped on every platform (see "Default-On Isolation" above). The process-inspection and sandbox-escape capabilities are enforced on macOS and Windows AppContainer, and on Linux through the seccomp deny list (ptrace, process_vm, bpf, keyctl, io_uring and nested user namespaces).
 
@@ -8982,7 +9040,7 @@ ta draft apply <draft-id> --force-apply
 
 - **A branch behind `origin`.** Before anything is written, the apply compares the checked-out branch with the local `origin/main` (or `origin/master`, or whatever `origin/HEAD` names). If the branch lacks commits that are on it, the apply stops with the commit it expected and the fix: `git fetch origin && git merge --ff-only origin/main` (on a feature branch, `git rebase origin/main`), then re-run `ta draft apply <id>`. Without that, the pull request would show everyone else's newer work as deletions. The check reads local refs only; it never fetches. For a stacked branch whose pull request targets another branch, pass `--allow-stale-base`. Without a git repository, an `origin` remote or an `origin/main` ref, the check is skipped.
 - **A dead apply.** If an earlier `ta draft apply` was killed (for example by a caller timeout), the next apply first rolls back or finishes anything it journaled, then reports the stale `.ta/apply.lock`: the draft it belonged to, the dead PID, when it started, what recovery did, and any uncommitted paths it could not account for (inspect with `git status`). **Re-running `ta draft apply <id>` is the resume.** To drop the draft instead, run `ta draft close <id>`. `ta draft apply --status` shows the same commands for a stale lock.
-- **Long verification.** The pre-submit verification prints how long its last run took. A caller with a shorter timeout kills it; run the apply detached instead: `nohup ta draft apply <id> > apply.log 2>&1 &`, then watch `ta draft apply --status`.
+- **Long verification.** The pre-submit verification prints how long its last run took. A caller with a shorter timeout kills it; run the apply detached instead: `ta draft apply <id> --detach`. It starts the apply as a background process in its own session, prints the run id, PID and log path, and returns at once; the apply keeps running if the terminal or caller ends. `ta draft apply --status` then shows the phase (`verifying (pre-submit checks)`, `committing`, `pushing the branch`, ...) with how long it has been in it and how long the apply has run, and after it ends, whether it succeeded or failed, in which phase and why, plus the next command to run. Follow the output with `tail -f .ta/apply-runs/<run>.log`. Only one apply runs at a time: `--detach` refuses to start while another is in progress. `--detach` cannot be combined with `--dry-run`. The last 10 run records are kept in `.ta/apply-runs/` (git-ignored).
 
 ### External Diff Handlers
 

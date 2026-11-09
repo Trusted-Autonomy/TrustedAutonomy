@@ -44,6 +44,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub verify: VerifyConfig,
 
+    /// End-to-end smoke cases run before a draft is built (v0.17.12.25)
+    #[serde(default)]
+    pub smoke: SmokeConfig,
+
     /// Shell TUI configuration
     #[serde(default)]
     pub shell: ShellConfig,
@@ -1946,6 +1950,167 @@ fn default_health_check() -> bool {
     true
 }
 
+/// What a failed smoke case does to the draft build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmokeOnFailure {
+    /// Do not create the draft; print the failing case and its output.
+    #[default]
+    Block,
+    /// Create the draft and attach the failures as warnings in `ta draft view`.
+    Warn,
+}
+
+impl std::fmt::Display for SmokeOnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SmokeOnFailure::Block => "block",
+            SmokeOnFailure::Warn => "warn",
+        })
+    }
+}
+
+/// Whether a smoke case expects its command to succeed or to be refused.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmokeExpect {
+    /// The command must exit 0.
+    #[default]
+    Success,
+    /// The command must exit non-zero (bad input is refused with a clear message).
+    Failure,
+}
+
+/// One smoke case: a real command run in a scratch git repository.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmokeCase {
+    /// Unique name, shown in the draft's validation log.
+    pub name: String,
+    /// Project file (or glob) this case exercises. The case runs when the draft changes
+    /// a matching file, and it satisfies the coverage rule for a newly added file that
+    /// matches. Omit to run the case on every draft build.
+    #[serde(default)]
+    pub covers: Option<String>,
+    /// Shell commands run, in order, in the scratch repository before `run`.
+    #[serde(default)]
+    pub setup: Vec<String>,
+    /// The command under test.
+    pub run: String,
+    /// `success` (default) or `failure`.
+    #[serde(default)]
+    pub expect: SmokeExpect,
+    /// Text that must appear in the command's output. Required when `expect = "failure"`,
+    /// so a crash cannot pass as "refused the bad input".
+    #[serde(default)]
+    pub expect_output: Option<String>,
+    /// Time limit for `run` in seconds. Default: `[smoke] default_timeout_secs`.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// `[smoke]`: end-to-end smoke cases run before a draft is built (v0.17.12.25).
+///
+/// Unit tests pass for behaviour that is wrong in real use; a smoke case runs the real
+/// command against real (scratch) state, including a bad-input case that must be refused.
+/// Absent `[smoke]` means no smoke stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmokeConfig {
+    /// What a failed case does: `block` (default) or `warn`.
+    #[serde(default)]
+    pub on_failure: SmokeOnFailure,
+    /// Files whose ADDITION means "a new command". A draft that adds a file matching one
+    /// of these globs must carry a smoke case whose `covers` matches that file, and at
+    /// least one of those cases must be a refusal (`expect = "failure"`).
+    #[serde(default)]
+    pub new_command_paths: Vec<String>,
+    /// Default time limit per case in seconds. Default: 900.
+    #[serde(default = "default_smoke_timeout")]
+    pub default_timeout_secs: u64,
+    /// The cases.
+    #[serde(default)]
+    pub cases: Vec<SmokeCase>,
+}
+
+fn default_smoke_timeout() -> u64 {
+    900
+}
+
+impl Default for SmokeConfig {
+    fn default() -> Self {
+        SmokeConfig {
+            on_failure: SmokeOnFailure::default(),
+            new_command_paths: Vec::new(),
+            default_timeout_secs: default_smoke_timeout(),
+            cases: Vec::new(),
+        }
+    }
+}
+
+impl SmokeConfig {
+    /// True when nothing is configured: no stage runs.
+    pub fn is_empty(&self) -> bool {
+        self.cases.is_empty() && self.new_command_paths.is_empty()
+    }
+
+    /// Problems that make the configuration unusable (each says what to change).
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for c in &self.cases {
+            if c.name.trim().is_empty() {
+                out.push(
+                    "a [[smoke.cases]] entry has an empty `name`; give every case a unique name"
+                        .to_string(),
+                );
+            } else if !seen.insert(c.name.as_str()) {
+                out.push(format!(
+                    "two [[smoke.cases]] entries are named '{}'; names must be unique",
+                    c.name
+                ));
+            }
+            if c.run.trim().is_empty() {
+                out.push(format!(
+                    "smoke case '{}' has an empty `run`; set the command to test",
+                    c.name
+                ));
+            }
+            if c.expect == SmokeExpect::Failure
+                && c.expect_output
+                    .as_deref()
+                    .is_none_or(|s| s.trim().is_empty())
+            {
+                out.push(format!(
+                    "smoke case '{}' has expect = \"failure\" but no `expect_output`; name the text the refusal must contain, so a crash does not pass as a refusal",
+                    c.name
+                ));
+            }
+        }
+        out
+    }
+
+    /// This project's settings combined with those found in a draft's staging copy:
+    /// the draft may ADD cases (a phase ships its own smoke case) but cannot relax
+    /// the project's settings: `block` wins, `new_command_paths` are united, and a
+    /// case the project already defines keeps the project's definition.
+    pub fn merged_with_staging(&self, staging: &SmokeConfig) -> SmokeConfig {
+        let mut merged = self.clone();
+        if staging.on_failure == SmokeOnFailure::Block {
+            merged.on_failure = SmokeOnFailure::Block;
+        }
+        for p in &staging.new_command_paths {
+            if !merged.new_command_paths.contains(p) {
+                merged.new_command_paths.push(p.clone());
+            }
+        }
+        for c in &staging.cases {
+            if !merged.cases.iter().any(|m| m.name == c.name) {
+                merged.cases.push(c.clone());
+            }
+        }
+        merged
+    }
+}
+
 /// Failure handling strategy for verification commands.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -2269,6 +2434,45 @@ pub struct StagingConfig {
     /// no cap. Default: 20.
     #[serde(default = "default_build_cache_max_gb")]
     pub build_cache_max_gb: f64,
+    /// Cargo builds in a goal run with `CARGO_PROFILE_DEV_DEBUG=0` (no debug
+    /// info) and `CARGO_INCREMENTAL=0` (no incremental cache), which keeps a
+    /// goal's build output to a fraction of the default. An agent that needs a
+    /// debugger sets `[agent_env]` values for these two variables, which win, or
+    /// this is set to `false`. Default: true.
+    #[serde(default = "default_lean_builds")]
+    pub lean_builds: bool,
+    /// Most build output one goal may add, in GB: the growth of the shared build
+    /// cache since the goal started, or the goal's own `target/`. Checked while
+    /// the agent runs; see `goal_build_over_budget`. `0` means no budget.
+    /// Default: 10.
+    #[serde(default = "default_goal_build_max_gb")]
+    pub goal_build_max_gb: f64,
+    /// What happens when a goal is over `goal_build_max_gb`, or free disk falls
+    /// below `min_disk_mb`, while its agent runs: `"stop"` ends the agent (its
+    /// work so far is kept and the draft is built from it) or `"warn"` only
+    /// reports it. Default: `"stop"`.
+    #[serde(default)]
+    pub goal_build_over_budget: BuildBudgetAction,
+}
+
+/// Reaction to a goal build going over its disk budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildBudgetAction {
+    /// End the agent process tree.
+    #[default]
+    Stop,
+    /// Report it and let the agent continue.
+    Warn,
+}
+
+impl BuildBudgetAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Warn => "warn",
+        }
+    }
 }
 
 impl Default for StagingConfig {
@@ -2281,12 +2485,23 @@ impl Default for StagingConfig {
             reclaim_build_output: default_reclaim_build_output(),
             build_cache: default_build_cache(),
             build_cache_max_gb: default_build_cache_max_gb(),
+            lean_builds: default_lean_builds(),
+            goal_build_max_gb: default_goal_build_max_gb(),
+            goal_build_over_budget: BuildBudgetAction::default(),
         }
     }
 }
 
 fn default_build_cache() -> bool {
     true
+}
+
+fn default_lean_builds() -> bool {
+    true
+}
+
+fn default_goal_build_max_gb() -> f64 {
+    10.0
 }
 
 fn default_build_cache_max_gb() -> f64 {
@@ -2493,6 +2708,26 @@ mod tests {
         assert_eq!(c.retention_days, 90);
         assert!(c.archive);
         assert!(!c.model_assist);
+    }
+
+    #[test]
+    fn goal_build_budget_defaults_and_overrides() {
+        let d = WorkflowConfig::default().staging;
+        assert!(d.lean_builds);
+        assert_eq!(d.goal_build_max_gb, 10.0);
+        assert_eq!(d.goal_build_over_budget, BuildBudgetAction::Stop);
+        let c: WorkflowConfig = toml::from_str(
+            "[staging]\nlean_builds = false\ngoal_build_max_gb = 0\ngoal_build_over_budget = \"warn\"\n",
+        )
+        .unwrap();
+        assert!(!c.staging.lean_builds);
+        assert_eq!(c.staging.goal_build_max_gb, 0.0);
+        assert_eq!(c.staging.goal_build_over_budget, BuildBudgetAction::Warn);
+        assert_eq!(BuildBudgetAction::Warn.as_str(), "warn");
+        assert!(toml::from_str::<WorkflowConfig>(
+            "[staging]\ngoal_build_over_budget = \"explode\"\n"
+        )
+        .is_err());
     }
 
     #[test]
@@ -3432,5 +3667,89 @@ on_max_iterations = "fail"
             "unset keys keep their defaults"
         );
         assert_eq!(s.queued_ttl, std::time::Duration::from_secs(86_400));
+    }
+    #[test]
+    fn smoke_config_parses_and_defaults_to_nothing() {
+        assert!(WorkflowConfig::default().smoke.is_empty());
+        let cfg: WorkflowConfig = toml::from_str(
+            r#"
+[smoke]
+on_failure = "warn"
+new_command_paths = ["src/commands/*.rs"]
+
+[[smoke.cases]]
+name = "headline"
+run = "mytool go"
+
+[[smoke.cases]]
+name = "bad-input"
+covers = "src/commands/go.rs"
+setup = ["echo x > f"]
+run = "mytool go --bad"
+expect = "failure"
+expect_output = "refused"
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.smoke.on_failure, SmokeOnFailure::Warn);
+        assert_eq!(cfg.smoke.default_timeout_secs, 900);
+        assert_eq!(cfg.smoke.cases.len(), 2);
+        assert_eq!(cfg.smoke.cases[0].expect, SmokeExpect::Success);
+        assert_eq!(cfg.smoke.cases[1].expect, SmokeExpect::Failure);
+        assert!(cfg.smoke.problems().is_empty());
+    }
+
+    #[test]
+    fn smoke_problems_say_what_to_change() {
+        let cfg: SmokeConfig = toml::from_str(
+            r#"
+[[cases]]
+name = "a"
+run = "x"
+expect = "failure"
+
+[[cases]]
+name = "a"
+run = " "
+"#,
+        )
+        .unwrap();
+        let p = cfg.problems().join("\n");
+        assert!(p.contains("expect_output"), "{p}");
+        assert!(p.contains("names must be unique"), "{p}");
+        assert!(p.contains("empty `run`"), "{p}");
+    }
+
+    #[test]
+    fn a_draft_cannot_relax_the_projects_smoke_settings() {
+        let project: SmokeConfig = toml::from_str(
+            r#"
+new_command_paths = ["a/*.rs"]
+[[cases]]
+name = "keep"
+run = "project-version"
+"#,
+        )
+        .unwrap();
+        let staging: SmokeConfig = toml::from_str(
+            r#"
+on_failure = "warn"
+new_command_paths = ["b/*.rs"]
+[[cases]]
+name = "keep"
+run = "weakened"
+[[cases]]
+name = "added"
+run = "extra"
+"#,
+        )
+        .unwrap();
+        let m = project.merged_with_staging(&staging);
+        assert_eq!(m.on_failure, SmokeOnFailure::Block, "block wins");
+        assert_eq!(m.new_command_paths, vec!["a/*.rs", "b/*.rs"]);
+        assert_eq!(m.cases.len(), 2);
+        assert_eq!(m.cases[0].run, "project-version");
+        assert_eq!(m.cases[1].name, "added");
     }
 }

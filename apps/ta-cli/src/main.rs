@@ -1370,6 +1370,28 @@ enum Commands {
         /// Defaults to the most recent active goal.
         goal_id: Option<String>,
     },
+    /// Run the project's smoke cases by hand (`[[smoke.cases]]` in .ta/workflow.toml).
+    ///
+    /// Each case runs a real command in a scratch git repository and checks that it
+    /// succeeds, or (for a bad-input case) is refused with the expected message. The same
+    /// stage runs automatically before every draft is built.
+    ///
+    /// Examples:
+    ///   ta smoke --list
+    ///   ta smoke
+    ///   ta smoke --case golden-replay-swapped-prompt
+    ///   TA_SMOKE_TA=target/debug/ta ta smoke    # use a prebuilt binary instead of `cargo run`
+    Smoke {
+        /// Run only this case (repeatable). Default: every case.
+        #[arg(long = "case")]
+        cases: Vec<String>,
+        /// List the cases and exit.
+        #[arg(long)]
+        list: bool,
+        /// Project (or goal staging) directory to test. Default: this project.
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
     /// Language-aware static analysis with optional agent correction loop (v0.15.14.3).
     ///
     /// Reads `[analysis.<lang>]` configuration from `.ta/workflow.toml` and runs
@@ -2552,6 +2574,10 @@ fn dispatch_raw(
             None => commands::sync::execute(config),
         },
         Commands::Verify { goal_id } => commands::verify::execute(config, goal_id.as_deref()),
+        Commands::Smoke { cases, list, dir } => {
+            let project = dir.clone().unwrap_or_else(|| config.workspace_root.clone());
+            commands::smoke::execute(&project, cases, *list)
+        }
         Commands::Analysis { command } => commands::analysis::execute(command, config),
         Commands::Cleanup {
             dry_run,

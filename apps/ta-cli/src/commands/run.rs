@@ -4435,6 +4435,15 @@ pub fn execute(
             );
         }
     }
+    // Lean cargo builds (no debug info, no incremental cache): the agent gets
+    // them in its environment and the verification gates get the same ones.
+    if let Some(src_dir) = &goal.source_dir {
+        let has_cargo_toml =
+            src_dir.join("Cargo.toml").exists() || staging_path.join("Cargo.toml").exists();
+        if has_cargo_toml {
+            super::build_cache::apply_lean_build_env(config, &staging_path, &mut agent_config.env);
+        }
+    }
 
     // Emit GoalStarted event to FsEventStore (v0.9.4.1).
     // Skip when reusing an existing goal — the MCP tool already emitted GoalStarted.
@@ -5842,7 +5851,10 @@ pub fn execute(
                 if !verification_warnings.is_empty() {
                     if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
                         if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.verification_warnings = verification_warnings;
+                            super::smoke::merge_warnings(
+                                &mut pkg.verification_warnings,
+                                &verification_warnings,
+                            );
                             let _ = super::draft::save_package(config, &pkg);
                         }
                     }
@@ -5852,7 +5864,10 @@ pub fn execute(
                 if !validation_log.is_empty() {
                     if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
                         if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.validation_log = validation_log;
+                            super::smoke::merge_validation_log(
+                                &mut pkg.validation_log,
+                                &validation_log,
+                            );
                             let _ = super::draft::save_package(config, &pkg);
                         }
                     }
@@ -7460,6 +7475,28 @@ fn launch_agent_via_runtime(
         }
     }
 
+    // Watch the goal's build output while the agent runs: stop the agent before a
+    // runaway build fills the disk (`[staging] goal_build_max_gb`, `min_disk_mb`,
+    // `goal_build_over_budget`). The interactive PTY launch path does not use this
+    // function and is not watched.
+    let mut budget_monitor = match (
+        project_root_opt.as_deref(),
+        handle.pid(),
+        super::build_cache::agent_build_dir(staging_path),
+    ) {
+        (Some(root), Some(pid), Some((dir, baseline))) => {
+            super::build_budget::BudgetMonitor::start(
+                goal_id.to_string(),
+                pid,
+                dir,
+                baseline,
+                super::build_cache::budget_settings(root),
+                super::build_budget::POLL_INTERVAL,
+            )
+        }
+        _ => None,
+    };
+
     // Attach Windows Job Object guard (v0.16.4 / v0.16.4.2): assign the agent process
     // to a Job Object with KILL_ON_JOB_CLOSE for process-tree teardown on TA exit.
     // Applied for both WindowsJobObject and WindowsAppContainer providers —
@@ -7544,6 +7581,15 @@ fn launch_agent_via_runtime(
             return Err(std::io::Error::other(format!("Wait failed: {}", e)));
         }
     };
+
+    // The agent has exited: stop watching its build output. If the monitor ended
+    // the agent, say so here, where the next steps (draft build) start.
+    if let Some(message) = budget_monitor.take().and_then(|m| m.finish()) {
+        println!(
+            "Agent stopped: build output over budget (goal {goal_id}). The agent was ended \
+             early; its work so far is kept and the draft is built from it.\n{message}"
+        );
+    }
 
     // Emit AgentExited event.
     {
