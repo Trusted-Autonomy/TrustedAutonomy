@@ -41,6 +41,7 @@ pub mod phase_release;
 pub mod phase_selector;
 pub mod process;
 pub mod provenance;
+pub mod release_set;
 pub mod reviewer;
 pub mod security;
 pub mod social_audit;

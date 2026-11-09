@@ -44,6 +44,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub verify: VerifyConfig,
 
+    /// `ta release-set` configuration (one open release per project).
+    #[serde(default)]
+    pub release_set: ReleaseSetConfig,
+
     /// End-to-end smoke cases run before a draft is built (v0.17.12.25)
     #[serde(default)]
     pub smoke: SmokeConfig,
@@ -1581,6 +1585,12 @@ pub struct GitConfig {
     /// continuation. Set via `.ta/workflow.toml`'s `[submit.git] build_milestone_label`.
     #[serde(default)]
     pub build_milestone_label: Option<String>,
+
+    /// Release branch every goal commits onto while a release is open
+    /// (`ta release-set`). Never read from `.ta/workflow.toml`: it is filled in
+    /// at run time by [`crate::routing::resolve_route`] from `.ta/release-set.json`.
+    #[serde(skip)]
+    pub release_branch: Option<String>,
 }
 
 impl Default for GitConfig {
@@ -1594,8 +1604,24 @@ impl Default for GitConfig {
             auto_merge: false,
             protected_branches: vec![],
             build_milestone_label: None,
+            release_branch: None,
         }
     }
+}
+
+/// `ta release-set` configuration.
+///
+/// ```toml
+/// [release_set]
+/// gate_commands = ["scripts/ci-local.sh"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReleaseSetConfig {
+    /// Commands `ta release-set cut` runs on the release branch (after merging the
+    /// latest main) before it pushes. Same formats as `[verify] commands`. When
+    /// empty, `[verify] commands` is the gate. The cut is refused if any fails.
+    #[serde(default, deserialize_with = "deserialize_verify_commands")]
+    pub gate_commands: Vec<VerifyCommand>,
 }
 
 // Serde default functions

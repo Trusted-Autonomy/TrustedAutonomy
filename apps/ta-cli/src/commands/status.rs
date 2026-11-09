@@ -922,6 +922,7 @@ mod tests {
             start_branch: None,
             objective_file_content: None,
             model_effort: None,
+            release: None,
             experiment_id: None,
             experiment_arm: None,
             experiment_pair_id: None,
