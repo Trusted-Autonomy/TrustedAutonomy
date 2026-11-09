@@ -1,0 +1,60 @@
+{
+  "replay_id": "8506681b-b1eb-4092-9029-8e9e814d884f",
+  "golden_id": "wiki-read-side-off-switch-c3118499",
+  "tag": "usage-verify-none",
+  "set": [],
+  "goal_id": "c52ae863-4350-43a2-b4f0-764460ab1529",
+  "started_at": "2026-10-22T05:13:43.989185Z",
+  "completed_at": "2026-10-22T05:34:33.727853Z",
+  "outcome": "pr_ready",
+  "cost_usd": 0.804138,
+  "cost_estimated": false,
+  "input_tokens": 52,
+  "output_tokens": 17483,
+  "cache_read_tokens": 2214840,
+  "cache_creation_tokens": 101930,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 7,
+  "lines_added": 318,
+  "lines_removed": 1,
+  "diff_sha256": "b24bb17213120153112714c62339cd9d348978e422b73f0b7d3d3afe4a526746",
+  "similarity": 0.01234447900466563,
+  "check_passed": null,
+  "check_run": null,
+  "run_index": 4,
+  "recomputed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "not chosen",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": false,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  },
+  "usage": {
+    "before": {
+      "plan_usage_pct": null,
+      "budget_used_pct": null,
+      "plan_captured_at": null,
+      "taken_at": "2026-10-22T05:13:43.988867Z"
+    },
+    "after": {
+      "plan_usage_pct": null,
+      "budget_used_pct": 0.4,
+      "plan_captured_at": null,
+      "taken_at": "2026-10-22T05:34:33.727853Z"
+    },
+    "plan_usage_pct_delta": null,
+    "budget_used_pct_delta": null,
+    "note": "plan_usage_pct was unavailable before or after the run (no fresh snapshot), so no plan delta is reported. budget_used_pct is unavailable (no [budget] configured), so no budget delta is reported."
+  }
+}

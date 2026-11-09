@@ -1,0 +1,25 @@
+{
+  "replay_id": "195165d7-37d2-429c-a542-9fd78cd244f6",
+  "golden_id": "automatic-pruning-of-merged-branches-and-8a27eb3b",
+  "tag": "none",
+  "set": [
+    "optimizers.input.use=none"
+  ],
+  "goal_id": "0b9e6211-3d18-4e78-a311-745fdfb899b8",
+  "started_at": "2026-10-17T15:37:09.466388Z",
+  "completed_at": "2026-10-17T15:54:38.754408Z",
+  "outcome": "pr_ready",
+  "cost_usd": 1.8791967,
+  "cost_estimated": false,
+  "input_tokens": 72,
+  "output_tokens": 55243,
+  "cache_read_tokens": 3908592,
+  "cache_creation_tokens": 209477,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 18,
+  "diff_sha256": "e3383d18f9212d87d7752bbba94ff5949ac7570c6bec22ae27a3ffde6ce50298",
+  "similarity": 0.07657487740475293,
+  "check_passed": null,
+  "failure": null
+}

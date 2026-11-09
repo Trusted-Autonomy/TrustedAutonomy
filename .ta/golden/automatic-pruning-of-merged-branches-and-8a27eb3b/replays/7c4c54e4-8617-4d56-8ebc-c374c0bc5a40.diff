@@ -1,0 +1,1964 @@
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5258,6 +5258,7 @@
+  "ta-changeset",
+  "ta-goal",
+  "ta-lifecycle",
++ "ta-submit",
+  "tempfile",
+  "tracing",
+  "uuid",
+--- a/apps/ta-cli/src/commands/cleanup.rs
++++ b/apps/ta-cli/src/commands/cleanup.rs
+@@ -104,6 +104,12 @@
+         }
+     }
+ 
++    fn branches(&self) -> Option<&dyn ta_cleanup::BranchTruth> {
++        self.adapter
++            .as_ref()
++            .map(|a| a as &dyn ta_cleanup::BranchTruth)
++    }
++
+     fn phase_done(&self, phase: &str) -> bool {
+         let Ok(text) = std::fs::read_to_string(self.root.join("PLAN.md")) else {
+             return false;
+@@ -324,6 +330,7 @@
+         retention_days: wf.cleanup.retention_days,
+         archive: wf.cleanup.archive,
+         model_assist: wf.cleanup.model_assist,
++        prune_branches: wf.cleanup.prune_branches,
+     }
+ }
+ 
+@@ -419,6 +426,36 @@
+     })
+ }
+ 
++/// Prune finished branches and worktrees now: safe actions only, nothing asked.
++/// Called after a PR is observed merged. Never fails the caller: a problem is
++/// printed with what to do about it. Does nothing when `[cleanup] prune_branches`
++/// is false.
++pub fn prune_branches_after_merge(config: &GatewayConfig) {
++    let wf = WorkflowConfig::load_or_default(&config.workspace_root.join(".ta/workflow.toml"));
++    if !wf.cleanup.prune_branches {
++        return;
++    }
++    match run_auto_safe(config, vec![Category::Branches]) {
++        Ok(r) => {
++            for d in &r.done {
++                println!("[cleanup] {}", d.summary);
++            }
++            for (id, err) in &r.failed {
++                eprintln!("[warn] cleanup could not prune {id}: {err}. Run `ta cleanup --only branches --dry-run` to see why.");
++            }
++            if !r.questions_open.is_empty() {
++                println!(
++                    "[cleanup] {} branch(es) need a decision. Run `ta cleanup --only branches`.",
++                    r.questions_open.len()
++                );
++            }
++        }
++        Err(e) => eprintln!(
++            "[warn] branch cleanup failed: {e}. Run `ta cleanup --only branches --dry-run` for details."
++        ),
++    }
++}
++
+ /// Read-only findings for doctor warnings and health signals. `online = false`
+ /// skips VCS lookups.
+ pub fn findings(
+@@ -478,7 +515,9 @@
+         )
+     })?;
+     if report.findings.is_empty() {
+-        println!("Nothing to clean up. Checked drafts, goals, staging, locks and old records.");
++        println!(
++            "Nothing to clean up. Checked drafts, goals, staging, locks, branches and old records."
++        );
+         return Ok(());
+     }
+     print!("{}", ta_cleanup::render_report(&report, dry_run));
+--- a/apps/ta-cli/src/commands/draft.rs
++++ b/apps/ta-cli/src/commands/draft.rs
+@@ -12952,6 +12952,9 @@
+         }
+     }
+ 
++    // The PR is merged: prune the branch and worktree that carried it.
++    super::cleanup::prune_branches_after_merge(config);
++
+     println!(
+         "\n✓ Draft {} merged and synced.",
+         &package_id.to_string()[..8]
+@@ -13060,6 +13063,9 @@
+                         }
+                     }
+ 
++                    // The PR is merged: prune the branch and worktree that carried it.
++                    super::cleanup::prune_branches_after_merge(config);
++
+                     println!(
+                         "\n✓ Draft {} merged and synced.",
+                         &package_id.to_string()[..8]
+--- a/apps/ta-cli/src/main.rs
++++ b/apps/ta-cli/src/main.rs
+@@ -683,7 +683,7 @@
+     ///   ta cleanup --dry-run               # show findings and reasons, change nothing
+     ///   ta cleanup                         # act on safe findings, ask about the rest
+     ///   ta cleanup --yes                   # also accept every proposal (never answers questions)
+-    ///   ta cleanup --only drafts,staging   # limit to drafts|staging|goals|locks|archive
++    ///   ta cleanup --only drafts,staging   # limit to drafts|staging|goals|locks|archive|branches
+     ///   ta cleanup --explain 025f676e      # full evidence for one finding
+     Cleanup {
+         /// Show findings and what would happen; change nothing.
+--- a/crates/ta-cleanup/Cargo.toml
++++ b/crates/ta-cleanup/Cargo.toml
+@@ -21,6 +21,7 @@
+ ta-changeset = { path = "../ta-changeset", version = "0.17.12-alpha.5" }
+ ta-goal = { path = "../ta-goal", version = "0.17.12-alpha.5" }
+ ta-audit = { path = "../ta-audit", version = "0.17.12-alpha.5" }
++ta-submit = { path = "../ta-submit", version = "0.17.12-alpha.5" }
+ ta-lifecycle = { path = "../ta-lifecycle", version = "0.17.12-alpha.5" }
+ 
+ [dev-dependencies]
+--- a/crates/ta-cleanup/src/act.rs
++++ b/crates/ta-cleanup/src/act.rs
+@@ -139,6 +139,51 @@
+             e.truth.release_phase_claim(phase)?;
+             Ok((format!("released daemon claim on phase {phase}"), 0))
+         }
++        Action::DeleteBranch {
++            name,
++            tip,
++            worktree,
++            reason,
++        } => {
++            let Some(bt) = e.truth.branches() else {
++                anyhow::bail!("no VCS adapter with branches is available to delete '{name}'");
++            };
++            if let Some(wt) = worktree {
++                // Same cleanliness check as the scan, repeated right before removal.
++                let dirty = bt.uncommitted_files(wt)?;
++                if !dirty.is_empty() {
++                    anyhow::bail!(
++                        "worktree {} now has {} uncommitted or untracked file(s) ({}); not removing it or branch '{name}'",
++                        wt.display(),
++                        dirty.len(),
++                        dirty.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
++                    );
++                }
++                bt.remove_worktree(wt)?;
++            }
++            bt.delete_branch(name, tip)?;
++            let summary = format!(
++                "deleted branch {name} (tip {tip}{}). Recover with `git branch {name} {tip}`",
++                worktree
++                    .as_ref()
++                    .map(|w| format!(", worktree {} removed", w.display()))
++                    .unwrap_or_default()
++            );
++            if let Err(err) = crate::state::append_jsonl(
++                &e.paths.cleanup_dir().join("branches.jsonl"),
++                &serde_json::json!({
++                    "at": Utc::now().to_rfc3339(),
++                    "branch": name,
++                    "tip": tip,
++                    "worktree": worktree.as_ref().map(|w| w.display().to_string()),
++                    "reason": reason,
++                    "recover": format!("git branch {name} {tip}"),
++                }),
++            ) {
++                tracing::warn!(branch = %name, tip = %tip, error = %err, "cleanup: branch deleted but could not write .ta/cleanup/branches.jsonl; the audit log still has the tip");
++            }
++            Ok((summary, 0))
++        }
+         Action::ArchiveRecords { goals, drafts } => {
+             let n = crate::archive::archive_records(&e.paths, goals, drafts)?;
+             Ok((format!("archived {n} record(s) under .ta/archive/"), 0))
+--- /dev/null
++++ b/crates/ta-cleanup/src/branch_tests.rs
+@@ -0,0 +1,491 @@
++//! `branches` group tests: real git repositories in tempdirs with a local bare
++//! repository as `origin`; only the PR state is faked.
++
++use std::collections::HashMap;
++use std::path::{Path, PathBuf};
++use std::process::Command;
++
++use ta_submit::{GitAdapter, SourceAdapter};
++
++use crate::act::FileCloser;
++use crate::*;
++
++fn git(dir: &Path, args: &[&str]) -> String {
++    let out = Command::new("git")
++        .args([
++            "-c",
++            "user.name=Test",
++            "-c",
++            "user.email=test@example.com",
++            "-c",
++            "commit.gpgsign=false",
++            "-c",
++            "init.defaultBranch=main",
++        ])
++        .args(args)
++        .current_dir(dir)
++        .env_remove("GIT_DIR")
++        .env_remove("GIT_WORK_TREE")
++        .output()
++        .expect("git runs");
++    assert!(
++        out.status.success(),
++        "git {args:?} in {} failed: {}",
++        dir.display(),
++        String::from_utf8_lossy(&out.stderr)
++    );
++    String::from_utf8_lossy(&out.stdout).trim().to_string()
++}
++
++/// PR state per branch on top of the real git adapter.
++struct FakePrs {
++    git: Box<dyn SourceAdapter>,
++    prs: HashMap<String, BranchPr>,
++}
++
++impl BranchTruth for FakePrs {
++    fn inventory(&self) -> anyhow::Result<BranchInventory> {
++        self.git.inventory()
++    }
++    fn pr_for_branch(&self, branch: &str) -> BranchPr {
++        self.prs.get(branch).cloned().unwrap_or(BranchPr::NotFound)
++    }
++    fn is_ancestor(&self, a: &str, d: &str) -> anyhow::Result<bool> {
++        BranchTruth::is_ancestor(&self.git, a, d)
++    }
++    fn uncommitted_files(&self, p: &Path) -> anyhow::Result<Vec<String>> {
++        BranchTruth::uncommitted_files(&self.git, p)
++    }
++    fn delete_branch(&self, n: &str, t: &str) -> anyhow::Result<()> {
++        self.git.delete_branch(n, t)
++    }
++    fn remove_worktree(&self, p: &Path) -> anyhow::Result<()> {
++        BranchTruth::remove_worktree(&self.git, p)
++    }
++}
++
++struct Truth(FakePrs);
++
++impl GroundTruth for Truth {
++    fn review_state(&self, _: &str) -> ReviewState {
++        ReviewState::Unknown("not used".into())
++    }
++    fn phase_done(&self, _: &str) -> bool {
++        false
++    }
++    fn branches(&self) -> Option<&dyn BranchTruth> {
++        Some(&self.0)
++    }
++}
++
++struct Repo {
++    _dir: tempfile::TempDir,
++    work: PathBuf,
++    origin: PathBuf,
++    prs: HashMap<String, BranchPr>,
++}
++
++fn merged(n: &str, head: &str) -> BranchPr {
++    BranchPr::Found {
++        review_id: n.into(),
++        state: ReviewState::Merged,
++        head_sha: Some(head.into()),
++    }
++}
++
++impl Repo {
++    fn new() -> Self {
++        let dir = tempfile::tempdir().unwrap();
++        let origin = dir.path().join("origin.git");
++        let work = dir.path().join("work");
++        std::fs::create_dir_all(&origin).unwrap();
++        std::fs::create_dir_all(&work).unwrap();
++        git(&origin, &["init", "--bare"]);
++        git(&work, &["init"]);
++        git(&work, &["checkout", "-b", "main"]);
++        git(
++            &work,
++            &["remote", "add", "origin", origin.to_str().unwrap()],
++        );
++        std::fs::write(work.join("a.txt"), "base\n").unwrap();
++        git(&work, &["add", "."]);
++        git(&work, &["commit", "-m", "base"]);
++        git(&work, &["push", "-u", "origin", "main"]);
++        Repo {
++            _dir: dir,
++            work,
++            origin,
++            prs: HashMap::new(),
++        }
++    }
++
++    fn commit_file(&self, name: &str, body: &str) -> String {
++        std::fs::write(self.work.join(name), body).unwrap();
++        git(&self.work, &["add", "."]);
++        git(&self.work, &["commit", "-m", name]);
++        git(&self.work, &["rev-parse", "HEAD"])
++    }
++
++    /// A feature branch with one commit, then back to main. Returns its tip.
++    fn feature(&self, name: &str) -> String {
++        git(&self.work, &["checkout", "-b", name]);
++        let tip = self.commit_file(&format!("{name}.txt"), "feature\n");
++        git(&self.work, &["checkout", "main"]);
++        tip
++    }
++
++    /// Main moves on with an unrelated commit, as after a squash merge.
++    fn advance_main(&self) {
++        self.commit_file("main-moves.txt", "squashed elsewhere\n");
++    }
++
++    fn has_branch(&self, name: &str) -> bool {
++        !git(&self.work, &["branch", "--list", name]).is_empty()
++    }
++
++    fn adapter(&self) -> Box<dyn SourceAdapter> {
++        Box::new(GitAdapter::new(&self.work))
++    }
++
++    fn run(&self, opts: RunOptions) -> Report {
++        let truth = Truth(FakePrs {
++            git: self.adapter(),
++            prs: self.prs.clone(),
++        });
++        let paths = Paths::for_project(&self.work);
++        let e = Engine {
++            paths,
++            settings: Settings::default(),
++            truth: &truth,
++            closer: &FileCloser,
++            assistant: None,
++        };
++        run(&e, &opts, None).unwrap()
++    }
++
++    fn run_branches(&self) -> Report {
++        self.run(RunOptions {
++            only: Some(vec![Category::Branches]),
++            auto_safe_only: true,
++            ..Default::default()
++        })
++    }
++}
++
++fn finding<'a>(r: &'a Report, id: &str) -> &'a Finding {
++    r.findings.iter().find(|f| f.id == id).unwrap_or_else(|| {
++        panic!(
++            "no finding {id} in {:?}",
++            r.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
++        )
++    })
++}
++
++#[test]
++fn merged_squash_branch_is_deleted_and_logged_with_its_tip() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-a");
++    repo.advance_main(); // tip is NOT an ancestor of main now: squash merge shape
++    repo.prs.insert("feat-a".into(), merged("7", &tip));
++
++    let r = repo.run_branches();
++    let f = finding(&r, "branch:feat-a");
++    assert_eq!(f.verdict, Verdict::AutoSafe, "{}", f.reason);
++    assert!(f.reason.contains("PR #7 is merged"), "{}", f.reason);
++    assert!(!repo.has_branch("feat-a"), "branch should be gone");
++    assert!(r.failed.is_empty(), "{:?}", r.failed);
++
++    let summary = &r.done[0].summary;
++    assert!(
++        summary.contains("feat-a") && summary.contains(&tip),
++        "{summary}"
++    );
++    let log = std::fs::read_to_string(repo.work.join(".ta/cleanup/branches.jsonl")).unwrap();
++    assert!(
++        log.contains("\"branch\":\"feat-a\"") && log.contains(&tip),
++        "{log}"
++    );
++    assert!(log.contains(&format!("git branch feat-a {tip}")), "{log}");
++    let audit = std::fs::read_to_string(repo.work.join(".ta/audit.jsonl")).unwrap();
++    assert!(audit.contains(&tip), "audit has the tip: {audit}");
++
++    // The logged recovery command really recovers it.
++    git(&repo.work, &["branch", "feat-a", &tip]);
++    assert!(repo.has_branch("feat-a"));
++}
++
++#[test]
++fn branch_that_is_an_ancestor_of_default_is_deleted_without_a_pr() {
++    let repo = Repo::new();
++    repo.feature("feat-ff");
++    git(&repo.work, &["merge", "--ff-only", "feat-ff"]);
++    repo.advance_main();
++    let r = repo.run_branches();
++    assert_eq!(finding(&r, "branch:feat-ff").verdict, Verdict::AutoSafe);
++    assert!(!repo.has_branch("feat-ff"));
++}
++
++#[test]
++fn open_pr_branch_is_kept() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-open");
++    repo.advance_main();
++    repo.prs.insert(
++        "feat-open".into(),
++        BranchPr::Found {
++            review_id: "9".into(),
++            state: ReviewState::Open,
++            head_sha: Some(tip),
++        },
++    );
++    let r = repo.run_branches();
++    let f = finding(&r, "branch:feat-open");
++    assert_eq!(f.verdict, Verdict::Skip);
++    assert!(f.reason.contains("PR #9 is still open"), "{}", f.reason);
++    assert!(repo.has_branch("feat-open"));
++    assert!(r.done.is_empty());
++}
++
++#[test]
++fn branch_with_commits_beyond_the_pr_head_is_a_question() {
++    let mut repo = Repo::new();
++    let pr_head = repo.feature("feat-extra");
++    repo.prs.insert("feat-extra".into(), merged("11", &pr_head));
++    git(&repo.work, &["checkout", "feat-extra"]);
++    repo.commit_file("later.txt", "work after the PR was merged\n");
++    git(&repo.work, &["checkout", "main"]);
++    repo.advance_main();
++
++    let r = repo.run_branches();
++    let f = finding(&r, "branch:feat-extra");
++    assert_eq!(f.verdict, Verdict::Ask);
++    assert!(
++        f.reason.contains("commits beyond the PR head"),
++        "{}",
++        f.reason
++    );
++    assert!(f.options.iter().any(|o| o.key == "keep"));
++    assert!(repo.has_branch("feat-extra"));
++    assert!(r.questions_open.contains(&"branch:feat-extra".to_string()));
++}
++
++#[test]
++fn branch_without_a_pr_is_a_question() {
++    let repo = Repo::new();
++    repo.feature("feat-nopr");
++    repo.advance_main();
++    let r = repo.run_branches();
++    let f = finding(&r, "branch:feat-nopr");
++    assert_eq!(f.verdict, Verdict::Ask);
++    assert!(f.reason.contains("no PR"), "{}", f.reason);
++    assert!(repo.has_branch("feat-nopr"));
++}
++
++#[test]
++fn unreadable_pr_state_is_a_question_not_a_deletion() {
++    let mut repo = Repo::new();
++    repo.feature("feat-unknown");
++    repo.advance_main();
++    repo.prs.insert(
++        "feat-unknown".into(),
++        BranchPr::Unknown("gh is not logged in".into()),
++    );
++    let r = repo.run_branches();
++    let f = finding(&r, "branch:feat-unknown");
++    assert_eq!(f.verdict, Verdict::Ask);
++    assert!(f.reason.contains("gh is not logged in"), "{}", f.reason);
++    assert!(repo.has_branch("feat-unknown"));
++}
++
++#[test]
++fn dirty_worktree_is_a_question_with_the_file_list() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-wt");
++    repo.advance_main();
++    repo.prs.insert("feat-wt".into(), merged("12", &tip));
++    let wt = repo.work.parent().unwrap().join("wt-dirty");
++    git(
++        &repo.work,
++        &["worktree", "add", wt.to_str().unwrap(), "feat-wt"],
++    );
++    std::fs::write(wt.join("scratch.txt"), "not committed\n").unwrap();
++
++    let r = repo.run_branches();
++    let f = finding(&r, "branch:feat-wt");
++    assert_eq!(f.verdict, Verdict::Ask);
++    let text = format!("{} {:?}", f.reason, f.evidence);
++    assert!(text.contains("scratch.txt"), "{text}");
++    assert!(
++        f.options.iter().all(|o| o.key == "keep"),
++        "no delete offered"
++    );
++    assert!(repo.has_branch("feat-wt"));
++    assert!(wt.exists(), "worktree untouched");
++    assert!(wt.join("scratch.txt").exists());
++}
++
++#[test]
++fn clean_worktree_is_removed_together_with_its_merged_branch() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-clean");
++    repo.advance_main();
++    repo.prs.insert("feat-clean".into(), merged("13", &tip));
++    let wt = repo.work.parent().unwrap().join("wt-clean");
++    git(
++        &repo.work,
++        &["worktree", "add", wt.to_str().unwrap(), "feat-clean"],
++    );
++
++    let r = repo.run_branches();
++    assert_eq!(finding(&r, "branch:feat-clean").verdict, Verdict::AutoSafe);
++    assert!(r.failed.is_empty(), "{:?}", r.failed);
++    assert!(!wt.exists(), "worktree directory removed");
++    assert!(!repo.has_branch("feat-clean"));
++    assert!(!git(&repo.work, &["worktree", "list"]).contains("wt-clean"));
++}
++
++#[test]
++fn current_and_default_branches_are_never_touched() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-cur");
++    repo.advance_main();
++    repo.prs.insert("feat-cur".into(), merged("14", &tip));
++    // Even a fully merged PR does not make the checked-out branch deletable.
++    git(&repo.work, &["checkout", "feat-cur"]);
++    repo.prs.insert("main".into(), merged("1", &tip));
++
++    let r = repo.run_branches();
++    assert!(
++        r.findings
++            .iter()
++            .all(|f| f.id != "branch:feat-cur" && f.id != "branch:main"),
++        "{:?}",
++        r.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
++    );
++    assert!(repo.has_branch("feat-cur") && repo.has_branch("main"));
++    assert!(r.done.is_empty());
++}
++
++#[test]
++fn delete_refuses_a_branch_that_moved_since_the_scan() {
++    let repo = Repo::new();
++    let old_tip = repo.feature("feat-moved");
++    git(&repo.work, &["checkout", "feat-moved"]);
++    repo.commit_file("more.txt", "new work\n");
++    git(&repo.work, &["checkout", "main"]);
++    let err = repo
++        .adapter()
++        .delete_local_branch("feat-moved", &old_tip)
++        .unwrap_err()
++        .to_string();
++    assert!(err.contains("moved since it was scanned"), "{err}");
++    assert!(repo.has_branch("feat-moved"));
++}
++
++#[test]
++fn delete_refuses_the_current_branch() {
++    let repo = Repo::new();
++    let tip = git(&repo.work, &["rev-parse", "main"]);
++    let err = repo
++        .adapter()
++        .delete_local_branch("main", &tip)
++        .unwrap_err()
++        .to_string();
++    assert!(err.contains("current branch"), "{err}");
++}
++
++#[test]
++fn remote_branch_with_closed_pr_is_reported_never_deleted() {
++    let mut repo = Repo::new();
++    repo.feature("feat-abandoned");
++    git(&repo.work, &["push", "origin", "feat-abandoned"]);
++    git(&repo.work, &["fetch", "origin"]);
++    repo.prs.insert(
++        "feat-abandoned".into(),
++        BranchPr::Found {
++            review_id: "5".into(),
++            state: ReviewState::Closed,
++            head_sha: None,
++        },
++    );
++    let r = repo.run_branches();
++    let f = finding(&r, "remote-branch:feat-abandoned");
++    assert_eq!(f.verdict, Verdict::Skip);
++    assert!(f.reason.contains("closed without merging"), "{}", f.reason);
++    let text = render_report(&r, false);
++    assert!(text.contains("remote-branch:feat-abandoned"), "{text}");
++    // Still on the remote.
++    let remote = git(&repo.origin, &["branch", "--list", "feat-abandoned"]);
++    assert!(remote.contains("feat-abandoned"), "{remote}");
++}
++
++#[test]
++fn dry_run_shows_reasons_and_changes_nothing() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-dry");
++    repo.advance_main();
++    repo.prs.insert("feat-dry".into(), merged("21", &tip));
++    let r = repo.run(RunOptions {
++        dry_run: true,
++        only: Some(vec![Category::Branches]),
++        ..Default::default()
++    });
++    assert!(repo.has_branch("feat-dry"));
++    assert!(r.done.is_empty());
++    let text = render_report(&r, true);
++    assert!(
++        text.contains("feat-dry") && text.contains("PR #21 is merged"),
++        "{text}"
++    );
++    assert!(!repo.work.join(".ta/cleanup/branches.jsonl").exists());
++}
++
++#[test]
++fn group_is_skipped_when_disabled_unless_asked_for_by_name() {
++    let mut repo = Repo::new();
++    let tip = repo.feature("feat-cfg");
++    repo.advance_main();
++    repo.prs.insert("feat-cfg".into(), merged("30", &tip));
++    let truth = Truth(FakePrs {
++        git: repo.adapter(),
++        prs: repo.prs.clone(),
++    });
++    let e = Engine {
++        paths: Paths::for_project(&repo.work),
++        settings: Settings {
++            prune_branches: false,
++            ..Settings::default()
++        },
++        truth: &truth,
++        closer: &FileCloser,
++        assistant: None,
++    };
++    assert!(scan_findings(&e, None).unwrap().is_empty());
++    assert!(!scan_findings(&e, Some(&[Category::Branches]))
++        .unwrap()
++        .is_empty());
++}
++
++#[test]
++fn no_adapter_branches_means_no_findings() {
++    struct Bare;
++    impl GroundTruth for Bare {
++        fn review_state(&self, _: &str) -> ReviewState {
++            ReviewState::Unknown("none".into())
++        }
++        fn phase_done(&self, _: &str) -> bool {
++            false
++        }
++    }
++    let dir = tempfile::tempdir().unwrap();
++    let e = Engine {
++        paths: Paths::for_project(dir.path()),
++        settings: Settings::default(),
++        truth: &Bare,
++        closer: &FileCloser,
++        assistant: None,
++    };
++    assert!(scan_findings(&e, Some(&[Category::Branches]))
++        .unwrap()
++        .is_empty());
++}
+--- /dev/null
++++ b/crates/ta-cleanup/src/branches.rs
+@@ -0,0 +1,383 @@
++//! The `branches` group: local branches (and their worktrees) whose work has
++//! landed, and remote branches whose PR was closed unmerged.
++//!
++//! Ground truth is the PR state from the VCS adapter, never `git branch -d` or
++//! `git cherry` (a squash merge rewrites patch ids, so both call finished
++//! branches unmerged). A local branch is deleted without asking only when
++//!
++//! * its tip is a strict ancestor of the default branch, or
++//! * its PR is merged and the tip is at or behind the PR head (no commits of
++//!   its own beyond what the PR merged),
++//!
++//! and, if it is checked out in a linked worktree, that worktree has no
++//! uncommitted or untracked files. Everything else is kept or put to a person.
++
++use std::cell::RefCell;
++use std::collections::HashMap;
++
++use crate::model::*;
++use crate::scan::{mk, Scan};
++
++/// At most this many remote branches are looked up per scan. Each lookup is a
++/// network call, and `delete_branch_on_merge` keeps the real number small.
++const MAX_REMOTE_LOOKUPS: usize = 50;
++
++fn short_sha(s: &str) -> &str {
++    &s[..s.len().min(8)]
++}
++
++pub(crate) fn branches(s: &Scan, out: &mut Vec<Finding>) {
++    let Some(truth) = s.e.truth.branches() else {
++        return;
++    };
++    let inv = match truth.inventory() {
++        Ok(i) => i,
++        Err(e) => {
++            tracing::warn!(error = %e, "cleanup: could not inspect branches; skipping the branches group");
++            return;
++        }
++    };
++    let default_tip = inv
++        .default_branch
++        .as_deref()
++        .and_then(|d| inv.branches.iter().find(|b| b.name == d))
++        .map(|b| b.tip.clone());
++
++    let pr_cache: RefCell<HashMap<String, BranchPr>> = RefCell::new(HashMap::new());
++    let pr_for = |name: &str| -> BranchPr {
++        if let Some(hit) = pr_cache.borrow().get(name) {
++            return hit.clone();
++        }
++        let pr = truth.pr_for_branch(name);
++        pr_cache.borrow_mut().insert(name.to_string(), pr.clone());
++        pr
++    };
++
++    for b in &inv.branches {
++        if Some(&b.name) == inv.default_branch.as_ref()
++            || Some(&b.name) == inv.current_branch.as_ref()
++        {
++            continue;
++        }
++        let tip7 = short_sha(&b.tip);
++        let wt = inv
++            .worktrees
++            .iter()
++            .find(|w| w.branch.as_deref() == Some(b.name.as_str()));
++        let mut evidence = vec![Evidence::new("git", format!("tip {tip7}"))];
++        let mut facts: Vec<(&str, String)> = vec![("tip", b.tip.clone())];
++        if let Some(w) = wt {
++            evidence.push(Evidence::new(
++                "git",
++                format!("checked out in worktree {}", w.path.display()),
++            ));
++        }
++
++        // Landed: Ok(why) or Err((verdict, why not)).
++        let mut landed: Result<String, (Verdict, String)> = Err((
++            Verdict::Ask,
++            "no PR was found for this branch and it is not in the default branch".into(),
++        ));
++        let mut resolved = false;
++
++        if let (Some(dt), Some(db)) = (&default_tip, &inv.default_branch) {
++            // Equal tips are ambiguous (a fresh branch looks the same as one fast-forwarded
++            // into the default), so only a strict ancestor counts.
++            if *dt != b.tip && matches!(truth.is_ancestor(&b.tip, dt), Ok(true)) {
++                landed = Ok(format!("its tip {tip7} is an ancestor of '{db}'"));
++                evidence.push(Evidence::new(
++                    "git",
++                    format!("tip is an ancestor of '{db}'"),
++                ));
++                resolved = true;
++            }
++        }
++        if !resolved {
++            match pr_for(&b.name) {
++                BranchPr::Found {
++                    review_id,
++                    state,
++                    head_sha,
++                } => {
++                    evidence.push(Evidence::new(
++                        "vcs",
++                        format!("PR #{review_id} is {}", state_word(&state)),
++                    ));
++                    facts.push(("pr", format!("{review_id}:{}", state_word(&state))));
++                    landed = match state {
++                        ReviewState::Open => Err((
++                            Verdict::Skip,
++                            format!("PR #{review_id} is still open, so the branch is in use"),
++                        )),
++                        ReviewState::Closed => Err((
++                            Verdict::Ask,
++                            format!("PR #{review_id} was closed without merging"),
++                        )),
++                        ReviewState::Unknown(w) => Err((Verdict::Ask, w)),
++                        ReviewState::Merged => match &head_sha {
++                            None => Err((
++                                Verdict::Ask,
++                                format!("PR #{review_id} is merged but its head commit is unknown, so \"no commits beyond the PR head\" cannot be shown"),
++                            )),
++                            Some(h) => match truth.is_ancestor(&b.tip, h) {
++                                Ok(true) => {
++                                    evidence.push(Evidence::new(
++                                        "git",
++                                        format!("tip {tip7} is at or behind the PR head {}", short_sha(h)),
++                                    ));
++                                    Ok(format!("PR #{review_id} is merged and the branch has no commits beyond the PR head {}", short_sha(h)))
++                                }
++                                Ok(false) => Err((
++                                    Verdict::Ask,
++                                    format!("PR #{review_id} is merged but the branch has commits beyond the PR head {}", short_sha(h)),
++                                )),
++                                Err(e) => Err((
++                                    Verdict::Ask,
++                                    format!("PR #{review_id} is merged but the PR head {} could not be compared ({e})", short_sha(h)),
++                                )),
++                            },
++                        },
++                    };
++                }
++                BranchPr::NotFound => {
++                    evidence.push(Evidence::new("vcs", "no PR found for this branch"));
++                    facts.push(("pr", "none".into()));
++                    if default_tip.as_deref() == Some(b.tip.as_str()) {
++                        landed = Err((
++                            Verdict::Ask,
++                            "it points at the same commit as the default branch and has no PR; it may be new, or fully merged".into(),
++                        ));
++                    }
++                }
++                BranchPr::Unknown(why) => {
++                    evidence.push(Evidence::new("vcs", format!("PR lookup failed: {why}")));
++                    facts.push(("pr", "unknown".into()));
++                    landed = Err((
++                        Verdict::Ask,
++                        format!("the PR state could not be read ({why})"),
++                    ));
++                }
++            }
++        }
++
++        // Worktree: removable only when linked and clean.
++        let mut dirty: Vec<String> = Vec::new();
++        let mut wt_problem: Option<String> = None;
++        let mut removable_wt: Option<std::path::PathBuf> = None;
++        if let Some(w) = wt {
++            if w.is_main {
++                wt_problem = Some(format!(
++                    "it is checked out in the main worktree {}; switch that worktree to another branch first",
++                    w.path.display()
++                ));
++            } else {
++                match truth.uncommitted_files(&w.path) {
++                    Ok(files) if files.is_empty() => removable_wt = Some(w.path.clone()),
++                    Ok(files) => {
++                        wt_problem = Some(format!(
++                            "its worktree {} has {} uncommitted or untracked file(s)",
++                            w.path.display(),
++                            files.len()
++                        ));
++                        dirty = files;
++                    }
++                    Err(e) => {
++                        wt_problem = Some(format!(
++                            "its worktree {} could not be checked for uncommitted files ({e})",
++                            w.path.display()
++                        ));
++                    }
++                }
++            }
++        }
++        if !dirty.is_empty() {
++            let shown: Vec<&str> = dirty.iter().take(20).map(String::as_str).collect();
++            let more = dirty.len().saturating_sub(shown.len());
++            evidence.push(Evidence::new(
++                "git",
++                format!(
++                    "uncommitted files: {}{}",
++                    shown.join(", "),
++                    if more > 0 {
++                        format!(" and {more} more")
++                    } else {
++                        String::new()
++                    }
++                ),
++            ));
++            facts.push(("dirty", dirty.join("\n")));
++        }
++
++        let id = format!("branch:{}", b.name);
++        let delete = Action::DeleteBranch {
++            name: b.name.clone(),
++            tip: b.tip.clone(),
++            worktree: removable_wt.clone(),
++            reason: String::new(),
++        };
++        let with_reason = |why: &str| match &delete {
++            Action::DeleteBranch {
++                name,
++                tip,
++                worktree,
++                ..
++            } => Action::DeleteBranch {
++                name: name.clone(),
++                tip: tip.clone(),
++                worktree: worktree.clone(),
++                reason: why.to_string(),
++            },
++            other => other.clone(),
++        };
++        let recover = format!("git branch {} {}", b.name, b.tip);
++        match landed {
++            Ok(why) if wt_problem.is_none() => {
++                let wt_note = removable_wt
++                    .as_ref()
++                    .map(|p| format!(" and remove its clean worktree {}", p.display()))
++                    .unwrap_or_default();
++                let mut f = mk(
++                    Kind::Branch,
++                    id,
++                    format!("branch {}", b.name),
++                    evidence,
++                    Verdict::AutoSafe,
++                    format!("Delete{wt_note}: {why}. Recover with `{recover}`."),
++                    with_reason(&why),
++                    &facts,
++                );
++                f.manual_command = Some(format!("git branch -D {} (tip was {})", b.name, b.tip));
++                out.push(f);
++            }
++            Ok(why) => {
++                let problem = wt_problem.unwrap_or_default();
++                out.push(question(
++                    id,
++                    &b.name,
++                    evidence,
++                    format!("Work has landed ({why}) but {problem}. Left alone."),
++                    None,
++                    &recover,
++                    &facts,
++                ));
++            }
++            Err((Verdict::Skip, why)) => {
++                out.push(mk(
++                    Kind::Branch,
++                    id,
++                    format!("branch {}", b.name),
++                    evidence,
++                    Verdict::Skip,
++                    format!("Kept: {why}."),
++                    Action::None,
++                    &facts,
++                ));
++            }
++            Err((_, why)) => {
++                let can_delete = wt_problem.is_none();
++                let mut reason = format!("Not deleted: {why}.");
++                if let Some(p) = &wt_problem {
++                    reason.push_str(&format!(" Also {p}."));
++                }
++                out.push(question(
++                    id,
++                    &b.name,
++                    evidence,
++                    reason,
++                    can_delete.then(|| with_reason("confirmed by a person")),
++                    &recover,
++                    &facts,
++                ));
++            }
++        }
++    }
++
++    // Remote branches: never deleted here (the repository deletes head
++    // branches on merge). Closed-unmerged ones are reported for a human.
++    let mut lookups = 0;
++    for r in &inv.remote_branches {
++        if Some(r) == inv.default_branch.as_ref() {
++            continue;
++        }
++        if lookups >= MAX_REMOTE_LOOKUPS {
++            tracing::warn!(
++                limit = MAX_REMOTE_LOOKUPS,
++                "cleanup: stopped looking up remote branch PRs; remaining remote branches were not checked"
++            );
++            break;
++        }
++        if !pr_cache.borrow().contains_key(r) {
++            lookups += 1;
++        }
++        if let BranchPr::Found {
++            review_id,
++            state: ReviewState::Closed,
++            ..
++        } = pr_for(r)
++        {
++            let mut f = mk(
++                Kind::RemoteBranch,
++                format!("remote-branch:{r}"),
++                format!("remote branch {r}"),
++                vec![Evidence::new(
++                    "vcs",
++                    format!("PR #{review_id} was closed without merging"),
++                )],
++                Verdict::Skip,
++                format!("Finding only: PR #{review_id} was closed without merging, so the remote branch '{r}' may be abandoned. Remote branches are never deleted by cleanup."),
++                Action::None,
++                &[("remote", r.clone()), ("pr", review_id)],
++            );
++            f.manual_command = Some(format!("git push origin --delete {r}"));
++            out.push(f);
++        }
++    }
++}
++
++fn state_word(s: &ReviewState) -> &'static str {
++    match s {
++        ReviewState::Open => "open",
++        ReviewState::Merged => "merged",
++        ReviewState::Closed => "closed without merging",
++        ReviewState::Unknown(_) => "unknown",
++    }
++}
++
++/// An `Ask` finding: keep, or (when it is safe to offer) delete.
++fn question(
++    id: String,
++    name: &str,
++    evidence: Vec<Evidence>,
++    reason: String,
++    delete: Option<Action>,
++    recover: &str,
++    facts: &[(&str, String)],
++) -> Finding {
++    let mut f = mk(
++        Kind::Branch,
++        id,
++        format!("branch {name}"),
++        evidence,
++        Verdict::Ask,
++        reason,
++        Action::None,
++        facts,
++    );
++    f.options.push(AnswerOption {
++        key: "keep".into(),
++        label: "Keep the branch".into(),
++        action: Action::None,
++    });
++    if let Some(a) = delete {
++        f.options.push(AnswerOption {
++            key: "delete".into(),
++            label: format!("Delete the branch (recover with `{recover}`)"),
++            action: a,
++        });
++    }
++    f.recommended = Some("keep".into());
++    f.manual_command = Some(format!(
++        "to delete by hand: git branch -D {name}; to undo: {recover}"
++    ));
++    f
++}
+--- a/crates/ta-cleanup/src/lib.rs
++++ b/crates/ta-cleanup/src/lib.rs
+@@ -8,13 +8,18 @@
+ 
+ pub mod act;
+ pub mod archive;
++pub mod branches;
+ pub mod model;
+ pub mod run;
+ pub mod scan;
+ pub mod state;
++pub mod vcs;
+ 
+ pub use model::*;
+ pub use run::{explain, render_finding, render_report, run, scan_findings};
+ 
+ #[cfg(test)]
+ mod tests;
++
++#[cfg(test)]
++mod branch_tests;
+--- a/crates/ta-cleanup/src/model.rs
++++ b/crates/ta-cleanup/src/model.rs
+@@ -45,6 +45,10 @@
+     LeftoverDecisions,
+     PhaseClaim,
+     Archive,
++    /// A local branch (and its worktree, if any) whose work has landed.
++    Branch,
++    /// A remote branch whose PR was closed without merging. Reported only.
++    RemoteBranch,
+ }
+ 
+ impl Kind {
+@@ -60,6 +64,8 @@
+             Kind::LeftoverDecisions => "leftover_decisions",
+             Kind::PhaseClaim => "phase_claim",
+             Kind::Archive => "archive",
++            Kind::Branch => "branch",
++            Kind::RemoteBranch => "remote_branch",
+         }
+     }
+ 
+@@ -72,6 +78,7 @@
+                 Category::Locks
+             }
+             Kind::Archive => Category::Archive,
++            Kind::Branch | Kind::RemoteBranch => Category::Branches,
+         }
+     }
+ }
+@@ -84,6 +91,7 @@
+     Goals,
+     Locks,
+     Archive,
++    Branches,
+ }
+ 
+ impl Category {
+@@ -94,12 +102,13 @@
+             "goals" | "goal" => Some(Category::Goals),
+             "locks" | "lock" => Some(Category::Locks),
+             "archive" => Some(Category::Archive),
++            "branches" | "branch" => Some(Category::Branches),
+             _ => None,
+         }
+     }
+ 
+     pub fn names() -> &'static str {
+-        "drafts, staging, goals, locks, archive"
++        "drafts, staging, goals, locks, archive, branches"
+     }
+ }
+ 
+@@ -155,6 +164,16 @@
+         goals: Vec<Uuid>,
+         drafts: Vec<Uuid>,
+     },
++    /// Delete a local branch, after removing its (clean) worktree if it has one.
++    /// `tip` is the commit the branch pointed at when scanned: the delete only
++    /// happens if it still does, and the tip is logged so the branch can be
++    /// recreated with `git branch <name> <tip>`.
++    DeleteBranch {
++        name: String,
++        tip: String,
++        worktree: Option<PathBuf>,
++        reason: String,
++    },
+ }
+ 
+ /// A choice offered for an `Ask` finding.
+@@ -262,8 +281,71 @@
+     fn release_phase_claim(&self, _phase: &str) -> anyhow::Result<()> {
+         Ok(())
+     }
++    /// Branch and worktree facts. `None` when there is no VCS adapter or it has
++    /// no branches, which turns the `branches` group into a no-op.
++    fn branches(&self) -> Option<&dyn BranchTruth> {
++        None
++    }
++}
++
++/// A local branch and its tip commit.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct BranchTip {
++    pub name: String,
++    pub tip: String,
+ }
+ 
++/// A worktree of the repository.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct WorktreeEntry {
++    pub path: PathBuf,
++    pub branch: Option<String>,
++    /// The main worktree: never removed.
++    pub is_main: bool,
++}
++
++/// What the repository looks like right now.
++#[derive(Debug, Clone, Default)]
++pub struct BranchInventory {
++    pub default_branch: Option<String>,
++    pub current_branch: Option<String>,
++    pub branches: Vec<BranchTip>,
++    pub worktrees: Vec<WorktreeEntry>,
++    /// Remote branches known locally, without the remote name.
++    pub remote_branches: Vec<String>,
++}
++
++/// The pull request of a branch, according to the VCS adapter.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum BranchPr {
++    /// The adapter looked and there is no PR for this branch.
++    NotFound,
++    Found {
++        review_id: String,
++        /// `Open`, `Merged` or `Closed` (closed without merging).
++        state: ReviewState,
++        /// Commit the PR branch pointed at on the server.
++        head_sha: Option<String>,
++    },
++    /// The lookup failed. Never an answer.
++    Unknown(String),
++}
++
++/// Branch operations behind the `branches` group. [`crate::vcs`] implements it
++/// on top of the project's `SourceAdapter`; tests wrap that to fake PR state.
++pub trait BranchTruth {
++    fn inventory(&self) -> anyhow::Result<BranchInventory>;
++    fn pr_for_branch(&self, branch: &str) -> BranchPr;
++    /// Whether `ancestor` is reachable from `descendant`. Errors when a commit is unknown.
++    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> anyhow::Result<bool>;
++    /// Modified, staged and untracked files in the worktree at `path`.
++    fn uncommitted_files(&self, path: &Path) -> anyhow::Result<Vec<String>>;
++    /// Delete `name` only if it still points at `tip`.
++    fn delete_branch(&self, name: &str, tip: &str) -> anyhow::Result<()>;
++    /// Remove a linked worktree (never forced).
++    fn remove_worktree(&self, path: &Path) -> anyhow::Result<()>;
++}
++
+ /// Closes a draft. The CLI supplies one that also resets plan phases and writes
+ /// the goal ledger; [`crate::act::FileCloser`] is the file-level default.
+ pub trait DraftCloser {
+@@ -333,6 +415,8 @@
+     pub retention_days: u64,
+     pub archive: bool,
+     pub model_assist: bool,
++    /// Look for finished branches and worktrees (`[cleanup] prune_branches`).
++    pub prune_branches: bool,
+ }
+ 
+ impl Default for Settings {
+@@ -342,6 +426,7 @@
+             retention_days: 90,
+             archive: true,
+             model_assist: false,
++            prune_branches: true,
+         }
+     }
+ }
+--- a/crates/ta-cleanup/src/run.rs
++++ b/crates/ta-cleanup/src/run.rs
+@@ -232,6 +232,11 @@
+         .iter()
+         .filter(|f| f.verdict != Verdict::Skip)
+         .collect();
++    let reported_only: Vec<&Finding> = r
++        .findings
++        .iter()
++        .filter(|f| f.kind == Kind::RemoteBranch)
++        .collect();
+     if dry_run {
+         s.push_str(&format!(
+             "Dry run: {} finding(s) would be acted on or asked about; nothing was changed.\n",
+@@ -270,5 +275,11 @@
+             r.done.len(), r.failed.len(), r.proposals_open.len(), r.questions_open.len(), human_bytes(r.bytes_reclaimed)
+         ));
+     }
++    if !reported_only.is_empty() {
++        s.push_str("Findings only (cleanup never deletes remote branches):\n");
++        for f in reported_only {
++            s.push_str(&render_finding(f, false));
++        }
++    }
+     s
+ }
+--- a/crates/ta-cleanup/src/scan.rs
++++ b/crates/ta-cleanup/src/scan.rs
+@@ -296,11 +296,17 @@
+     if want(Category::Archive) {
+         archive(&s, &mut out);
+     }
++    // Opt-out by config, but an explicit `--only branches` always runs.
++    if want(Category::Branches)
++        && (e.settings.prune_branches || only.is_some_and(|o| o.contains(&Category::Branches)))
++    {
++        crate::branches::branches(&s, &mut out);
++    }
+     Ok(out)
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+-fn mk(
++pub(crate) fn mk(
+     kind: Kind,
+     id: String,
+     title: String,
+--- /dev/null
++++ b/crates/ta-cleanup/src/vcs.rs
+@@ -0,0 +1,90 @@
++//! [`BranchTruth`] on top of the project's [`SourceAdapter`], so git calls stay
++//! inside the adapter (constitution section 16) and cleanup works with any
++//! adapter that implements the branch methods.
++
++use std::path::Path;
++
++use ta_submit::SourceAdapter;
++
++use crate::model::*;
++
++fn err(e: impl std::fmt::Display) -> anyhow::Error {
++    anyhow::anyhow!("{e}")
++}
++
++impl BranchTruth for Box<dyn SourceAdapter> {
++    fn inventory(&self) -> anyhow::Result<BranchInventory> {
++        let Some(branches) = self.list_local_branches().map_err(err)? else {
++            anyhow::bail!(
++                "the '{}' VCS adapter has no branches, so there is nothing to prune",
++                self.name()
++            );
++        };
++        Ok(BranchInventory {
++            default_branch: self.default_branch().map_err(err)?,
++            current_branch: self
++                .current_branch()
++                .ok()
++                .filter(|b| b != "HEAD" && b != "unknown"),
++            branches: branches
++                .into_iter()
++                .map(|b| BranchTip {
++                    name: b.name,
++                    tip: b.tip,
++                })
++                .collect(),
++            worktrees: self
++                .list_worktrees()
++                .map_err(err)?
++                .into_iter()
++                .map(|w| WorktreeEntry {
++                    path: w.path,
++                    branch: w.branch,
++                    is_main: w.is_main,
++                })
++                .collect(),
++            remote_branches: self.list_remote_branches().map_err(err)?,
++        })
++    }
++
++    fn pr_for_branch(&self, branch: &str) -> BranchPr {
++        match self.branch_review(branch) {
++            Ok(None) => BranchPr::NotFound,
++            Ok(Some(r)) => match r.state.to_ascii_lowercase().as_str() {
++                "merged" => BranchPr::Found {
++                    review_id: r.review_id,
++                    state: ReviewState::Merged,
++                    head_sha: r.head_sha,
++                },
++                "closed" => BranchPr::Found {
++                    review_id: r.review_id,
++                    state: ReviewState::Closed,
++                    head_sha: r.head_sha,
++                },
++                "open" | "draft" => BranchPr::Found {
++                    review_id: r.review_id,
++                    state: ReviewState::Open,
++                    head_sha: r.head_sha,
++                },
++                other => BranchPr::Unknown(format!("unrecognised PR state '{other}'")),
++            },
++            Err(e) => BranchPr::Unknown(e.to_string()),
++        }
++    }
++
++    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> anyhow::Result<bool> {
++        SourceAdapter::is_ancestor(self.as_ref(), ancestor, descendant).map_err(err)
++    }
++
++    fn uncommitted_files(&self, path: &Path) -> anyhow::Result<Vec<String>> {
++        SourceAdapter::uncommitted_files(self.as_ref(), path).map_err(err)
++    }
++
++    fn delete_branch(&self, name: &str, tip: &str) -> anyhow::Result<()> {
++        self.delete_local_branch(name, tip).map_err(err)
++    }
++
++    fn remove_worktree(&self, path: &Path) -> anyhow::Result<()> {
++        SourceAdapter::remove_worktree(self.as_ref(), path).map_err(err)
++    }
++}
+--- a/crates/ta-daemon/src/cleanup_pass.rs
++++ b/crates/ta-daemon/src/cleanup_pass.rs
+@@ -31,6 +31,12 @@
+         }
+     }
+ 
++    fn branches(&self) -> Option<&dyn ta_cleanup::BranchTruth> {
++        self.adapter
++            .as_ref()
++            .map(|a| a as &dyn ta_cleanup::BranchTruth)
++    }
++
+     fn phase_done(&self, phase: &str) -> bool {
+         let Ok(text) = std::fs::read_to_string(self.root.join("PLAN.md")) else {
+             return false;
+@@ -46,7 +52,10 @@
+ /// Returns the number of actions taken (0 when disabled).
+ pub fn run_if_enabled(root: &Path) -> usize {
+     let wf = WorkflowConfig::load_or_default(&root.join(".ta/workflow.toml"));
+-    if !wf.cleanup.auto_safe() {
++    // Finished branches and worktrees are pruned every time (owner rule), so that
++    // group runs even when `auto = "off"`; `prune_branches = false` turns it off.
++    let only_branches = !wf.cleanup.auto_safe();
++    if only_branches && !wf.cleanup.prune_branches {
+         return 0;
+     }
+     let adapter = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+@@ -64,6 +73,7 @@
+             retention_days: wf.cleanup.retention_days,
+             archive: wf.cleanup.archive,
+             model_assist: false,
++            prune_branches: wf.cleanup.prune_branches,
+         },
+         truth: &truth,
+         closer: &FileCloser,
+@@ -71,6 +81,7 @@
+     };
+     let opts = RunOptions {
+         auto_safe_only: true,
++        only: only_branches.then(|| vec![ta_cleanup::Category::Branches]),
+         ..Default::default()
+     };
+     match ta_cleanup::run(&engine, &opts, None) {
+--- a/crates/ta-daemon/src/main.rs
++++ b/crates/ta-daemon/src/main.rs
+@@ -566,7 +566,8 @@
+                                 freed,
+                             );
+                         }
+-                        // Ground-truth cleanup, only when `[cleanup] auto = "safe"`.
++                        // Ground-truth cleanup: everything safe when `[cleanup] auto = "safe"`,
++                        // otherwise just the branches group (`prune_branches`, default on).
+                         let root = gc_project_root.clone();
+                         let _ = tokio::task::spawn_blocking(move || {
+                             cleanup_pass::run_if_enabled(&root)
+--- a/crates/ta-submit/src/adapter.rs
++++ b/crates/ta-submit/src/adapter.rs
+@@ -264,6 +264,72 @@
+         Ok(None)
+     }
+ 
++    // ── Branch and worktree hygiene (`ta cleanup` branches group) ─────────
++    //
++    // All default to "not supported" so adapters without branches (SVN,
++    // Perforce, none) are unaffected. Git implements them.
++
++    /// Local branches with their tip commit. `None` = this VCS has no branches.
++    fn list_local_branches(&self) -> Result<Option<Vec<BranchRef>>> {
++        Ok(None)
++    }
++
++    /// Name of the default (trunk) branch, e.g. `main`.
++    fn default_branch(&self) -> Result<Option<String>> {
++        Ok(None)
++    }
++
++    /// Names of remote branches known locally (`origin/foo` is reported as `foo`).
++    fn list_remote_branches(&self) -> Result<Vec<String>> {
++        Ok(Vec::new())
++    }
++
++    /// All worktrees of the repository, the main one first.
++    fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
++        Ok(Vec::new())
++    }
++
++    /// Whether commit `ancestor` is reachable from `descendant` (equal counts).
++    /// Errors when either commit is unknown locally.
++    fn is_ancestor(&self, _ancestor: &str, _descendant: &str) -> Result<bool> {
++        Err(SubmitError::InvalidState(format!(
++            "adapter '{}' cannot compare commits",
++            self.name()
++        )))
++    }
++
++    /// Modified, staged and untracked files in the working tree at `path`
++    /// (relative paths, ignored files excluded). Empty = clean.
++    fn uncommitted_files(&self, _path: &std::path::Path) -> Result<Vec<String>> {
++        Ok(Vec::new())
++    }
++
++    /// The pull request (review) for `branch`, preferring an open one, then
++    /// the most recent merged one, then a closed one. `None` = no PR was found
++    /// or this adapter cannot look branches up.
++    fn branch_review(&self, _branch: &str) -> Result<Option<BranchReview>> {
++        Ok(None)
++    }
++
++    /// Delete the local branch `name` only if it still points at `expected_tip`.
++    /// Refuses the current branch and any branch checked out in a worktree.
++    /// Never force-deletes by name: the tip check is what makes it recoverable.
++    fn delete_local_branch(&self, _name: &str, _expected_tip: &str) -> Result<()> {
++        Err(SubmitError::InvalidState(format!(
++            "adapter '{}' does not support deleting branches",
++            self.name()
++        )))
++    }
++
++    /// Remove a linked worktree. Refuses a worktree with uncommitted or
++    /// untracked files (no force).
++    fn remove_worktree(&self, _path: &std::path::Path) -> Result<()> {
++        Err(SubmitError::InvalidState(format!(
++            "adapter '{}' does not support removing worktrees",
++            self.name()
++        )))
++    }
++
+     /// Merge a review/PR into the target branch and sync the local workspace.
+     ///
+     /// Git: calls `gh pr merge` to merge the PR immediately.
+@@ -477,6 +543,34 @@
+     pub checks_passing: Option<bool>,
+ }
+ 
++/// A local branch and the commit it points at.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct BranchRef {
++    pub name: String,
++    pub tip: String,
++}
++
++/// One worktree of a repository.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct WorktreeInfo {
++    pub path: std::path::PathBuf,
++    /// Checked-out branch; `None` for a detached HEAD.
++    pub branch: Option<String>,
++    /// The main worktree (the repository itself), which is never removed.
++    pub is_main: bool,
++}
++
++/// The pull request found for a branch.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct BranchReview {
++    /// PR number or id.
++    pub review_id: String,
++    /// `open`, `merged` or `closed` (closed without merging).
++    pub state: String,
++    /// Commit the PR's branch pointed at when it was last seen on the server.
++    pub head_sha: Option<String>,
++}
++
+ /// Commit summary for log_since results.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct CommitSummary {
+--- a/crates/ta-submit/src/config.rs
++++ b/crates/ta-submit/src/config.rs
+@@ -1706,6 +1706,15 @@
+     #[serde(default = "default_cleanup_archive")]
+     pub archive: bool,
+ 
++    /// Prune finished branches and their worktrees (the `branches` group).
++    /// Default: true. A local branch is deleted only when its PR is merged and
++    /// it has no commits beyond the PR head (or it is an ancestor of the default
++    /// branch), and any worktree it has is clean. This group also runs from the
++    /// daemon and after a watched PR merges, even when `auto = "off"`; set this
++    /// to false to turn all of that off.
++    #[serde(default = "default_cleanup_prune_branches")]
++    pub prune_branches: bool,
++
+     /// Command run for model assistance when `model_assist = true`. It reads one
+     /// JSON finding on stdin and prints `{"option": "...", "confidence": 0.0-1.0}`.
+     #[serde(default)]
+@@ -1719,6 +1728,7 @@
+             retention_days: default_cleanup_retention_days(),
+             model_assist: false,
+             archive: default_cleanup_archive(),
++            prune_branches: default_cleanup_prune_branches(),
+             assistant_command: None,
+         }
+     }
+@@ -1743,6 +1753,10 @@
+     true
+ }
+ 
++fn default_cleanup_prune_branches() -> bool {
++    true
++}
++
+ fn default_stale_threshold_days() -> u64 {
+     7
+ }
+@@ -2271,6 +2285,13 @@
+     }
+ 
+     #[test]
++    fn cleanup_prunes_branches_by_default_and_can_opt_out() {
++        assert!(WorkflowConfig::default().cleanup.prune_branches);
++        let c: WorkflowConfig = toml::from_str("[cleanup]\nprune_branches = false\n").unwrap();
++        assert!(!c.cleanup.prune_branches);
++    }
++
++    #[test]
+     fn cleanup_section_parses() {
+         let c: WorkflowConfig =
+             toml::from_str("[cleanup]\nauto = \"safe\"\nretention_days = 30\nmodel_assist = true\narchive = false\n").unwrap();
+--- a/crates/ta-submit/src/git.rs
++++ b/crates/ta-submit/src/git.rs
+@@ -7,8 +7,9 @@
+ use ta_goal::CommitContext;
+ 
+ use crate::adapter::{
+-    CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult, Result, ReviewResult,
+-    ReviewStatus, SavedVcsState, SourceAdapter, SubmitError, SyncResult,
++    BranchRef, BranchReview, CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult,
++    Result, ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SubmitError, SyncResult,
++    WorktreeInfo,
+ };
+ use crate::config::SubmitConfig;
+ use crate::config::SyncConfig;
+@@ -254,21 +255,31 @@
+ 
+     /// Run a git command in the working directory
+     fn git_cmd(&self, args: &[&str]) -> Result<String> {
++        self.git_cmd_in(&self.work_dir, args)
++    }
++
++    /// Run git in `dir` and return the raw output, whatever its exit status.
++    fn git_raw_in(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+         // Clear TA agent VCS isolation env vars so git operates on the
+         // work_dir's own repo, not the staging directory's repo (v0.13.17.3
+         // sets GIT_DIR/GIT_WORK_TREE/GIT_CEILING_DIRECTORIES for agents).
+         // -c safe.directory=* bypasses ownership checks in CI environments
+         // where temp dirs may be owned by a different user than the git process.
+-        let output = Command::new("git")
++        Ok(Command::new("git")
+             .args(["-c", "safe.directory=*"])
+             .args(args)
+-            .current_dir(&self.work_dir)
++            .current_dir(dir)
+             .env_remove("GIT_DIR")
+             .env_remove("GIT_WORK_TREE")
+             .env_remove("GIT_INDEX_FILE")
+             .env_remove("GIT_COMMON_DIR")
+             .env_remove("GIT_CEILING_DIRECTORIES")
+-            .output()?;
++            .output()?)
++    }
++
++    /// Run a git command in `dir`; a non-zero exit becomes an error.
++    fn git_cmd_in(&self, dir: &Path, args: &[&str]) -> Result<String> {
++        let output = self.git_raw_in(dir, args)?;
+ 
+         if !output.status.success() {
+             let stderr = String::from_utf8_lossy(&output.stderr);
+@@ -1533,6 +1544,237 @@
+         Ok(env)
+     }
+ 
++    fn list_local_branches(&self) -> Result<Option<Vec<BranchRef>>> {
++        let out = self.git_cmd(&[
++            "for-each-ref",
++            "--format=%(refname:short)%09%(objectname)",
++            "refs/heads",
++        ])?;
++        Ok(Some(
++            out.lines()
++                .filter_map(|l| l.split_once('\t'))
++                .map(|(name, tip)| BranchRef {
++                    name: name.to_string(),
++                    tip: tip.to_string(),
++                })
++                .collect(),
++        ))
++    }
++
++    fn default_branch(&self) -> Result<Option<String>> {
++        // The remote's idea of trunk first, then the configured sync branch,
++        // then the conventional names.
++        if let Ok(head) = self.git_cmd(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
++            if let Some(name) = head.strip_prefix("origin/") {
++                return Ok(Some(name.to_string()));
++            }
++        }
++        let configured = self.sync_config.branch.trim().to_string();
++        for candidate in [configured.as_str(), "main", "master"] {
++            if candidate.is_empty() {
++                continue;
++            }
++            let full = format!("refs/heads/{candidate}");
++            if self
++                .git_cmd(&["rev-parse", "--verify", "--quiet", &full])
++                .is_ok()
++            {
++                return Ok(Some(candidate.to_string()));
++            }
++        }
++        Ok(None)
++    }
++
++    fn list_remote_branches(&self) -> Result<Vec<String>> {
++        let out = self.git_cmd(&["for-each-ref", "--format=%(refname)", "refs/remotes"])?;
++        let mut names: Vec<String> = out
++            .lines()
++            .filter_map(|l| l.strip_prefix("refs/remotes/"))
++            .filter_map(|rest| rest.split_once('/').map(|(_, b)| b.to_string()))
++            .filter(|b| b != "HEAD")
++            .collect();
++        names.sort();
++        names.dedup();
++        Ok(names)
++    }
++
++    fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
++        let out = self.git_cmd(&["worktree", "list", "--porcelain"])?;
++        let mut list: Vec<WorktreeInfo> = Vec::new();
++        for line in out.lines() {
++            if let Some(path) = line.strip_prefix("worktree ") {
++                let is_main = list.is_empty();
++                list.push(WorktreeInfo {
++                    path: std::path::PathBuf::from(path),
++                    branch: None,
++                    is_main,
++                });
++            } else if let (Some(branch), Some(last)) =
++                (line.strip_prefix("branch refs/heads/"), list.last_mut())
++            {
++                last.branch = Some(branch.to_string());
++            }
++        }
++        Ok(list)
++    }
++
++    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
++        for rev in [ancestor, descendant] {
++            let spec = format!("{rev}^{{commit}}");
++            self.git_cmd(&["cat-file", "-e", &spec]).map_err(|_| {
++                SubmitError::VcsError(format!(
++                    "commit {rev} is not in this repository (try `git fetch`)"
++                ))
++            })?;
++        }
++        let out = self.git_raw_in(
++            &self.work_dir,
++            &["merge-base", "--is-ancestor", ancestor, descendant],
++        )?;
++        match out.status.code() {
++            Some(0) => Ok(true),
++            Some(1) => Ok(false),
++            _ => Err(SubmitError::VcsError(format!(
++                "git merge-base --is-ancestor {ancestor} {descendant} failed: {}",
++                String::from_utf8_lossy(&out.stderr).trim()
++            ))),
++        }
++    }
++
++    fn uncommitted_files(&self, path: &Path) -> Result<Vec<String>> {
++        let out = self.git_raw_in(
++            path,
++            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
++        )?;
++        if !out.status.success() {
++            return Err(SubmitError::VcsError(format!(
++                "git status failed in {}: {}",
++                path.display(),
++                String::from_utf8_lossy(&out.stderr).trim()
++            )));
++        }
++        let text = String::from_utf8_lossy(&out.stdout);
++        let mut files = Vec::new();
++        let mut entries = text.split('\0').filter(|e| !e.is_empty());
++        while let Some(entry) = entries.next() {
++            if entry.len() < 4 {
++                continue;
++            }
++            files.push(entry[3..].to_string());
++            // Renames and copies carry the original path as the next entry.
++            if matches!(entry.as_bytes()[0], b'R' | b'C') {
++                entries.next();
++            }
++        }
++        Ok(files)
++    }
++
++    fn branch_review(&self, branch: &str) -> Result<Option<BranchReview>> {
++        if !self.has_gh_cli() {
++            return Err(SubmitError::VcsError(
++                "gh CLI not found or not responding; cannot look up the PR for a branch. \
++                 Install and authenticate GitHub CLI (`gh auth login`)."
++                    .to_string(),
++            ));
++        }
++        let out = run_gh_bounded(
++            &self.gh_program,
++            &[
++                "pr",
++                "list",
++                "--head",
++                branch,
++                "--state",
++                "all",
++                "--limit",
++                "30",
++                "--json",
++                "number,state,headRefOid",
++            ],
++            &self.work_dir,
++            Duration::from_secs(30),
++        )
++        .ok_or_else(|| {
++            SubmitError::VcsError(format!(
++                "`gh pr list --head {branch}` timed out after 30s or could not start"
++            ))
++        })?;
++        if !out.status.success() {
++            return Err(SubmitError::VcsError(format!(
++                "`gh pr list --head {branch}` failed: {}",
++                String::from_utf8_lossy(&out.stderr).trim()
++            )));
++        }
++        let prs: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).map_err(|e| {
++            SubmitError::VcsError(format!("could not parse `gh pr list` output: {e}"))
++        })?;
++        // Open beats merged beats closed; within a state the newest PR wins.
++        let rank = |state: &str| match state {
++            "open" => 2,
++            "merged" => 1,
++            _ => 0,
++        };
++        let best = prs
++            .iter()
++            .filter_map(|pr| {
++                let number = pr.get("number")?.as_u64()?;
++                let state = pr.get("state")?.as_str()?.to_ascii_lowercase();
++                let head_sha = pr
++                    .get("headRefOid")
++                    .and_then(|v| v.as_str())
++                    .filter(|s| !s.is_empty())
++                    .map(str::to_string);
++                Some((number, state, head_sha))
++            })
++            .max_by_key(|(number, state, _)| (rank(state), *number));
++        Ok(best.map(|(number, state, head_sha)| BranchReview {
++            review_id: number.to_string(),
++            state,
++            head_sha,
++        }))
++    }
++
++    fn delete_local_branch(&self, name: &str, expected_tip: &str) -> Result<()> {
++        let current = self
++            .git_cmd(&["symbolic-ref", "--short", "-q", "HEAD"])
++            .unwrap_or_default();
++        if current == name {
++            return Err(SubmitError::InvalidState(format!(
++                "refusing to delete branch '{name}': it is the current branch"
++            )));
++        }
++        if let Some(wt) = self
++            .list_worktrees()?
++            .into_iter()
++            .find(|w| w.branch.as_deref() == Some(name))
++        {
++            return Err(SubmitError::InvalidState(format!(
++                "refusing to delete branch '{name}': it is checked out in {}",
++                wt.path.display()
++            )));
++        }
++        let full = format!("refs/heads/{name}");
++        let actual = self.git_cmd(&["rev-parse", "--verify", "--quiet", &full])?;
++        if actual != expected_tip {
++            return Err(SubmitError::InvalidState(format!(
++                "branch '{name}' moved since it was scanned (was {expected_tip}, now {actual}); \
++                 not deleting. Re-run `ta cleanup`."
++            )));
++        }
++        // update-ref with the old value is an atomic compare-and-delete.
++        self.git_cmd(&["update-ref", "-d", &full, expected_tip])?;
++        // Best effort: drop the branch's tracking config. It may not exist.
++        let _ = self.git_cmd(&["config", "--remove-section", &format!("branch.{name}")]);
++        Ok(())
++    }
++
++    fn remove_worktree(&self, path: &Path) -> Result<()> {
++        let path_str = path.to_string_lossy();
++        // No --force: git itself refuses a dirty or locked worktree.
++        self.git_cmd(&["worktree", "remove", &path_str])?;
++        Ok(())
++    }
++
+     fn check_review(&self, review_id: &str) -> Result<Option<ReviewStatus>> {
+         if !self.has_gh_cli() {
+             return Ok(None);
+--- a/crates/ta-submit/src/lib.rs
++++ b/crates/ta-submit/src/lib.rs
+@@ -34,8 +34,8 @@
+ 
+ // Primary exports (v0.11.1+)
+ pub use adapter::{
+-    CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult, ReviewResult, ReviewStatus,
+-    SavedVcsState, SourceAdapter, SyncResult,
++    BranchRef, BranchReview, CheckFailure, CommitResult, CommitSummary, MergeResult, PushResult,
++    ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SyncResult, WorktreeInfo,
+ };
+ 
+ // Backward-compatible re-export: SubmitAdapter is a type alias for SourceAdapter.
+--- a/docs/USAGE.md
++++ b/docs/USAGE.md
+@@ -3938,7 +3938,7 @@
+ ta cleanup --dry-run                 # Show every finding, its evidence and what would happen. Changes nothing.
+ ta cleanup                           # Do the safe things, confirm the likely ones once, ask about the rest
+ ta cleanup --yes                     # Accept the batch of likely-right proposals without asking
+-ta cleanup --only drafts,staging     # Limit to: drafts, staging, goals, locks, archive
++ta cleanup --only drafts,staging     # Limit to: drafts, staging, goals, locks, archive, branches, branches
+ ta cleanup --explain draft:025f676e  # Evidence and reasoning for one finding
+ ```
+ 
+@@ -3960,13 +3960,58 @@
+ - Goals stuck in a state that no longer matches their draft.
+ - Staging directories (with the bytes reclaimed), orphan `target/` directories, stale pid files, a dead-process `.ta/apply.lock`, a leftover `.ta-decisions.json` in the project root, and daemon phase claims whose goal is gone.
+ - Old finished records, which are archived to a compressed bundle under `.ta/archive/` (with an index) and never silently deleted.
++- Finished branches and worktrees (see below).
+ 
+ When there is no terminal (a script, CI, the daemon), cleanup does not guess and does not block. It writes the open questions to `.ta/cleanup/questions.jsonl` and `.ta/interactions/pending/`, then exits 0. Answer them by running `ta cleanup` interactively. Your answers are remembered in `.ta/cleanup/decisions.jsonl`; when the same situation comes back, the earlier answer is pre-selected and the output says so, but a question is still a question and is never answered for you. Every action is logged to `.ta/audit.jsonl` with the finding, its evidence, the verdict and who decided (`rule`, `human`, `human-remembered`, or `model-suggested+human`).
+ 
++#### Pruning finished branches and worktrees
++
++Merged branches and the worktrees that carried them are pruned for you, so they do not pile up.
++
++```bash
++ta cleanup --only branches --dry-run   # Every local branch, why it would be deleted or kept, and any questions
++ta cleanup --only branches             # Delete the safe ones, ask about the rest
++```
++
++The pull request state from your VCS adapter decides, not `git branch -d` or `git cherry` (a squash merge rewrites commits, so both call a finished branch unmerged). A local branch is deleted without asking only when:
++
++- its pull request is merged **and** the branch has no commits beyond the PR head, or
++- its tip is already an ancestor of the default branch (a branch that points at the very same commit as the default branch is asked about, because it may simply be new),
++
++and, if it is checked out in a linked worktree, that worktree has no uncommitted or untracked files. The worktree is then removed first and the branch after.
++
++Everything else is kept:
++
++| Situation | What happens |
++|-----------|--------------|
++| PR still open | Kept, with the PR number as the reason. |
++| No PR, PR closed unmerged, PR state unreadable (for example `gh` not logged in) | A question. |
++| Commits beyond the PR head | A question. |
++| Worktree has uncommitted or untracked files | A question that lists the files. The worktree and branch stay. |
++| Current branch, default branch | Never touched. |
++| Remote branch whose PR was closed unmerged | Reported as a finding only, with the `git push origin --delete` command. Remote branches are never deleted by cleanup (let GitHub's "automatically delete head branches" do that). |
++
++Every deletion is recorded with the branch name and the commit it pointed at, in `.ta/audit.jsonl` and `.ta/cleanup/branches.jsonl`. To get a branch back:
++
++```bash
++git branch feature/my-change 3f9c2ab41d7e...   # the tip SHA from the cleanup log
++```
++
++The delete only happens if the branch still points at the commit that was scanned, so a branch that gained a commit in the meantime is left alone.
++
++This group runs by itself, with no flag:
++
++- after `ta draft watch` (or `ta draft apply --submit --watch`) sees the PR merge,
++- after `ta draft merge`,
++- in the daemon's periodic cleanup, even when `auto = "off"`.
++
++Turn it all off with `prune_branches = false`. `ta cleanup --only branches` still runs it when you ask for it by name.
++
+ ```toml
+ # .ta/workflow.toml
+ [cleanup]
+ auto = "off"          # "safe": the daemon's periodic cleanup runs auto_safe findings only
++prune_branches = true # Prune finished branches and worktrees (default true; runs even when auto = "off")
+ retention_days = 90   # Finished records older than this are archived
+ archive = true        # Archive instead of removing old records
+ model_assist = false  # true: a configured assistant may suggest an answer; it only pre-selects and is recorded, never executed

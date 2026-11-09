@@ -1,0 +1,40 @@
+{
+  "replay_id": "0a973a65-5929-4e62-b13e-bae88409ec6d",
+  "golden_id": "propose-and-replay-wayfinder-goals-kpis-81f0624b",
+  "tag": "keep-headroom",
+  "set": [
+    "optimizers.input.use=headroom"
+  ],
+  "goal_id": "04ba585b-75f0-434d-adce-bdbe5789f717",
+  "started_at": "2026-10-18T18:41:36.568135Z",
+  "completed_at": "2026-10-18T19:06:06.598891Z",
+  "outcome": "pr_ready",
+  "cost_usd": 1.9357351999999992,
+  "cost_estimated": false,
+  "input_tokens": 82,
+  "output_tokens": 59888,
+  "cache_read_tokens": 3743932,
+  "cache_creation_tokens": 221234,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 9,
+  "diff_sha256": "ca5df0f83ccf3e31f693aa76a611590ad2e9700467e17fa4a8e571b381e2154e",
+  "similarity": 0.2696793002915452,
+  "check_passed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "headroom",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": true,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  }
+}

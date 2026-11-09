@@ -1,0 +1,9 @@
+{
+  "optimizer": "rtk",
+  "active": true,
+  "version": "1.0.1",
+  "edition": "oss",
+  "licence": "Apache-2.0 (rtk-oss)",
+  "allow_busl": false,
+  "summary": "optimizer: rtk 1.0.1"
+}

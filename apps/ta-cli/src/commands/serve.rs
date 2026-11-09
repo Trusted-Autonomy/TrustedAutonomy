@@ -97,6 +97,8 @@ mod tests {
             session_id: uuid::Uuid::new_v4(),
             workspace_root: Some(staging.path().to_path_buf()),
             wayfinder_project_id: None,
+            project_root: None,
+            read_grant: None,
         };
         let config = chat_mode_config(&launch, project.path());
         assert_eq!(config.workspace_root, staging.path());

@@ -1,0 +1,28 @@
+{
+  "id": "ta-cost-report-export-to-meridian-1751596f",
+  "title": "ta cost report Export to Meridian",
+  "source_goal_id": "1751596f-0784-4b55-bb52-edc72d0c987d",
+  "start_commit": "57a07281e09350824d61d31b5cfa05a3454705d8",
+  "start_dirty": false,
+  "start_branch": "main",
+  "prompt_sha256": "57c6205e0a3dbff6db397a08ce2b875963e4cf07a68f4e089d3ff3c3ea1e8a3b",
+  "agent_id": "claude-code",
+  "agent_model": "claude-sonnet-5-5",
+  "check_command": "./dev cargo test -p ta-goal",
+  "baseline": {
+    "cost_usd": 0.7728779999999998,
+    "cost_estimated": false,
+    "input_tokens": 46,
+    "output_tokens": 20707,
+    "cache_read_tokens": 1861880,
+    "cache_creation_tokens": 94882,
+    "turns": null,
+    "outcome": "applied",
+    "files_changed": 7,
+    "lines_added": 543,
+    "lines_removed": 8,
+    "diff_sha256": "9a9c7a77ff03768a084a8c06c5df7590d8fbcec9fbcaf9a318856a3f3e76a876",
+    "check_passed": null,
+    "captured_at": "2026-10-17T04:58:22.165131Z"
+  }
+}

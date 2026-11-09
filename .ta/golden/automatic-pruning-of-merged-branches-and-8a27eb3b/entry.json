@@ -1,0 +1,43 @@
+{
+  "id": "automatic-pruning-of-merged-branches-and-8a27eb3b",
+  "title": "Automatic pruning of merged branches and worktrees",
+  "source_goal_id": "8a27eb3b-7f16-460d-b305-03c084323207",
+  "start_commit": "42e8207373bba4c05d624b1069dd75844376fd5e",
+  "start_dirty": false,
+  "start_branch": "main",
+  "prompt_sha256": "383c3c4d7418670888be1ad7cc797a3286d12b1531c8309535fcba2da802876d",
+  "agent_id": "claude-code",
+  "agent_model": "claude-sonnet-5-5",
+  "check_command": "./dev cargo test -p ta-cleanup -p ta-submit",
+  "baseline": {
+    "cost_usd": 1.6256041,
+    "cost_estimated": false,
+    "input_tokens": 80,
+    "output_tokens": 52264,
+    "cache_read_tokens": 4812241,
+    "cache_creation_tokens": 155395,
+    "turns": null,
+    "outcome": "applied",
+    "files_changed": 16,
+    "lines_added": 1469,
+    "lines_removed": 18,
+    "diff_sha256": "dab681a23f684f85d50e2df7afa8ab78f499c00bba319054a48e73f0ff7c93af",
+    "check_passed": null,
+    "captured_at": "2026-10-17T04:58:06.224615Z"
+  },
+  "baseline_environment": {
+    "provenance": "declared by owner, not measured: owner states the baseline ran with all optimizers on; the goal record does not store optimizer state, so this is unverified",
+    "ta_version": "",
+    "claude_code_version": "",
+    "rtk_version": "",
+    "headroom_version": "",
+    "input_slot": "rtk+headroom (all on)",
+    "context_slot": "agent-native",
+    "output_slot": "none",
+    "compression_enabled": true,
+    "anthropic_base_url": null,
+    "auto_compact_window": null,
+    "daemon_toml_sha256": null,
+    "note": "owner states the baseline ran with all optimizers on; the goal record does not store optimizer state, so this is unverified"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "ta-cost-report-spend-across-goals-and-in-8a58320f",
+  "title": "ta cost report: Spend Across Goals and Interactive Sessions",
+  "source_goal_id": "8a58320f-ac67-455d-8e7d-92b10bc5a73b",
+  "start_commit": "a00e0c9af2dd53a4a65772656744f55d9747e39a",
+  "start_dirty": false,
+  "start_branch": "main",
+  "prompt_sha256": "4aa1fa94f7011d7d0867258fb95101fc95935ef769148fbdd8ac3bae3e333d40",
+  "agent_id": "claude-code",
+  "agent_model": "claude-sonnet-5-5",
+  "check_command": "./dev cargo test -p ta-goal",
+  "baseline": {
+    "cost_usd": 1.1134057,
+    "cost_estimated": false,
+    "input_tokens": 52,
+    "output_tokens": 38717,
+    "cache_read_tokens": 2391677,
+    "cache_creation_tokens": 121741,
+    "turns": null,
+    "outcome": "applied",
+    "files_changed": 10,
+    "lines_added": 1662,
+    "lines_removed": 15,
+    "diff_sha256": "d8f7dac91bf8738ce95239c22928131c9705b706eaa930529dc2a9f053796460",
+    "check_passed": null,
+    "captured_at": "2026-10-17T04:58:26.062558Z"
+  }
+}

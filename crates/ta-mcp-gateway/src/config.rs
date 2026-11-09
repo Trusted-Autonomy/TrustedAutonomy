@@ -70,10 +70,23 @@ pub struct GatewayConfig {
     /// keychain's permission prompt.
     #[serde(default = "default_credential_vault_use_keychain")]
     pub credential_vault_use_keychain: bool,
+
+    /// The REAL project root, when it differs from `workspace_root`. Set by
+    /// the chat-mode launch (`TA_CHAT_PROJECT_ROOT`): a Chief-of-Staff
+    /// session's `workspace_root` is a private session directory that holds
+    /// the gateway's own state, while the project it reads lives here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<PathBuf>,
 }
 
 fn default_credential_vault_use_keychain() -> bool {
     true
+}
+
+/// Split a staging workspace (`<project>/.ta/staging/<goal-uuid>`) into the
+/// project root it was copied from.
+pub fn source_root_of_staging(workspace_root: &Path) -> Option<PathBuf> {
+    crate::tools::task_request::parse_staging_workspace(workspace_root).map(|(root, _)| root)
 }
 
 impl GatewayConfig {
@@ -94,7 +107,26 @@ impl GatewayConfig {
             web_ui_port: None,
             is_staging: std::env::var("TA_IS_STAGING").is_ok(),
             credential_vault_use_keychain: ta_credentials::custody::use_keychain(),
+            project_root: None,
         }
+    }
+
+    /// The SOURCE project root: where `.ta/workflow.toml`,
+    /// `.ta/wiki-resources.toml`, the plan file and the credential vault of
+    /// the project live.
+    ///
+    /// A gateway serving a goal is rooted in a staging copy
+    /// (`<project>/.ta/staging/<goal>`) that carries none of the project's
+    /// `.ta/` configuration (and must not: staging is agent-writable). Every
+    /// read tool that loads project configuration MUST resolve it through
+    /// this method, never from `workspace_root` directly. Order: the
+    /// explicit `project_root`, else the project a staging-shaped
+    /// `workspace_root` was copied from, else `workspace_root` itself.
+    pub fn source_root(&self) -> PathBuf {
+        if let Some(root) = &self.project_root {
+            return root.clone();
+        }
+        source_root_of_staging(&self.workspace_root).unwrap_or_else(|| self.workspace_root.clone())
     }
 }
 
@@ -114,5 +146,24 @@ mod tests {
             ta_credentials::custody::use_keychain()
         );
         assert!(!config.credential_vault_use_keychain);
+    }
+
+    #[test]
+    fn source_root_prefers_explicit_then_staging_parent_then_workspace() {
+        let id = uuid::Uuid::new_v4();
+        let staging = std::path::PathBuf::from(format!("/work/proj/.ta/staging/{id}"));
+        let mut c = GatewayConfig::for_project(&staging);
+        assert_eq!(c.source_root(), std::path::PathBuf::from("/work/proj"));
+        c.project_root = Some("/elsewhere/real".into());
+        assert_eq!(c.source_root(), std::path::PathBuf::from("/elsewhere/real"));
+        // Not staging-shaped (a normal project, or a chat session dir):
+        // the workspace itself.
+        let plain = GatewayConfig::for_project("/work/proj");
+        assert_eq!(plain.source_root(), std::path::PathBuf::from("/work/proj"));
+        let not_uuid = GatewayConfig::for_project("/work/proj/.ta/staging/not-a-goal");
+        assert_eq!(
+            not_uuid.source_root(),
+            std::path::PathBuf::from("/work/proj/.ta/staging/not-a-goal")
+        );
     }
 }

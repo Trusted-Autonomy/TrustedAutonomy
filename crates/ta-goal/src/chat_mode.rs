@@ -97,6 +97,28 @@ pub const CHAT_MODE_MCP_TOOLS: &[&str] = &[
     "ta_ask_human",
 ];
 
+/// The chat-mode tools that load PROJECT CONFIGURATION (`.ta/workflow.toml`,
+/// `.ta/wiki-resources.toml`, the plan file, the credential vault) from the
+/// real project root. A chat session may use the real root for exactly
+/// these only when its read grant names them (`tool:read:<name>` scopes,
+/// compiled to `tool.read` manifest grants). Always a subset of
+/// [`CHAT_MODE_MCP_TOOLS`] (enforced by a test): a grant can never widen the
+/// tool surface.
+pub const CHAT_SOURCE_READ_TOOLS: &[&str] = &[
+    "ta_plan_status",
+    "ta_wiki_search",
+    "ta_wiki_get",
+    "ta_wiki_types",
+    "community_search",
+    "community_get",
+    "ta_wayfinder_task_list",
+    "ta_wayfinder_task_get",
+    "ta_wayfinder_goal_list",
+    "ta_wayfinder_kpi_metric_list",
+    "ta_wayfinder_kpi_summary",
+    "ta_wayfinder_kpi_list",
+];
+
 /// Claude Code built-in tools denied by name in a chat-mode launch.
 ///
 /// This is the SECOND layer (belt and braces). The primary control is the
@@ -419,6 +441,33 @@ mod tests {
         // And no native tool appears in the allow patterns at all.
         for p in chat_mode_allowed_tool_patterns() {
             assert!(p.starts_with(TA_MCP_TOOL_PREFIX), "non-MCP entry {}", p);
+        }
+    }
+
+    /// A read grant can name only tools the chat surface already exposes,
+    /// and never a write: the grant narrows, it cannot widen.
+    #[test]
+    fn source_read_tools_are_a_read_only_subset_of_the_chat_surface() {
+        for tool in CHAT_SOURCE_READ_TOOLS {
+            assert!(
+                is_chat_mode_mcp_tool(tool),
+                "{tool} is granted project reads but is not a chat-mode tool"
+            );
+            for write_marker in ["write", "create", "update", "propose", "send", "start"] {
+                assert!(
+                    !tool.contains(write_marker),
+                    "{tool} looks like a mutating tool"
+                );
+            }
+        }
+        for wayfinder in CHAT_MODE_MCP_TOOLS
+            .iter()
+            .filter(|t| t.starts_with("ta_wayfinder_"))
+        {
+            assert!(
+                CHAT_SOURCE_READ_TOOLS.contains(wayfinder),
+                "{wayfinder} reads project config but is missing from CHAT_SOURCE_READ_TOOLS"
+            );
         }
     }
 

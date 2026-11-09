@@ -1,0 +1,75 @@
+{
+  "replay_id": "ec7fc364-8a9b-4680-893b-fb42afbe0a78",
+  "golden_id": "ta-cost-report-spend-across-goals-and-in-8a58320f",
+  "tag": "r2-rtk",
+  "set": [
+    "optimizers.input.use=rtk"
+  ],
+  "goal_id": "a70a3a62-f6ba-462a-9ee2-d9a7ae3eb03d",
+  "started_at": "2026-10-22T10:56:06.878838Z",
+  "completed_at": "2026-10-22T11:15:04.341875Z",
+  "outcome": "pr_ready",
+  "cost_usd": 1.1712494000000002,
+  "cost_estimated": false,
+  "input_tokens": 60,
+  "output_tokens": 39507,
+  "cache_read_tokens": 2864394,
+  "cache_creation_tokens": 122405,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 8,
+  "lines_added": 1651,
+  "lines_removed": 9,
+  "diff_sha256": "d8513433a903b431ea71696e008ad04cab97586aeda5de886353a648d96a9f28",
+  "similarity": 0.20289303387894936,
+  "check_passed": true,
+  "check_run": {
+    "command": "./dev cargo test -p ta-goal",
+    "started_at": "2026-10-22T11:15:06.978208Z",
+    "finished_at": "2026-10-22T11:15:19.945299Z",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "s_an_untrusted_sink ... ok\ntest token_cost::tests::malformed_override_file_falls_back_to_builtin_with_a_clear_error ... ok\ntest tool_surface::tests::empty_allow_list_denies_every_ta_tool ... ok\ntest tool_surface::tests::default_read_only_surface_is_valid ... ok\ntest tool_surface::tests::prefix_allow_covers_its_family_only ... ok\ntest tool_surface::tests::propose_prefix_is_mutating_even_when_not_in_table ... ok\ntest tool_surface::tests::rejects_native_wildcard_foreign_unknown_and_mutating ... ok\ntest tool_surface::tests::server_wide_allow_denies_nothing ... ok\ntest token_cost::tests::override_file_replaces_builtin_rows_and_adds_unknown_models ... ok\ntest tool_surface::tests::table_has_no_duplicates ... ok\ntest tool_surface::tests::unlisted_ta_tools_are_all_denied_and_listed_ones_never_are ... ok\ntest velocity::tests::aggregate_by_contributor_groups_by_committer ... ok\ntest velocity::tests::aggregate_goals_per_week_zero_when_empty ... ok\ntest velocity::tests::aggregate_goals_per_week_positive_when_entries_present ... ok\ntest velocity::tests::derived_title_none_before_with_derived_title ... ok\ntest velocity::tests::aggregate_calculates_correctly ... ok\ntest velocity::tests::aggregate_includes_cost_fields ... ok\ntest velocity::tests::detect_phase_conflicts_no_conflicts_when_single_contributor ... ok\ntest velocity::tests::detect_phase_conflicts_flags_multi_contributor_phases ... ok\ntest velocity::tests::derived_title_round_trips_through_store ... ok\ntest velocity::tests::filter_by_phase_prefix_empty_prefix_returns_all ... ok\ntest velocity::tests::filter_by_phase_prefix_matches_title ... ok\ntest velocity::tests::from_goal_copies_goal_workflow_into_entry_workflow ... ok\ntest velocity::tests::from_goal_without_experiment_leaves_fields_none ... ok\ntest velocity::tests::merge_deduplicates_by_goal_id ... ok\ntest velocity::tests::meridian_fields_none_before_with_token_cost ... ok\ntest start_state::tests::non_git_directory_records_nothing ... ok\ntest velocity::tests::old_entry_without_machine_id_deserializes_ok ... ok\ntest velocity::tests::update_parent_rework_increments_fields ... ok\ntest velocity::tests::update_parent_rework_not_found_returns_false ... ok\ntest velocity::tests::velocity_entry_defaults_origin_class_for_old_lines_and_has_an_aborted_outcome ... ok\ntest velocity::tests::velocity_entry_from_goal ... ok\ntest origin::tests::origin_class_is_never_read_by_a_decision_path ... ok\ntest velocity::tests::velocity_history_empty_when_no_file ... ok\ntest velocity::tests::velocity_store_append_and_load ... ok\ntest velocity::tests::velocity_store_empty_when_no_file ... ok\ntest velocity::tests::with_derived_title_sets_field ... ok\ntest velocity::tests::with_experiment_sets_all_three_fields ... ok\ntest velocity::tests::with_goal_spend_copies_cache_tokens_cost_and_origin_class ... ok\ntest velocity::tests::with_goal_spend_prices_an_old_goal_from_the_table_as_an_estimate ... ok\ntest velocity::tests::with_token_cost_ollama_is_zero_not_estimated ... ok\ntest velocity::tests::with_token_cost_sets_fields_for_claude ... ok\ntest velocity::tests::with_token_cost_sets_meridian_fields ... ok\ntest velocity::tests::machine_id_is_eight_hex_chars ... ok\ntest velocity::tests::velocity_history_store_append_and_load ... ok\ntest velocity::tests::migrate_promotes_local_entries_to_history ... ok\ntest velocity::tests::machine_id_is_stable ... ok\ntest start_state::tests::clean_repo_records_commit_and_branch ... ok\ntest start_state::tests::captured_state_holds_no_environment_values ... ok\ntest start_state::tests::apply_sets_fields_and_old_records_load ... ok\ntest start_state::tests::detached_head_has_no_branch ... ok\ntest start_state::tests::modified_tracked_file_is_dirty_but_untracked_is_not ... ok\n\ntest result: ok. 357 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s\n\n\nrunning 2 tests\ntest crates/ta-goal/src/messaging_audit.rs - messaging_audit (line 9) ... ignored\ntest crates/ta-goal/src/social_audit.rs - social_audit (line 9) ... ignored\n\ntest result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+    "stderr_tail": "   Compiling proc-macro2 v1.0.107\n   Compiling unicode-ident v1.0.24\n   Compiling quote v1.0.47\n   Compiling libc v0.2.189\n   Compiling serde_core v1.0.229\n   Compiling cfg-if v1.0.4\n   Compiling serde v1.0.229\n   Compiling version_check v0.9.5\n   Compiling zerocopy v0.8.56\n   Compiling typenum v1.20.1\n   Compiling getrandom v0.4.3\n   Compiling autocfg v1.5.1\n   Compiling generic-array v0.14.7\n   Compiling num-traits v0.2.19\n   Compiling zmij v1.0.23\n   Compiling equivalent v1.0.2\n   Compiling hashbrown v0.17.1\n   Compiling syn v3.0.4\n   Compiling serde_json v1.0.151\n   Compiling once_cell v1.21.4\n   Compiling ref-cast v1.0.27\n   Compiling core-foundation-sys v0.8.7\n   Compiling iana-time-zone v0.1.65\n   Compiling indexmap v2.14.0\n   Compiling getrandom v0.2.17\n   Compiling rand_core v0.6.4\n   Compiling syn v2.0.119\n   Compiling winnow v0.7.15\n   Compiling block-buffer v0.10.4\n   Compiling crypto-common v0.1.7\n   Compiling serde_derive_internals v0.30.0\n   Compiling thiserror v2.0.20\n   Compiling toml_write v0.1.2\n   Compiling memchr v2.8.3\n   Compiling itoa v1.0.18\n   Compiling rustix v1.1.4\n   Compiling anyhow v1.0.104\n   Compiling digest v0.10.7\n   Compiling uuid v1.25.0\n   Compiling serde_derive v1.0.229\n   Compiling ref-cast-impl v1.0.27\n   Compiling thiserror-impl v2.0.20\n   Compiling schemars_derive v1.2.2\n   Compiling errno v0.3.14\n   Compiling cpufeatures v0.2.17\n   Compiling tracing-core v0.1.36\n   Compiling pin-project-lite v0.2.17\n   Compiling bitflags v2.13.1\n   Compiling dyn-clone v1.0.20\n   Compiling sha2 v0.10.9\n   Compiling fastrand v2.5.0\n   Compiling ppv-lite86 v0.2.21\n   Compiling tempfile v3.27.0\n   Compiling rand_chacha v0.3.1\n   Compiling rand v0.8.7\n   Compiling tracing-attributes v0.1.31\n   Compiling toml_datetime v0.6.11\n   Compiling serde_spanned v0.6.9\n   Compiling chrono v0.4.45\n   Compiling tracing v0.1.44\n   Compiling toml_edit v0.22.27\n   Compiling schemars v1.2.2\n   Compiling toml v0.8.23\n   Compiling ta-goal v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a70a3a62-f6ba-462a-9ee2-d9a7ae3eb03d/crates/ta-goal)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.79s\n     Running unittests src/lib.rs (target/debug/deps/ta_goal-4895d161648b4797)\n   Doc-tests ta_goal\n",
+    "tests": {
+      "passed": 357,
+      "failed": 0,
+      "ignored": 2
+    }
+  },
+  "run_index": 3,
+  "recomputed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "rtk",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": true,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  },
+  "usage": {
+    "before": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 19.71,
+      "plan_captured_at": "2026-10-22T10:55:55Z",
+      "taken_at": "2026-10-22T10:56:06.877932Z"
+    },
+    "after": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 20.3,
+      "plan_captured_at": "2026-10-22T11:14:55Z",
+      "taken_at": "2026-10-22T11:15:04.341875Z"
+    },
+    "plan_usage_pct_delta": 0.0,
+    "budget_used_pct_delta": 0.59,
+    "note": null
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "propose-and-replay-wayfinder-goals-kpis-81f0624b",
+  "title": "Propose and replay Wayfinder goals KPIs datapoints",
+  "source_goal_id": "81f0624b-cbb2-44e4-a489-be5b251e17b3",
+  "start_commit": "4c6584248ef98cbe6311aad142d13e0ad076797e",
+  "start_dirty": false,
+  "start_branch": "main",
+  "prompt_sha256": "4b035d11f44519facbf79b837f5beeee71a777fced476a1472c9237ec00b2ae0",
+  "agent_id": "claude-code",
+  "agent_model": "claude-sonnet-5-5",
+  "check_command": "./dev cargo test -p ta-plan-wayfinder -p ta-goal -p ta-mcp-gateway",
+  "baseline": {
+    "cost_usd": 2.1018002,
+    "cost_estimated": false,
+    "input_tokens": 100,
+    "output_tokens": 62677,
+    "cache_read_tokens": 4555129,
+    "cache_creation_tokens": 229973,
+    "turns": null,
+    "outcome": "applied",
+    "files_changed": 9,
+    "lines_added": 2216,
+    "lines_removed": 60,
+    "diff_sha256": "0ed95cb8a167425b174b358c2eb6e805f9b2bab5d5f83ceb22a67d1d80f90473",
+    "check_passed": null,
+    "captured_at": "2026-10-17T04:58:10.343335Z"
+  }
+}

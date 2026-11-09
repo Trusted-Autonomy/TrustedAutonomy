@@ -1,0 +1,28 @@
+{
+  "id": "wiki-read-side-off-switch-c3118499",
+  "title": "Wiki read side off switch",
+  "source_goal_id": "c3118499-1ac9-44d4-a3f5-5b0451a68433",
+  "start_commit": "dafbea3b0d417822462556960e67a16d091da694",
+  "start_dirty": false,
+  "start_branch": "main",
+  "prompt_sha256": "99e9cfe5bc341eff5db59e7004cf7f690ab4288e0023cd42168ef52c0921bdd3",
+  "agent_id": "claude-code",
+  "agent_model": "claude-sonnet-5-5",
+  "check_command": "./dev cargo test -p ta-mcp-gateway -p ta-submit",
+  "baseline": {
+    "cost_usd": 0.7530117000000001,
+    "cost_estimated": false,
+    "input_tokens": 48,
+    "output_tokens": 15865,
+    "cache_read_tokens": 1956337,
+    "cache_creation_tokens": 99658,
+    "turns": null,
+    "outcome": "applied",
+    "files_changed": 5,
+    "lines_added": 5809,
+    "lines_removed": 5442,
+    "diff_sha256": "eb6ca1f5a22e47264ff2545a947ad44d3f1a4476cb24de43ec0d9b24db46f010",
+    "check_passed": null,
+    "captured_at": "2026-10-17T04:58:14.276743Z"
+  }
+}

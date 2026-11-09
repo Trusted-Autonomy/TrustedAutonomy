@@ -29,7 +29,7 @@ pub fn handle_plan(
                 let goal = validate_goal_exists(&state.goal_store, goal_run_id)?;
                 goal.workspace_path.join("PLAN.md")
             } else {
-                state.config.workspace_root.join("PLAN.md")
+                state.config.source_root().join("PLAN.md")
             };
 
             if plan_path.exists() {
@@ -260,11 +260,26 @@ pub fn handle_plan_status(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
 
-    let plan_path = state.config.workspace_root.join("PLAN.md");
+    // The plan file and `.ta/workflow.toml` live in the SOURCE project root:
+    // the gateway's own `workspace_root` may be a staging copy or a chat
+    // session directory that has neither.
+    let project_root = state.read_tool_root("ta_plan_status")?;
+    let plan_path = project_root.join("PLAN.md");
 
     if !plan_path.exists() {
         let response = serde_json::json!({
-            "message": "No PLAN.md found in project root.",
+            "message": format!(
+                "No plan file found: looked for {} (project root {}). The gateway resolves the \
+                 plan from the project root, not from the goal's staging copy, so this means \
+                 the project root has no PLAN.md there. Create PLAN.md at that path, or check \
+                 that the agent was launched from the right project (workspace {}).",
+                plan_path.display(),
+                project_root.display(),
+                state.config.workspace_root.display()
+            ),
+            "looked_at": plan_path.display().to_string(),
+            "project_root": project_root.display().to_string(),
+            "workspace_root": state.config.workspace_root.display().to_string(),
         });
         return Ok(CallToolResult::success(vec![
             Content::json(response).map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -273,14 +288,28 @@ pub fn handle_plan_status(
 
     // v0.17.11.3: `select_plan_store` returns `FilePlanStore` unless
     // `.ta/workflow.toml`'s `[plan] backend = "wayfinder"` opts in.
-    let store =
-        ta_plan_wayfinder::select_plan_store(&state.config.workspace_root, &state.config.goals_dir)
-            .map_err(|e| {
-                McpError::internal_error(format!("failed to open PlanStore: {}", e), None)
-            })?;
-    let phases = store
-        .list_phases()
-        .map_err(|e| McpError::internal_error(format!("failed to read PLAN.md: {}", e), None))?;
+    let goals_dir = if project_root == state.config.workspace_root {
+        state.config.goals_dir.clone()
+    } else {
+        project_root.join(".ta").join("goals")
+    };
+    let store = ta_plan_wayfinder::select_plan_store(&project_root, &goals_dir).map_err(|e| {
+        McpError::internal_error(
+            format!(
+                "failed to open the plan store for {} (backend selected by {}/.ta/workflow.toml): {}",
+                plan_path.display(),
+                project_root.display(),
+                e
+            ),
+            None,
+        )
+    })?;
+    let phases = store.list_phases().map_err(|e| {
+        McpError::internal_error(
+            format!("failed to read the plan at {}: {}", plan_path.display(), e),
+            None,
+        )
+    })?;
 
     let done_window = params.done_window.unwrap_or(5) as usize;
     let pending_window = params.pending_window.unwrap_or(5) as usize;

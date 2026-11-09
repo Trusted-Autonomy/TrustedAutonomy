@@ -111,6 +111,16 @@ pub fn fs_view(policy: &SandboxPolicy, working_dir: &Path) -> FsView {
             push_unique(&mut v.goal_ro, p.clone());
         }
     }
+    // A read-only project root contains the `.ta` tree that holds this very workspace
+    // (`<project>/.ta/staging/<goal>`). The deny hides `.ta` with a tmpfs, so the workspace
+    // is mounted again on top of it.
+    let masked_ancestor = v
+        .deny
+        .iter()
+        .any(|d| d != working_dir && within(working_dir, d) && v.ro.iter().any(|r| within(d, r)));
+    if masked_ancestor {
+        push_unique(&mut v.goal, working_dir.to_path_buf());
+    }
     // A path that is both writable and readable is just writable.
     let rw = v.rw.clone();
     v.ro.retain(|r| !rw.iter().any(|w| within(r, w)));
@@ -708,5 +718,40 @@ mod tests {
         let without = helper_args(&v, &p, false, vec!["x".into()]);
         assert!(without.egress_socket.is_none());
         assert!(without.restrict_net);
+    }
+
+    #[test]
+    fn read_only_project_root_masks_ta_but_keeps_the_workspace_writable() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("proj");
+        let ws = root.join(".ta").join("staging").join("g1");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let mut p = policy(d.path());
+        p.allow_read = vec![root.clone()];
+        p.allow_write = Vec::new();
+        p.deny_paths = vec![root.join(".ta"), root.join(".git")];
+        let v = fs_view(&p, &ws);
+        assert!(v.ro.contains(&root), "project root mounted read-only");
+        assert!(!v.rw.contains(&root), "the project root is never writable");
+        assert!(v.rw.contains(&ws));
+        assert!(
+            v.goal.contains(&ws),
+            "the workspace is re-mounted after the .ta mask"
+        );
+        let args = bwrap_args(&v, &p, &ws, Path::new("/opt/ta/ta-sandbox-exec"), None);
+        let pos = |flag: &str, path: &Path| {
+            args.windows(2)
+                .position(|w| w[0] == flag && w[1] == path.to_string_lossy())
+        };
+        assert!(pos("--ro-bind-try", &root).is_some());
+        let mask = pos("--tmpfs", &root.join(".ta")).expect(".ta masked");
+        assert!(pos("--tmpfs", &root.join(".git")).is_some(), ".git masked");
+        let regrant = args
+            .windows(3)
+            .rposition(|w| w[0] == "--bind-try" && w[1] == ws.to_string_lossy())
+            .expect("workspace re-granted");
+        assert!(regrant > mask, "the re-grant comes after the .ta mask");
     }
 }

@@ -1,0 +1,28 @@
+{
+  "id": "swappable-optimizer-slots-and-optimizer-8ab0a4f0",
+  "title": "Swappable Optimizer Slots and Optimizer Spawn Safety",
+  "source_goal_id": "8ab0a4f0-ec91-49bb-a3ee-b5f63df471ef",
+  "start_commit": "899a122fd668d89963e3a9b4844d3b8a3f668c56",
+  "start_dirty": false,
+  "start_branch": "main",
+  "prompt_sha256": "3abd64655d6bb687bbb3ed4482902265fb6a489c30aec3d85f738ef17051ed72",
+  "agent_id": "claude-code",
+  "agent_model": "claude-sonnet-5-5",
+  "check_command": "./dev cargo test -p ta-context-opt -p ta-daemon",
+  "baseline": {
+    "cost_usd": 1.4096586,
+    "cost_estimated": false,
+    "input_tokens": 88,
+    "output_tokens": 41063,
+    "cache_read_tokens": 4640646,
+    "cache_creation_tokens": 133697,
+    "turns": null,
+    "outcome": "applied",
+    "files_changed": 19,
+    "lines_added": 11971,
+    "lines_removed": 10607,
+    "diff_sha256": "3c1c62eff42ef48fdfb1d5df003a2970fe4b1505e4013680c3cd05c5708844f7",
+    "check_passed": null,
+    "captured_at": "2026-10-17T04:58:18.347937Z"
+  }
+}

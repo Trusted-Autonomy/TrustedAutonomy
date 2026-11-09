@@ -1,0 +1,73 @@
+{
+  "replay_id": "877cbdad-21d6-4cb3-84e8-dfba7f90d3a6",
+  "golden_id": "wiki-read-side-off-switch-c3118499",
+  "tag": "r2-none",
+  "set": [],
+  "goal_id": "e479122e-f411-457e-8716-d046d460f2f3",
+  "started_at": "2026-10-22T08:27:09.979460Z",
+  "completed_at": "2026-10-22T08:35:23.698706Z",
+  "outcome": "pr_ready",
+  "cost_usd": 0.7366856,
+  "cost_estimated": false,
+  "input_tokens": 40,
+  "output_tokens": 15920,
+  "cache_read_tokens": 1670376,
+  "cache_creation_tokens": 102592,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 7,
+  "lines_added": 397,
+  "lines_removed": 3,
+  "diff_sha256": "f91dc3673036427c5bdcd7d011bc64118bc5bdd22ba11edc8d75488f253689ba",
+  "similarity": 0.009430331023864511,
+  "check_passed": true,
+  "check_run": {
+    "command": "./dev cargo test -p ta-mcp-gateway -p ta-submit",
+    "started_at": "2026-10-22T08:35:25.928971Z",
+    "finished_at": "2026-10-22T08:36:26.624427Z",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "sts::test_svn_adapter_check_failures_uses_default_empty_vec ... ok\ntest svn::tests::test_svn_adapter_detect ... ok\ntest svn::tests::test_svn_adapter_exclude_patterns ... ok\ntest svn::tests::test_svn_adapter_name ... ok\ntest svn::tests::test_svn_adapter_protected_targets ... ok\ntest svn::tests::test_svn_adapter_push_is_noop ... ok\ntest svn::tests::test_svn_adapter_verify_degrades_without_svn ... ok\ntest vcs_detect::tests::plugin_without_detect_markers_is_not_consulted ... ok\ntest vcs_detect::tests::project_local_plugin_with_markers_is_detected ... ok\ntest vcs_plugin_manifest::tests::default_timeout_is_30 ... ok\ntest vcs_plugin_manifest::tests::discover_vcs_plugins_empty_returns_empty ... ok\ntest vcs_plugin_manifest::tests::discover_vcs_plugins_finds_manifests ... ok\ntest vcs_plugin_manifest::tests::discover_vcs_plugins_skips_invalid ... ok\ntest vcs_plugin_manifest::tests::has_protected_targets_false ... ok\ntest vcs_plugin_manifest::tests::has_protected_targets_true ... ok\ntest vcs_plugin_manifest::tests::load_manifest_missing ... ok\ntest vcs_plugin_manifest::tests::load_valid_manifest ... ok\ntest vcs_plugin_manifest::tests::validate_empty_command ... ok\ntest vcs_plugin_manifest::tests::validate_wrong_type ... ok\ntest vcs_plugin_manifest::tests::vcs_plugin_source_display ... ok\ntest vcs_plugin_protocol::tests::commit_params_roundtrip ... ok\ntest vcs_plugin_protocol::tests::detect_params_roundtrip ... ok\ntest vcs_plugin_protocol::tests::handshake_params_roundtrip ... ok\ntest vcs_plugin_protocol::tests::handshake_result_roundtrip ... ok\ntest vcs_plugin_protocol::tests::protocol_version_is_one ... ok\ntest vcs_plugin_protocol::tests::request_roundtrip ... ok\ntest vcs_plugin_protocol::tests::response_error_roundtrip ... ok\ntest vcs_plugin_protocol::tests::response_success_roundtrip ... ok\ntest git::tests::test_prepare_preserves_uncommitted_changes_when_local_head_is_stale ... ok\ntest external_vcs_adapter::tests::plugin_non_zero_exit_returns_error ... ok\ntest messaging_adapter::tests::external_adapter_create_draft_returns_id ... ok\ntest messaging_adapter::tests::external_adapter_calls_mock_plugin ... ok\ntest registry::tests::test_select_adapter_loads_external_plugin ... ok\ntest social_adapter::tests::external_adapter_create_scheduled_returns_id_and_time ... ok\ntest social_adapter::tests::external_adapter_publish_commits_when_review_passes ... ok\ntest social_adapter::tests::external_adapter_health_returns_handle ... ok\ntest social_adapter::tests::external_adapter_create_draft_returns_id ... ok\n\ntest result: ok. 248 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s\n\n\nrunning 2 tests\ntest test_open_review_uses_workflow_config ... ok\ntest test_open_review_idempotency_returns_existing_pr ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s\n\n\nrunning 5 tests\ntest perforce_plugin_handshake_succeeds ... ok\ntest perforce_plugin_protected_targets ... ok\ntest perforce_plugin_verify_not_on_protected_target ... ok\ntest perforce_plugin_exclude_patterns ... ok\ntest perforce_plugin_save_restore_state_roundtrip ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s\n\n\nrunning 12 tests\ntest handshake_succeeds_with_mock_plugin ... ok\ntest revision_id_returns_mock_rev ... ok\ntest check_review_returns_open ... ok\ntest merge_review_returns_merged_true ... ok\ntest exclude_patterns_returns_mock_patterns ... ok\ntest detect_with_mock_plugin ... ok\ntest protected_targets_returns_mock_targets ... ok\ntest save_state_returns_some ... ok\ntest sync_upstream_returns_updated_true ... ok\ntest restore_state_round_trip ... ok\ntest verify_not_on_protected_target_succeeds ... ok\ntest full_lifecycle_detect_save_commit_restore ... ok\n\ntest result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+    "stderr_tail": "d460f2f3/crates/ta-workflow)\n   Compiling hnsw_rs v0.3.4\n   Compiling sha2 v0.9.9\n   Compiling tokio-websockets v0.10.1\n   Compiling biscuit-quote v0.3.0\n   Compiling crossbeam v0.8.4\n   Compiling prost-types v0.10.1\n   Compiling darling v0.23.0\n   Compiling pkcs8 v0.9.0\n   Compiling ta-audit v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-audit)\n   Compiling rustls-native-certs v0.8.4\n   Compiling tryhard v0.5.2\n   Compiling axum-core v0.5.6\n   Compiling serde_nanos v0.1.4\n   Compiling rand_distr v0.4.3\n   Compiling nuid v0.5.0\n   Compiling serde_repr v0.1.21\n   Compiling serde_path_to_error v0.1.20\n   Compiling memmap2 v0.9.11\n   Compiling matchit v0.8.4\n   Compiling rmcp v0.14.0\n   Compiling env_home v0.1.0\n   Compiling base64 v0.13.1\n   Compiling which v7.0.3\n   Compiling async-nats v0.50.0\n   Compiling rmcp-macros v0.14.0\n   Compiling ta-plan v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-plan)\n   Compiling axum v0.8.9\n   Compiling ta-session v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-session)\n   Compiling sse-stream v0.2.6\n   Compiling pastey v0.2.3\n   Compiling ta-plan-wayfinder v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-plan-wayfinder)\n   Compiling ruvector-core v2.3.0\n   Compiling ta-credential-broker v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-credential-broker)\n   Compiling ta-connector-fs v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-connectors/fs)\n   Compiling ta-actions v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-actions)\n   Compiling ta-events v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-events)\n   Compiling ta-connector-comfyui v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-connectors/comfyui)\n   Compiling ta-connector-unreal v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-connectors/unreal)\n   Compiling ta-connector-unity v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-connectors/unity)\n   Compiling ta-memory v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-memory)\n   Compiling ta-agent-whiteboard v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-agent-whiteboard)\n   Compiling ta-mcp-gateway v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/e479122e-f411-457e-8716-d046d460f2f3/crates/ta-mcp-gateway)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 51.44s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`\n     Running unittests src/lib.rs (target/debug/deps/ta_mcp_gateway-929b710a9c9f3379)\n     Running tests/origin_class_not_agent_settable.rs (target/debug/deps/origin_class_not_agent_settable-f00fd58194ae05bb)\n     Running unittests src/lib.rs (target/debug/deps/ta_submit-dad3a37c67e69bcf)\n     Running tests/git_open_review.rs (target/debug/deps/git_open_review-5775c6c47ef3ba4f)\n     Running tests/vcs_perforce_plugin.rs (target/debug/deps/vcs_perforce_plugin-96706946d36a09be)\n     Running tests/vcs_plugin_lifecycle.rs (target/debug/deps/vcs_plugin_lifecycle-fe5ddae317cad8fc)\n   Doc-tests ta_mcp_gateway\n   Doc-tests ta_submit\n",
+    "tests": {
+      "passed": 582,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "run_index": 7,
+  "recomputed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "not chosen",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": false,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  },
+  "usage": {
+    "before": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 11.52,
+      "plan_captured_at": "2026-10-22T08:26:55Z",
+      "taken_at": "2026-10-22T08:27:09.977547Z"
+    },
+    "after": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 11.89,
+      "plan_captured_at": "2026-10-22T08:34:55Z",
+      "taken_at": "2026-10-22T08:35:23.698706Z"
+    },
+    "plan_usage_pct_delta": 0.0,
+    "budget_used_pct_delta": 0.37,
+    "note": null
+  }
+}
