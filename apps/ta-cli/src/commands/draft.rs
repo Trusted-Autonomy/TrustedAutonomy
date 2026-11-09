@@ -338,6 +338,12 @@ pub enum DraftCommands {
         /// Without it, a stale base is refused before anything is written.
         #[arg(long)]
         allow_stale_base: bool,
+        /// Run the apply as a background process that survives this terminal or caller
+        /// ending, and return at once. Progress is in `.ta/apply-runs/<run>.log`; check
+        /// it with `ta draft apply --status`. Use this when the pre-submit verification
+        /// is long and the caller has a time limit.
+        #[arg(long)]
+        detach: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -676,6 +682,70 @@ impl Drop for BackgroundHeartbeat {
 }
 
 pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()> {
+    // A background apply started by `--detach` keeps its run record current: it says
+    // when it is running and how it ended, which is what `--status` reports once the
+    // starting terminal is gone.
+    if matches!(cmd, DraftCommands::Apply { status: false, .. }) {
+        if let Some(run) = super::apply_detach::RunHandle::from_env() {
+            run.mark_running();
+            let result = execute_command(cmd, config);
+            run.finish(&result);
+            return result;
+        }
+    }
+    execute_command(cmd, config)
+}
+
+/// Start `ta draft apply` for `draft` as a detached background process.
+fn launch_detached_apply(config: &GatewayConfig, draft: &str) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().map_err(|e| {
+        anyhow::anyhow!(
+            "could not find the running `ta` binary to start the background apply: {e}. \
+             Run `ta draft apply {draft}` in the foreground instead."
+        )
+    })?;
+    // Refuse here, where the user is looking, instead of in a log nobody reads.
+    let lock = config.workspace_root.join(".ta").join("apply.lock");
+    if let Ok(raw) = std::fs::read_to_string(&lock) {
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let pid = data["pid"].as_u64().unwrap_or(0) as u32;
+            if pid != 0 && is_apply_process_alive(pid) {
+                anyhow::bail!(
+                    "Draft apply already in progress (PID {pid}, draft {}). Not starting another. \
+                     See it with: ta draft apply --status",
+                    data["draft_id"].as_str().unwrap_or("unknown")
+                );
+            }
+        }
+    }
+    let args = super::apply_detach::child_args(std::env::args_os().skip(1));
+    let record = super::apply_detach::launch(super::apply_detach::LaunchSpec {
+        workspace_root: &config.workspace_root,
+        draft,
+        program: &exe,
+        args,
+    })?;
+    tracing::info!(
+        run_id = %record.run_id,
+        pid = ?record.pid,
+        draft = %draft,
+        log = %record.log.display(),
+        "started detached draft apply"
+    );
+    println!(
+        "Detached apply of draft {draft} started in the background (PID {}).",
+        record.pid.map_or("unknown".to_string(), |p| p.to_string())
+    );
+    println!("  Run:    {}", record.run_id);
+    println!("  Log:    {}", record.log.display());
+    println!(
+        "  Status: ta draft apply --status   (phase and elapsed time while it runs, result after)"
+    );
+    println!("  It keeps running if this terminal or caller ends. Do not start another apply until it finishes.");
+    Ok(())
+}
+
+fn execute_command(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match cmd {
         DraftCommands::Build {
             goal_id,
@@ -842,6 +912,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             replay_actions,
             no_replay_actions,
             allow_stale_base,
+            detach,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -857,6 +928,16 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             }
 
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+
+            if *detach {
+                if *dry_run {
+                    anyhow::bail!(
+                        "--detach cannot be combined with --dry-run: a dry run changes nothing and \
+                         finishes at once. Run `ta draft apply {resolved} --dry-run` without --detach."
+                    );
+                }
+                return launch_detached_apply(config, &resolved);
+            }
 
             let replay = ReplayDecision::resolve(*replay_actions, *no_replay_actions);
 
@@ -3016,6 +3097,9 @@ pub(crate) fn build_package(
         }
     }
 
+    // v0.17.12.25 item 7: run the smoke cases (real command, scratch repo) before the draft exists.
+    run_smoke_stage(&goal.workspace_path, source_dir, &mut pkg)?;
+
     // Save the draft package.
     save_package(config, &pkg)?;
 
@@ -3065,6 +3149,82 @@ pub(crate) fn build_package(
         println!("Approve with: ta draft approve {}", draft_display);
     }
 
+    Ok(())
+}
+
+/// The smoke stage of a draft build (v0.17.12.25 item 7): run the project's
+/// `[[smoke.cases]]` against the goal's staging copy in a scratch repository, with no human
+/// involved. With `on_failure = "block"` (the default) a failing case stops the build before
+/// any draft exists; with `"warn"` the failures ride along as draft warnings. Passing cases
+/// and the "smoke-tested the headline behaviour, including bad input" checklist are recorded
+/// in the draft's validation log. A project without `[smoke]` config is not affected.
+fn run_smoke_stage(
+    staging: &Path,
+    source_dir: impl AsRef<Path>,
+    pkg: &mut DraftPackage,
+) -> anyhow::Result<()> {
+    use super::smoke;
+    let load = |dir: &Path| {
+        ta_submit::WorkflowConfig::load_or_default(&dir.join(".ta/workflow.toml")).smoke
+    };
+    // The draft may add smoke cases of its own, but cannot relax the project's settings.
+    let cfg = load(source_dir.as_ref()).merged_with_staging(&load(staging));
+    if cfg.is_empty() {
+        return Ok(());
+    }
+    if !staging.is_dir() {
+        tracing::warn!(
+            staging = %staging.display(),
+            "smoke stage skipped: the goal's staging directory is missing"
+        );
+        println!(
+            "[smoke] Skipped: staging directory {} is missing, so there is nothing to run the smoke cases against.",
+            staging.display()
+        );
+        return Ok(());
+    }
+    let changed: Vec<smoke::ChangedPath> = pkg
+        .changes
+        .artifacts
+        .iter()
+        .map(|a| smoke::ChangedPath {
+            path: a
+                .resource_uri
+                .strip_prefix("fs://workspace/")
+                .unwrap_or(&a.resource_uri)
+                .to_string(),
+            change: a.change_type.clone(),
+        })
+        .collect();
+    let env = super::verify::goal_cargo_env(staging);
+    let report = smoke::run_gate(&cfg, staging, &changed, &env, false, &[]);
+    if report.is_empty() {
+        return Ok(());
+    }
+    if smoke::blocks_draft(&cfg, &report) {
+        tracing::error!(
+            failed = report.results.iter().filter(|r| !r.passed).count(),
+            findings = report.findings.len(),
+            "smoke stage failed; draft not created"
+        );
+        anyhow::bail!(
+            "Draft NOT created: the smoke stage failed.\n{}\n\
+             Fix the behaviour in the staging copy ({}), then run `ta draft build` again. To run just \
+             the cases: `ta smoke --dir {}`. To build the draft anyway and show these failures to the \
+             reviewer, set `on_failure = \"warn\"` under [smoke] in .ta/workflow.toml.",
+            report.failure_text().trim_end(),
+            staging.display(),
+            staging.display()
+        );
+    }
+    smoke::merge_validation_log(&mut pkg.validation_log, &report.validation_entries(&cfg));
+    if report.failed() {
+        println!(
+            "[smoke] {} failure(s) recorded as draft warnings (on_failure = \"warn\").",
+            report.warnings().len()
+        );
+        smoke::merge_warnings(&mut pkg.verification_warnings, &report.warnings());
+    }
     Ok(())
 }
 
@@ -6270,10 +6430,15 @@ impl ApplyLock {
             }
         }
 
+        let now = Utc::now().to_rfc3339();
         let content = serde_json::json!({
             "draft_id": draft_id,
             "pid": std::process::id(),
-            "started_at": Utc::now().to_rfc3339(),
+            "started_at": now,
+            "phase": "starting",
+            "phase_started_at": now,
+            // Set when this apply was started by `ta draft apply --detach`.
+            "run_record": std::env::var(super::apply_detach::RECORD_ENV).ok(),
         })
         .to_string();
         std::fs::write(&lock_path, &content).map_err(|e| {
@@ -6288,7 +6453,54 @@ impl ApplyLock {
         Ok(ApplyLock { lock_path })
     }
 
-    /// Print the current apply lock status to stdout.
+    /// Record what the apply is doing now, in the lock (read by `--status`) and, for a
+    /// detached apply, in its run record. Best effort: a failure only costs the
+    /// progress line.
+    fn set_phase(&self, phase: &str) {
+        if let Ok(raw) = std::fs::read_to_string(&self.lock_path) {
+            if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                data["phase"] = serde_json::Value::String(phase.to_string());
+                data["phase_started_at"] = serde_json::Value::String(Utc::now().to_rfc3339());
+                let tmp = self.lock_path.with_extension("lock.tmp");
+                let written = std::fs::write(&tmp, data.to_string())
+                    .and_then(|()| std::fs::rename(&tmp, &self.lock_path));
+                if let Err(e) = written {
+                    tracing::warn!(
+                        lock = %self.lock_path.display(),
+                        phase,
+                        error = %e,
+                        "could not record the apply phase in the lock"
+                    );
+                }
+            }
+        }
+        if let Some(run) = super::apply_detach::RunHandle::from_env() {
+            run.set_phase(phase);
+        }
+    }
+
+    /// The phase line of a lock: what the apply is doing and for how long.
+    fn phase_line(data: &serde_json::Value, now: chrono::DateTime<Utc>) -> Option<String> {
+        let phase = data["phase"].as_str()?;
+        let since = data["phase_started_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| {
+                super::apply_detach::human_elapsed((now - t.with_timezone(&Utc)).num_seconds())
+            });
+        let total = data["started_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| {
+                super::apply_detach::human_elapsed((now - t.with_timezone(&Utc)).num_seconds())
+            });
+        Some(match (since, total) {
+            (Some(s), Some(t)) => format!("  Phase: {phase} (for {s}; apply running for {t})."),
+            _ => format!("  Phase: {phase}."),
+        })
+    }
+
+    /// Print the current apply lock status to stdout, then the newest detached run.
     fn print_status(workspace_root: &std::path::Path) {
         let lock_path = workspace_root.join(".ta").join("apply.lock");
         match std::fs::read_to_string(&lock_path) {
@@ -6311,6 +6523,12 @@ impl ApplyLock {
                         "Apply in progress: draft={draft_id}, PID={pid} ({state}), started={started_at}",
                         state = if alive { "running" } else { "stale/dead" }
                     );
+                    // A detached apply's phase is shown with its run record below.
+                    if alive && data["run_record"].is_null() {
+                        if let Some(line) = Self::phase_line(&data, Utc::now()) {
+                            println!("{line}");
+                        }
+                    }
                     if !alive {
                         for line in super::apply_base::stale_lock_status_lines(
                             &super::apply_base::StaleLock {
@@ -6322,9 +6540,18 @@ impl ApplyLock {
                         ) {
                             println!("{line}");
                         }
+                        if let Some(phase) = data["phase"].as_str() {
+                            println!("  It was in phase: {phase}.");
+                        }
                     }
                 }
             },
+        }
+        if let Some(rec) = super::apply_detach::latest_record(workspace_root) {
+            let alive = rec.pid.is_some_and(is_apply_process_alive);
+            for line in super::apply_detach::status_lines(&rec, Utc::now(), alive) {
+                println!("{line}");
+            }
         }
     }
 }
@@ -7167,8 +7394,9 @@ fn apply_package(
     // Finish or undo any earlier apply that was interrupted (crash, power loss)
     // before taking the lock. A live apply is left alone (v0.17.12.3).
     let recovered = super::apply_queue::recover_interrupted_applies(config);
-    let _apply_lock =
+    let apply_lock =
         ApplyLock::acquire(&config.workspace_root, &package_id.to_string(), recovered)?;
+    apply_lock.set_phase("loading the draft");
 
     eprintln!("[apply] Loading draft package {}...", package_id);
     let mut pkg = load_package(config, package_id)?;
@@ -7867,6 +8095,7 @@ fn apply_package(
     }
 
     // Apply changes — use overlay path for overlay-based goals, legacy path otherwise.
+    apply_lock.set_phase("copying changes into the project");
     eprintln!("[apply] Applying changes to {}...", target_dir.display());
     let applied_files: Vec<String> = if let Some(ref source_dir) = goal.source_dir {
         // Overlay-based goal: diff staging vs source, copy changed files.
@@ -9325,6 +9554,7 @@ fn apply_package(
                 if skip_verify {
                     println!("\n  Skipping pre-submit verification (--skip-verify).");
                 } else if !workflow_config.verify.commands.is_empty() {
+                    apply_lock.set_phase("verifying (pre-submit checks)");
                     println!(
                         "\n{}",
                         super::apply_base::verify_announcement(
@@ -9446,6 +9676,7 @@ fn apply_package(
                 }
 
                 // Commit changes — goal title as subject, complete draft summary as body.
+                apply_lock.set_phase("committing");
                 eprintln!("[apply] Staging changes for VCS commit...");
                 let commit_msg = build_commit_message(goal, &pkg);
 
@@ -9575,6 +9806,7 @@ fn apply_package(
 
                 // Submit (push) to remote if requested.
                 if git_push {
+                    apply_lock.set_phase("pushing the branch");
                     println!("Submitting to remote...");
                     match adapter.push(&CommitContext::from(goal)) {
                         Ok(result) => {
@@ -9636,6 +9868,7 @@ fn apply_package(
 
                 // Open review (PR / CL review) if requested.
                 if git_review {
+                    apply_lock.set_phase("opening the review");
                     println!("Creating review request...");
                     match adapter.open_review(&CommitContext::from(goal), &pkg) {
                         Ok(result) => {
@@ -11731,10 +11964,10 @@ pub fn apply_draft_build_context(
     let mut pkg = load_package(config, draft_uuid)?;
 
     if !ctx.verification_warnings.is_empty() {
-        pkg.verification_warnings = ctx.verification_warnings;
+        super::smoke::merge_warnings(&mut pkg.verification_warnings, &ctx.verification_warnings);
     }
     if !ctx.validation_log.is_empty() {
-        pkg.validation_log = ctx.validation_log;
+        super::smoke::merge_validation_log(&mut pkg.validation_log, &ctx.validation_log);
     }
     if let Some(mut sup) = ctx.supervisor_review {
         // Pre-PASS consistency check: never let a PASS through when an artifact's
@@ -11823,10 +12056,10 @@ pub fn build_draft_inline(
 
     if let Some(mut pkg) = latest_pkg {
         if !verification_warnings.is_empty() {
-            pkg.verification_warnings = verification_warnings.to_vec();
+            super::smoke::merge_warnings(&mut pkg.verification_warnings, verification_warnings);
         }
         if !validation_log.is_empty() {
-            pkg.validation_log = validation_log.to_vec();
+            super::smoke::merge_validation_log(&mut pkg.validation_log, validation_log);
         }
         if let Some(sup) = supervisor_review {
             let mut sup = sup.clone();
@@ -13775,6 +14008,55 @@ mod tests {
             superseded_by: uuid::Uuid::new_v4(),
         };
         assert!(super::wrong_state_message("deny", id, &sup).contains("superseded"));
+    }
+
+    #[test]
+    fn apply_lock_records_the_phase_and_when_it_began() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let lock_path = dir.path().join(".ta/apply.lock");
+        let lock = ApplyLock::acquire(dir.path(), "draft-1", 0).unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap()
+        };
+        let first = read();
+        assert_eq!(first["phase"], "starting");
+        assert_eq!(first["draft_id"], "draft-1");
+        assert_eq!(first["pid"], std::process::id());
+
+        lock.set_phase("verifying (pre-submit checks)");
+        let second = read();
+        assert_eq!(second["phase"], "verifying (pre-submit checks)");
+        assert_eq!(
+            second["started_at"], first["started_at"],
+            "the apply's own start time must not move when the phase changes"
+        );
+        assert!(
+            !dir.path().join(".ta/apply.lock.tmp").exists(),
+            "the atomic rewrite must not leave its temp file"
+        );
+        drop(lock);
+        assert!(!lock_path.exists(), "dropping the lock releases it");
+    }
+
+    #[test]
+    fn apply_lock_phase_line_shows_phase_and_elapsed_time() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let data = serde_json::json!({
+            "phase": "verifying (pre-submit checks)",
+            "phase_started_at": "2026-01-01T00:55:00Z",
+            "started_at": "2026-01-01T00:50:00Z",
+        });
+        let line = ApplyLock::phase_line(&data, now).unwrap();
+        assert!(line.contains("verifying (pre-submit checks)"), "{line}");
+        assert!(line.contains("5m"), "phase elapsed missing: {line}");
+        assert!(line.contains("10m"), "total elapsed missing: {line}");
+        assert!(
+            ApplyLock::phase_line(&serde_json::json!({"draft_id": "x"}), now).is_none(),
+            "a lock from before phases were recorded has no phase line"
+        );
     }
 
     use super::*;

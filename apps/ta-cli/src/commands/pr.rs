@@ -836,6 +836,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             replay_actions: false,
             no_replay_actions: false,
             allow_stale_base: false,
+            detach: false,
         },
         // Checks and Fix are handled before reaching this function.
         PrCommands::Checks { .. } | PrCommands::Fix { .. } => {
