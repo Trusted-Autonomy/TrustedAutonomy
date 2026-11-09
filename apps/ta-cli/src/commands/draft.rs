@@ -10850,7 +10850,6 @@ fn run_apply_safety_checks(
     let mut violations: Vec<String> = Vec::new();
 
     if let Some(base) = base_snapshot {
-        use sha2::Digest as _;
         for artifact in artifacts {
             if artifact.change_type != ChangeType::Delete {
                 continue;
@@ -10863,14 +10862,6 @@ fn run_apply_safety_checks(
             let source_exists = source_path.exists();
             let base_entry = base.files.get(rel);
 
-            let source_hash = if source_exists {
-                std::fs::read(&source_path)
-                    .ok()
-                    .map(|b| format!("{:x}", sha2::Sha256::digest(&b)))
-            } else {
-                None
-            };
-
             let suspicious = match base_entry {
                 // Never in the pre-agent base at all, yet source has it now and
                 // the draft wants it deleted — this is exactly the ghost-deletion
@@ -10880,19 +10871,21 @@ fn run_apply_safety_checks(
                 // matches what the base recorded — someone changed it directly
                 // in source_dir after staging began; deleting it now would
                 // discard that concurrent change.
-                Some(base_snap) => {
-                    source_exists && source_hash.as_deref() != Some(base_snap.content_hash.as_str())
-                }
+                Some(base_snap) => source_exists && !base_snap.matches_file(&source_path),
             };
 
             if suspicious {
+                let detail = match base_entry {
+                    Some(snap) => snap.describe_against(&source_path),
+                    None => "the file is not in the base snapshot".to_string(),
+                };
                 violations.push(format!(
                     "Artifact '{}' is about to be deleted, but its content in source \
                      does not match the pre-agent base snapshot taken when staging began \
-                     — it looks like a concurrent, unrelated commit added or modified this \
+                     ({}) — it looks like a concurrent, unrelated commit added or modified this \
                      file directly in source_dir after the goal started. Deleting it now \
                      would discard that concurrent change.",
-                    rel
+                    rel, detail
                 ));
             }
         }

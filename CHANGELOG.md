@@ -1,5 +1,11 @@
 ## Unreleased
 
+**Lazy copy-on-write staging**
+
+- **New `[staging] strategy = "lazy"`.** Staging is populated with directory-level `clonefile` (APFS) or per-file reflinks (Btrfs/XFS); ext4, NTFS, other volumes and Windows fall back to the full copy and the goal output says why. A metadata baseline stored outside staging (`.ta/staging-baselines/<goal-id>.json`) lets `ta draft build` open only files the agent wrote, deleted, renamed or added. Goal start no longer SHA-256s the whole source tree in this mode. Default stays `full`. Design and measurements: `docs/design/lazy-cow-staging.md`.
+- **Fixed: `[staging] strategy` in `.ta/workflow.toml` was never read by `ta goal start`, `ta run` or the doctor/status output.** They passed the project directory instead of the file to the config loader, which fails silently and returns defaults, so every goal used `full`. They now read `.ta/workflow.toml`; projects that had `smart`, `refs-cow` or `projfs` configured (and silently ignored) will now get that strategy.
+- `ta goal start` prints the staging size/time line in every mode. Apply safety failures for deleted files now show the base and current size/mtime.
+
 **crates.io release step**
 
 - **`scripts/publish-crates.sh` computes the publish order** from `cargo metadata` instead of a hand-kept list. The old list published `ta-audit` before `ta-credentials` (its dependency), named a crate that no longer exists (`ta-db-proxy-sqlite`) and omitted 16 that do, so a release would have failed at the first crate. `--list-order` prints the order; `scripts/test-publish-order.sh` (part of `ci-local`) checks that every crate is listed once, after its dependencies, with versioned internal dependencies.

@@ -30,6 +30,11 @@ pub enum OverlayStagingMode {
     /// Byte-for-byte copy (default — always works, may be slow for large workspaces).
     #[default]
     Full,
+    /// Lazy copy-on-write staging (`strategy = "lazy"`): clones instead of copying
+    /// where the filesystem allows it, records a metadata baseline of the staging
+    /// tree, and diffs only the files that changed since. Falls back to the full
+    /// copy (reported in [`CopyStat::lazy`]) where cloning is unavailable.
+    Lazy,
     /// Symlink excluded directories instead of copying — fast for large workspaces.
     Smart,
     /// Windows ReFS CoW clone — auto-falls back to `Smart` on non-ReFS volumes.
@@ -45,11 +50,14 @@ pub enum OverlayStagingMode {
 use crate::conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 use crate::error::{SharedFileConflict, WorkspaceError};
 
-// ── V1 copy-optimization excludes (remove when V2 VFS lands) ──────
+// ── Excludes ──────────────────────────────────────────────────────
 
-/// V1 TEMPORARY: Built-in default exclude patterns for common build artifacts.
-/// When V2 lazy COW lands, these become unnecessary — the VFS only copies
-/// files on write, so build artifacts are never materialized.
+/// Built-in default exclude patterns for common build artifacts.
+///
+/// They stay in force under lazy staging: an agent's own `cargo build` or
+/// `npm install` writes into staging, and those trees must not surface as
+/// artifacts; cloning them costs time and inodes (see
+/// `docs/design/lazy-cow-staging.md`, "Why the default excludes stay").
 const DEFAULT_EXCLUDES: &[&str] = &[
     // Rust
     "target/",
@@ -68,9 +76,9 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     ".cache/",
 ];
 
-/// V1 TEMPORARY: Exclude patterns for the full-copy overlay.
-/// When V2 lazy COW lands, these become unnecessary — the VFS only
-/// copies files on write, so build artifacts are never copied.
+/// Exclude patterns for the staging overlay.
+/// They keep build output (`target/`, `node_modules/`, ...) out of staging
+/// and out of diffs in every staging mode, including lazy.
 /// Role-based access control (what agents can see) is a separate
 /// concern handled by ta-policy, not by copy excludes.
 #[derive(Debug, Clone)]
@@ -340,6 +348,10 @@ pub struct OverlayWorkspace {
     apply_base: Option<crate::shared_files::SharedFileBase>,
     /// Statistics from staging creation (strategy, duration, file count).
     copy_stat: Option<CopyStat>,
+    /// Metadata baseline of the staging tree (lazy staging, or reloaded from
+    /// `.ta/staging-baselines/` by [`Self::open`]). When present, diffs open only
+    /// the files whose metadata changed since staging was created.
+    baseline: Option<crate::lazy_cow::StagingBaseline>,
     /// Active ProjFS virtualization provider (Windows only, v0.15.8).
     /// Must outlive the workspace root directory. `None` on non-Windows or
     /// when ProjFS mode is not in use. Held for RAII drop — intentionally
@@ -435,10 +447,6 @@ impl OverlayWorkspace {
 
         // Detect the best available COW file-copy strategy (APFS/Btrfs/Full).
         let copy_strategy = detect_strategy(&staging_dir);
-        // TODO(cow): Future — lazy copy-on-write via hardlinks for read-only files.
-        // Interface: `HardlinkStrategy::new(source_dir, staging_dir)` copies only
-        // modified files on first write. Requires O_NOFOLLOW-safe hardlink checks and
-        // cross-device fallback. Implement after OverlayStagingMode::Smart stabilises.
 
         tracing::info!(
             goal_id = %goal_id,
@@ -464,7 +472,61 @@ impl OverlayWorkspace {
         #[cfg(all(target_os = "windows", feature = "projfs"))]
         let mut projfs_provider: Option<crate::projfs_strategy::ProjFsProvider> = None;
 
+        // Lazy staging state, finished after the ephemeral files are removed.
+        let mut lazy_state: Option<(
+            crate::lazy_cow::CreationMarker,
+            crate::lazy_cow::LazyReport,
+            crate::lazy_cow::LazyMechanism,
+        )> = None;
+
         match effective_mode {
+            OverlayStagingMode::Lazy => {
+                let swept = crate::lazy_cow::sweep_orphan_baselines(staging_root.as_ref());
+                if swept > 0 {
+                    tracing::info!(
+                        removed = swept,
+                        "removed baselines of staging directories that no longer exist"
+                    );
+                }
+                let marker = crate::lazy_cow::CreationMarker::begin(&staging_dir)?;
+                let mechanism = crate::lazy_cow::choose_mechanism(&source_dir, &staging_dir);
+                let mut report = crate::lazy_cow::LazyReport::new(&mechanism);
+                if mechanism.is_clone() {
+                    crate::lazy_cow::populate(
+                        &source_dir,
+                        &staging_dir,
+                        &excludes,
+                        &mechanism,
+                        &mut report,
+                    )?;
+                    stat.strategy = if cfg!(target_os = "macos") {
+                        CopyStrategy::ApfsClone
+                    } else {
+                        CopyStrategy::BtrfsReflink
+                    };
+                    stat.files_copied =
+                        report.files_in_dir_clones + report.file_clones + report.files_copied;
+                } else {
+                    if let crate::lazy_cow::LazyMechanism::FullCopy { reason } = &mechanism {
+                        tracing::warn!(
+                            goal_id = %goal_id,
+                            reason = %reason,
+                            "strategy = \"lazy\" is unavailable here; using the full copy \
+                             (set [staging] strategy = \"full\" in .ta/workflow.toml to silence this)"
+                        );
+                    }
+                    copy_dir_recursive(
+                        &source_dir,
+                        &staging_dir,
+                        &excludes,
+                        copy_strategy,
+                        &mut stat,
+                    )?;
+                    report.files_copied = stat.files_copied;
+                    report.bytes_copied = stat.bytes_total;
+                }
+                lazy_state = Some((marker, report, mechanism));
+            }
             OverlayStagingMode::Smart => {
                 copy_dir_recursive_smart(
                     &source_dir,
@@ -526,6 +588,29 @@ impl OverlayWorkspace {
             }
         }
 
+        // v0.15.14.7: Delete ephemeral staging-root files so each goal starts
+        // with a clean slate. These files (e.g., .ta-decisions.json) must not
+        // carry over from a previous goal's applied source state. Runs before
+        // the lazy baseline so the baseline never lists a file removed here.
+        delete_ephemeral_staging_files(&staging_dir);
+
+        let mut baseline = None;
+        if let Some((marker, mut report, mechanism)) = lazy_state {
+            let captured = crate::lazy_cow::StagingBaseline::capture(
+                &staging_dir,
+                &excludes,
+                mechanism.description(),
+                &mut report,
+            )?;
+            if let Some(path) = crate::lazy_cow::baseline_path(&staging_dir) {
+                captured.save(&path)?;
+            }
+            marker.finish();
+            stat.bytes_total = report.baseline_bytes;
+            stat.lazy = Some(report);
+            baseline = Some(captured);
+        }
+
         stat.duration = start.elapsed();
 
         tracing::info!(
@@ -540,14 +625,12 @@ impl OverlayWorkspace {
         // Log staging size report (tracing avoids polluting MCP stdout).
         tracing::info!("{}", stat.size_report());
 
-        // v0.15.14.7: Delete ephemeral staging-root files so each goal starts
-        // with a clean slate. These files (e.g., .ta-decisions.json) must not
-        // carry over from a previous goal's applied source state.
-        delete_ephemeral_staging_files(&staging_dir);
-
         // v0.2.1: Capture source snapshot for conflict detection.
-        let snapshot =
-            SourceSnapshot::capture(&source_dir, |path| excludes.should_skip_path(path)).ok();
+        let snapshot = if effective_mode == OverlayStagingMode::Lazy {
+            SourceSnapshot::capture_lazy(&source_dir, |path| excludes.should_skip_path(path)).ok()
+        } else {
+            SourceSnapshot::capture(&source_dir, |path| excludes.should_skip_path(path)).ok()
+        };
 
         Ok(Self {
             goal_id,
@@ -557,6 +640,7 @@ impl OverlayWorkspace {
             source_snapshot: snapshot,
             apply_base: None,
             copy_stat: Some(stat),
+            baseline,
             #[cfg(all(target_os = "windows", feature = "projfs"))]
             projfs_provider,
         })
@@ -569,14 +653,17 @@ impl OverlayWorkspace {
         staging_dir: impl AsRef<Path>,
         excludes: ExcludePatterns,
     ) -> Self {
+        let staging_dir = staging_dir.as_ref().to_path_buf();
+        let baseline = load_baseline(&staging_dir);
         Self {
             goal_id: goal_id.into(),
             source_dir: source_dir.as_ref().to_path_buf(),
-            staging_dir: staging_dir.as_ref().to_path_buf(),
+            staging_dir,
             excludes,
             source_snapshot: None, // Snapshot must be loaded separately if needed.
             apply_base: None,      // Must be loaded separately if needed — see set_apply_base.
             copy_stat: None,       // Not available when reopening an existing workspace.
+            baseline,
             #[cfg(all(target_os = "windows", feature = "projfs"))]
             projfs_provider: None, // Not available when reopening an existing workspace.
         }
@@ -637,6 +724,10 @@ impl OverlayWorkspace {
     /// diffing (internal state, not agent work product), plus V1 exclude patterns
     /// (which include VCS metadata dirs contributed by the active adapter).
     pub fn diff_all(&self) -> Result<Vec<OverlayChange>, WorkspaceError> {
+        self.ensure_staging_complete()?;
+        if let Some(baseline) = &self.baseline {
+            return self.diff_with_baseline(baseline);
+        }
         let mut changes = Vec::new();
 
         // Collect all file paths from both directories.
@@ -662,74 +753,7 @@ impl OverlayWorkspace {
                 continue;
             }
 
-            let staging_path = self.staging_dir.join(path);
-            let source_path = self.source_dir.join(path);
-
-            if source_path.exists() {
-                // File exists in both — check if modified.
-                let staging_content =
-                    fs::read(&staging_path).map_err(|source| WorkspaceError::IoError {
-                        path: staging_path.clone(),
-                        source,
-                    })?;
-                let source_content =
-                    fs::read(&source_path).map_err(|source| WorkspaceError::IoError {
-                        path: source_path.clone(),
-                        source,
-                    })?;
-
-                if staging_content != source_content {
-                    // Detect binary: if either version has null bytes in first 8KB,
-                    // produce a summary instead of a lossy text diff.
-                    let source_binary = source_content
-                        .get(..8192)
-                        .unwrap_or(&source_content)
-                        .contains(&0);
-                    let staging_binary = staging_content
-                        .get(..8192)
-                        .unwrap_or(&staging_content)
-                        .contains(&0);
-                    let diff = if source_binary || staging_binary {
-                        format!(
-                            "--- a/{}\n+++ b/{}\n[binary file changed: {} -> {} bytes]\n",
-                            path,
-                            path,
-                            source_content.len(),
-                            staging_content.len()
-                        )
-                    } else {
-                        simple_unified_diff(
-                            path,
-                            &String::from_utf8_lossy(&source_content),
-                            &String::from_utf8_lossy(&staging_content),
-                        )
-                    };
-                    changes.push(OverlayChange::Modified {
-                        path: path.clone(),
-                        diff,
-                    });
-                }
-            } else {
-                // File only in staging — created.
-                // Detect binary files: if the first 8KB contains a null byte,
-                // store a placeholder instead of lossy UTF-8 conversion.
-                let raw = fs::read(&staging_path).map_err(|source| WorkspaceError::IoError {
-                    path: staging_path.clone(),
-                    source,
-                })?;
-                let is_binary = raw.get(..8192).unwrap_or(&raw).contains(&0);
-                let content = if is_binary {
-                    format!("[binary file: {} bytes]", raw.len())
-                } else {
-                    String::from_utf8(raw).unwrap_or_else(|e| {
-                        format!("[binary file: {} bytes]", e.into_bytes().len())
-                    })
-                };
-                changes.push(OverlayChange::Created {
-                    path: path.clone(),
-                    content,
-                });
-            }
+            self.compare_staged_file(path, &mut changes)?;
         }
 
         // Check for deleted files (in source but not in staging).
@@ -768,21 +792,196 @@ impl OverlayWorkspace {
             }
         }
 
-        changes.sort_by(|a, b| {
-            let path_a = match a {
-                OverlayChange::Modified { path, .. }
-                | OverlayChange::Created { path, .. }
-                | OverlayChange::Deleted { path } => path,
-            };
-            let path_b = match b {
-                OverlayChange::Modified { path, .. }
-                | OverlayChange::Created { path, .. }
-                | OverlayChange::Deleted { path } => path,
-            };
-            path_a.cmp(path_b)
-        });
+        sort_changes(&mut changes);
 
         Ok(changes)
+    }
+
+    /// Refuse to diff a lazy staging directory whose creation did not finish:
+    /// files that were not yet cloned would be reported as deletions.
+    fn ensure_staging_complete(&self) -> Result<(), WorkspaceError> {
+        if let Some(marker) = crate::lazy_cow::creating_marker_path(&self.staging_dir) {
+            if marker.exists() {
+                tracing::error!(
+                    goal_id = %self.goal_id,
+                    staging = %self.staging_dir.display(),
+                    marker = %marker.display(),
+                    "lazy staging was not completely created; refusing to diff it"
+                );
+                return Err(WorkspaceError::IncompleteStaging {
+                    staging_path: self.staging_dir.clone(),
+                    marker,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Compare one staging file with its source counterpart and record a
+    /// `Modified` or `Created` change when they differ.
+    fn compare_staged_file(
+        &self,
+        path: &str,
+        changes: &mut Vec<OverlayChange>,
+    ) -> Result<(), WorkspaceError> {
+        let staging_path = self.staging_dir.join(path);
+        let source_path = self.source_dir.join(path);
+
+        if source_path.exists() {
+            // File exists in both — check if modified.
+            let staging_content =
+                fs::read(&staging_path).map_err(|source| WorkspaceError::IoError {
+                    path: staging_path.clone(),
+                    source,
+                })?;
+            let source_content =
+                fs::read(&source_path).map_err(|source| WorkspaceError::IoError {
+                    path: source_path.clone(),
+                    source,
+                })?;
+
+            if staging_content != source_content {
+                // Detect binary: if either version has null bytes in first 8KB,
+                // produce a summary instead of a lossy text diff.
+                let source_binary = source_content
+                    .get(..8192)
+                    .unwrap_or(&source_content)
+                    .contains(&0);
+                let staging_binary = staging_content
+                    .get(..8192)
+                    .unwrap_or(&staging_content)
+                    .contains(&0);
+                let diff = if source_binary || staging_binary {
+                    format!(
+                        "--- a/{}\n+++ b/{}\n[binary file changed: {} -> {} bytes]\n",
+                        path,
+                        path,
+                        source_content.len(),
+                        staging_content.len()
+                    )
+                } else {
+                    simple_unified_diff(
+                        path,
+                        &String::from_utf8_lossy(&source_content),
+                        &String::from_utf8_lossy(&staging_content),
+                    )
+                };
+                changes.push(OverlayChange::Modified {
+                    path: path.to_string(),
+                    diff,
+                });
+            }
+        } else {
+            // File only in staging — created.
+            // Detect binary files: if the first 8KB contains a null byte,
+            // store a placeholder instead of lossy UTF-8 conversion.
+            let raw = fs::read(&staging_path).map_err(|source| WorkspaceError::IoError {
+                path: staging_path.clone(),
+                source,
+            })?;
+            let is_binary = raw.get(..8192).unwrap_or(&raw).contains(&0);
+            let content = if is_binary {
+                format!("[binary file: {} bytes]", raw.len())
+            } else {
+                String::from_utf8(raw)
+                    .unwrap_or_else(|e| format!("[binary file: {} bytes]", e.into_bytes().len()))
+            };
+            changes.push(OverlayChange::Created {
+                path: path.to_string(),
+                content,
+            });
+        }
+        Ok(())
+    }
+
+    /// Diff driven by the staging baseline: look only at files whose metadata
+    /// changed since staging was created, plus files that disappeared.
+    ///
+    /// The source tree is not walked and an unchanged file is never opened, so a
+    /// goal that wrote nothing costs one `lstat` per staging file. Files that
+    /// are written, added, rewritten with identical content, or whose metadata
+    /// cannot be trusted (racy timestamps) go through the same content comparison
+    /// as the full diff, so the result is the same set of changes.
+    fn diff_with_baseline(
+        &self,
+        baseline: &crate::lazy_cow::StagingBaseline,
+    ) -> Result<Vec<OverlayChange>, WorkspaceError> {
+        let current =
+            crate::lazy_cow::scan_tree(&self.staging_dir, &self.excludes).map_err(|source| {
+                WorkspaceError::IoError {
+                    path: self.staging_dir.clone(),
+                    source,
+                }
+            })?;
+        let mut changes = Vec::new();
+        let mut candidates = 0usize;
+
+        for (path, fingerprint) in &current {
+            if should_skip_for_diff(path, &self.excludes)
+                || baseline.is_unchanged(path, fingerprint)
+            {
+                continue;
+            }
+            candidates += 1;
+            if fingerprint.kind == crate::lazy_cow::EntryKind::Symlink
+                && !self.staged_symlink_stays_inside(path)
+            {
+                tracing::warn!(
+                    goal_id = %self.goal_id,
+                    path = %path,
+                    "staging contains a symlink that points outside the staging directory \
+                     (or is broken); it is not part of the diff, so it cannot be applied to \
+                     the source tree. Replace it with a regular file in staging if the change \
+                     is intended"
+                );
+                continue;
+            }
+            if !self.staging_dir.join(path).is_file() {
+                continue;
+            }
+            self.compare_staged_file(path, &mut changes)?;
+        }
+
+        // Deleted: in the baseline, gone from staging, still in source, and part of
+        // the pre-agent snapshot (same rule as the full diff: a file someone else
+        // added to source after staging began is never a deletion).
+        for path in baseline.files.keys() {
+            if current.contains_key(path) || should_skip_for_diff(path, &self.excludes) {
+                continue;
+            }
+            if !self.source_dir.join(path).exists() {
+                continue;
+            }
+            let is_genuine_deletion = match &self.source_snapshot {
+                Some(base) => base.files.contains_key(path),
+                None => true,
+            };
+            if is_genuine_deletion {
+                changes.push(OverlayChange::Deleted { path: path.clone() });
+            }
+        }
+
+        tracing::debug!(
+            goal_id = %self.goal_id,
+            staging_files = current.len(),
+            candidates,
+            changes = changes.len(),
+            "diff_all: baseline diff"
+        );
+        sort_changes(&mut changes);
+        Ok(changes)
+    }
+
+    /// True when the symlink `rel` in staging resolves to a path inside the
+    /// staging directory (so reading it cannot leak or change anything outside).
+    fn staged_symlink_stays_inside(&self, rel: &str) -> bool {
+        match (
+            fs::canonicalize(self.staging_dir.join(rel)),
+            fs::canonicalize(&self.staging_dir),
+        ) {
+            (Ok(target), Ok(root)) => target.starts_with(root),
+            _ => false,
+        }
     }
 
     /// Diff a single file between staging and source.
@@ -1253,12 +1452,26 @@ impl OverlayWorkspace {
         for conflict in overlapping {
             let staging_path = self.staging_dir.join(&conflict.path);
             let agent_changed = if staging_path.exists() {
-                // Compare staging file hash to snapshot hash at goal start.
-                match FileSnapshot::capture(&self.staging_dir, &conflict.path) {
-                    Ok(staging_snap) => staging_snap.content_hash != conflict.snapshot.content_hash,
-                    Err(_) => true, // Can't read staging file — assume agent changed it (safe)
+                if conflict.snapshot.hashed {
+                    // Compare staging file hash to snapshot hash at goal start.
+                    match FileSnapshot::capture(&self.staging_dir, &conflict.path) {
+                        Ok(staging_snap) => {
+                            staging_snap.content_hash != conflict.snapshot.content_hash
+                        }
+                        Err(_) => true, // Can't read staging file — assume agent changed it (safe)
+                    }
+                } else {
+                    // Lazy snapshot (no content hash): the staging baseline says
+                    // whether the file is still the untouched clone. Anything the
+                    // baseline cannot vouch for counts as changed (safe).
+                    !matches!(
+                        self.baseline
+                            .as_ref()
+                            .and_then(|b| b.file_unchanged(&self.staging_dir, &conflict.path)),
+                        Some(true)
+                    )
                 }
-            } else if conflict.snapshot.content_hash.is_empty() {
+            } else if !conflict.snapshot.existed_at_snapshot() {
                 // File didn't exist at snapshot time and doesn't exist in staging.
                 // This is a new-in-source file the agent never saw. Auto-resolve.
                 false
@@ -1279,6 +1492,7 @@ impl OverlayWorkspace {
 
     /// Clean up the staging directory.
     pub fn cleanup(self) -> Result<(), WorkspaceError> {
+        crate::lazy_cow::remove_baseline_files(&self.staging_dir);
         if self.staging_dir.exists() {
             fs::remove_dir_all(&self.staging_dir).map_err(|source| WorkspaceError::IoError {
                 path: self.staging_dir,
@@ -1948,6 +2162,37 @@ fn delete_ephemeral_staging_files(staging_dir: &Path) {
             }
         }
     }
+}
+
+/// Load the lazy-staging baseline of `staging_dir`, if one was recorded. A
+/// baseline that cannot be read is not fatal: the diff then compares every
+/// file by content, which is slower but gives the same answer.
+fn load_baseline(staging_dir: &Path) -> Option<crate::lazy_cow::StagingBaseline> {
+    let path = crate::lazy_cow::baseline_path(staging_dir)?;
+    match crate::lazy_cow::StagingBaseline::load(&path) {
+        Ok(baseline) => baseline,
+        Err(e) => {
+            tracing::warn!(
+                baseline = %path.display(),
+                error = %e,
+                "cannot read the lazy staging baseline; comparing every file by content \
+                 (slower, same result). Delete the baseline file to silence this"
+            );
+            None
+        }
+    }
+}
+
+/// Order changes by path.
+fn sort_changes(changes: &mut [OverlayChange]) {
+    fn path_of(change: &OverlayChange) -> &str {
+        match change {
+            OverlayChange::Modified { path, .. }
+            | OverlayChange::Created { path, .. }
+            | OverlayChange::Deleted { path } => path,
+        }
+    }
+    changes.sort_by(|a, b| path_of(a).cmp(path_of(b)));
 }
 
 /// Hard runtime guard (v0.17.10.2): verify that `staging_path` is a real,

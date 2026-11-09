@@ -75,6 +75,8 @@ pub struct CopyStat {
     pub symlinks_created: usize,
     /// Estimated bytes behind symlinks (for the staging size report message).
     pub bytes_symlinked: u64,
+    /// Lazy copy-on-write staging report (`strategy = "lazy"` only).
+    pub lazy: Option<crate::lazy_cow::LazyReport>,
 }
 
 impl CopyStat {
@@ -86,11 +88,15 @@ impl CopyStat {
             bytes_total: 0,
             symlinks_created: 0,
             bytes_symlinked: 0,
+            lazy: None,
         }
     }
 
     /// Format a human-readable staging size report.
     pub fn size_report(&self) -> String {
+        if let Some(lazy) = &self.lazy {
+            return lazy.summary(self.duration);
+        }
         if self.strategy.is_virtual() {
             format!(
                 "Staging: ProjFS virtual workspace (zero disk cost, files hydrated on demand) in {:.1}s",
@@ -221,7 +227,31 @@ mod macos {
         let ret = unsafe { clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0) };
         ret == 0
     }
+
+    /// Clone `src` to `dst` (a path that must not exist) without copying data.
+    ///
+    /// `src` may be a regular file or a whole directory subtree, which the kernel
+    /// clones in one syscall. `CLONE_NOFOLLOW`: a symlink at `src` is cloned as a
+    /// link, never followed.
+    pub fn clone_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+        /// `CLONE_NOFOLLOW` from `<sys/clonefile.h>`.
+        const CLONE_NOFOLLOW: c_uint = 0x0001;
+        let src_c = CString::new(src.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let dst_c = CString::new(dst.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        // SAFETY: both pointers are valid NUL-terminated strings for the call.
+        let ret = unsafe { clonefile(src_c.as_ptr(), dst_c.as_ptr(), CLONE_NOFOLLOW) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::clone_path;
 
 /// Probe whether APFS clone works in `dir` by cloning a temp file.
 #[cfg(target_os = "macos")]
@@ -275,7 +305,45 @@ mod linux {
 
         Ok(ret == 0)
     }
+
+    /// Clone one regular file with `FICLONE` into a path that must not exist.
+    /// The clone gets the source's permission bits; a failed clone leaves no
+    /// destination behind.
+    pub fn clone_path(src: &Path, dst: &Path) -> io::Result<()> {
+        let md = std::fs::metadata(src)?;
+        if !md.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "FICLONE clones regular files only",
+            ));
+        }
+        let src_file = std::fs::File::open(src)?;
+        let dst_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dst)?;
+        // SAFETY: FICLONE takes the source fd; both fds are valid for the call.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ret = unsafe {
+            libc::ioctl(
+                dst_file.as_raw_fd(),
+                FICLONE as libc::Ioctl,
+                src_file.as_raw_fd(),
+            )
+        };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            drop(dst_file);
+            let _ = std::fs::remove_file(dst);
+            return Err(err);
+        }
+        drop(dst_file);
+        std::fs::set_permissions(dst, md.permissions())
+    }
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::clone_path;
 
 /// Probe whether Btrfs reflink works in `dir` by cloning a temp file.
 #[cfg(target_os = "linux")]

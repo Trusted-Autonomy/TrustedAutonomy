@@ -22,6 +22,7 @@ pub mod conflict;
 pub mod copy_strategy;
 pub mod error;
 pub mod install_facts;
+pub mod lazy_cow;
 pub mod link_cache;
 pub mod links;
 pub mod local_dev;

@@ -87,6 +87,21 @@ pub enum WorkspaceError {
         source_dir: PathBuf,
         reason: String,
     },
+
+    /// A lazy staging directory was only partly populated: TA stopped between
+    /// starting to create it and recording its baseline. Diffing it would
+    /// report every file that was not yet copied as a deletion.
+    #[error(
+        "staging directory {} was not completely created (lazy staging marker {} is still \
+         present: TA stopped while populating it). Nothing was diffed. Delete the staging \
+         directory and the marker file, then start the goal again",
+        .staging_path.display(),
+        .marker.display()
+    )]
+    IncompleteStaging {
+        staging_path: PathBuf,
+        marker: PathBuf,
+    },
 }
 
 /// A shared file whose apply-time 3-way merge left conflict markers.

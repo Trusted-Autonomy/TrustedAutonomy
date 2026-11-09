@@ -40,13 +40,101 @@ pub struct FileSnapshot {
     pub path: String,
     /// File modification time (seconds since UNIX epoch).
     pub mtime_secs: u64,
-    /// SHA-256 hash of file content (hex string).
+    /// SHA-256 hash of file content (hex string). Empty when `hashed` is false.
     pub content_hash: String,
     /// File size in bytes (for quick sanity check).
     pub size_bytes: u64,
+    /// False when the content hash was deliberately not computed (lazy staging
+    /// snapshot, see `docs/design/lazy-cow-staging.md`): the file is then compared
+    /// by size and modification time. Snapshots written before lazy staging
+    /// existed have no such field and are always hashed.
+    #[serde(default = "default_hashed")]
+    pub hashed: bool,
+    /// Sub-second part of the modification time (only recorded when not hashed).
+    #[serde(default)]
+    pub mtime_nanos: u32,
+}
+
+fn default_hashed() -> bool {
+    true
+}
+
+/// Modification time of a file as (seconds, nanoseconds) since the UNIX epoch.
+fn mtime_parts(metadata: &fs::Metadata) -> (u64, u32) {
+    let d = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    (d.as_secs(), d.subsec_nanos())
 }
 
 impl FileSnapshot {
+    /// Record size and modification time only; the content is not read. Used by
+    /// lazy staging so goal start does not read the whole project.
+    pub fn capture_metadata(root: &Path, rel_path: &str) -> Result<Self, WorkspaceError> {
+        let abs_path = root.join(rel_path);
+        let metadata = fs::metadata(&abs_path).map_err(|source| WorkspaceError::IoError {
+            path: abs_path.clone(),
+            source,
+        })?;
+        let (mtime_secs, mtime_nanos) = mtime_parts(&metadata);
+        Ok(Self {
+            path: rel_path.to_string(),
+            mtime_secs,
+            content_hash: String::new(),
+            size_bytes: metadata.len(),
+            hashed: false,
+            mtime_nanos,
+        })
+    }
+
+    /// Did the file exist when the snapshot was taken? (A placeholder entry for
+    /// a file that appeared in source later has `hashed` set and no hash.)
+    pub fn existed_at_snapshot(&self) -> bool {
+        !self.hashed || !self.content_hash.is_empty()
+    }
+
+    /// Does the file at `abs_path` still match this snapshot? Hashed entries are
+    /// compared by content hash, unhashed ones by size and modification time.
+    /// A missing or unreadable file does not match.
+    pub fn matches_file(&self, abs_path: &Path) -> bool {
+        if self.hashed {
+            return match fs::read(abs_path) {
+                Ok(content) => format!("{:x}", Sha256::digest(&content)) == self.content_hash,
+                Err(_) => false,
+            };
+        }
+        match fs::metadata(abs_path) {
+            Ok(md) => {
+                let (secs, nanos) = mtime_parts(&md);
+                md.len() == self.size_bytes && secs == self.mtime_secs && nanos == self.mtime_nanos
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Human-readable comparison of this snapshot entry with the file at
+    /// `abs_path`, for error messages ("base: ..., now: ...").
+    pub fn describe_against(&self, abs_path: &Path) -> String {
+        let base = if self.hashed {
+            format!("sha256 {}", self.content_hash)
+        } else {
+            format!(
+                "{} bytes, mtime {}.{:09}",
+                self.size_bytes, self.mtime_secs, self.mtime_nanos
+            )
+        };
+        let now = match fs::metadata(abs_path) {
+            Ok(md) => {
+                let (secs, nanos) = mtime_parts(&md);
+                format!("{} bytes, mtime {}.{:09}", md.len(), secs, nanos)
+            }
+            Err(e) => format!("unreadable ({e})"),
+        };
+        format!("base: {base}; now: {now}")
+    }
+
     /// Create a snapshot of a file.
     pub fn capture(root: &Path, rel_path: &str) -> Result<Self, WorkspaceError> {
         let abs_path = root.join(rel_path);
@@ -78,6 +166,8 @@ impl FileSnapshot {
             mtime_secs,
             content_hash,
             size_bytes,
+            hashed: true,
+            mtime_nanos: 0,
         })
     }
 
@@ -92,6 +182,11 @@ impl FileSnapshot {
     /// from what was captured at goal-start time.
     pub fn has_changed(&self, root: &Path) -> Result<bool, WorkspaceError> {
         let abs_path = root.join(&self.path);
+        if !self.hashed {
+            // Lazy snapshot: size and modification time (conservative: a touch
+            // without a content change counts as a change).
+            return Ok(!self.matches_file(&abs_path));
+        }
 
         if !abs_path.exists() {
             // File was deleted since snapshot.
@@ -135,9 +230,26 @@ pub struct SourceSnapshot {
 }
 
 impl SourceSnapshot {
-    /// Capture a snapshot of all files in a directory tree.
+    /// Capture a snapshot of all files in a directory tree, hashing every file.
     /// Excludes directories matching `should_skip` predicate.
     pub fn capture<F>(root: &Path, should_skip: F) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        Self::capture_inner(root, should_skip, false)
+    }
+
+    /// Capture a snapshot that records size and modification time only, without
+    /// reading file content (lazy staging). Shared files (`PLAN.md`, `Cargo.toml`,
+    /// ...), which the apply step 3-way merges, are still hashed.
+    pub fn capture_lazy<F>(root: &Path, should_skip: F) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        Self::capture_inner(root, should_skip, true)
+    }
+
+    fn capture_inner<F>(root: &Path, should_skip: F, lazy: bool) -> Result<Self, WorkspaceError>
     where
         F: Fn(&str) -> bool,
     {
@@ -177,7 +289,11 @@ impl SourceSnapshot {
                 if abs_path.is_dir() {
                     pending.push(rel_path);
                 } else {
-                    let snapshot = FileSnapshot::capture(root, &rel_path_str)?;
+                    let snapshot = if lazy && !crate::shared_files::is_shared_file(&rel_path_str) {
+                        FileSnapshot::capture_metadata(root, &rel_path_str)?
+                    } else {
+                        FileSnapshot::capture(root, &rel_path_str)?
+                    };
                     files.insert(rel_path_str, snapshot);
                 }
             }
@@ -278,6 +394,8 @@ impl SourceSnapshot {
                         mtime_secs: 0,
                         content_hash: String::new(),
                         size_bytes: 0,
+                        hashed: true,
+                        mtime_nanos: 0,
                     },
                     source_exists: true,
                     description: format!(
@@ -534,5 +652,91 @@ mod tests {
             "Expected no conflicts but got: {:?}",
             conflicts.iter().map(|c| &c.path).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn lazy_snapshot_records_metadata_not_content() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "src/main.rs", "fn main() {}");
+        create_test_file(dir.path(), "PLAN.md", "# plan\n");
+
+        let snapshot = SourceSnapshot::capture_lazy(dir.path(), |_| false).unwrap();
+        let ordinary = &snapshot.files["src/main.rs"];
+        assert!(!ordinary.hashed);
+        assert!(ordinary.content_hash.is_empty());
+        assert!(ordinary.existed_at_snapshot());
+        assert_eq!(ordinary.size_bytes, 12);
+        // Shared files keep their hash: the apply step 3-way merges them.
+        let shared = &snapshot.files["PLAN.md"];
+        assert!(shared.hashed);
+        assert!(!shared.content_hash.is_empty());
+    }
+
+    #[test]
+    fn lazy_snapshot_detects_size_change_and_deletion_without_hashing() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "a.txt", "one");
+        create_test_file(dir.path(), "b.txt", "two");
+        let snapshot = SourceSnapshot::capture_lazy(dir.path(), |_| false).unwrap();
+        assert!(snapshot
+            .detect_conflicts(dir.path(), |_| false)
+            .unwrap()
+            .is_empty());
+
+        create_test_file(dir.path(), "a.txt", "one, longer");
+        fs::remove_file(dir.path().join("b.txt")).unwrap();
+        let conflicts = snapshot.detect_conflicts(dir.path(), |_| false).unwrap();
+        let paths: Vec<_> = conflicts.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+        assert!(conflicts[1].snapshot.existed_at_snapshot());
+        assert!(!conflicts[1].source_exists);
+    }
+
+    #[test]
+    fn snapshots_written_before_lazy_staging_still_load_as_hashed() {
+        let json = r#"{"path":"a.txt","mtime_secs":1,"content_hash":"abc","size_bytes":3}"#;
+        let snap: FileSnapshot = serde_json::from_str(json).unwrap();
+        assert!(snap.hashed);
+        assert_eq!(snap.mtime_nanos, 0);
+        assert!(snap.existed_at_snapshot());
+    }
+
+    #[test]
+    fn placeholder_for_new_source_file_did_not_exist_at_snapshot() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "a.txt", "one");
+        let snapshot = SourceSnapshot::capture_lazy(dir.path(), |_| false).unwrap();
+        create_test_file(dir.path(), "added.txt", "new");
+        let conflicts = snapshot.detect_conflicts(dir.path(), |_| false).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert!(!conflicts[0].snapshot.existed_at_snapshot());
+    }
+
+    #[test]
+    fn matches_file_compares_metadata_for_lazy_entries_and_content_for_hashed_ones() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "a.txt", "one");
+        let lazy = SourceSnapshot::capture_lazy(dir.path(), |_| false).unwrap();
+        let hashed = SourceSnapshot::capture(dir.path(), |_| false).unwrap();
+        let path = dir.path().join("a.txt");
+        assert!(lazy.files["a.txt"].matches_file(&path));
+        assert!(hashed.files["a.txt"].matches_file(&path));
+
+        create_test_file(dir.path(), "a.txt", "one, longer");
+        assert!(!lazy.files["a.txt"].matches_file(&path));
+        assert!(!hashed.files["a.txt"].matches_file(&path));
+
+        fs::remove_file(&path).unwrap();
+        assert!(!lazy.files["a.txt"].matches_file(&path));
+    }
+
+    #[test]
+    fn lazy_snapshot_survives_a_json_round_trip() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "a.txt", "one");
+        let lazy = SourceSnapshot::capture_lazy(dir.path(), |_| false).unwrap();
+        let json = serde_json::to_value(&lazy).unwrap();
+        let back: SourceSnapshot = serde_json::from_value(json).unwrap();
+        assert!(back.files["a.txt"].matches_file(&dir.path().join("a.txt")));
     }
 }
