@@ -11536,6 +11536,49 @@ Status note: items 1 to 3 are built and tested; the report only shows a recommen
 
 #### Version: `0.17.12-alpha.33`
 
+### v0.17.12.34 - Release branches, one release goal, cut by merging to main
+<!-- status: in_progress -->
+**Depends on**: v0.17.12.33
+
+**Goal**: Stop spending GitHub Actions minutes on one PR per goal. One open release per project; every goal commits onto `release/<name>`; the release is cut with ONE PR to main. A hotfix is the recorded exception.
+
+1. [x] State: `.ta/release-set.json` (id, name, branch, base commit, release goal, status, timestamps, landed goals, hotfixes, off-track goals); at most one open release; machine-local and git-ignored.
+2. [x] CLI: `ta release-set start|status [--json]|cut`. `cut` merges main in, runs the gate (refuses naming the failing command), pushes once, opens one PR to main with the evidence line. `ta release` stays the publish pipeline.
+3. [x] Routing: `ta run`, goal start, `ta draft apply --git-commit` and the submit adapter target the release branch; apply commits locally and defers push/review to `cut`; precedence hotfix, then open release, then configured `target_branch`. The printed `gh pr create` hints use the real target.
+4. [x] `--hotfix` with mandatory `--hotfix-reason` on `ta run` and `ta draft apply`; recorded in the release state; refused from the release branch at apply.
+5. [x] Drift advice (plan phase + keyword overlap, deterministic, advice only): printed at goal start, recorded on the goal, in `ta draft view`, in `ta release-set status`, and in the CoS wake context together with the release goal and branch.
+6. [x] The release goal is an umbrella macro goal (`is_macro`, `sub_goal_ids`, `parent_macro_id`); Wayfinder status mapping treats it as in progress.
+7. [x] `ta release-set status --json` stable schema, documented in docs/USAGE.md. CLAUDE.md Git Workflow and docs/USAGE.md updated.
+8. [x] Tests: state machine, routing precedence, hotfix, drift advice, cut refusal on a failing gate, and an end-to-end scratch repo with a local bare origin and a mock `gh` (two goals land, no PR, hotfix, off-track advice, one push, one PR).
+9. [ ] VT Wayfinder poller (VT repo, out of scope here): read `ta release-set status --json` per project, mirror `release.goal` / `goals_landed` / `off_track` / `hotfixes` / `ahead` / `behind` into the Wayfinder goal named by `release.goal.wayfinder_goal_id`, and report the cut PR URL.
+10. [ ] Model-based supervisor drift judgement (today's check is deterministic keyword and phase overlap only).
+11. [ ] Windows run of the cut path (the tests that use a mock `gh` shell script are unix-only).
+12. [ ] `ta run --hotfix` for `--phases` / `--sub-goals` launches (refused today; single-goal launches only).
+
+**Effort**: M.
+
+
+### v0.17.12.35 - Chief of Staff Read Access
+<!-- status: in_progress -->
+**Depends on**: v0.17.12.33
+
+**Goal**: The chat-mode Chief of Staff reads the real project (Wayfinder config, wiki, plan, files) read-only instead of an empty staging copy, with no project copy, a capability grant for exactly that, an opt-in registry of other readable projects, and a read-only sandbox mirror. Trigger: Wayfinder note 063.
+
+1. [x] Fix F: gateway read tools (`ta_wayfinder_*`, wiki, plan-status, community) resolve `.ta/workflow.toml`, `.ta/wiki-resources.toml` and the plan from the source project root. Plan-status names the path it looked at and why it found nothing. Gateway tests with `workspace_root` = a staging dir; the owner's error was reproduced first, then shown fixed.
+2. [x] Chat mode makes no project copy: `start_chat_goal_without_copy` creates a thin goal-scoped session dir; the draft build is skipped; `--goal-id` with chat mode is refused with a message. The MCP surface stays read-only (`chat_mode_server_router_exposes_only_chat_mode_tools` holds); `ta_fs_read` gains a `project` argument for the real root.
+3. [x] Sandbox: read-only project root (`SandboxProfile::with_project_read_roots`); `.ta`, `.git`, the state dir and credential paths stay denied; the bwrap view re-mounts the session dir after the `.ta` mask. Seatbelt conformance test proves read project file OK, write refused, `.ta` and `~/.ssh` unreadable (run on macOS with real `sandbox-exec`).
+4. [x] Grant: `ChatReadAccess` + `compile_chat_manifest_with_read_access` (read on `fs://project/**` and the named read tools, nothing else); the grant is minted into the credential broker (biscuit custody) at launch and verified by the gateway; without it the old refusal stands.
+5. [x] Answer G: `[chat] readable_projects` in the source `.ta/workflow.toml` (absolute path or a project name from `office.yaml`); default empty; unlisted paths and symlinks out of a listed root are refused; each root has the same deny-list.
+6. [x] Answer H documented in docs/USAGE.md (agent and model selection keys).
+7. [ ] Attenuate the CoS token further at the Wayfinder handoff (per-tool narrowing hops), plus rotation/revocation wiring. The manifest-level grant and the biscuit scope strings are implemented; biscuit block attenuation per hop is not.
+8. [ ] `ta_goal_list` / `ta_goal_status` over the real goal store and `ta_fs_list` directory browsing of the real root for chat sessions (they still see the session dir).
+9. [ ] Windows AppContainer read grant on the project root: not implemented. The Windows policy refuses a grant that is an ancestor of a protected path (an inheritable ACE would expose `.ta`); the CoS reads project content through the out-of-sandbox gateway meanwhile.
+10. [ ] bwrap and Landlock paths are covered by unit tests of the generated view only; not run on Linux.
+11. [ ] `readable_projects` lives in `.ta/workflow.toml`, which agents cannot change through drafts today; consider moving it to owner state policy.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.35`
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: deferred -->
 

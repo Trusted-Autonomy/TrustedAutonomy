@@ -3402,6 +3402,41 @@ pub fn execute(
         false
     };
 
+    // Chat-mode launch (persona `chat_mode = true` or `--chat-mode`): resolve
+    // before any injection so invalid combinations fail fast. `None` for every
+    // normal launch, which then proceeds exactly as before.
+    let chat_mode_plan = {
+        let (persona_chat_mode, persona_tools) = match persona_name {
+            Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
+                Ok(p) => (p.capabilities.chat_mode, p.capabilities.allowed_tools),
+                Err(e) => anyhow::bail!(
+                    "Could not load persona '{}' while checking for chat mode: {}. Check \
+                     .ta/personas/{}.toml exists.",
+                    pname,
+                    e,
+                    pname
+                ),
+            },
+            None => (false, Vec::new()),
+        };
+        let plan =
+            super::chat_launch::plan_chat_mode_launch(&super::chat_launch::ChatModeInputs {
+                cli_flag: super::chat_launch::cli_chat_mode_requested(),
+                persona_name,
+                persona_chat_mode,
+                persona_allowed_tools: &persona_tools,
+                agent,
+                agent_framework_name: agent_config.name.as_deref(),
+                injects_settings: agent_config.injects_settings,
+                macro_goal,
+                uses_pty: interactive && !headless && !quiet,
+            })?;
+        if let Some(ref p) = plan {
+            super::chat_launch::report_chat_mode_plan(p, quiet);
+        }
+        plan
+    };
+
     // 1. Start the goal (creates overlay workspace), or reuse an existing one
     //    when --goal-id is passed (v0.9.5.1: prevents duplicate goal creation
     //    when the MCP orchestrator's ta_goal_start already created the goal).
@@ -3413,6 +3448,14 @@ pub fn execute(
         let mut existing = goal_store
             .get(goal_uuid)?
             .ok_or_else(|| anyhow::anyhow!("Goal {} not found", existing_id))?;
+        if chat_mode_plan.is_some() {
+            anyhow::bail!(
+                "Goal {existing_id} was created for a normal run but this launch is chat-mode \
+                 (read-only). A chat-mode session has no project copy, so it cannot reuse a \
+                 goal's staging overlay. Re-launch without --goal-id, or without --chat-mode / \
+                 a chat_mode persona."
+            );
+        }
 
         // The MCP tool creates the goal record but the overlay workspace
         // (full copy of source) hasn't been created yet. Create it now.
@@ -3469,6 +3512,30 @@ pub fn execute(
             }
         }
         existing
+    } else if chat_mode_plan.is_some() {
+        // A chat-mode (read-only) session never gets a project copy: it reads the real
+        // project root through TA's read-only tools. Its goal owns only a thin session
+        // directory for its context file, settings and private scratch.
+        let chat_objective = match objective_file {
+            Some(f) => std::fs::read_to_string(f).map_err(|e| {
+                anyhow::anyhow!(
+                    "Could not read the objective file {} for the chat-mode session: {}. \
+                     Check the path and retry.",
+                    f.display(),
+                    e
+                )
+            })?,
+            None => objective.to_string(),
+        };
+        super::goal::start_chat_goal_without_copy(
+            config,
+            &goal_store,
+            title,
+            &chat_objective,
+            agent,
+            phase,
+            source,
+        )?
     } else {
         super::goal::execute(
             &super::goal::GoalCommands::Start {
@@ -3859,41 +3926,6 @@ pub fn execute(
     // Pin the persona and project agent override in the state directory and
     // warn loudly if either changed since the last launch.
     super::state_secrets::pin_launch_configs(&config.workspace_root, persona_name, agent);
-
-    // Chat-mode launch (persona `chat_mode = true` or `--chat-mode`): resolve
-    // before any injection so invalid combinations fail fast. `None` for every
-    // normal launch, which then proceeds exactly as before.
-    let chat_mode_plan = {
-        let (persona_chat_mode, persona_tools) = match persona_name {
-            Some(pname) => match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
-                Ok(p) => (p.capabilities.chat_mode, p.capabilities.allowed_tools),
-                Err(e) => anyhow::bail!(
-                    "Could not load persona '{}' while checking for chat mode: {}. Check \
-                     .ta/personas/{}.toml exists.",
-                    pname,
-                    e,
-                    pname
-                ),
-            },
-            None => (false, Vec::new()),
-        };
-        let plan =
-            super::chat_launch::plan_chat_mode_launch(&super::chat_launch::ChatModeInputs {
-                cli_flag: super::chat_launch::cli_chat_mode_requested(),
-                persona_name,
-                persona_chat_mode,
-                persona_allowed_tools: &persona_tools,
-                agent,
-                agent_framework_name: agent_config.name.as_deref(),
-                injects_settings: agent_config.injects_settings,
-                macro_goal,
-                uses_pty: interactive && !headless && !quiet,
-            })?;
-        if let Some(ref p) = plan {
-            super::chat_launch::report_chat_mode_plan(p, quiet);
-        }
-        plan
-    };
 
     // Initial injected context (set below), kept so a restricted launch can be handed
     // exactly what TA injected through --append-system-prompt-file.
@@ -4335,6 +4367,14 @@ pub fn execute(
         agent_config
             .env
             .extend(super::chat_launch::chat_mode_agent_env(plan, &staging_path));
+        // Read-only access to the REAL project root (no copy): its path and the biscuit
+        // grant the gateway verifies before it reads anything there.
+        agent_config
+            .env
+            .extend(super::chat_launch::chat_mode_read_env(
+                plan,
+                goal.source_dir.as_deref().unwrap_or(&config.workspace_root),
+            )?);
         // Pin the read tools to the project this launch is for, never to whatever Wayfinder
         // project happens to be in the ambient environment.
         agent_config
@@ -5742,8 +5782,8 @@ pub fn execute(
         .get(goal.goal_run_id)?
         .unwrap_or_else(|| goal.clone());
     // v0.13.14: Also build draft when state is Finalizing (set just above on agent exit).
-    // Set when a chat-mode session ends with no file changes: it completed
-    // successfully and has no draft (see chat_session_no_changes_is_success).
+    // Set when a chat-mode session ends: it completed successfully and has no draft
+    // (see complete_chat_session_without_draft).
     let mut chat_session_finished = false;
     let draft_built = if matches!(
         goal_current.state,
@@ -5813,22 +5853,25 @@ pub fn execute(
             }
             None => {
                 // Synchronous build (headless mode or background spawn failed — fall back).
-                update_finalize_note("diffing workspace files");
-                update_finalize_note("building draft package");
-                let build_result = super::draft::execute(
-                    &super::draft::DraftCommands::Build {
-                        goal_id: goal_id.clone(),
-                        summary: format!("Changes from goal: {}", title),
-                        latest: false,
-                        apply_context_file: None,
-                    },
-                    config,
-                );
-                if let Err(e) = build_result {
-                    if chat_session_no_changes_is_success(chat_mode_plan.is_some(), &e) {
-                        complete_chat_session_without_draft(config, goal.goal_run_id)?;
-                        chat_session_finished = true;
-                    } else {
+                if chat_mode_plan.is_some() {
+                    // A chat-mode session has no project copy (its directory holds only
+                    // the agent's context, settings and private scratch), so there is
+                    // nothing to diff and no draft to build: complete the goal directly.
+                    complete_chat_session_without_draft(config, goal.goal_run_id)?;
+                    chat_session_finished = true;
+                } else {
+                    update_finalize_note("diffing workspace files");
+                    update_finalize_note("building draft package");
+                    let build_result = super::draft::execute(
+                        &super::draft::DraftCommands::Build {
+                            goal_id: goal_id.clone(),
+                            summary: format!("Changes from goal: {}", title),
+                            latest: false,
+                            apply_context_file: None,
+                        },
+                        config,
+                    );
+                    if let Err(e) = build_result {
                         // The draft could not be built, so the goal ends here:
                         // still publish its spend (and, for a budget abort, say so
                         // in the velocity record) before returning the error.
@@ -7711,18 +7754,6 @@ fn pump_agent_output(
             }
         }
     }
-}
-
-/// Whether a failed draft build after the agent exited is in fact the normal,
-/// successful end of a chat-mode session. A chat-mode agent (for example
-/// the chief-of-staff) has no native file tools, so an empty diff is its
-/// expected outcome, not an error. Every non-chat launch keeps the error.
-///
-/// Found live: the daemon's wake listener treated the resulting exit 1 as a
-/// failed launch, left the message unacked, and JetStream redelivered it,
-/// relaunching the paid CoS run three times in about three minutes.
-fn chat_session_no_changes_is_success(is_chat_mode: bool, err: &anyhow::Error) -> bool {
-    is_chat_mode && super::draft::is_no_changes_error(err)
 }
 
 /// Finish a chat-mode goal that produced no file changes: transition it to
@@ -11255,39 +11286,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn no_changes_err() -> anyhow::Error {
-        // Produce the real typed error through the real draft build path:
-        // a goal whose staging is identical to its source.
-        let project = TempDir::new().unwrap();
-        let staging = project.path().join(".ta/staging/g");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(project.path().join("a.txt"), "same").unwrap();
-        std::fs::write(staging.join("a.txt"), "same").unwrap();
-        let config = GatewayConfig::for_project(project.path());
-        let store = GoalRunStore::new(&config.goals_dir).unwrap();
-        let mut goal = ta_goal::GoalRun::new(
-            "chat",
-            "chat",
-            "claude-code",
-            staging,
-            project.path().join(".ta/store/g"),
-        );
-        goal.source_dir = Some(project.path().to_path_buf());
-        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
-        goal.transition(ta_goal::GoalRunState::Running).unwrap();
-        store.save(&goal).unwrap();
-        super::super::draft::execute(
-            &super::super::draft::DraftCommands::Build {
-                goal_id: goal.goal_run_id.to_string(),
-                summary: "x".to_string(),
-                latest: false,
-                apply_context_file: None,
-            },
-            &config,
-        )
-        .expect_err("an unchanged staging dir must fail the draft build")
-    }
-
     #[test]
     fn transcript_is_kept_for_chat_mode_or_on_request_only() {
         let root = std::path::Path::new("/proj");
@@ -11335,23 +11333,6 @@ mod tests {
         assert_eq!(calls.lines().count(), 1);
         assert!(calls.contains("mcp__ta__ta_whiteboard_outcome_send"));
         assert!(calls.contains("\"candidate_id\":\"c1\""));
-    }
-
-    #[test]
-    fn chat_mode_treats_an_empty_diff_as_success_but_other_goals_do_not() {
-        let err = no_changes_err();
-        assert!(
-            chat_session_no_changes_is_success(true, &err),
-            "a chat-mode goal with no file changes finished normally"
-        );
-        assert!(
-            !chat_session_no_changes_is_success(false, &err),
-            "non-chat goals keep the 'No changes detected' error"
-        );
-        assert!(
-            !chat_session_no_changes_is_success(true, &anyhow::anyhow!("disk full")),
-            "a real build failure is never swallowed, even in chat mode"
-        );
     }
 
     #[test]

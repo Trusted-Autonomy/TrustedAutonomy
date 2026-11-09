@@ -429,7 +429,22 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
         );
     }
 
-    let profile = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
+    let mut profile = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
+    if input.chat {
+        // A chat-mode session reads the real project root (and any
+        // `[chat] readable_projects` root) through TA's read-only tools; the sandbox
+        // mirrors that: read-only on those roots, no write, `.ta`/`.git`/credentials
+        // still denied. The session's own directory stays its only workspace.
+        let mut roots = vec![input.project_root.to_path_buf()];
+        match ta_mcp_gateway::chat_launch::load_readable_projects(input.project_root) {
+            Ok(list) => roots.extend(list.into_iter().map(|p| p.root)),
+            Err(e) => warnings.push(format!(
+                "readable_projects could not be resolved for the sandbox profile: {e}. Only \
+                 the project root is granted read-only."
+            )),
+        }
+        profile = profile.with_project_read_roots(&roots);
+    }
     let scrubs_env = profile.requested;
     let wraps = profile.requested && provider != SandboxProvider::None;
     let placement = if gateway.is_some() {

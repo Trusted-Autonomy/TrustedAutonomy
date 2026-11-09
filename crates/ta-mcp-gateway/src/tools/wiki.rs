@@ -88,13 +88,15 @@ struct WikiContext {
     use_keychain: bool,
 }
 
-fn load_context(state: &Arc<Mutex<GatewayState>>) -> Result<WikiContext, McpError> {
+fn load_context(state: &Arc<Mutex<GatewayState>>, tool: &str) -> Result<WikiContext, McpError> {
+    // `.ta/wiki-resources.toml` and the credential vault live in the SOURCE
+    // project root, not in a staging copy or chat session directory.
     let (project_root, use_keychain) = {
         let locked = state
             .lock()
             .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
         (
-            locked.config.workspace_root.clone(),
+            locked.read_tool_root(tool)?,
             locked.config.credential_vault_use_keychain,
         )
     };
@@ -119,9 +121,7 @@ pub fn require_wiki_reads_enabled(
     let project_root = state
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?
-        .config
-        .workspace_root
-        .clone();
+        .read_tool_root(tool)?;
     let path = project_root.join(".ta").join("workflow.toml");
     match ta_submit::WorkflowConfig::wiki_seed_context(&path) {
         Ok(true) => Ok(()),
@@ -185,7 +185,7 @@ pub fn handle_wiki_search(
     params: WikiSearchParams,
 ) -> Result<CallToolResult, McpError> {
     require_wiki_reads_enabled(state, "ta_wiki_search")?;
-    let ctx = load_context(state)?;
+    let ctx = load_context(state, "ta_wiki_search")?;
     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
     let client = read_client(&ctx)?;
 
@@ -216,7 +216,7 @@ pub fn handle_wiki_get(
     params: WikiGetParams,
 ) -> Result<CallToolResult, McpError> {
     require_wiki_reads_enabled(state, "ta_wiki_get")?;
-    let ctx = load_context(state)?;
+    let ctx = load_context(state, "ta_wiki_get")?;
     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
 
     let cache = WikiCache::new(&ctx.project_root);
@@ -261,7 +261,7 @@ pub fn handle_wiki_types(
     params: WikiTypesParams,
 ) -> Result<CallToolResult, McpError> {
     require_wiki_reads_enabled(state, "ta_wiki_types")?;
-    let ctx = load_context(state)?;
+    let ctx = load_context(state, "ta_wiki_types")?;
     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
     let client = read_client(&ctx)?;
 
@@ -525,7 +525,7 @@ pub fn handle_wiki_create(
     params: WikiCreateParams,
 ) -> Result<CallToolResult, McpError> {
     validate_create(&params)?;
-    let ctx = load_context(state)?;
+    let ctx = load_context(state, "ta_wiki_create")?;
     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
 
     let description = format!(
@@ -576,7 +576,7 @@ pub fn handle_wiki_update(
     params: WikiUpdateParams,
 ) -> Result<CallToolResult, McpError> {
     validate_update(&params)?;
-    let ctx = load_context(state)?;
+    let ctx = load_context(state, "ta_wiki_update")?;
     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
 
     let description = format!(

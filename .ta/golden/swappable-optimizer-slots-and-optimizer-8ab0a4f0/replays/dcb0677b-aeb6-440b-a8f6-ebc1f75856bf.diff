@@ -1,0 +1,1579 @@
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5280,6 +5280,7 @@
+  "ta-connector-fs",
+  "ta-connector-unity",
+  "ta-connector-unreal",
++ "ta-context-opt",
+  "ta-credential-broker",
+  "ta-credentials",
+  "ta-events",
+@@ -5442,6 +5443,17 @@
+ ]
+ 
+ [[package]]
++name = "ta-context-opt"
++version = "0.17.12-alpha.5"
++dependencies = [
++ "serde",
++ "serde_json",
++ "sha2 0.10.9",
++ "tempfile",
++ "thiserror 2.0.20",
++]
++
++[[package]]
+ name = "ta-credential-broker"
+ version = "0.17.12-alpha.5"
+ dependencies = [
+@@ -5507,6 +5519,7 @@
+  "ta-changeset",
+  "ta-connector-email",
+  "ta-connector-slack",
++ "ta-context-opt",
+  "ta-credential-broker",
+  "ta-credentials",
+  "ta-data-spec",
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -14,6 +14,7 @@
+ members = [
+     "crates/ta-audit",
+     "crates/ta-changeset",
++    "crates/ta-context-opt",
+     "crates/ta-daemon",
+     "crates/ta-lifecycle",
+     "crates/ta-goal",
+--- a/PLAN.md
++++ b/PLAN.md
+@@ -11295,11 +11295,17 @@
+ 
+ **Goal**: Input, context and output optimization sit behind one abstraction so an open-source tool (RTK, headroom) can be started with and replaced later. Owner condition: no repeated shell windows. Spec: same file, section 5.
+ 
+-1. [ ] **No visible windows.** Every optimizer process is spawned with `CREATE_NO_WINDOW` on Windows (`crates/ta-daemon/src/prompt_optimizer_supervisor.rs` currently sets no flag and the constant appears nowhere in the repo). A test asserts the flag on the constructed command; a manual Windows smoke check is added to the release checklist.
+-2. [ ] **Flap guard.** After the existing five failures in five minutes the optimizer is disabled for the session with one user-visible message, never restarted forever; `ta compression status` shows restart count and last failure.
+-3. [ ] **`ta-context-opt` crate.** Traits `InputOptimizer`, `ContextOptimizer`, `OutputOptimizer`; a registry selected per slot in config; a `none` implementation; and a metrics record `{bytes_in, bytes_out, est_tokens_in, est_tokens_out, ms, lossless, original_ref}` with the full original kept on disk so any reduction is reversible. `[compression.plugin]` becomes the `proxy` kind of the input slot.
+-4. [ ] **Replay-able selection.** `--set optimizers.input.use=none|rtk|headroom` works through `ta golden replay`.
+-5. [ ] Tests and docs: slot selection, `none` baseline, metrics and original recovery, spawn flag. `docs/USAGE.md` how-to including licences recorded per optimizer.
++1. [x] **No visible windows.** Every optimizer process is spawned with `CREATE_NO_WINDOW` on Windows (`crates/ta-daemon/src/prompt_optimizer_supervisor.rs` currently sets no flag and the constant appears nowhere in the repo). A test asserts the flag on the constructed command; a manual Windows smoke check is added to the release checklist.
++2. [x] **Flap guard.** After the existing five failures in five minutes the optimizer is disabled for the session with one user-visible message, never restarted forever; `ta compression status` shows restart count and last failure.
++3. [x] **`ta-context-opt` crate.** Traits `InputOptimizer`, `ContextOptimizer`, `OutputOptimizer`; a registry selected per slot in config; a `none` implementation; and a metrics record `{bytes_in, bytes_out, est_tokens_in, est_tokens_out, ms, lossless, original_ref}` with the full original kept on disk so any reduction is reversible. `[compression.plugin]` becomes the `proxy` kind of the input slot.
++4. [x] **Replay-able selection.** `--set optimizers.input.use=none|rtk|headroom` works through `ta golden replay`.
++5. [x] Tests and docs: slot selection, `none` baseline, metrics and original recovery, spawn flag. `docs/USAGE.md` how-to including licences recorded per optimizer.
++
++**Implementation notes**:
++- Item 1: `build_command` in `prompt_optimizer_supervisor.rs` applies `CREATE_NO_WINDOW` on Windows and returns the requested flags for the test (a `Command` cannot report its flags). The Windows smoke check is in the USAGE.md Pre-Release Checklist and has not been run on Windows.
++- Item 2: the five-in-five-minutes suspension already existed. Added one visible warning, `last_failure` in `status.json`, and `Last failure` plus slot/licence lines in `ta compression status`.
++- Item 3: `ta-context-opt` holds the three traits, registry, `none`, metrics and the content-addressed original store. `headroom` and `proxy` are registered as `proxy` kind, `rtk` as `hook` kind, as selectable names only. Nothing launches RTK yet and no first-party minimizers exist, so only `none` changes bytes. The context and output slots have only `none`.
++- Item 4: `optimizers.input.use` is validated by `ta golden replay` before launch and honoured when the agent environment is built (`none` or `rtk` means no `ANTHROPIC_BASE_URL`). The daemon-level proxy process follows `daemon.toml`, not per-goal overrides.
+ 
+ **Effort**: M.
+ 
+--- a/apps/ta-cli/Cargo.toml
++++ b/apps/ta-cli/Cargo.toml
+@@ -84,6 +84,7 @@
+ ta-governed-paths = { path = "../../crates/ta-governed-paths", version = "0.17.12-alpha.5" }
+ ta-plugin = { path = "../../crates/ta-plugin", version = "0.17.12-alpha.5" }
+ ta-intake = { path = "../../crates/ta-intake", version = "0.17.12-alpha.5" }
++ta-context-opt = { path = "../../crates/ta-context-opt", version = "0.17.12-alpha.5" }
+ ta-brain = { path = "../../crates/ta-brain", version = "0.17.12-alpha.5" }
+ ta-advisor = { path = "../../crates/ta-advisor", version = "0.17.12-alpha.5" }
+ ta-release = { path = "../../crates/ta-release", version = "0.17.12-alpha.5" }
+--- a/apps/ta-cli/src/commands/compression.rs
++++ b/apps/ta-cli/src/commands/compression.rs
+@@ -100,6 +100,8 @@
+         }
+     );
+ 
++    print_optimizer_slots(workspace_root, &cfg);
++
+     // Supervisor process status.
+     if let Some(status) = read_optimizer_status(workspace_root) {
+         let pid_str = status
+@@ -109,10 +111,15 @@
+         let display_name = status.plugin_name.unwrap_or_else(|| plugin.name.clone());
+         println!("  Process:        {} (PID {})", status.status, pid_str);
+         println!("  Restarts:       {}", status.restart_count);
++        if let Some(why) = &status.last_failure {
++            println!("  Last failure:   {}", why);
++        }
+         if status.status == "suspended" {
+             println!(
+-                "\n  ⚠ {} supervisor is suspended after repeated failures.\n  \
+-                 To resume:  ta compression enable",
++                "\n  ⚠ {} was disabled for this session after repeated failures\n  \
++                 (5 in 5 minutes) and will not restart on its own.\n  \
++                 To resume:  ta compression enable\n  \
++                 To stop it: ta compression disable",
+                 display_name
+             );
+         }
+@@ -225,6 +232,60 @@
+     Ok(())
+ }
+ 
++/// Selected optimizer per slot, with the licence recorded for each.
++fn print_optimizer_slots(workspace_root: &Path, cfg: &CompressionConfig) {
++    let registry = ta_context_opt::Registry::with_builtins();
++    let optimizers = load_optimizers(workspace_root);
++    let default_input = if !cfg.enabled {
++        "none"
++    } else if cfg.plugin.is_some() {
++        "proxy"
++    } else {
++        "headroom"
++    };
++    println!("  Optimizer slots:");
++    match ta_context_opt::resolve_selection(
++        optimizers.configured(),
++        [default_input, "none", "none"],
++        None,
++        &registry,
++    ) {
++        Ok(sel) => {
++            for slot in ta_context_opt::Slot::ALL {
++                let name = &sel.get(slot).name;
++                let info = registry
++                    .infos()
++                    .into_iter()
++                    .find(|i| i.slot == slot && &i.name == name);
++                match info {
++                    Some(i) => println!(
++                        "    {:<8} {} ({}, licence {})",
++                        slot,
++                        i.name,
++                        i.kind.as_str(),
++                        i.licence
++                    ),
++                    None => println!("    {:<8} {}", slot, name),
++                }
++            }
++        }
++        Err(e) => println!("    ⚠ {e}"),
++    }
++}
++
++fn load_optimizers(workspace_root: &Path) -> ta_context_opt::OptimizersConfig {
++    #[derive(serde::Deserialize, Default)]
++    #[serde(default)]
++    struct File {
++        optimizers: ta_context_opt::OptimizersConfig,
++    }
++    std::fs::read_to_string(workspace_root.join(".ta").join("daemon.toml"))
++        .ok()
++        .and_then(|raw| toml::from_str::<File>(&raw).ok())
++        .map(|f| f.optimizers)
++        .unwrap_or_default()
++}
++
+ // ─── enable / disable ────────────────────────────────────────────────────────
+ 
+ fn set_enabled(workspace_root: &Path, enabled: bool) -> Result<()> {
+@@ -460,6 +521,8 @@
+     pub restart_count: u32,
+     #[serde(default)]
+     pub plugin_name: Option<String>,
++    #[serde(default)]
++    pub last_failure: Option<String>,
+ }
+ 
+ fn read_optimizer_status(workspace_root: &Path) -> Option<OptimizerStatusFile> {
+--- a/apps/ta-cli/src/commands/golden.rs
++++ b/apps/ta-cli/src/commands/golden.rs
+@@ -548,6 +548,8 @@
+     let store = GoldenStore::new(&config.workspace_root);
+     let entry = store.load_entry(id)?;
+     let overrides = parse_overrides(set)?;
++    // Refuse an unknown optimizer before a scratch checkout or a goal exists.
++    ta_context_opt::validate_overrides(&overrides, &ta_context_opt::Registry::with_builtins())?;
+     if let Some(cap) = max_usd {
+         if !(cap.is_finite() && cap > 0.0) {
+             anyhow::bail!("--max-usd must be a positive number of USD, got {cap}.");
+@@ -1724,6 +1726,67 @@
+     }
+ 
+     #[test]
++    fn optimizer_selection_is_validated_and_passed_to_the_replayed_goal() {
++        let f = fixture();
++        let entry = captured_entry(&f, None);
++        let mut launched = false;
++        let mut run = |_: &mut Command| {
++            launched = true;
++            Ok(ok_status())
++        };
++        for bad in ["optimizers.input.use=zip", "optimizers.sideways.use=none"] {
++            let e = replay(
++                &f.config,
++                Path::new("ta"),
++                &entry.id,
++                &[bad.to_string()],
++                None,
++                None,
++                &mut run,
++            )
++            .err()
++            .unwrap()
++            .to_string();
++            assert!(e.contains("optimizer"), "{bad}: {e}");
++        }
++        assert!(
++            !launched,
++            "a bad optimizer name must stop the replay before it launches"
++        );
++
++        for v in ["none", "rtk", "headroom"] {
++            let overrides = parse_overrides(&[format!("optimizers.input.use={v}")]).unwrap();
++            ta_context_opt::validate_overrides(
++                &overrides,
++                &ta_context_opt::Registry::with_builtins(),
++            )
++            .unwrap();
++            let cmd = build_replay_command(
++                Path::new("ta"),
++                f.project.path(),
++                &entry,
++                Path::new("p.md"),
++                Path::new("scratch"),
++                "arm",
++                &overrides,
++                None,
++            );
++            let args: Vec<_> = cmd
++                .get_args()
++                .map(|a| a.to_string_lossy().to_string())
++                .collect();
++            let at = args
++                .iter()
++                .position(|a| a == "--experiment-shadow-overrides")
++                .unwrap();
++            assert_eq!(
++                serde_json::from_str::<Value>(&args[at + 1]).unwrap(),
++                serde_json::json!({"optimizers.input.use": v})
++            );
++        }
++    }
++
++    #[test]
+     fn replay_refuses_a_prompt_that_no_longer_matches_its_recorded_hash() {
+         let f = fixture();
+         let entry = captured_entry(&f, None);
+--- a/apps/ta-cli/src/commands/run.rs
++++ b/apps/ta-cli/src/commands/run.rs
+@@ -6780,7 +6780,7 @@
+ 
+     // Inject ANTHROPIC_BASE_URL when context compression is enabled (v0.17.0.7).
+     // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
+-    inject_compression_url(&mut env, config, staging_path);
++    inject_compression_url(&mut env, config, staging_path, goal_id);
+ 
+     // Sandbox plan (v0.17.12.6). Settings come from the REAL project root (staging
+     // has no `.ta/`), the trusted policy from the daemon-only state dir. A
+@@ -10601,6 +10601,19 @@
+     plugin: Option<PluginSection>,
+ }
+ 
++impl CompressionSection {
++    /// Input-slot optimizer used when `[optimizers.input]` is not set.
++    fn default_input_optimizer(&self) -> &'static str {
++        if !self.enabled {
++            "none"
++        } else if self.plugin.is_some() {
++            "proxy"
++        } else {
++            "headroom"
++        }
++    }
++}
++
+ impl Default for CompressionSection {
+     fn default() -> Self {
+         Self {
+@@ -10622,24 +10635,65 @@
+ #[serde(default)]
+ struct DaemonTomlCompression {
+     compression: CompressionSection,
++    optimizers: ta_context_opt::OptimizersConfig,
+ }
+ 
+-/// Load the `[compression]` section from `project_root/.ta/daemon.toml`.
+-fn load_compression_section(project_root: &std::path::Path) -> CompressionSection {
++/// Load the `[compression]` and `[optimizers]` sections from `project_root/.ta/daemon.toml`.
++fn load_compression_section(
++    project_root: &std::path::Path,
++) -> (CompressionSection, ta_context_opt::OptimizersConfig) {
+     let path = project_root.join(".ta").join("daemon.toml");
+     if let Ok(content) = std::fs::read_to_string(&path) {
+         if let Ok(parsed) = toml::from_str::<DaemonTomlCompression>(&content) {
+-            return parsed.compression;
++            return (parsed.compression, parsed.optimizers);
+         }
+     }
+-    CompressionSection::default()
++    Default::default()
+ }
+ 
++/// The goal's experiment overrides (`ta golden replay --set ...`), if any.
++fn goal_experiment_overrides(
++    project_root: &std::path::Path,
++    goal_id: uuid::Uuid,
++) -> Option<serde_json::Value> {
++    let store = GoalRunStore::new(project_root.join(".ta").join("goals")).ok()?;
++    store.get(goal_id).ok()??.experiment_overrides
++}
++
+ /// Return the headroom proxy URL (as `ANTHROPIC_BASE_URL`) if compression is
+ /// enabled for this agent AND the headroom proxy is currently running.
+-fn compression_base_url(project_root: &std::path::Path, agent_name: &str) -> Option<String> {
+-    let cfg = load_compression_section(project_root);
++fn compression_base_url(
++    project_root: &std::path::Path,
++    agent_name: &str,
++    overrides: Option<&serde_json::Value>,
++) -> Option<String> {
++    let (cfg, optimizers) = load_compression_section(project_root);
+ 
++    // The input slot decides whether a proxy sits in front of the agent. A replay
++    // override (`optimizers.input.use=none`) wins over `daemon.toml`.
++    let registry = ta_context_opt::Registry::with_builtins();
++    match ta_context_opt::resolve_selection(
++        optimizers.configured(),
++        [cfg.default_input_optimizer(), "none", "none"],
++        overrides,
++        &registry,
++    ) {
++        Ok(sel) => {
++            if !matches!(sel.input.name.as_str(), "proxy" | "headroom") {
++                tracing::info!(
++                    optimizer = %sel.input.name,
++                    from_override = sel.input.from_override,
++                    "Input optimizer slot has no proxy; agent API calls go direct"
++                );
++                return None;
++            }
++        }
++        Err(e) => {
++            tracing::warn!(error = %e, "Invalid optimizer selection; agent API calls go direct");
++            return None;
++        }
++    }
++
+     if !cfg.enabled {
+         return None;
+     }
+@@ -10686,6 +10740,7 @@
+     env: &mut std::collections::HashMap<String, String>,
+     config: &AgentLaunchConfig,
+     staging_path: &std::path::Path,
++    goal_id: uuid::Uuid,
+ ) {
+     // Derive project_root from staging_path (project_root/.ta/staging/<uuid>).
+     let project_root = staging_path
+@@ -10697,7 +10752,8 @@
+ 
+     let agent_name = config.name.as_deref().unwrap_or("claude-code");
+ 
+-    if let Some(url) = compression_base_url(root, agent_name) {
++    let overrides = goal_experiment_overrides(root, goal_id);
++    if let Some(url) = compression_base_url(root, agent_name, overrides.as_ref()) {
+         env.insert("ANTHROPIC_BASE_URL".to_string(), url.clone());
+         tracing::info!(
+             agent = %agent_name,
+@@ -10712,6 +10768,33 @@
+     use super::*;
+     use tempfile::TempDir;
+ 
++    #[test]
++    fn input_slot_override_decides_whether_the_proxy_url_is_injected() {
++        let root = TempDir::new().unwrap();
++        let comp = root.path().join(".ta").join("compression");
++        std::fs::create_dir_all(&comp).unwrap();
++        std::fs::write(comp.join("status.json"), r#"{"status":"running"}"#).unwrap();
++        let none = serde_json::json!({"optimizers.input.use": "none"});
++        let rtk = serde_json::json!({"optimizers.input.use": "rtk"});
++        let headroom = serde_json::json!({"optimizers.input.use": "headroom"});
++
++        // Baseline: compression enabled and running, so the proxy is used.
++        assert!(compression_base_url(root.path(), "claude-code", None).is_some());
++        assert!(compression_base_url(root.path(), "claude-code", Some(&headroom)).is_some());
++        // The replay arms with no proxy go direct.
++        assert!(compression_base_url(root.path(), "claude-code", Some(&none)).is_none());
++        assert!(compression_base_url(root.path(), "claude-code", Some(&rtk)).is_none());
++
++        // daemon.toml can select none too; an override can still pick headroom back.
++        std::fs::write(
++            root.path().join(".ta").join("daemon.toml"),
++            "[optimizers.input]\nuse = \"none\"\n",
++        )
++        .unwrap();
++        assert!(compression_base_url(root.path(), "claude-code", None).is_none());
++        assert!(compression_base_url(root.path(), "claude-code", Some(&headroom)).is_some());
++    }
++
+     fn no_changes_err() -> anyhow::Error {
+         // Produce the real typed error through the real draft build path:
+         // a goal whose staging is identical to its source.
+--- /dev/null
++++ b/crates/ta-context-opt/Cargo.toml
+@@ -0,0 +1,19 @@
++[package]
++name = "ta-context-opt"
++version.workspace = true
++edition = "2021"
++description = "Swappable input, context and output optimizer slots for Trusted Autonomy"
++license = "Apache-2.0"
++repository = "https://github.com/trustedautonomy/ta"
++homepage = "https://github.com/trustedautonomy/ta"
++keywords = ["ai", "agent", "autonomy", "tokens", "optimizer"]
++categories = ["development-tools"]
++
++[dependencies]
++serde = { workspace = true }
++serde_json = { workspace = true }
++sha2 = { workspace = true }
++thiserror = { workspace = true }
++
++[dev-dependencies]
++tempfile = { workspace = true }
+--- /dev/null
++++ b/crates/ta-context-opt/src/lib.rs
+@@ -0,0 +1,240 @@
++//! Swappable optimizer slots (v0.17.12.21).
++//!
++//! Input, context and output optimization each sit behind one trait. An
++//! implementation is picked per slot by name (`[optimizers.input] use = "rtk"`),
++//! can be overridden per golden replay (`--set optimizers.input.use=none`), and
++//! `none` is always valid and is the baseline for every comparison.
++//!
++//! Every application records a [`Metrics`] record and keeps the full original
++//! on disk ([`OriginalStore`]) so any reduction is reversible and auditable.
++
++mod metrics;
++mod registry;
++mod select;
++
++pub use metrics::{apply_with_metrics, est_tokens, Applied, Metrics, OriginalStore};
++pub use registry::{Kind, OptimizerInfo, Registry};
++pub use select::{
++    resolve_selection, validate_overrides, OptimizersConfig, Selection, SlotChoice, SlotConfig,
++    OVERRIDE_PREFIX, SLOTS,
++};
++
++use serde::{Deserialize, Serialize};
++
++/// The three places an optimizer can act.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum Slot {
++    /// Tool and command output, files and logs before they enter context.
++    Input,
++    /// The accumulated conversation (compaction, eviction, prefix).
++    Context,
++    /// What the model writes (terse replies, edit format).
++    Output,
++}
++
++impl Slot {
++    pub const ALL: [Slot; 3] = [Slot::Input, Slot::Context, Slot::Output];
++
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Slot::Input => "input",
++            Slot::Context => "context",
++            Slot::Output => "output",
++        }
++    }
++
++    pub fn parse(s: &str) -> Option<Slot> {
++        Slot::ALL.into_iter().find(|slot| slot.as_str() == s)
++    }
++}
++
++impl std::fmt::Display for Slot {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str(self.as_str())
++    }
++}
++
++#[derive(Debug, thiserror::Error)]
++pub enum OptError {
++    #[error(
++        "unknown optimizer '{name}' for the {slot} slot. Available: {available}. \
++         Set it with `[optimizers.{slot}] use = \"<name>\"` in .ta/daemon.toml"
++    )]
++    UnknownOptimizer {
++        slot: Slot,
++        name: String,
++        available: String,
++    },
++    #[error(
++        "'{key}' is not an optimizer setting. Expected optimizers.<input|context|output>.use \
++         (for example optimizers.input.use=none)"
++    )]
++    BadKey { key: String },
++    #[error("optimizers.{slot}.use must be a string such as \"none\", got {got}")]
++    BadValue { slot: String, got: String },
++    #[error("optimizer '{name}' failed on the {slot} slot: {reason}")]
++    Failed {
++        slot: Slot,
++        name: String,
++        reason: String,
++    },
++    #[error("original store at {path}: {source}. Check the directory exists and is writable")]
++    Store {
++        path: String,
++        #[source]
++        source: std::io::Error,
++    },
++    #[error("no stored original for reference '{0}'. Run `ls` on the originals directory to see what is kept")]
++    MissingOriginal(String),
++}
++
++/// What an optimizer returns. `lossless` is the optimizer's own claim that
++/// `bytes` can be turned back into the input exactly.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Optimized {
++    pub bytes: Vec<u8>,
++    pub lossless: bool,
++}
++
++/// Common contract. The three slot traits add nothing but a type, so the
++/// compiler stops an output optimizer being wired into the input slot.
++pub trait Optimizer: Send + Sync {
++    fn name(&self) -> &str;
++    fn version(&self) -> &str {
++        env!("CARGO_PKG_VERSION")
++    }
++    fn kind(&self) -> Kind;
++    /// Recorded licence (SPDX), shown by `ta compression status`.
++    fn licence(&self) -> &str;
++    /// Cheap probe. Must never start a visible window.
++    fn available(&self) -> bool {
++        true
++    }
++    fn apply(&self, input: &[u8]) -> Result<Optimized, OptError>;
++}
++
++pub trait InputOptimizer: Optimizer {}
++pub trait ContextOptimizer: Optimizer {}
++pub trait OutputOptimizer: Optimizer {}
++
++/// The baseline: returns its input unchanged, for any slot.
++#[derive(Debug, Default, Clone, Copy)]
++pub struct NoneOptimizer;
++
++impl Optimizer for NoneOptimizer {
++    fn name(&self) -> &str {
++        "none"
++    }
++    fn kind(&self) -> Kind {
++        Kind::InProcess
++    }
++    fn licence(&self) -> &str {
++        "Apache-2.0"
++    }
++    fn apply(&self, input: &[u8]) -> Result<Optimized, OptError> {
++        Ok(Optimized {
++            bytes: input.to_vec(),
++            lossless: true,
++        })
++    }
++}
++
++impl InputOptimizer for NoneOptimizer {}
++impl ContextOptimizer for NoneOptimizer {}
++impl OutputOptimizer for NoneOptimizer {}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn none_is_the_baseline_for_every_slot() {
++        let reg = Registry::with_builtins();
++        for slot in Slot::ALL {
++            let o = reg.get(slot, "none").unwrap();
++            let out = o.apply(b"unchanged text").unwrap();
++            assert_eq!(out.bytes, b"unchanged text");
++            assert!(out.lossless);
++        }
++    }
++
++    #[test]
++    fn registry_lists_licences_and_proxy_kind_for_input() {
++        let infos = Registry::with_builtins().infos();
++        let h = infos
++            .iter()
++            .find(|i| i.slot == Slot::Input && i.name == "headroom")
++            .unwrap();
++        assert_eq!(h.kind, Kind::Proxy);
++        assert_eq!(h.licence, "Apache-2.0");
++        assert!(infos
++            .iter()
++            .any(|i| i.slot == Slot::Input && i.name == "proxy" && i.kind == Kind::Proxy));
++        assert!(!infos
++            .iter()
++            .any(|i| i.slot == Slot::Context && i.name == "headroom"));
++    }
++
++    struct Halver;
++    impl Optimizer for Halver {
++        fn name(&self) -> &str {
++            "halver"
++        }
++        fn kind(&self) -> Kind {
++            Kind::InProcess
++        }
++        fn licence(&self) -> &str {
++            "MIT"
++        }
++        fn apply(&self, input: &[u8]) -> Result<Optimized, OptError> {
++            Ok(Optimized {
++                bytes: input[..input.len() / 2].to_vec(),
++                lossless: false,
++            })
++        }
++    }
++
++    #[test]
++    fn metrics_are_filled_and_the_original_is_recoverable() {
++        let dir = tempfile::tempdir().unwrap();
++        let store = OriginalStore::new(dir.path().join("originals"));
++        let input = vec![b'x'; 400];
++
++        let applied = apply_with_metrics(Slot::Input, &Halver, &store, &input).unwrap();
++        let m = &applied.metrics;
++        assert_eq!((m.bytes_in, m.bytes_out), (400, 200));
++        assert_eq!((m.est_tokens_in, m.est_tokens_out), (100, 50));
++        assert!(!m.lossless);
++        assert_eq!(m.optimizer, "halver");
++        assert_eq!(store.recover(&m.original_ref).unwrap(), input);
++
++        // `none` records a lossless pass-through with the same reference.
++        let base = apply_with_metrics(Slot::Input, &NoneOptimizer, &store, &input).unwrap();
++        assert_eq!(base.output, input);
++        assert!(base.metrics.lossless);
++        assert_eq!(base.metrics.original_ref, m.original_ref);
++
++        let json = serde_json::to_value(m).unwrap();
++        for k in [
++            "bytes_in",
++            "bytes_out",
++            "est_tokens_in",
++            "est_tokens_out",
++            "ms",
++            "lossless",
++            "original_ref",
++        ] {
++            assert!(json.get(k).is_some(), "missing {k}");
++        }
++    }
++
++    #[test]
++    fn recover_rejects_path_escapes_and_unknown_refs() {
++        let dir = tempfile::tempdir().unwrap();
++        let store = OriginalStore::new(dir.path());
++        assert!(store.recover("../secret").is_err());
++        assert!(store.recover("").is_err());
++        assert!(store.recover("abcdef").is_err());
++    }
++}
+--- /dev/null
++++ b/crates/ta-context-opt/src/metrics.rs
+@@ -0,0 +1,101 @@
++use std::path::{Path, PathBuf};
++use std::time::Instant;
++
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++
++use crate::{OptError, Optimized, Optimizer, Slot};
++
++/// One application of an optimizer.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct Metrics {
++    pub slot: Slot,
++    pub optimizer: String,
++    pub bytes_in: u64,
++    pub bytes_out: u64,
++    pub est_tokens_in: u64,
++    pub est_tokens_out: u64,
++    pub ms: u64,
++    pub lossless: bool,
++    /// Content hash of the unmodified input, resolvable with [`OriginalStore::recover`].
++    pub original_ref: String,
++}
++
++/// Rough token estimate (about 4 bytes per token). It is an estimate for
++/// comparing optimizers, never a billing figure.
++pub fn est_tokens(bytes: u64) -> u64 {
++    bytes.div_ceil(4)
++}
++
++/// Full originals kept on disk, content addressed, so a reduction can always be undone.
++pub struct OriginalStore {
++    dir: PathBuf,
++}
++
++impl OriginalStore {
++    pub fn new(dir: impl Into<PathBuf>) -> Self {
++        Self { dir: dir.into() }
++    }
++
++    pub fn dir(&self) -> &Path {
++        &self.dir
++    }
++
++    pub fn save(&self, original: &[u8]) -> Result<String, OptError> {
++        let hash = format!("{:x}", Sha256::digest(original));
++        let store_err = |source| OptError::Store {
++            path: self.dir.display().to_string(),
++            source,
++        };
++        std::fs::create_dir_all(&self.dir).map_err(store_err)?;
++        let path = self.dir.join(&hash);
++        if !path.exists() {
++            std::fs::write(&path, original).map_err(store_err)?;
++        }
++        Ok(hash)
++    }
++
++    pub fn recover(&self, original_ref: &str) -> Result<Vec<u8>, OptError> {
++        // A ref is a hex digest. Anything else could be a path escape.
++        if original_ref.is_empty() || !original_ref.bytes().all(|b| b.is_ascii_hexdigit()) {
++            return Err(OptError::MissingOriginal(original_ref.to_string()));
++        }
++        std::fs::read(self.dir.join(original_ref))
++            .map_err(|_| OptError::MissingOriginal(original_ref.to_string()))
++    }
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Applied {
++    pub output: Vec<u8>,
++    pub metrics: Metrics,
++}
++
++/// Run `optimizer` on `input`, keeping the original first. If the optimizer
++/// fails, the error is returned and the original is still on disk.
++pub fn apply_with_metrics(
++    slot: Slot,
++    optimizer: &dyn Optimizer,
++    store: &OriginalStore,
++    input: &[u8],
++) -> Result<Applied, OptError> {
++    let original_ref = store.save(input)?;
++    let started = Instant::now();
++    let Optimized { bytes, lossless } = optimizer.apply(input)?;
++    let ms = started.elapsed().as_millis() as u64;
++    let (bytes_in, bytes_out) = (input.len() as u64, bytes.len() as u64);
++    Ok(Applied {
++        metrics: Metrics {
++            slot,
++            optimizer: optimizer.name().to_string(),
++            bytes_in,
++            bytes_out,
++            est_tokens_in: est_tokens(bytes_in),
++            est_tokens_out: est_tokens(bytes_out),
++            ms,
++            lossless,
++            original_ref,
++        },
++        output: bytes,
++    })
++}
+--- /dev/null
++++ b/crates/ta-context-opt/src/registry.rs
+@@ -0,0 +1,139 @@
++use std::collections::BTreeMap;
++use std::sync::Arc;
++
++use serde::{Deserialize, Serialize};
++
++use crate::{OptError, Optimized, Optimizer, Slot};
++
++/// How an optimizer runs.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum Kind {
++    /// A supervised child process.
++    Process,
++    /// An HTTP proxy on `ANTHROPIC_BASE_URL` (the former `[compression.plugin]`).
++    Proxy,
++    /// A hook that rewrites tool calls.
++    Hook,
++    InProcess,
++}
++
++impl Kind {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Kind::Process => "process",
++            Kind::Proxy => "proxy",
++            Kind::Hook => "hook",
++            Kind::InProcess => "in_process",
++        }
++    }
++}
++
++/// What `ta compression status` shows for one registered optimizer.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct OptimizerInfo {
++    pub slot: Slot,
++    pub name: String,
++    pub kind: Kind,
++    pub licence: String,
++}
++
++/// An external tool TA does not run inside this crate. Applying it here is a
++/// pass-through: the real work happens in the supervised process, proxy or
++/// hook. Registering it makes the name selectable and its licence recorded.
++struct External {
++    name: &'static str,
++    kind: Kind,
++    licence: &'static str,
++}
++
++impl Optimizer for External {
++    fn name(&self) -> &str {
++        self.name
++    }
++    fn kind(&self) -> Kind {
++        self.kind
++    }
++    fn licence(&self) -> &str {
++        self.licence
++    }
++    fn apply(&self, input: &[u8]) -> Result<Optimized, OptError> {
++        Ok(Optimized {
++            bytes: input.to_vec(),
++            lossless: true,
++        })
++    }
++}
++
++/// Optimizers by slot and name.
++pub struct Registry {
++    entries: BTreeMap<(Slot, String), Arc<dyn Optimizer>>,
++}
++
++impl Registry {
++    pub fn empty() -> Self {
++        Self {
++            entries: BTreeMap::new(),
++        }
++    }
++
++    /// `none` for every slot, plus the input-slot starters: `proxy` (any
++    /// `[compression.plugin]`), `headroom` and `rtk`.
++    pub fn with_builtins() -> Self {
++        let mut r = Self::empty();
++        for slot in Slot::ALL {
++            r.register(slot, Arc::new(crate::NoneOptimizer));
++        }
++        for (name, kind, licence) in [
++            ("proxy", Kind::Proxy, "per plugin"),
++            ("headroom", Kind::Proxy, "Apache-2.0"),
++            ("rtk", Kind::Hook, "Apache-2.0"),
++        ] {
++            r.register(
++                Slot::Input,
++                Arc::new(External {
++                    name,
++                    kind,
++                    licence,
++                }),
++            );
++        }
++        r
++    }
++
++    pub fn register(&mut self, slot: Slot, optimizer: Arc<dyn Optimizer>) {
++        self.entries
++            .insert((slot, optimizer.name().to_string()), optimizer);
++    }
++
++    pub fn get(&self, slot: Slot, name: &str) -> Result<Arc<dyn Optimizer>, OptError> {
++        self.entries
++            .get(&(slot, name.to_string()))
++            .cloned()
++            .ok_or_else(|| OptError::UnknownOptimizer {
++                slot,
++                name: name.to_string(),
++                available: self.names(slot).join(", "),
++            })
++    }
++
++    pub fn names(&self, slot: Slot) -> Vec<String> {
++        self.entries
++            .keys()
++            .filter(|(s, _)| *s == slot)
++            .map(|(_, n)| n.clone())
++            .collect()
++    }
++
++    pub fn infos(&self) -> Vec<OptimizerInfo> {
++        self.entries
++            .iter()
++            .map(|((slot, name), o)| OptimizerInfo {
++                slot: *slot,
++                name: name.clone(),
++                kind: o.kind(),
++                licence: o.licence().to_string(),
++            })
++            .collect()
++    }
++}
+--- /dev/null
++++ b/crates/ta-context-opt/src/select.rs
+@@ -0,0 +1,193 @@
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
++
++use crate::{OptError, Registry, Slot};
++
++/// Override keys look like `optimizers.input.use`.
++pub const OVERRIDE_PREFIX: &str = "optimizers.";
++pub const SLOTS: [Slot; 3] = Slot::ALL;
++
++/// `[optimizers.<slot>]` in `daemon.toml`.
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(default)]
++pub struct SlotConfig {
++    /// Optimizer name. Absent means the slot default.
++    #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
++    pub use_: Option<String>,
++}
++
++/// The `[optimizers]` table.
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(default)]
++pub struct OptimizersConfig {
++    pub input: SlotConfig,
++    pub context: SlotConfig,
++    pub output: SlotConfig,
++}
++
++impl OptimizersConfig {
++    pub fn configured(&self) -> [Option<&str>; 3] {
++        [
++            self.input.use_.as_deref(),
++            self.context.use_.as_deref(),
++            self.output.use_.as_deref(),
++        ]
++    }
++}
++
++/// The name chosen for one slot and where the choice came from.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SlotChoice {
++    pub name: String,
++    pub from_override: bool,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Selection {
++    pub input: SlotChoice,
++    pub context: SlotChoice,
++    pub output: SlotChoice,
++}
++
++impl Selection {
++    pub fn get(&self, slot: Slot) -> &SlotChoice {
++        match slot {
++            Slot::Input => &self.input,
++            Slot::Context => &self.context,
++            Slot::Output => &self.output,
++        }
++    }
++}
++
++fn parse_key(key: &str) -> Result<Option<Slot>, OptError> {
++    let Some(rest) = key.strip_prefix(OVERRIDE_PREFIX) else {
++        return Ok(None);
++    };
++    rest.strip_suffix(".use")
++        .and_then(Slot::parse)
++        .map(Some)
++        .ok_or_else(|| OptError::BadKey {
++            key: key.to_string(),
++        })
++}
++
++/// Check every `optimizers.*` key in a replay's override object before
++/// anything is launched. Keys outside `optimizers.` are not ours and are ignored.
++pub fn validate_overrides(overrides: &Value, registry: &Registry) -> Result<(), OptError> {
++    let Some(map) = overrides.as_object() else {
++        return Ok(());
++    };
++    for (key, value) in map {
++        let Some(slot) = parse_key(key)? else {
++            continue;
++        };
++        let name = value.as_str().ok_or_else(|| OptError::BadValue {
++            slot: slot.to_string(),
++            got: value.to_string(),
++        })?;
++        registry.get(slot, name)?;
++    }
++    Ok(())
++}
++
++/// Resolve each slot: a goal's override wins over `configured`, which wins
++/// over `defaults`. `configured` and `defaults` are `[input, context, output]`.
++pub fn resolve_selection(
++    configured: [Option<&str>; 3],
++    defaults: [&str; 3],
++    overrides: Option<&Value>,
++    registry: &Registry,
++) -> Result<Selection, OptError> {
++    let mut choices = Vec::with_capacity(3);
++    for (i, slot) in Slot::ALL.into_iter().enumerate() {
++        let key = format!("{OVERRIDE_PREFIX}{slot}.use");
++        let overridden = overrides.and_then(|o| o.get(&key));
++        let (name, from_override) = match overridden {
++            Some(v) => (
++                v.as_str()
++                    .ok_or_else(|| OptError::BadValue {
++                        slot: slot.to_string(),
++                        got: v.to_string(),
++                    })?
++                    .to_string(),
++                true,
++            ),
++            None => (configured[i].unwrap_or(defaults[i]).to_string(), false),
++        };
++        registry.get(slot, &name)?;
++        choices.push(SlotChoice {
++            name,
++            from_override,
++        });
++    }
++    let output = choices.pop().unwrap();
++    let context = choices.pop().unwrap();
++    let input = choices.pop().unwrap();
++    Ok(Selection {
++        input,
++        context,
++        output,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn reg() -> Registry {
++        Registry::with_builtins()
++    }
++
++    #[test]
++    fn override_beats_config_beats_default() {
++        let o = json!({"optimizers.input.use": "none"});
++        let s = resolve_selection(
++            [Some("rtk"), None, None],
++            ["headroom", "none", "none"],
++            Some(&o),
++            &reg(),
++        )
++        .unwrap();
++        assert_eq!(s.input.name, "none");
++        assert!(s.input.from_override);
++
++        let s = resolve_selection(
++            [Some("rtk"), None, None],
++            ["headroom", "none", "none"],
++            None,
++            &reg(),
++        )
++        .unwrap();
++        assert_eq!(s.input.name, "rtk");
++        assert!(!s.input.from_override);
++
++        let s = resolve_selection([None; 3], ["headroom", "none", "none"], None, &reg()).unwrap();
++        assert_eq!(s.input.name, "headroom");
++        assert_eq!(s.get(Slot::Output).name, "none");
++    }
++
++    #[test]
++    fn replay_values_none_rtk_headroom_all_validate() {
++        for v in ["none", "rtk", "headroom"] {
++            validate_overrides(&json!({"optimizers.input.use": v}), &reg()).unwrap();
++        }
++    }
++
++    #[test]
++    fn unknown_names_keys_and_types_are_refused_with_the_valid_choices() {
++        let e = validate_overrides(&json!({"optimizers.input.use": "zip"}), &reg())
++            .unwrap_err()
++            .to_string();
++        assert!(
++            e.contains("zip") && e.contains("headroom") && e.contains("rtk"),
++            "{e}"
++        );
++        // rtk is an input-slot starter only.
++        assert!(validate_overrides(&json!({"optimizers.output.use": "rtk"}), &reg()).is_err());
++        assert!(validate_overrides(&json!({"optimizers.inputs.use": "none"}), &reg()).is_err());
++        assert!(validate_overrides(&json!({"optimizers.input.use": 3}), &reg()).is_err());
++        // Not ours: ignored.
++        validate_overrides(&json!({"wiki.disabled": true}), &reg()).unwrap();
++    }
++}
+--- a/crates/ta-daemon/Cargo.toml
++++ b/crates/ta-daemon/Cargo.toml
+@@ -37,6 +37,7 @@
+ 
+ # Internal crates
+ ta-mcp-gateway = { path = "../ta-mcp-gateway", version = "0.17.12-alpha.5" }
++ta-context-opt = { path = "../ta-context-opt", version = "0.17.12-alpha.5" }
+ ta-workspace = { path = "../ta-workspace", version = "0.17.12-alpha.5" }
+ ta-changeset = { path = "../ta-changeset", version = "0.17.12-alpha.5" }
+ ta-memory = { path = "../ta-memory", version = "0.17.12-alpha.5" }
+--- a/crates/ta-daemon/src/config.rs
++++ b/crates/ta-daemon/src/config.rs
+@@ -139,6 +139,19 @@
+     #[serde(default)]
+     pub compression: CompressionConfig,
+ 
++    /// Swappable optimizer slots (v0.17.12.21).
++    ///
++    /// ```toml
++    /// [optimizers.input]
++    /// use = "none"   # none | proxy | headroom | rtk
++    /// ```
++    ///
++    /// Absent means the input slot follows `[compression]`: `proxy` when
++    /// `[compression.plugin]` is set, `headroom` when compression is enabled,
++    /// otherwise `none`.
++    #[serde(default)]
++    pub optimizers: ta_context_opt::OptimizersConfig,
++
+     /// Meridian analytics integration (v0.17.0.12.1).
+     ///
+     /// Set `binary` when `meridian` is installed outside your PATH, or to pin
+@@ -2353,6 +2366,18 @@
+ }
+ 
+ impl CompressionConfig {
++    /// The input-slot optimizer used when `[optimizers.input]` is not set.
++    /// `[compression.plugin]` is the `proxy` kind of the input slot.
++    pub fn default_input_optimizer(&self) -> &'static str {
++        if !self.enabled {
++            "none"
++        } else if self.plugin.is_some() {
++            "proxy"
++        } else {
++            "headroom"
++        }
++    }
++
+     /// Whether compression should be applied for a given agent framework.
+     ///
+     /// Uses the `per_agent` map first; falls back to the framework default
+--- a/crates/ta-daemon/src/main.rs
++++ b/crates/ta-daemon/src/main.rs
+@@ -453,7 +453,10 @@
+     // to use a custom optimizer.
+     prompt_optimizer_supervisor::start(
+         project_root.clone(),
+-        daemon_config.compression.clone(),
++        prompt_optimizer_supervisor::effective_compression(
++            &daemon_config,
++            &ta_context_opt::Registry::with_builtins(),
++        ),
+         shutdown.clone(),
+     );
+ 
+--- a/crates/ta-daemon/src/prompt_optimizer_supervisor.rs
++++ b/crates/ta-daemon/src/prompt_optimizer_supervisor.rs
+@@ -7,8 +7,13 @@
+ // ## Lifecycle
+ //   1. Spawns `plugin.command` with `plugin.args`, merging `plugin.env` into env.
+ //   2. Polls `plugin.health_endpoint` every 10s; restarts on failure.
+-//   3. Exponential backoff (1→60 s cap); suspends after 5 failures in 5 min.
+-//   4. Writes status to `.ta/compression/status.json`.
++//   3. Exponential backoff (1→60 s cap). After 5 failures in 5 min the optimizer is
++//      disabled for the session (status "suspended") with one user-visible message and
++//      is never restarted on its own; only `ta compression enable` resumes it.
++//   4. Writes status (restart count, last failure) to `.ta/compression/status.json`.
++//
++// On Windows every optimizer is spawned with CREATE_NO_WINDOW so a console child never
++// opens a visible shell window, including when a flapping plugin is restarted.
+ 
+ use std::path::{Path, PathBuf};
+ use std::sync::Arc;
+@@ -27,6 +32,68 @@
+ const MAX_BACKOFF_SECS: u64 = 60;
+ const RESTART_SIGNAL_POLL_SECS: u64 = 5;
+ 
++/// Windows process creation flag: do not open a console window for the child.
++pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
++
++/// Build the optimizer command. Returns the creation flags that were requested
++/// alongside it: `std::process::Command` cannot be asked for its flags back, so
++/// the value is returned for a test to assert. They are applied only on Windows;
++/// other platforms have no console window to suppress.
++fn build_command(plugin: &PromptOptimizerPluginConfig) -> (tokio::process::Command, u32) {
++    let mut cmd = tokio::process::Command::new(&plugin.command);
++    cmd.args(&plugin.args)
++        .stdin(std::process::Stdio::null())
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .kill_on_drop(true);
++    for (k, v) in &plugin.env {
++        cmd.env(k, v);
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::process::CommandExt;
++        cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
++    }
++    (cmd, CREATE_NO_WINDOW)
++}
++
++/// The compression config the supervisor should run with once the input slot
++/// selection (`[optimizers.input] use`) is applied. Only `proxy` and `headroom`
++/// are supervised processes; `none` and `rtk` start nothing here.
++pub fn effective_compression(
++    daemon: &crate::config::DaemonConfig,
++    registry: &ta_context_opt::Registry,
++) -> CompressionConfig {
++    let mut cfg = daemon.compression.clone();
++    let default = cfg.default_input_optimizer();
++    let configured = daemon.optimizers.configured();
++    match ta_context_opt::resolve_selection(configured, [default, "none", "none"], None, registry) {
++        Ok(sel) => {
++            let name = sel.input.name.as_str();
++            if !matches!(name, "proxy" | "headroom") {
++                if cfg.enabled {
++                    tracing::info!(
++                        optimizer = name,
++                        "PromptOptimizerSupervisor: input slot is '{name}', no proxy process to supervise"
++                    );
++                }
++                cfg.enabled = false;
++            } else {
++                cfg.enabled = true;
++            }
++        }
++        Err(e) => {
++            tracing::error!(
++                error = %e,
++                "PromptOptimizerSupervisor: invalid [optimizers] selection; running without an input optimizer"
++            );
++            eprintln!("Warning: {e}");
++            cfg.enabled = false;
++        }
++    }
++    cfg
++}
++
+ // ─── Public surface ───────────────────────────────────────────────────────────
+ 
+ /// Start the prompt-optimizer supervisor if compression is enabled.
+@@ -111,6 +178,10 @@
+     /// None in legacy files (before v0.17.0.10.1) and when compression is disabled.
+     #[serde(default)]
+     pub plugin_name: Option<String>,
++    /// Why the optimizer last stopped (exit code, failed health check, spawn
++    /// error). Carried forward across status writes; absent if it never failed.
++    #[serde(default)]
++    pub last_failure: Option<String>,
+ }
+ 
+ // ─── Supervisor loop ──────────────────────────────────────────────────────────
+@@ -167,15 +238,7 @@
+             Some(&plugin.name),
+         );
+ 
+-        let mut cmd = tokio::process::Command::new(&plugin.command);
+-        cmd.args(&plugin.args)
+-            .stdin(std::process::Stdio::null())
+-            .stdout(std::process::Stdio::null())
+-            .stderr(std::process::Stdio::null())
+-            .kill_on_drop(true);
+-        for (k, v) in &plugin.env {
+-            cmd.env(k, v);
+-        }
++        let (mut cmd, _) = build_command(&plugin);
+ 
+         let mut child = match cmd.spawn() {
+             Ok(c) => c,
+@@ -186,6 +249,10 @@
+                     error = %e,
+                     "PromptOptimizerSupervisor: failed to spawn plugin process"
+                 );
++                record_failure(
++                    &status_dir,
++                    format!("failed to spawn `{}`: {e}", plugin.command),
++                );
+                 write_status(
+                     &status_dir,
+                     "stopped",
+@@ -272,6 +339,7 @@
+                 );
+             }
+             ExitReason::Crash(code) => {
++                record_failure(&status_dir, format!("process exited with code {code:?}"));
+                 tracing::warn!(
+                     plugin = %plugin.name,
+                     code = ?code,
+@@ -279,6 +347,10 @@
+                 );
+             }
+             ExitReason::HealthFailed => {
++                record_failure(
++                    &status_dir,
++                    format!("health check failed at {}", plugin.health_endpoint),
++                );
+                 tracing::warn!(
+                     plugin = %plugin.name,
+                     "PromptOptimizerSupervisor: health check failed — restarting"
+@@ -382,6 +454,17 @@
+             SUSPEND_WINDOW_SECS,
+         );
+         *suspended = true;
++        // One user-visible message; the supervisor then waits for an explicit
++        // `ta compression enable` and does not restart the plugin on its own.
++        eprintln!(
++            "Warning: the {plugin_name} prompt optimizer failed {} times in {} minutes and is \
++             disabled for this session. Agents run without it.\n  \
++             See why:        ta compression status\n  \
++             Turn it off:    ta compression disable\n  \
++             Try again:      ta compression enable",
++            recent_failure_times.len(),
++            SUSPEND_WINDOW_SECS / 60,
++        );
+         write_status(
+             status_dir,
+             "suspended",
+@@ -414,6 +497,27 @@
+ 
+ // ─── File helpers ─────────────────────────────────────────────────────────────
+ 
++fn read_status_file(dir: &Path) -> Option<OptimizerStatus> {
++    serde_json::from_str(&std::fs::read_to_string(dir.join("status.json")).ok()?).ok()
++}
++
++/// Record why the optimizer last failed, keeping the rest of the status as is.
++fn record_failure(dir: &Path, reason: String) {
++    let Some(mut status) = read_status_file(dir) else {
++        return;
++    };
++    status.last_failure = Some(format!("{} ({})", reason, chrono::Utc::now().to_rfc3339()));
++    if let Ok(json) = serde_json::to_string_pretty(&status) {
++        if let Err(e) = std::fs::write(dir.join("status.json"), json) {
++            tracing::warn!(
++                path = %dir.display(),
++                error = %e,
++                "PromptOptimizerSupervisor: failed to record last failure"
++            );
++        }
++    }
++}
++
+ fn write_status(
+     dir: &Path,
+     status: &str,
+@@ -421,7 +525,15 @@
+     restart_count: u32,
+     plugin_name: Option<&str>,
+ ) {
++    // Carry the last failure forward: it explains the current state and must not
++    // be lost when the status moves on to "starting" or "stopped".
++    let last_failure = if status == "disabled" {
++        None
++    } else {
++        read_status_file(dir).and_then(|s| s.last_failure)
++    };
+     let record = OptimizerStatus {
++        last_failure,
+         schema_version: 1,
+         status: status.to_string(),
+         pid,
+@@ -557,6 +669,7 @@
+             restart_count: 7,
+             updated_at: "2026-06-22T00:00:00Z".to_string(),
+             plugin_name: Some("my-proxy".to_string()),
++            last_failure: Some("health check failed".to_string()),
+         };
+         let json = serde_json::to_string(&s).unwrap();
+         let back: OptimizerStatus = serde_json::from_str(&json).unwrap();
+@@ -565,5 +678,102 @@
+         assert_eq!(back.restart_count, 7);
+         assert!(back.pid.is_none());
+         assert_eq!(back.plugin_name, Some("my-proxy".to_string()));
++        assert_eq!(back.last_failure.as_deref(), Some("health check failed"));
++    }
++
++    fn plugin() -> PromptOptimizerPluginConfig {
++        let mut env = std::collections::HashMap::new();
++        env.insert("K".to_string(), "V".to_string());
++        PromptOptimizerPluginConfig {
++            name: "p".into(),
++            command: "optimizer-bin".into(),
++            args: vec!["serve".into(), "--port".into(), "1".into()],
++            proxy_base_url: "http://127.0.0.1:1".into(),
++            health_endpoint: "http://127.0.0.1:1/health".into(),
++            env,
++        }
++    }
++
++    #[test]
++    fn optimizer_command_requests_create_no_window() {
++        let (cmd, flags) = build_command(&plugin());
++        assert_eq!(
++            flags, CREATE_NO_WINDOW,
++            "every optimizer spawn must hide its console"
++        );
++        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
++        let std = cmd.as_std();
++        assert_eq!(std.get_program(), "optimizer-bin");
++        assert_eq!(std.get_args().count(), 3);
++        assert!(std
++            .get_envs()
++            .any(|(k, v)| k == "K" && v.is_some_and(|v| v == "V")));
++    }
++
++    #[test]
++    fn last_failure_survives_later_status_writes_and_clears_when_disabled() {
++        let dir = tempfile::tempdir().unwrap();
++        write_status(dir.path(), "running", Some(1), 0, Some("p"));
++        record_failure(dir.path(), "health check failed at http://x/health".into());
++        write_status(dir.path(), "starting", None, 1, Some("p"));
++        let s = read_status_file(dir.path()).unwrap();
++        assert!(s.last_failure.unwrap().contains("health check failed"));
++        write_status(dir.path(), "disabled", None, 0, None);
++        assert!(read_status_file(dir.path()).unwrap().last_failure.is_none());
++    }
++
++    #[tokio::test]
++    async fn five_failures_suspend_once_and_the_status_says_why() {
++        let dir = tempfile::tempdir().unwrap();
++        let shutdown = Arc::new(Notify::new());
++        write_status(dir.path(), "stopped", None, 0, Some("p"));
++        let (mut restarts, mut suspended, mut times) = (0u32, false, Vec::new());
++        for i in 0..SUSPEND_FAILURE_COUNT {
++            record_failure(dir.path(), format!("process exited with code Some(1) #{i}"));
++            // A pending shutdown makes the backoff sleep return immediately.
++            shutdown.notify_one();
++            handle_failure(
++                dir.path(),
++                "p",
++                &mut restarts,
++                &mut suspended,
++                &mut times,
++                &shutdown,
++            )
++            .await;
++            assert_eq!(
++                suspended,
++                i + 1 >= SUSPEND_FAILURE_COUNT,
++                "after failure {i}"
++            );
++        }
++        let s = read_status_file(dir.path()).unwrap();
++        assert_eq!(s.status, "suspended");
++        assert_eq!(s.restart_count, 5);
++        assert!(s.last_failure.unwrap().contains("exited with code"));
++    }
++
++    #[test]
++    fn input_slot_selection_decides_whether_a_proxy_is_supervised() {
++        let reg = ta_context_opt::Registry::with_builtins();
++        let mut d = crate::config::DaemonConfig::default();
++        assert!(
++            effective_compression(&d, &reg).enabled,
++            "default is headroom"
++        );
++        d.optimizers.input.use_ = Some("none".into());
++        assert!(!effective_compression(&d, &reg).enabled);
++        d.optimizers.input.use_ = Some("rtk".into());
++        assert!(!effective_compression(&d, &reg).enabled);
++        d.optimizers.input.use_ = Some("headroom".into());
++        assert!(effective_compression(&d, &reg).enabled);
++        d.optimizers.input.use_ = Some("bogus".into());
++        assert!(
++            !effective_compression(&d, &reg).enabled,
++            "bad name never starts a process"
++        );
++        d.optimizers.input.use_ = None;
++        d.compression.enabled = false;
++        assert!(!effective_compression(&d, &reg).enabled);
+     }
+ }
+--- a/docs/USAGE.md
++++ b/docs/USAGE.md
+@@ -8568,6 +8568,8 @@
+ 
+ #### Pre-Release Checklist
+ 
++**Windows smoke check (manual, required while an optimizer is enabled):** on a Windows machine, set `[optimizers.input] use = "headroom"` (or a `[compression.plugin]`), start the daemon, then force the optimizer to fail (point `command` at a binary that exits immediately). Confirm no console window appears at any point, including across the restarts, and that after the fifth failure `ta compression status` shows `suspended` with a `Last failure` line. CI asserts the `CREATE_NO_WINDOW` flag is requested, but cannot see a window.
++
+ Before publishing a public release, run the full verification suite including integration and E2E tests:
+ 
+ ```bash
+@@ -18095,6 +18097,10 @@
+   Proxy URL:      http://127.0.0.1:8787
+   Cache aligner:  active
+   headroom_learn: false (always disabled in TA-managed runs)
++  Optimizer slots:
++    input    headroom (proxy, licence Apache-2.0)
++    context  none (in_process, licence Apache-2.0)
++    output   none (in_process, licence Apache-2.0)
+   Process:        running (PID 54321)
+   Restarts:       0
+   Binary:         /usr/local/bin/headroom
+@@ -18139,9 +18145,10 @@
+ 
+ - **Health check**: `GET http://127.0.0.1:<port>/health` every 10 seconds
+ - **Backoff**: 1 s → 2 s → … → 60 s cap on each failure
+-- **Suspension**: after 5 failures in 5 minutes, the supervisor stops restarting
++- **Flap guard**: after 5 failures in 5 minutes the optimizer is disabled for the session. TA prints one warning, agents run without it, and it is never restarted on its own. `ta compression status` shows the restart count and the last failure (for example `health check failed at http://127.0.0.1:8787/health`).
++- **No console windows**: on Windows every optimizer process is started with `CREATE_NO_WINDOW`, so a failing optimizer cannot open repeated shell windows.
+ 
+-To resume after suspension:
++To resume after the guard trips (fix the cause first, see `Last failure` in the status output):
+ 
+ ```bash
+ ta compression enable   # clears suspended state; supervisor retries within 5 s
+@@ -18192,6 +18199,39 @@
+     health_endpoint = "http://127.0.0.1:8787/health"
+ ```
+ 
++### Optimizer slots
++
++Optimization has three slots. Each one is a name you can swap without changing anything else:
++
++| Slot | Acts on | Choices today |
++|------|---------|---------------|
++| `input` | command output, files and logs before they enter context | `none`, `proxy`, `headroom`, `rtk` |
++| `context` | the accumulated conversation | `none` |
++| `output` | what the model writes | `none` |
++
++`none` is always valid and is the baseline every comparison uses. `proxy` is whatever you configured in `[compression.plugin]`; `headroom` is the built-in default plugin. Pick one per slot in `.ta/daemon.toml`:
++
++```toml
++[optimizers.input]
++use = "none"        # none | proxy | headroom | rtk
++```
++
++With no `[optimizers.input]`, the input slot follows `[compression]`: `proxy` if `[compression.plugin]` is set, `headroom` if compression is enabled, otherwise `none`. An unknown name is refused with the list of valid ones. Only `proxy` and `headroom` start a supervised process. `rtk` is selectable and its licence is recorded, but TA does not launch or install it: agent API calls go direct while it is selected.
++
++Licences recorded for the starters (confirm against each project before redistributing): headroom Apache-2.0, RTK (`rtk-oss`) Apache-2.0. The full `rtk` and `rtk-proxy` builds add BUSL-1.1 components, so check which one you install.
++
++Compare a slot choice with a golden replay, without touching your config:
++
++```bash
++ta golden replay <id> --set optimizers.input.use=none
++ta golden replay <id> --set optimizers.input.use=headroom
++ta golden report <id>
++```
++
++The override is checked before anything is launched and applies only to that replay's goal.
++
++Every optimizer application produces a metrics record (`bytes_in`, `bytes_out`, `est_tokens_in`, `est_tokens_out`, `ms`, `lossless`, `original_ref`). The full original is kept on disk under `original_ref`, so any reduction can be reversed or audited. Token figures are estimates (about 4 bytes per token) for comparing optimizers, not billing numbers. The traits and registry live in the `ta-context-opt` crate.
++
+ ### Windows installer
+ 
+ The Windows `.msi` installer includes an optional "Enable context compression (headroom)" checkbox that runs `pip install headroom-ai[all]` during setup. The checkbox is checked by default.

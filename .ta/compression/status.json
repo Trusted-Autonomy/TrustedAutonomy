@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "status": "stopped",
+  "pid": null,
+  "restart_count": 5,
+  "updated_at": "2026-10-23T06:05:00.250244+00:00",
+  "plugin_name": "headroom",
+  "last_failure": "process exited with code 1",
+  "last_failure_at": "2026-10-22T04:56:30.519492+00:00"
+}

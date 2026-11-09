@@ -50,6 +50,36 @@
         }
       ]
     },
+    "GoalReleaseInfo": {
+      "description": "Release membership recorded on a goal (`GoalRun.release`).",
+      "properties": {
+        "hotfix_reason": {
+          "description": "Set when the goal opted out of the release with `--hotfix`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "off_track_reasons": {
+          "description": "Why the drift check flagged the goal. Empty when it is on track.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "release_branch": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "release_id",
+        "release_branch"
+      ],
+      "type": "object"
+    },
     "GoalRunState": {
       "description": "The lifecycle state of a GoalRun.\n\nIn Rust, enums can carry data per variant (like `Failed { reason }`).\nThe `#[serde(tag = \"state\")]` attribute makes this serialize as\n`{\"state\": \"running\"}` in JSON — clean and readable.\nThe lifecycle state of a GoalRun (v0.17.0.9: `#[non_exhaustive]` added).\n\nDownstream crates that match on this enum must add a `_` arm. Use\n`GoalRunState::Custom { tag }` when extending the state machine without\nforking this crate.",
       "oneOf": [
@@ -834,6 +864,17 @@
         "string",
         "null"
       ]
+    },
+    "release": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GoalReleaseInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Release-set membership (`ta release-set`): which open release this goal\nstarted under, the drift advice recorded at start, and the hotfix\nreason when the goal opted out of the release. `None` when no release\nwas open at goal start."
     },
     "request_provenance": {
       "anyOf": [

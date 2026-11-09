@@ -211,12 +211,15 @@ fn load_context(
     tool: &str,
     requested: Option<&str>,
 ) -> Result<ReadContext, McpError> {
+    // Project configuration (`.ta/workflow.toml`, the credential vault) lives
+    // in the SOURCE project root. The gateway's own `workspace_root` may be
+    // a staging copy or a chat session directory that has none of it.
     let (workspace_root, use_keychain, wake_pin) = {
         let locked = state
             .lock()
             .map_err(|e| McpError::internal_error(format!("{tool}: lock poisoned: {e}"), None))?;
         (
-            locked.config.workspace_root.clone(),
+            locked.read_tool_root(tool)?,
             locked.config.credential_vault_use_keychain,
             locked.chat_wayfinder_project_id.clone(),
         )
@@ -899,6 +902,171 @@ mod tests {
             "completed_at": null, "external_id": null,
             "created_at": "1", "updated_at": updated.to_string(),
         })
+    }
+
+    /// A gateway whose `workspace_root` is a goal STAGING copy that holds no
+    /// `.ta/` config, while the source project (the fixture dir) does. This
+    /// is the shape of a chat-mode / staged goal and the owner's note-063
+    /// failure: "no Wayfinder configuration: <staging>/.ta/workflow.toml
+    /// does not exist".
+    fn staged_state(f: &Fixture) -> (Arc<Mutex<GatewayState>>, std::path::PathBuf) {
+        let staging = f
+            .dir
+            .path()
+            .join(".ta/staging")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(
+            !staging.join(".ta/workflow.toml").exists(),
+            "the staging copy must not hold the config (that is the bug's precondition)"
+        );
+        let mut config = GatewayConfig::for_project(&staging);
+        config.credential_vault_use_keychain = false;
+        let state = GatewayState::new(config).unwrap();
+        (Arc::new(Mutex::new(state)), staging)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wayfinder_reads_resolve_config_from_the_source_root_when_workspace_is_a_staging_copy()
+    {
+        let f = fixture_for("proj-1", None).await;
+        f.mock.route(
+            "/api/projects/proj-1/tasks",
+            200,
+            json!([task("t1", "Real task", "open", 5)]),
+        );
+        let (state, staging) = staged_state(&f);
+        assert_eq!(
+            state.lock().unwrap().config.source_root(),
+            f.dir.path().to_path_buf(),
+            "source root must be derived from <project>/.ta/staging/<uuid>"
+        );
+        let out = json_of(handle_task_list(&state, TaskListParams::default()));
+        assert_eq!(out["tasks"][0]["id"], "t1", "{out}");
+        assert_eq!(f.mock.paths(), vec!["/api/projects/proj-1/tasks"]);
+        let _ = staging;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_explicit_project_root_wins_over_the_staging_derivation() {
+        let f = fixture_for("proj-1", None).await;
+        f.mock.route("/api/projects/proj-1/tasks", 200, json!([]));
+        // A chat session directory is not under `.ta/staging/<uuid>` of the
+        // project at all: only the explicit project root can find the config.
+        let session_dir = tempfile::tempdir().unwrap();
+        let mut config = GatewayConfig::for_project(session_dir.path());
+        config.credential_vault_use_keychain = false;
+        config.project_root = Some(f.dir.path().to_path_buf());
+        let state = Arc::new(Mutex::new(GatewayState::new(config).unwrap()));
+        let out = json_of(handle_task_list(&state, TaskListParams::default()));
+        assert_eq!(out["returned"], 0, "{out}");
+        assert_eq!(f.mock.paths(), vec!["/api/projects/proj-1/tasks"]);
+    }
+
+    #[test]
+    fn without_a_source_root_the_staging_copy_still_reports_the_missing_config() {
+        // The pre-fix behaviour for a genuinely unconfigured project is
+        // unchanged and still actionable.
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir
+            .path()
+            .join(".ta/staging")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&staging).unwrap();
+        let mut config = GatewayConfig::for_project(&staging);
+        config.credential_vault_use_keychain = false;
+        let state = Arc::new(Mutex::new(GatewayState::new(config).unwrap()));
+        let err = err_of(handle_task_list(&state, TaskListParams::default()));
+        assert!(
+            err.contains("workflow.toml") && err.contains("[plan.wayfinder]"),
+            "{err}"
+        );
+        assert!(
+            err.contains(&dir.path().join(".ta/workflow.toml").display().to_string()),
+            "must name the SOURCE root path it looked at: {err}"
+        );
+    }
+
+    /// A chat-locked gateway whose session directory is private and empty,
+    /// reading the fixture's REAL project through a read grant naming `tools`.
+    fn chat_state(
+        f: &Fixture,
+        grant_tools: Option<&[&str]>,
+    ) -> (Arc<Mutex<GatewayState>>, tempfile::TempDir) {
+        let session_dir = tempfile::tempdir().unwrap();
+        let mut config = GatewayConfig::for_project(session_dir.path());
+        config.credential_vault_use_keychain = false;
+        let mut state = GatewayState::new(config).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let agent = "chief-of-staff";
+        let (project_root, read_grant) = match grant_tools {
+            None => (None, None),
+            Some(tools) => {
+                let access = ta_policy::ChatReadAccess {
+                    project: true,
+                    readable_projects: vec![],
+                    tools: tools.iter().map(|t| t.to_string()).collect(),
+                };
+                let token = crate::chat_launch::mint_chat_read_grant(
+                    f.dir.path(),
+                    &crate::chat_launch::chat_policy_id(agent, session_id),
+                    &access,
+                )
+                .unwrap();
+                (Some(f.dir.path().to_path_buf()), Some(token))
+            }
+        };
+        state
+            .lock_to_chat_session(&crate::chat_launch::ChatLaunch {
+                agent_id: agent.to_string(),
+                session_id,
+                workspace_root: None,
+                wayfinder_project_id: None,
+                project_root,
+                read_grant,
+            })
+            .unwrap();
+        (Arc::new(Mutex::new(state)), session_dir)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_cos_with_a_read_grant_answers_wayfinder_reads_from_the_real_project_config() {
+        let f = fixture_for("proj-1", None).await;
+        f.mock.route(
+            "/api/projects/proj-1/tasks",
+            200,
+            json!([task("t9", "From the real config", "open", 3)]),
+        );
+        let (state, session_dir) = chat_state(&f, Some(ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS));
+        assert!(
+            !session_dir.path().join(".ta/workflow.toml").exists(),
+            "the session directory holds no config; only the real root does"
+        );
+        let out = json_of(handle_task_list(&state, TaskListParams::default()));
+        assert_eq!(out["tasks"][0]["id"], "t9", "{out}");
+        assert_eq!(f.mock.paths(), vec!["/api/projects/proj-1/tasks"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_cos_without_a_read_grant_gets_the_refusal_not_a_silent_fallback() {
+        let f = fixture_for("proj-1", None).await;
+        let (state, _session_dir) = chat_state(&f, None);
+        let err = err_of(handle_task_list(&state, TaskListParams::default()));
+        assert!(err.contains("holds no read grant"), "{err}");
+        assert!(err.contains("tool:read:ta_wayfinder_task_list"), "{err}");
+        assert!(
+            f.mock.paths().is_empty(),
+            "no request may leave the gateway"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_grant_naming_other_tools_does_not_authorise_this_read() {
+        let f = fixture_for("proj-1", None).await;
+        let (state, _session_dir) = chat_state(&f, Some(&["ta_plan_status"]));
+        let err = err_of(handle_task_list(&state, TaskListParams::default()));
+        assert!(err.contains("holds no read grant"), "{err}");
+        assert!(f.mock.paths().is_empty());
     }
 
     // ── pure logic ──────────────────────────────────────────────────────

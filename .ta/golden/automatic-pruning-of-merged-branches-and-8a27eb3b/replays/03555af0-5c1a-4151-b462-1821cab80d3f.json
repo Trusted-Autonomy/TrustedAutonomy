@@ -1,0 +1,25 @@
+{
+  "replay_id": "03555af0-5c1a-4151-b462-1821cab80d3f",
+  "golden_id": "automatic-pruning-of-merged-branches-and-8a27eb3b",
+  "tag": "headroom",
+  "set": [
+    "optimizers.input.use=headroom"
+  ],
+  "goal_id": "ab7c0c4d-9cf6-4944-9973-991f48f04ab3",
+  "started_at": "2026-10-17T16:11:41.190131Z",
+  "completed_at": "2026-10-17T16:34:56.873249Z",
+  "outcome": "pr_ready",
+  "cost_usd": 1.9439615,
+  "cost_estimated": false,
+  "input_tokens": 74,
+  "output_tokens": 63500,
+  "cache_read_tokens": 3535010,
+  "cache_creation_tokens": 217238,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 19,
+  "diff_sha256": "600b8d895a2b139d8b6c4b624488731902d6ea3ae006009bfe92fd16b42ab890",
+  "similarity": 0.07189072609633357,
+  "check_passed": null,
+  "failure": null
+}

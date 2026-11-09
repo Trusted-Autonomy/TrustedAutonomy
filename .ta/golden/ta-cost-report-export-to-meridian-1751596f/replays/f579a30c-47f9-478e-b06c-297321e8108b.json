@@ -1,0 +1,25 @@
+{
+  "replay_id": "f579a30c-47f9-478e-b06c-297321e8108b",
+  "golden_id": "ta-cost-report-export-to-meridian-1751596f",
+  "tag": "none",
+  "set": [
+    "optimizers.input.use=none"
+  ],
+  "goal_id": "74ea5029-2420-4227-8b3e-23e7fc9923d8",
+  "started_at": "2026-10-17T06:11:00.554897Z",
+  "completed_at": "2026-10-17T06:16:44.155204Z",
+  "outcome": "pr_ready",
+  "cost_usd": 0.5204871000000001,
+  "cost_estimated": false,
+  "input_tokens": 36,
+  "output_tokens": 11863,
+  "cache_read_tokens": 1138451,
+  "cache_creation_tokens": 71985,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 4,
+  "diff_sha256": "8ebb7a750ac899dfa3bf6f9af928797daa7d6e9462965907751a734709485836",
+  "similarity": 0.029262086513994912,
+  "check_passed": null,
+  "failure": null
+}

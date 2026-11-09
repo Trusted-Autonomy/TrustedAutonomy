@@ -431,6 +431,12 @@ pub fn render_session_context(project_root: &Path, state: &TeamSessionState, rol
         ta_goal::untrusted::STANDING_LINE
     ));
 
+    // Release set: the open release's goal and branch, and the goals flagged off track, so the
+    // chief of staff can advise when goals drift off the release (advice only).
+    if let Some(section) = ta_goal::release_set::render_cos_section(project_root) {
+        out.push_str(&section);
+    }
+
     if let Some(prompt) = state.config.role_prompts.get(role) {
         if !prompt.trim().is_empty() {
             out.push_str(&format!("## Your role: {role}\n\n{prompt}\n\n"));
@@ -1491,6 +1497,48 @@ mod tests {
         let rendered = render_session_context(dir.path(), &state, "analyst");
         assert!(rendered.contains("No prior role findings yet"));
         assert!(rendered.contains("trading-desk"));
+    }
+
+    #[test]
+    fn render_context_names_the_open_release_goal_branch_and_off_track_goals() {
+        use ta_goal::release_set::{NewRelease, ReleaseSetStore};
+        let dir = tempfile::tempdir().unwrap();
+        let state = TeamSessionState::new("sess-1".to_string(), sample_config(), sample_stages());
+
+        let none = render_session_context(dir.path(), &state, "analyst");
+        assert!(!none.contains("Release in progress"), "got: {none}");
+
+        let store = ReleaseSetStore::new(dir.path());
+        store
+            .start(NewRelease {
+                name: "0.18".into(),
+                objective: "Ship the billing export".into(),
+                wayfinder_goal_id: Some("wf-7".into()),
+                plan_phases: vec![],
+                base_branch: "main".into(),
+                base_commit: "0123456789abcdef".into(),
+            })
+            .unwrap();
+        store
+            .update(|r| {
+                r.record_off_track(
+                    uuid::Uuid::new_v4(),
+                    "Redesign the logo",
+                    vec!["shares no keywords with the release goal".into()],
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let rendered = render_session_context(dir.path(), &state, "analyst");
+        assert!(rendered.contains("Release in progress"), "got: {rendered}");
+        assert!(
+            rendered.contains("Ship the billing export"),
+            "got: {rendered}"
+        );
+        assert!(rendered.contains("release/0.18"), "got: {rendered}");
+        assert!(rendered.contains("wf-7"), "got: {rendered}");
+        assert!(rendered.contains("Redesign the logo"), "got: {rendered}");
     }
 
     #[test]

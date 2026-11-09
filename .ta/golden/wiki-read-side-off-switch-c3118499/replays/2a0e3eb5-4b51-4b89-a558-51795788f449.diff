@@ -1,0 +1,390 @@
+--- a/apps/ta-cli/src/commands/doctor.rs
++++ b/apps/ta-cli/src/commands/doctor.rs
+@@ -294,6 +294,9 @@
+     // 25. ProjFS availability — fast virtual staging on Windows (v0.16.4.1).
+     results.push(check_projfs(config));
+ 
++    // 25b. Wiki read-side switch: one line, only when reads are off or the setting is unreadable.
++    results.extend(check_wiki_seed_context(config));
++
+     // 26. Credential vault key custody — loud warning when the encryption
+     // key fell back to a file instead of the OS keychain (v0.17.6.2).
+     results.push(check_credential_vault_key_custody(config));
+@@ -2289,6 +2292,28 @@
+ 
+ // ── Credential vault key custody check (v0.17.6.2) ─────────────────────────────
+ 
++/// `[wiki] seed_context = false` makes the gateway refuse wiki reads. Say so
++/// (one line) so the owner can see why; silent when reads are on.
++fn check_wiki_seed_context(config: &GatewayConfig) -> Vec<CheckResult> {
++    let path = config.workspace_root.join(".ta").join("workflow.toml");
++    match ta_submit::WikiConfig::seed_context_enabled(&path) {
++        Ok(true) => Vec::new(),
++        Ok(false) => vec![CheckResult::warn(
++            "wiki reads",
++            format!(
++                "OFF: [wiki] seed_context = false in {} (agents cannot read the wiki; writes still work)",
++                path.display()
++            ),
++            "Set seed_context = true under [wiki] in .ta/workflow.toml to allow reads again",
++        )],
++        Err(e) => vec![CheckResult::warn(
++            "wiki reads",
++            format!("refused: {e}"),
++            "Fix [wiki] seed_context in .ta/workflow.toml",
++        )],
++    }
++}
++
+ fn check_credential_vault_key_custody(config: &GatewayConfig) -> CheckResult {
+     check_credential_vault_key_custody_with(config, &ta_credentials::encryption::probe_key_custody)
+ }
+--- a/crates/ta-mcp-gateway/src/server.rs
++++ b/crates/ta-mcp-gateway/src/server.rs
+@@ -3771,6 +3771,29 @@
+         std::env::remove_var("TA_AGENT_ID");
+     }
+ 
++    /// Chat-mode CoS wiki reads go through the same gateway handlers, so
++    /// `[wiki] seed_context = false` refuses them too.
++    #[test]
++    fn chat_mode_wiki_reads_are_refused_when_seed_context_is_false() {
++        let _guard = ENV_LOCK.lock().unwrap();
++        let launch = chat_launch("chief-of-staff");
++        let (server, dir) = chat_mode_server(
++            &[(".ta/workflow.toml", b"[wiki]\nseed_context = false\n")],
++            &launch,
++        );
++        let err = server
++            .ta_wiki_search(Parameters(tools::wiki::WikiSearchParams {
++                scope: "project".to_string(),
++                id: "proj-1".to_string(),
++                query: "anything".to_string(),
++            }))
++            .expect_err("chat-mode wiki read must be refused");
++        let msg = err.message.to_string();
++        assert!(msg.contains("seed_context = false"), "{msg}");
++        assert!(msg.contains("workflow.toml"), "{msg}");
++        drop(dir);
++    }
++
+     // ── Chat-mode launch (persona chat_mode = true / ta run --chat-mode) ──
+ 
+     fn chat_launch(agent_id: &str) -> crate::chat_launch::ChatLaunch {
+--- a/crates/ta-mcp-gateway/src/tools/wiki.rs
++++ b/crates/ta-mcp-gateway/src/tools/wiki.rs
+@@ -131,6 +131,51 @@
+     })
+ }
+ 
++// ── Read-side off switch ─────────────────────────────────────────────────
++
++/// Refuses a wiki READ tool when `[wiki] seed_context = false` in
++/// `.ta/workflow.toml`. Enforced here in the gateway handler (not only in a
++/// prompt) so it also covers chat-mode CoS sessions, which share this server.
++/// A malformed setting fails closed with an error naming the file and key.
++/// Writes (`ta_wiki_create`/`ta_wiki_update`) never call this.
++pub fn require_wiki_reads_enabled(
++    state: &Arc<Mutex<GatewayState>>,
++    tool: &str,
++) -> Result<(), McpError> {
++    let workflow_toml = {
++        let locked = state
++            .lock()
++            .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
++        locked
++            .config
++            .workspace_root
++            .join(".ta")
++            .join("workflow.toml")
++    };
++    match ta_submit::WikiConfig::seed_context_enabled(&workflow_toml) {
++        Ok(true) => Ok(()),
++        Ok(false) => {
++            tracing::warn!(tool, path = %workflow_toml.display(), "wiki read refused: [wiki] seed_context = false");
++            Err(McpError::invalid_request(
++                format!(
++                    "{tool}: wiki reads are turned off. `[wiki] seed_context = false` in {}. \
++                     Wiki writes (ta_wiki_create/ta_wiki_update) still work. To allow reads again, \
++                     set `seed_context = true` under `[wiki]` in that file (or remove the line).",
++                    workflow_toml.display()
++                ),
++                None,
++            ))
++        }
++        Err(e) => {
++            tracing::error!(tool, error = %e, "wiki read refused: cannot read [wiki] seed_context");
++            Err(McpError::invalid_request(
++                format!("{tool}: wiki reads refused because the setting is unreadable. {e}"),
++                None,
++            ))
++        }
++    }
++}
++
+ // ── ta_wiki_search ────────────────────────────────────────────────────────
+ 
+ #[derive(Debug, Clone, Deserialize, JsonSchema)]
+@@ -146,6 +191,7 @@
+     state: &Arc<Mutex<GatewayState>>,
+     params: WikiSearchParams,
+ ) -> Result<CallToolResult, McpError> {
++    require_wiki_reads_enabled(state, "ta_wiki_search")?;
+     let ctx = load_context(state)?;
+     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
+     let client = read_client(&ctx)?;
+@@ -176,6 +222,7 @@
+     state: &Arc<Mutex<GatewayState>>,
+     params: WikiGetParams,
+ ) -> Result<CallToolResult, McpError> {
++    require_wiki_reads_enabled(state, "ta_wiki_get")?;
+     let ctx = load_context(state)?;
+     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
+ 
+@@ -220,6 +267,7 @@
+     state: &Arc<Mutex<GatewayState>>,
+     params: WikiTypesParams,
+ ) -> Result<CallToolResult, McpError> {
++    require_wiki_reads_enabled(state, "ta_wiki_types")?;
+     let ctx = load_context(state)?;
+     require_declared_scope(&ctx.config, &params.scope, &params.id)?;
+     let client = read_client(&ctx)?;
+@@ -1511,4 +1559,99 @@
+         assert!(upd.contains("Page id: page-9") && upd.contains("If-sha: sha-9"));
+         assert!(upd.contains("Preview: short"));
+     }
++
++    // ── Read-side off switch: [wiki] seed_context ─────────────────────────
++
++    fn set_seed_context(dir: &std::path::Path, body: &str) {
++        std::fs::create_dir_all(dir.join(".ta")).unwrap();
++        std::fs::write(dir.join(".ta").join("workflow.toml"), body).unwrap();
++    }
++
++    fn refusal_text(r: Result<CallToolResult, McpError>) -> String {
++        r.expect_err("expected the read to be refused")
++            .message
++            .to_string()
++    }
++
++    fn get_params() -> WikiGetParams {
++        WikiGetParams {
++            scope: "project".into(),
++            id: "proj-1".into(),
++            page_id: "page-1".into(),
++        }
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn seed_context_true_or_absent_allows_reads() {
++        let (state, dir, _ct) = test_project_with_mock_server().await;
++        assert!(handle_wiki_get(&state, get_params()).is_ok(), "no file");
++        set_seed_context(dir.path(), "[wiki]\nseed_context = true\n");
++        assert!(
++            handle_wiki_get(&state, get_params()).is_ok(),
++            "explicit true"
++        );
++        set_seed_context(dir.path(), "[wiki]\n");
++        assert!(handle_wiki_get(&state, get_params()).is_ok(), "missing key");
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn seed_context_false_refuses_every_read_tool_with_an_actionable_message() {
++        let (state, dir, _ct) = test_project_with_mock_server().await;
++        set_seed_context(dir.path(), "[wiki]\nseed_context = false\n");
++
++        let texts = [
++            refusal_text(handle_wiki_search(
++                &state,
++                WikiSearchParams {
++                    scope: "project".into(),
++                    id: "proj-1".into(),
++                    query: "q".into(),
++                },
++            )),
++            refusal_text(handle_wiki_get(&state, get_params())),
++            refusal_text(handle_wiki_types(
++                &state,
++                WikiTypesParams {
++                    scope: "project".into(),
++                    id: "proj-1".into(),
++                },
++            )),
++        ];
++        for (text, tool) in texts
++            .iter()
++            .zip(["ta_wiki_search", "ta_wiki_get", "ta_wiki_types"])
++        {
++            assert!(text.contains(tool), "{text}");
++            assert!(text.contains("[wiki] seed_context = false"), "{text}");
++            assert!(text.contains("workflow.toml"), "{text}");
++            assert!(
++                text.contains("seed_context = true"),
++                "how to re-enable: {text}"
++            );
++        }
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn seed_context_false_still_allows_writes_while_reads_are_refused() {
++        let (state, dir, _ct, _stats) = test_project_with_stats().await;
++        set_seed_context(dir.path(), "[wiki]\nseed_context = false\n");
++
++        let params = create_params("Runbook", "Steps");
++        let goal = params.goal_run_id.clone();
++        let result = handle_wiki_create(&state, params).expect("write must still succeed");
++        assert_eq!(result_json(&result)["status"], "captured_for_review");
++        assert_eq!(pending_for(&state, &goal).len(), 1);
++        assert!(handle_wiki_update(&state, update_params("T", "B")).is_ok());
++
++        assert!(handle_wiki_get(&state, get_params()).is_err());
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn malformed_seed_context_errors_naming_file_and_key() {
++        let (state, dir, _ct) = test_project_with_mock_server().await;
++        set_seed_context(dir.path(), "[wiki]\nseed_context = \"nope\"\n");
++        let text = refusal_text(handle_wiki_get(&state, get_params()));
++        assert!(text.contains("workflow.toml"), "{text}");
++        assert!(text.contains("seed_context"), "{text}");
++    }
+ }
+--- a/crates/ta-submit/src/config.rs
++++ b/crates/ta-submit/src/config.rs
+@@ -103,6 +103,11 @@
+     #[serde(default)]
+     pub budget: BudgetConfig,
+ 
++    /// Wiki read-side switch. `[wiki] seed_context = false` makes the TA MCP
++    /// gateway refuse every wiki read tool; writes are unaffected.
++    #[serde(default)]
++    pub wiki: WikiConfig,
++
+     /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
+     ///
+     /// Each command is run in the staging workspace. Results are embedded in the
+@@ -1645,6 +1650,59 @@
+     pub max_usd: Option<f64>,
+ }
+ 
++/// `[wiki]` section of `.ta/workflow.toml`: the wiki read-side off switch.
++///
++/// ```toml
++/// [wiki]
++/// seed_context = false   # agents may not READ the wiki; writes still go through draft review
++/// ```
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct WikiConfig {
++    /// When `false`, wiki read tools (`ta_wiki_search`, `ta_wiki_get`,
++    /// `ta_wiki_types`) are refused by the gateway. Default `true`.
++    #[serde(default = "default_wiki_seed_context")]
++    pub seed_context: bool,
++}
++
++fn default_wiki_seed_context() -> bool {
++    true
++}
++
++impl Default for WikiConfig {
++    fn default() -> Self {
++        Self { seed_context: true }
++    }
++}
++
++impl WikiConfig {
++    /// Read `[wiki] seed_context` from the workflow.toml at `path` (with the
++    /// usual `workflow.local.toml` overlay, via [`WorkflowConfig::load`]).
++    ///
++    /// A missing file, section or key means `true`. A malformed file or value
++    /// is an error naming the file and the key, so callers can fail closed
++    /// with an actionable message.
++    pub fn seed_context_enabled(path: &std::path::Path) -> Result<bool, String> {
++        match WorkflowConfig::load(path) {
++            Ok(cfg) => Ok(cfg.wiki.seed_context),
++            Err(e) => {
++                let missing = e
++                    .downcast_ref::<std::io::Error>()
++                    .map(|io| io.kind() == std::io::ErrorKind::NotFound)
++                    .unwrap_or(false);
++                if missing {
++                    Ok(true)
++                } else {
++                    Err(format!(
++                        "could not read `[wiki] seed_context` from {}: {e}. \
++                         Fix the file so that `[wiki]` has `seed_context = true` or `seed_context = false`.",
++                        path.display()
++                    ))
++                }
++            }
++        }
++    }
++}
++
+ /// Garbage collection / draft lifecycle configuration
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct GcConfig {
+@@ -2435,6 +2493,31 @@
+     }
+ 
+     #[test]
++    fn wiki_seed_context_defaults_true_and_parses_false() {
++        let none: WorkflowConfig = toml::from_str("").unwrap();
++        assert!(none.wiki.seed_context);
++        let empty: WorkflowConfig = toml::from_str("[wiki]\n").unwrap();
++        assert!(empty.wiki.seed_context);
++        let off: WorkflowConfig = toml::from_str("[wiki]\nseed_context = false\n").unwrap();
++        assert!(!off.wiki.seed_context);
++    }
++
++    #[test]
++    fn wiki_seed_context_enabled_reads_file_and_names_file_on_error() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("workflow.toml");
++        assert_eq!(super::WikiConfig::seed_context_enabled(&path), Ok(true));
++        std::fs::write(&path, "[wiki]\nseed_context = false\n").unwrap();
++        assert_eq!(super::WikiConfig::seed_context_enabled(&path), Ok(false));
++        std::fs::write(&path, "[wiki]\nseed_context = 3\n").unwrap();
++        let err = super::WikiConfig::seed_context_enabled(&path).unwrap_err();
++        assert!(
++            err.contains("workflow.toml") && err.contains("seed_context"),
++            "{err}"
++        );
++    }
++
++    #[test]
+     fn load_or_default_returns_default_for_missing_file() {
+         let config = WorkflowConfig::load_or_default(std::path::Path::new("/nonexistent/path"));
+         assert_eq!(config.build.summary_enforcement, "warning");
+--- a/crates/ta-submit/src/lib.rs
++++ b/crates/ta-submit/src/lib.rs
+@@ -46,7 +46,7 @@
+     BuildConfig, BuildOnFail, CommitConfig, ContextMode, DiffConfig, DraftReviewConfig, GitConfig,
+     PerforceConfig, PlanConfig, SecurityConfig, ShellConfig, StagingConfig, SubmitConfig,
+     SvnConfig, SyncConfig, TaLocalPaths, TaPathConfig, TaProjectPaths, VcsAgentConfig, VcsConfig,
+-    VerifyCommand, VerifyConfig, VerifyOnFailure, WorkflowConfig,
++    VerifyCommand, VerifyConfig, VerifyOnFailure, WikiConfig, WorkflowConfig,
+ };
+ pub use external_vcs_adapter::ExternalVcsAdapter;
+ pub use git::GitAdapter;
+--- a/docs/USAGE.md
++++ b/docs/USAGE.md
+@@ -317,6 +317,19 @@
+ - explicitly denies every mutating TA MCP tool (`ta_fs_write`, `ta_wiki_create`/`ta_wiki_update`, `ta_external_action`, every `ta_propose_*`, whiteboard writes, and so on);
+ - refuses to launch, listing each offending entry, if `allowed_tools` contains a native tool, a wildcard such as `mcp__ta__*`, another MCP server, or a mutating tool.
+ 
++### Turning Wiki Reads Off
++
++To stop agents from reading the wiki (to seed or inform their context) while still letting them propose wiki changes, add this to `.ta/workflow.toml`:
++
++```toml
++[wiki]
++seed_context = false
++```
++
++With `seed_context = false` the TA gateway refuses `ta_wiki_search`, `ta_wiki_get` and `ta_wiki_types`, for goal agents and for chat-mode Chief-of-Staff sessions alike. The refusal names the setting and the file and tells you how to turn reads back on. `ta_wiki_create`, `ta_wiki_update` and the draft-review write path keep working as before.
++
++The default is `true`, so a project with no `[wiki]` section behaves as it always did. `ta doctor` prints a `wiki reads` line when the switch is off, so you can see why reads are refused. A value that is not `true` or `false` makes reads fail closed with an error naming `.ta/workflow.toml` and `seed_context`.
++
+ ### Wiki Writes Are Reviewed
+ 
+ `ta_wiki_create` and `ta_wiki_update` do not write to the wiki when an agent calls them. They check the input and queue the change in the goal's draft. Nothing reaches Wayfinder until you approve and apply that draft. `ta_wiki_search`, `ta_wiki_get` and `ta_wiki_types` are unchanged and read live.

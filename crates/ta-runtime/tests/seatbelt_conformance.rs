@@ -576,3 +576,131 @@ fn burst_of_hundred_denials_is_delivered_after_reconciliation() {
          {live_only:?}; after reconciliation {delivered:?}; persisted log holds {persisted_all:?}"
     );
 }
+
+/// The profile a chat-mode Chief of Staff gets for the REAL project root (no copy):
+/// compiled by the same code `ta run` uses, with the project and one readable project
+/// granted read-only.
+fn chat_world() -> (World, PathBuf, PathBuf) {
+    use ta_runtime::sandbox_launch::{
+        LaunchContext, ProjectRequest, RoleClass, SandboxPosture, SandboxProfile,
+    };
+    let mut w = world();
+    let project = w.staging.ancestors().nth(3).unwrap().to_path_buf();
+    let base = project.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::write(project.join("README.md"), "real project file").unwrap();
+    std::fs::write(project.join("src/lib.rs"), "fn main() {}").unwrap();
+    std::fs::write(project.join(".git/config"), "git internals").unwrap();
+    let other = base.join("other-project");
+    std::fs::create_dir_all(other.join(".ta")).unwrap();
+    std::fs::write(other.join("notes.md"), "other project file").unwrap();
+    std::fs::write(other.join(".ta/workflow.toml"), "other state").unwrap();
+
+    let ctx = LaunchContext {
+        goal_id: "chat-g1".into(),
+        role_class: RoleClass::Chat,
+        team_role: false,
+        project_root: project.clone(),
+        staging: w.staging.clone(),
+        state_dir: Some(base.join("state")),
+        agent_home: w.agent_home.clone(),
+        user_home: Some(base.join("home")),
+        mediation_socket: None,
+        egress_proxy: false,
+        persona: None,
+        prompt_file: None,
+    };
+    let request = ProjectRequest {
+        posture: Some(SandboxPosture::Balanced),
+        ..Default::default()
+    };
+    let profile = SandboxProfile::compile(None, &request, &ctx)
+        .with_project_read_roots(&[project.clone(), other.clone()]);
+    assert!(
+        profile.read_roots.len() == 2,
+        "both roots must be accepted: {:?}",
+        profile.warnings
+    );
+    let mut policy = profile.to_policy(SandboxProvider::MacosSandboxExec);
+    policy.egress_proxy_port = w.policy.egress_proxy_port;
+    w.policy = policy;
+    (w, project, other)
+}
+
+#[test]
+fn chat_session_reads_the_real_project_but_cannot_write_or_see_ta_state() {
+    let (w, project, other) = chat_world();
+    if !can_run(&w) {
+        return;
+    }
+    // Reads: project files and the readable project's files work (and the probe proves
+    // the control: the same files are readable unsandboxed).
+    for f in [
+        project.join("README.md"),
+        project.join("src/lib.rs"),
+        other.join("notes.md"),
+    ] {
+        assert!(unsandboxed(&["read", s(&f)]), "control {}", f.display());
+        assert!(
+            sandboxed(&w, &["read", s(&f)]),
+            "{} must be readable",
+            f.display()
+        );
+    }
+    // Writes: no write to an existing project file, no new file, nothing in the other
+    // project, and the files are unchanged.
+    for f in [
+        project.join("README.md"),
+        project.join("src/lib.rs"),
+        project.join("new-file.txt"),
+        other.join("notes.md"),
+        other.join("new-file.txt"),
+    ] {
+        assert!(
+            !sandboxed(&w, &["write", s(&f)]),
+            "{} must not be writable",
+            f.display()
+        );
+    }
+    assert!(!project.join("new-file.txt").exists());
+    assert!(!other.join("new-file.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("README.md")).unwrap(),
+        "real project file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("notes.md")).unwrap(),
+        "other project file"
+    );
+    // The session's own directory and agent home are the only writable places.
+    assert!(sandboxed(&w, &["write", s(&w.staging.join("scratch.txt"))]));
+    assert!(sandboxed(
+        &w,
+        &["write", s(&w.agent_home.join("scratch.txt"))]
+    ));
+    // The deny list still wins inside the readable roots and at the home directory.
+    let ta_file = project.join(".ta/workflow.toml");
+    std::fs::write(&ta_file, "[plan.wayfinder]").unwrap();
+    assert!(unsandboxed(&["read", s(&ta_file)]));
+    assert!(
+        !sandboxed(&w, &["read", s(&ta_file)]),
+        "the project's .ta must stay unreadable"
+    );
+    assert!(
+        !sandboxed(&w, &["read", s(&other.join(".ta/workflow.toml"))]),
+        "a readable project's .ta must stay unreadable"
+    );
+    assert!(
+        !sandboxed(&w, &["read", s(&project.join(".git/config"))]),
+        "the project's .git must stay unreadable"
+    );
+    assert!(
+        !sandboxed(&w, &["read", s(&w.ssh_key)]),
+        "~/.ssh must stay unreadable"
+    );
+    assert!(
+        !sandboxed(&w, &["read", s(&w.state_secret)]),
+        "the TA state dir must stay unreadable"
+    );
+}

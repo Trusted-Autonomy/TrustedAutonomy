@@ -26,6 +26,7 @@ pub mod messaging_plugin_protocol;
 pub mod none;
 pub mod perforce;
 pub mod registry;
+pub mod routing;
 pub mod social_adapter;
 pub mod social_plugin_protocol;
 pub mod svn;
@@ -46,10 +47,10 @@ pub use adapter::SubmitAdapter;
 pub use config::{
     check_disk_space_mb, resolve_plan_path, AgentProfile, ApplyConfig, AssetDiffConfig,
     BuildConfig, BuildOnFail, CommitConfig, ContextMode, DiffConfig, DraftReviewConfig, GitConfig,
-    PerforceConfig, PlanConfig, SecurityConfig, ShellConfig, SmokeCase, SmokeConfig, SmokeExpect,
-    SmokeOnFailure, StagingConfig, SubmitConfig, SvnConfig, SyncConfig, TaLocalPaths, TaPathConfig,
-    TaProjectPaths, VcsAgentConfig, VcsConfig, VerifyCommand, VerifyConfig, VerifyOnFailure,
-    WorkflowConfig,
+    PerforceConfig, PlanConfig, ReleaseSetConfig, SecurityConfig, ShellConfig, SmokeCase,
+    SmokeConfig, SmokeExpect, SmokeOnFailure, StagingConfig, SubmitConfig, SvnConfig, SyncConfig,
+    TaLocalPaths, TaPathConfig, TaProjectPaths, VcsAgentConfig, VcsConfig, VerifyCommand,
+    VerifyConfig, VerifyOnFailure, WorkflowConfig,
 };
 pub use external_vcs_adapter::ExternalVcsAdapter;
 pub use git::GitAdapter;

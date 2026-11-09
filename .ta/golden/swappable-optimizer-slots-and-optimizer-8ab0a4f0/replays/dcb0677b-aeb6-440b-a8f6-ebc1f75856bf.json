@@ -1,0 +1,75 @@
+{
+  "replay_id": "dcb0677b-aeb6-440b-a8f6-ebc1f75856bf",
+  "golden_id": "swappable-optimizer-slots-and-optimizer-8ab0a4f0",
+  "tag": "r2-headroom",
+  "set": [
+    "optimizers.input.use=headroom"
+  ],
+  "goal_id": "89936165-ed5e-4559-ac7a-e8573f22a8c6",
+  "started_at": "2026-10-22T08:36:41.471886Z",
+  "completed_at": "2026-10-22T08:58:07.031355Z",
+  "outcome": "pr_ready",
+  "cost_usd": 6.379638899999998,
+  "cost_estimated": false,
+  "input_tokens": 96,
+  "output_tokens": 38355,
+  "cache_read_tokens": 4430628,
+  "cache_creation_tokens": 122337,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 17,
+  "lines_added": 1230,
+  "lines_removed": 29,
+  "diff_sha256": "74f26c36b627fa93746825aeab47df76a657ad6e426aa6c9aa5b4edac44c984f",
+  "similarity": 0.011873840445269016,
+  "check_passed": true,
+  "check_run": {
+    "command": "./dev cargo test -p ta-context-opt -p ta-daemon",
+    "started_at": "2026-10-22T08:58:09.497925Z",
+    "finished_at": "2026-10-22T08:59:47.611823Z",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "eb::tests::draft_detail_returns_supervisor_review ... ok\ntest web::tests::draft_detail_returns_initial_supervisor_review_for_followup_draft ... ok\ntest web::tests::ensure_and_prune_logs_dir_creates_directory ... ok\ntest web::tests::ensure_and_prune_logs_dir_removes_logs_older_than_retention ... ok\ntest web::tests::ensure_and_prune_logs_dir_keeps_recent_logs ... ok\ntest web::tests::favicon_serves_icon ... ok\ntest web::tests::find_conflicts_and_patches_reads_sidecars_and_patches ... ok\ntest web::tests::get_artifact_content_rejects_path_traversal ... ok\ntest web::tests::get_artifact_content_prefers_goal_staging_dir_over_project_root ... ok\ntest web::tests::get_artifact_content_rejects_uri_not_on_draft ... ok\ntest web::tests::get_artifact_content_serves_bytes_from_project_root ... ok\ntest web::tests::get_draft_not_found ... ok\ntest web::tests::icon_192_serves_png ... ok\ntest web::tests::icon_512_serves_png ... ok\ntest web::tests::index_html_attention_queue_includes_health_signals_and_approved_drafts ... ok\ntest web::tests::index_html_has_dashboard_advisor_flicker_guards ... ok\ntest web::tests::index_serves_html ... ok\ntest web::tests::legacy_ui_default_auth_config_allows_loopback ... ok\ntest web::tests::legacy_ui_require_token_and_no_bypass_rejects_even_loopback ... ok\ntest web::tests::legacy_ui_require_token_rejects_unauthenticated_non_local_caller ... ok\ntest web::tests::list_drafts_empty ... ok\ntest web::tests::malformed_or_oversize_actor_header_is_ignored_and_the_action_still_succeeds ... ok\ntest web::tests::memory_create_and_list ... ok\ntest web::tests::memory_list_empty ... ok\ntest web::tests::memory_stats_empty ... ok\ntest web::tests::parse_commit_sha_finds_sha_in_commit_line ... ok\ntest web::tests::parse_commit_sha_returns_none_when_absent ... ok\ntest web::tests::relay_token_cannot_approve_and_a_header_assertion_is_not_proof ... ok\ntest web::tests::serve_refuses_to_start_when_the_strict_posture_refused ... ok\ntest web::tests::tail_lines_keeps_short_output_unchanged ... ok\ntest web::tests::tail_lines_truncates_to_last_n_lines ... ok\ntest web::tests::the_header_does_not_open_the_gate ... ok\ntest web::tests::without_the_header_the_action_is_direct_and_names_the_usual_actor ... ok\ntest web::tests::health_answers_starting_during_keychain_wait_then_the_full_api_takes_over ... ok\ntest whiteboard_link::tests::backoff_doubles_is_capped_and_stays_above_half_the_base ... ok\ntest whiteboard_link::tests::backoff_settings_are_sanitized ... ok\ntest whiteboard_link::tests::connect_fails_twice_then_succeeds_and_each_attempt_is_logged_and_reported ... ok\ntest wiki_sync::tests::sync_once_is_a_no_op_when_unconfigured ... ok\ntest wiki_sync::tests::sync_once_reports_config_error_when_malformed ... ok\ntest wiki_sync::tests::sync_once_with_configured_but_unreachable_wayfinder_does_not_panic ... ignored, known CI-sandbox-specific hang connecting to 127.0.0.1 on GitHub's macOS runners, not reproduced on Linux/Windows/real hardware -- see the comment above for the two prior fix attempts that didn't resolve it. Covered on ubuntu-latest and windows-latest.\ntest whiteboard_link::tests::a_disconnected_link_names_the_server_attempt_and_next_step ... ok\ntest team_session::tests::run_one_cycle_suspended_then_restart_signal ... ok\ntest wake_retry::tests::without_heartbeats_the_same_long_launch_is_redelivered ... ok\ntest team_session::tests::configured_min_delay_paces_rotation_cycles ... ok\ntest team_session::tests::one_stage_session_is_rate_limited_by_the_default_delay ... ok\ntest wake_listener::tests::wake_only_session_launches_the_role_on_a_message_and_runs_no_rotation ... ok\ntest web::tests::a_blocked_keychain_leaves_http_answering_and_the_default_posture_degrades ... ok\ntest wake_listener::tests::listener_retries_the_connect_and_reconnects_after_a_drop ... ok\ntest wake_retry::tests::completed_store_keeps_only_the_most_recent_entries ... ok\n\ntest result: ok. 790 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.73s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+    "stderr_tail": "ompiling rustls-webpki v0.103.15\n   Compiling tokio-rustls v0.26.4\n   Compiling hyper-rustls v0.27.9\n   Compiling tokio-websockets v0.10.1\n   Compiling reqwest v0.12.28\n   Compiling async-nats v0.50.0\n   Compiling ta-changeset v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-changeset)\n   Compiling ruvector-core v2.3.0\n   Compiling ta-connector-email v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-connectors/email)\n   Compiling ta-connector-slack v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-connectors/slack)\n   Compiling ta-runtime v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-runtime)\n   Compiling ta-memory v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-memory)\n   Compiling ta-workspace v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-workspace)\n   Compiling ta-workflow v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-workflow)\n   Compiling ta-session v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-session)\n   Compiling ta-connector-unreal v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-connectors/unreal)\n   Compiling ta-connector-comfyui v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-connectors/comfyui)\n   Compiling ta-submit v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-submit)\n   Compiling ta-connector-fs v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-connectors/fs)\n   Compiling ta-actions v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-actions)\n   Compiling ta-agent-whiteboard v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-agent-whiteboard)\n   Compiling ta-intake v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-intake)\n   Compiling ta-plan v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-plan)\n   Compiling ta-brain v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-brain)\n   Compiling ta-plan-wayfinder v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-plan-wayfinder)\n   Compiling ta-data-spec v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-data-spec)\n   Compiling ta-advisor v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-advisor)\n   Compiling ta-mcp-gateway v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/89936165-ed5e-4559-ac7a-e8573f22a8c6/crates/ta-mcp-gateway)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 24s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`\n     Running unittests src/lib.rs (target/debug/deps/ta_context_opt-26a072b8d33d7424)\n     Running unittests src/main.rs (target/debug/deps/ta_daemon-5fd2ae26f755175e)\n   Doc-tests ta_context_opt\n",
+    "tests": {
+      "passed": 797,
+      "failed": 0,
+      "ignored": 1
+    }
+  },
+  "run_index": 4,
+  "recomputed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "headroom",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": true,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  },
+  "usage": {
+    "before": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 11.89,
+      "plan_captured_at": "2026-10-22T08:36:25Z",
+      "taken_at": "2026-10-22T08:36:41.470892Z"
+    },
+    "after": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 15.08,
+      "plan_captured_at": "2026-10-22T08:57:55Z",
+      "taken_at": "2026-10-22T08:58:07.031355Z"
+    },
+    "plan_usage_pct_delta": 0.0,
+    "budget_used_pct_delta": 3.19,
+    "note": null
+  }
+}

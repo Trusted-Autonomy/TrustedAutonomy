@@ -282,6 +282,14 @@ enum Commands {
         /// title that matches no PLAN.md phase blocks instead of inserting one.
         #[arg(long, conflicts_with = "phase")]
         new_phase: bool,
+        /// While a release is open (`ta release-set`), send THIS goal to main with its own PR
+        /// instead of onto the release branch. Needs `--hotfix-reason`; recorded as a hotfix in
+        /// the release state. Hotfix goals are never flagged as off track.
+        #[arg(long, requires = "hotfix_reason")]
+        hotfix: bool,
+        /// Why this goal cannot wait for the release (mandatory with `--hotfix`).
+        #[arg(long, requires = "hotfix")]
+        hotfix_reason: Option<String>,
         /// Follow up on a previous goal (ID prefix or omit for interactive picker).
         #[arg(long)]
         follow_up: Option<Option<String>>,
@@ -1079,6 +1087,15 @@ enum Commands {
     Release {
         #[command(subcommand)]
         command: commands::release::ReleaseCommands,
+    },
+    /// One open release per project: every goal commits onto `release/<name>`, cut by ONE PR.
+    ///
+    /// `ta release-set start <name> --goal "..."` opens the release; `ta release-set status`
+    /// shows it (`--json` for Wayfinder); `ta release-set cut` merges main, runs the gate,
+    /// pushes once and opens the one PR to main. Not `ta release` (the publish pipeline).
+    ReleaseSet {
+        #[command(subcommand)]
+        command: commands::release_set::ReleaseSetCommands,
     },
     /// Multi-project office daemon management.
     #[command(hide = true)]
@@ -2040,6 +2057,8 @@ fn dispatch_raw(
             objective,
             phase,
             new_phase,
+            hotfix,
+            hotfix_reason,
             follow_up,
             follow_up_draft,
             follow_up_goal,
@@ -2129,6 +2148,22 @@ fn dispatch_raw(
                 commands::build_cache::NoBuildCacheGuard::set(*no_build_cache);
             // `--new-phase`: carried the same way (keeps `execute`'s parameter list stable).
             let _new_phase_guard = commands::plan::CliNewPhaseGuard::set(*new_phase);
+            // `--hotfix` / `--hotfix-reason`: carried the same way; a single-goal launch only,
+            // because multi-goal workflows spawn sub-goal launches that would not inherit it.
+            let hotfix_reason_value =
+                commands::release_set::hotfix_reason_from_flags(*hotfix, hotfix_reason.as_deref())?;
+            if hotfix_reason_value.is_some()
+                && (phases.is_some()
+                    || workflow.as_deref() == Some("serial-phases")
+                    || !sub_goals.is_empty())
+            {
+                anyhow::bail!(
+                    "--hotfix cannot be combined with --phases/--workflow serial-phases or \
+                     --sub-goals: those spawn separate sub-goal launches that would not be \
+                     hotfixes. Launch the hotfix as a single `ta run --hotfix` goal."
+                );
+            }
+            let _hotfix_guard = commands::release_set::CliHotfixGuard::set(hotfix_reason_value);
             // `--intake-file`: carried the same way. Multi-goal workflows would
             // not pass it on to their sub-goals, so reject that combination.
             if intake_file.is_some()
@@ -2412,6 +2447,7 @@ fn dispatch_raw(
         }
         Commands::New { command } => commands::new::execute(command, config),
         Commands::Release { command } => commands::release::execute(command, config),
+        Commands::ReleaseSet { command } => commands::release_set::execute(command, config),
         Commands::Shell {
             init,
             tui,
@@ -2676,6 +2712,7 @@ fn command_prints_json(cmd: Option<&Commands>) -> bool {
         Some(Commands::TermsStatus { json }) | Some(Commands::Capabilities { json }) => *json,
         Some(Commands::State { command }) => commands::state_dir::prints_json(command),
         Some(Commands::AgentLogin { command }) => commands::agent_login::prints_json(command),
+        Some(Commands::ReleaseSet { command }) => commands::release_set::prints_json(command),
         _ => false,
     }
 }

@@ -1,0 +1,699 @@
+--- a/PLAN.md
++++ b/PLAN.md
+@@ -11265,9 +11265,9 @@
+ 
+ **Goal**: The cost report must also land in Meridian so cost can be analysed against KPIs. Meridian's generic JSONL loader reads `id`, `title`, `timestamp`, `tokens_input`, `tokens_output`, `source`, `phase` and keeps string-valued extras as metadata.
+ 
+-1. [ ] **`ta cost report --meridian <file.jsonl>`** writes one record per session or goal in that shape, with string metadata `cost_usd`, `cost_exact`, `model`, `cache_read_tokens`, `cache_write_tokens`, `context_peak`, `workload`. The write is atomic (temp file then rename), idempotent by record `id`, and prints the path, record count and the exact Meridian command to read it.
++1. [x] **`ta cost report --meridian <file.jsonl>`** writes one record per session or goal in that shape, with string metadata `cost_usd`, `cost_exact`, `model`, `cache_read_tokens`, `cache_write_tokens`, `context_peak`, `workload`. The write is atomic (temp file then rename), idempotent by record `id`, and prints the path, record count and the exact Meridian command to read it.
+ 2. [ ] **Meridian ingester fixes (Meridian repo, separate PR).** Its `claude_code` ingester sums every assistant row without deduplicating by `message.id`: measured 2.49x input and 2.69x output overcount on a real session. It also drops `cache_read_input_tokens`, which is 64% of interactive cost. Dedupe by message id and carry cache-read as separate metadata. Needs the owner's approval because it changes Meridian's numbers for past data.
+-3. [ ] Tests: output parses with Meridian's own loader (path dependency or fixture round trip), re-running does not duplicate records, a session with repeated ids exports once. `docs/USAGE.md` how-to.
++3. [x] Tests: output parses with Meridian's own loader (path dependency or fixture round trip), re-running does not duplicate records, a session with repeated ids exports once. `docs/USAGE.md` how-to. The round trip uses a fixture mirror of Meridian's `load_jsonl` (Meridian is a separate repository, so no path dependency).
+ 
+ **Effort**: S.
+ 
+--- a/apps/ta-cli/src/commands/cost.rs
++++ b/apps/ta-cli/src/commands/cost.rs
+@@ -9,9 +9,11 @@
+ 
+ use anyhow::Context;
+ use clap::Subcommand;
++use ta_goal::cost_export::export_meridian;
++use ta_goal::cost_report::CostRow;
+ use ta_goal::cost_report::{
+-    build_report, parse_cost_group_by, scan_claude, scan_omp, CostFilter, CostGroupRow, CostReport,
+-    CostTotals, Scan,
++    build_report_with_rows, parse_cost_group_by, scan_claude, scan_omp, CostFilter, CostGroupRow,
++    CostReport, CostTotals, Scan,
+ };
+ use ta_goal::spend::parse_time_bound;
+ use ta_goal::{GoalRunStore, PriceTable};
+@@ -43,6 +45,11 @@
+         /// Print the report as JSON.
+         #[arg(long)]
+         json: bool,
++        /// Also write one Meridian JSONL record per session or goal to this
++        /// file. Re-running replaces records with the same id; other lines in
++        /// the file are kept. Respects --since, --until and --project.
++        #[arg(long, value_name = "FILE")]
++        meridian: Option<PathBuf>,
+         /// Claude Code projects directory (default: ~/.claude/projects).
+         #[arg(long, value_name = "DIR")]
+         claude_dir: Option<PathBuf>,
+@@ -60,6 +67,7 @@
+             group_by,
+             project,
+             json,
++            meridian,
+             claude_dir,
+             omp_dir,
+         } => {
+@@ -75,7 +83,7 @@
+                         .map(|h| h.join(".omp").join("agent").join("sessions"))
+                 })
+                 .unwrap_or_else(|| PathBuf::from(".omp/agent/sessions"));
+-            let report = run_report(
++            let (report, rows) = run_report_rows(
+                 config,
+                 since.as_deref(),
+                 until.as_deref(),
+@@ -89,12 +97,31 @@
+             } else {
+                 print!("{}", render(&report));
+             }
++            if let Some(path) = meridian {
++                let summary = export_meridian(&rows, path)?;
++                // stderr under --json keeps stdout parseable.
++                let msg = format!(
++                    "Meridian export: wrote {} record(s) to {} ({} replaced an earlier record, \
++                     {} existing line(s) kept)\nRead it with: {}",
++                    summary.records,
++                    summary.path.display(),
++                    summary.replaced,
++                    summary.kept_existing,
++                    summary.meridian_command()
++                );
++                if *json {
++                    eprintln!("{msg}");
++                } else {
++                    println!("{msg}");
++                }
++            }
+             Ok(())
+         }
+     }
+ }
+ 
+ /// Validate the flags, read every source and build the report.
++#[cfg(test)]
+ pub fn run_report(
+     config: &GatewayConfig,
+     since: Option<&str>,
+@@ -104,6 +131,19 @@
+     claude_dir: &Path,
+     omp_dir: &Path,
+ ) -> anyhow::Result<CostReport> {
++    run_report_rows(config, since, until, group_by, project, claude_dir, omp_dir).map(|(r, _)| r)
++}
++
++/// [`run_report`] plus the filtered rows, which the Meridian export needs.
++pub fn run_report_rows(
++    config: &GatewayConfig,
++    since: Option<&str>,
++    until: Option<&str>,
++    group_by: &str,
++    project: Option<&str>,
++    claude_dir: &Path,
++    omp_dir: &Path,
++) -> anyhow::Result<(CostReport, Vec<CostRow>)> {
+     let group_by = parse_cost_group_by(group_by).map_err(anyhow::Error::msg)?;
+     let bound = |name: &str, v: Option<&str>| -> anyhow::Result<_> {
+         v.map(|s| parse_time_bound(s).map_err(|e| anyhow::anyhow!("--{name}: {e}")))
+@@ -148,7 +188,12 @@
+         None
+     };
+     let scans: Vec<Scan> = vec![scan_claude(claude_dir, &table), scan_omp(omp_dir, &table)];
+-    Ok(build_report(goals.as_deref(), scans, &group_by, &filter))
++    Ok(build_report_with_rows(
++        goals.as_deref(),
++        scans,
++        &group_by,
++        &filter,
++    ))
+ }
+ 
+ fn tok(n: u64) -> String {
+@@ -393,6 +438,24 @@
+     }
+ 
+     #[test]
++    fn meridian_export_respects_filters_and_is_idempotent() {
++        let dir = tempfile::tempdir().unwrap();
++        let (claude, omp) = fixture(dir.path());
++        let out = dir.path().join("m.jsonl");
++        let go = |since: Option<&str>| {
++            let (_, rows) =
++                run_report_rows(&cfg(dir.path()), since, None, "", None, &claude, &omp).unwrap();
++            export_meridian(&rows, &out).unwrap()
++        };
++        // m1 (deduped) and m2 share one Claude session; OMP is a second.
++        assert_eq!(go(None).records, 2);
++        let first = fs::read_to_string(&out).unwrap();
++        assert_eq!(go(None).replaced, 2);
++        assert_eq!(first, fs::read_to_string(&out).unwrap());
++        assert_eq!(go(Some("2030-01-01")).records, 0);
++    }
++
++    #[test]
+     fn json_output_round_trips() {
+         let dir = tempfile::tempdir().unwrap();
+         let (claude, omp) = fixture(dir.path());
+--- /dev/null
++++ b/crates/ta-goal/src/cost_export.rs
+@@ -0,0 +1,431 @@
++//! Export a cost report to Meridian (`ta cost report --meridian <file.jsonl>`).
++//!
++//! Meridian's generic JSONL loader (`meridian-ingest`, `generic::load_jsonl`)
++//! reads `id`, `title`, `timestamp`, `tokens_input`, `tokens_output`, `source`
++//! and `phase`, and keeps only string-valued extras as metadata. One record is
++//! written per session (transcripts) or goal, so every metadata value here is a
++//! string, including the numbers.
++//!
++//! - `tokens_input` is the uncached input; cache traffic is carried separately
++//!   as `cache_read_tokens` and `cache_write_tokens`, because cache reads are
++//!   most of an interactive session's cost and would swamp the input count.
++//! - The record `id` is `<source>:<session>`, so a re-run replaces a record
++//!   instead of duplicating it. Lines already in the file that are not ours
++//!   (other ids, comments, blank lines) are kept as they were.
++//! - The write is atomic: a temp file in the same directory, then a rename.
++//!
++//! Rows arrive already deduplicated by `message.id`, so a session with repeated
++//! ids is exported once and with each message counted once.
++
++use std::collections::BTreeMap;
++use std::path::{Path, PathBuf};
++
++use anyhow::Context;
++use chrono::{DateTime, Utc};
++use serde_json::{json, Map, Value};
++
++use crate::cost_report::{CostKind, CostRow, CostSourceKind};
++
++/// What an export wrote, for the confirmation the CLI prints.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ExportSummary {
++    pub path: PathBuf,
++    /// Records produced by this report (one per session or goal).
++    pub records: usize,
++    /// Of those, records that replaced an earlier record with the same id.
++    pub replaced: usize,
++    /// Lines already in the file that were left untouched.
++    pub kept_existing: usize,
++}
++
++impl ExportSummary {
++    /// The exact command that reads the file back.
++    pub fn meridian_command(&self) -> String {
++        let p = self.path.display().to_string();
++        let p = if p.contains(char::is_whitespace) {
++            format!("'{}'", p.replace('\'', "'\\''"))
++        } else {
++            p
++        };
++        format!("meridian analyze --source jsonl --path {p}")
++    }
++}
++
++fn session_title(first: &CostRow) -> String {
++    if let Some(t) = &first.title {
++        return t.clone();
++    }
++    let short: String = first.session.chars().take(8).collect();
++    match first.source {
++        CostSourceKind::Goals => format!("TA goal {short} ({})", first.project),
++        _ => format!(
++            "{} session {short} ({})",
++            first.source.as_str(),
++            first.project
++        ),
++    }
++}
++
++fn kind_label(kinds: &[CostKind]) -> &'static str {
++    let all = |k: CostKind| kinds.iter().all(|x| *x == k);
++    if all(CostKind::Exact) {
++        "exact"
++    } else if all(CostKind::Estimated) {
++        "estimated"
++    } else if all(CostKind::Unpriced) {
++        "unpriced"
++    } else {
++        "mixed"
++    }
++}
++
++/// One Meridian record per (source, session), ordered by id.
++pub fn meridian_records(rows: &[CostRow]) -> Vec<(String, Value)> {
++    let mut sessions: BTreeMap<String, Vec<&CostRow>> = BTreeMap::new();
++    for r in rows {
++        sessions
++            .entry(format!("{}:{}", r.source.as_str(), r.session))
++            .or_default()
++            .push(r);
++    }
++    sessions
++        .into_iter()
++        .map(|(id, rs)| {
++            let first = rs[0];
++            let ts: Option<DateTime<Utc>> = rs.iter().filter_map(|r| r.ts).min();
++            let sum =
++                |f: fn(&CostRow) -> u64| rs.iter().map(|r| f(r)).fold(0u64, u64::saturating_add);
++            let usd: f64 = rs.iter().map(|r| r.usd).sum();
++            let kinds: Vec<CostKind> = rs.iter().map(|r| r.kind).collect();
++            let kind = kind_label(&kinds);
++            // Distinct models in first-seen order.
++            let mut models: Vec<&str> = Vec::new();
++            for r in &rs {
++                let m = if r.model.is_empty() {
++                    "unknown"
++                } else {
++                    r.model.as_str()
++                };
++                if !models.contains(&m) {
++                    models.push(m);
++                }
++            }
++            let peak = rs.iter().filter_map(|r| r.context_tokens).max();
++            let mut rec = Map::new();
++            rec.insert("id".into(), json!(id));
++            rec.insert("title".into(), json!(session_title(first)));
++            if let Some(t) = ts {
++                rec.insert("timestamp".into(), json!(t.to_rfc3339()));
++            }
++            rec.insert("tokens_input".into(), json!(sum(|r| r.usage.input)));
++            rec.insert("tokens_output".into(), json!(sum(|r| r.usage.output)));
++            rec.insert("source".into(), json!(first.source.as_str()));
++            if let Some(p) = rs.iter().find_map(|r| r.phase.clone()) {
++                rec.insert("phase".into(), json!(p));
++            }
++            let mut meta = |k: &str, v: String| {
++                rec.insert(k.into(), Value::String(v));
++            };
++            meta("cost_usd", format!("{usd:.6}"));
++            meta("cost_exact", (kind == "exact").to_string());
++            meta("cost_kind", kind.to_string());
++            meta("model", models.join(","));
++            meta("cache_read_tokens", sum(|r| r.usage.cache_read).to_string());
++            meta(
++                "cache_write_tokens",
++                sum(|r| r.usage.cache_creation).to_string(),
++            );
++            meta(
++                "context_peak",
++                peak.map(|p| p.to_string()).unwrap_or_else(|| "n/a".into()),
++            );
++            meta(
++                "workload",
++                match first.source {
++                    CostSourceKind::Goals => "goal",
++                    _ => "interactive",
++                }
++                .into(),
++            );
++            meta("project", first.project.clone());
++            (id, Value::Object(rec))
++        })
++        .collect()
++}
++
++fn line_id(line: &str) -> Option<String> {
++    let t = line.trim();
++    if t.is_empty() || t.starts_with("//") {
++        return None;
++    }
++    serde_json::from_str::<Value>(t)
++        .ok()?
++        .get("id")?
++        .as_str()
++        .map(str::to_string)
++}
++
++/// Merge `rows` into the JSONL file at `path`, replacing records with the same
++/// id and keeping every other line. Atomic: temp file then rename.
++pub fn export_meridian(rows: &[CostRow], path: &Path) -> anyhow::Result<ExportSummary> {
++    let records = meridian_records(rows);
++    let existing = match std::fs::read_to_string(path) {
++        Ok(t) => t,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
++        Err(e) => {
++            return Err(anyhow::Error::new(e).context(format!(
++                "could not read the existing Meridian file {}. Check it is a readable file, or \
++                 pass a different --meridian path",
++                path.display()
++            )))
++        }
++    };
++    let mut new_by_id: BTreeMap<&str, &Value> =
++        records.iter().map(|(id, v)| (id.as_str(), v)).collect();
++    let mut out = String::new();
++    let (mut replaced, mut kept_existing) = (0usize, 0usize);
++    for line in existing.lines() {
++        match line_id(line).and_then(|id| new_by_id.remove_entry(id.as_str())) {
++            Some((_, v)) => {
++                out.push_str(&v.to_string());
++                replaced += 1;
++            }
++            None => {
++                if !line.trim().is_empty() {
++                    kept_existing += 1;
++                }
++                out.push_str(line);
++            }
++        }
++        out.push('\n');
++    }
++    // Ids not seen in the file, in id order. Records that replaced a line are
++    // already out of the map.
++    for v in new_by_id.values() {
++        out.push_str(&v.to_string());
++        out.push('\n');
++    }
++
++    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
++        std::fs::create_dir_all(dir).with_context(|| {
++            format!(
++                "could not create {} for the Meridian export. Check the path is writable",
++                dir.display()
++            )
++        })?;
++    }
++    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
++    tmp_name.push(format!(".tmp-{}", std::process::id()));
++    let tmp = path.with_file_name(tmp_name);
++    std::fs::write(&tmp, out).with_context(|| {
++        format!(
++            "could not write the temp file {} for the Meridian export. Check the directory is \
++             writable and has space",
++            tmp.display()
++        )
++    })?;
++    if let Err(e) = std::fs::rename(&tmp, path) {
++        let _ = std::fs::remove_file(&tmp);
++        return Err(anyhow::Error::new(e).context(format!(
++            "could not move {} into place as {}. The existing file was not changed",
++            tmp.display(),
++            path.display()
++        )));
++    }
++    Ok(ExportSummary {
++        path: path.to_path_buf(),
++        records: records.len(),
++        replaced,
++        kept_existing,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::cost_report::{scan_claude, CostFilter};
++    use crate::token_cost::{PriceTable, TokenUsage};
++    use std::collections::HashMap;
++
++    /// Mirrors `meridian_ingest::generic::load_jsonl`: `title` required, the
++    /// named fields typed, only string extras kept as metadata. Meridian is a
++    /// separate repository, so this is the fixture side of the round trip.
++    #[derive(serde::Deserialize)]
++    struct MeridianRecord {
++        id: Option<String>,
++        title: String,
++        timestamp: Option<String>,
++        tokens_input: Option<u64>,
++        tokens_output: Option<u64>,
++        source: Option<String>,
++        phase: Option<String>,
++        #[serde(flatten)]
++        extra: HashMap<String, Value>,
++    }
++
++    fn load(path: &Path) -> Vec<MeridianRecord> {
++        std::fs::read_to_string(path)
++            .unwrap()
++            .lines()
++            .filter(|l| !l.trim().is_empty() && !l.starts_with("//"))
++            .map(|l| serde_json::from_str(l).unwrap())
++            .collect()
++    }
++
++    fn meta<'a>(r: &'a MeridianRecord, k: &str) -> &'a str {
++        r.extra
++            .get(k)
++            .and_then(Value::as_str)
++            .unwrap_or_else(|| panic!("no string {k}"))
++    }
++
++    fn row(session: &str, usd: f64, kind: CostKind, ctx: Option<u64>) -> CostRow {
++        CostRow {
++            source: CostSourceKind::Claude,
++            session: session.into(),
++            ts: DateTime::parse_from_rfc3339("2026-10-10T01:00:00Z")
++                .ok()
++                .map(|d| d.with_timezone(&Utc)),
++            project: "proj".into(),
++            model: "claude-sonnet-5-5".into(),
++            usage: TokenUsage {
++                input: 10,
++                output: 20,
++                cache_read: 300,
++                cache_creation: 40,
++            },
++            usd,
++            kind,
++            context_tokens: ctx,
++            origin_class: None,
++            title: None,
++            phase: None,
++        }
++    }
++
++    #[test]
++    fn records_load_in_meridians_shape_with_string_metadata() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("out/cost.jsonl");
++        let rows = vec![
++            row("s1", 1.5, CostKind::Estimated, Some(1000)),
++            row("s1", 0.5, CostKind::Estimated, Some(5000)),
++            row("s2", 2.0, CostKind::Exact, Some(70)),
++        ];
++        let s = export_meridian(&rows, &path).unwrap();
++        assert_eq!((s.records, s.replaced), (2, 0));
++        let recs = load(&path);
++        assert_eq!(recs.len(), 2);
++        let r = &recs[0];
++        assert_eq!(r.id.as_deref(), Some("claude_code:s1"));
++        assert!(r.title.contains("s1"));
++        assert!(r.timestamp.is_some());
++        assert_eq!((r.tokens_input, r.tokens_output), (Some(20), Some(40)));
++        assert_eq!(r.source.as_deref(), Some("claude_code"));
++        assert!(r.phase.is_none());
++        assert_eq!(meta(r, "cost_usd"), "2.000000");
++        assert_eq!(meta(r, "cost_exact"), "false");
++        assert_eq!(meta(r, "model"), "claude-sonnet-5-5");
++        assert_eq!(meta(r, "cache_read_tokens"), "600");
++        assert_eq!(meta(r, "cache_write_tokens"), "80");
++        assert_eq!(meta(r, "context_peak"), "5000");
++        assert_eq!(meta(r, "workload"), "interactive");
++        assert_eq!(meta(&recs[1], "cost_exact"), "true");
++    }
++
++    #[test]
++    fn rerunning_does_not_duplicate_and_keeps_foreign_lines() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("cost.jsonl");
++        std::fs::write(&path, "// mine\n{\"id\":\"other\",\"title\":\"keep\"}\n").unwrap();
++        let first = vec![row("s1", 1.0, CostKind::Exact, None)];
++        export_meridian(&first, &path).unwrap();
++        let second = vec![
++            row("s1", 3.0, CostKind::Exact, None),
++            row("s2", 1.0, CostKind::Exact, None),
++        ];
++        let s = export_meridian(&second, &path).unwrap();
++        assert_eq!((s.records, s.replaced, s.kept_existing), (2, 1, 2));
++        let recs = load(&path);
++        let ids: Vec<_> = recs.iter().map(|r| r.id.clone().unwrap()).collect();
++        assert_eq!(ids, ["other", "claude_code:s1", "claude_code:s2"]);
++        assert_eq!(meta(&recs[1], "cost_usd"), "3.000000");
++        // Same input again: byte-identical file.
++        let before = std::fs::read(&path).unwrap();
++        export_meridian(&second, &path).unwrap();
++        assert_eq!(before, std::fs::read(&path).unwrap());
++        assert!(std::fs::read_dir(dir.path()).unwrap().all(|e| !e
++            .unwrap()
++            .file_name()
++            .to_string_lossy()
++            .contains(".tmp-")));
++    }
++
++    #[test]
++    fn a_session_with_repeated_message_ids_exports_once() {
++        let dir = tempfile::tempdir().unwrap();
++        let t = dir.path().join("p");
++        std::fs::create_dir_all(&t).unwrap();
++        let line = |out: u64| {
++            serde_json::json!({"type":"assistant","timestamp":"2026-10-10T01:00:00Z",
++              "sessionId":"s1","cwd":"/x/proj","message":{"id":"m1","model":"claude-sonnet-5-5",
++              "usage":{"input_tokens":2,"output_tokens":out,"cache_read_input_tokens":100,
++                       "cache_creation_input_tokens":0}}})
++            .to_string()
++        };
++        std::fs::write(t.join("a.jsonl"), [line(5), line(90)].join("\n")).unwrap();
++        let scan = scan_claude(dir.path(), &PriceTable::builtin());
++        let (_, rows) = crate::cost_report::build_report_with_rows(
++            None,
++            vec![scan],
++            &[],
++            &CostFilter::default(),
++        );
++        let out = dir.path().join("m.jsonl");
++        let s = export_meridian(&rows, &out).unwrap();
++        assert_eq!(s.records, 1);
++        let recs = load(&out);
++        assert_eq!(recs.len(), 1);
++        assert_eq!(recs[0].tokens_output, Some(90));
++        assert_eq!(meta(&recs[0], "cache_read_tokens"), "100");
++    }
++
++    #[test]
++    fn goals_carry_title_phase_and_workload() {
++        let mut r = row("g1", 0.0, CostKind::Unpriced, None);
++        r.source = CostSourceKind::Goals;
++        r.title = Some("Fix the thing".into());
++        r.phase = Some("v0.1.2".into());
++        let recs = meridian_records(&[r]);
++        let v = &recs[0].1;
++        assert_eq!(v["id"], "ta_goals:g1");
++        assert_eq!(v["title"], "Fix the thing");
++        assert_eq!(v["phase"], "v0.1.2");
++        assert_eq!(v["workload"], "goal");
++        assert_eq!(v["context_peak"], "n/a");
++        assert_eq!(v["cost_exact"], "false");
++        assert_eq!(v["cost_kind"], "unpriced");
++    }
++
++    #[test]
++    fn command_quotes_paths_with_spaces() {
++        let s = ExportSummary {
++            path: PathBuf::from("/a b/c.jsonl"),
++            records: 1,
++            replaced: 0,
++            kept_existing: 0,
++        };
++        assert_eq!(
++            s.meridian_command(),
++            "meridian analyze --source jsonl --path '/a b/c.jsonl'"
++        );
++    }
++
++    #[test]
++    fn unwritable_target_is_an_actionable_error() {
++        let dir = tempfile::tempdir().unwrap();
++        // A directory where the file should be: read fails, message names the path.
++        let e = export_meridian(&[row("s", 1.0, CostKind::Exact, None)], dir.path()).unwrap_err();
++        assert!(e.to_string().contains("--meridian"), "{e}");
++    }
++}
+--- a/crates/ta-goal/src/cost_report.rs
++++ b/crates/ta-goal/src/cost_report.rs
+@@ -80,6 +80,10 @@
+     /// for goals, which are many turns.
+     pub context_tokens: Option<u64>,
+     pub origin_class: Option<String>,
++    /// Goal title; `None` for transcript turns.
++    pub title: Option<String>,
++    /// Plan phase the goal is linked to; `None` for transcript turns.
++    pub phase: Option<String>,
+ }
+ 
+ // ── Context buckets ─────────────────────────────────────────────────────────
+@@ -293,6 +297,8 @@
+                 kind,
+                 context_tokens: Some(usage.input + usage.cache_read + usage.cache_creation),
+                 origin_class: None,
++                title: None,
++                phase: None,
+             };
+             match msg.get("id").and_then(Value::as_str) {
+                 Some(id) => match by_id.get(id) {
+@@ -397,6 +403,8 @@
+                         kind,
+                         context_tokens: Some(usage.input + usage.cache_read + usage.cache_creation),
+                         origin_class: None,
++                        title: None,
++                        phase: None,
+                     });
+                 }
+                 _ => {}
+@@ -432,6 +440,8 @@
+             },
+             context_tokens: None,
+             origin_class: Some(g.effective_origin_class().to_string()),
++            title: Some(g.title.clone()).filter(|t| !t.trim().is_empty()),
++            phase: g.plan_phase.clone(),
+         })
+         .collect()
+ }
+@@ -639,10 +649,21 @@
+ /// when the project has no goal directory (reported, not an error).
+ pub fn build_report(
+     goals: Option<&[(String, GoalRun)]>,
+-    mut scans: Vec<Scan>,
++    scans: Vec<Scan>,
+     group_by: &[CostGroup],
+     filter: &CostFilter,
+ ) -> CostReport {
++    build_report_with_rows(goals, scans, group_by, filter).0
++}
++
++/// [`build_report`] plus the rows that passed the filter, for exporters that
++/// need per-session detail the grouped report does not keep.
++pub fn build_report_with_rows(
++    goals: Option<&[(String, GoalRun)]>,
++    mut scans: Vec<Scan>,
++    group_by: &[CostGroup],
++    filter: &CostFilter,
++) -> (CostReport, Vec<CostRow>) {
+     let mut rows: Vec<CostRow> = Vec::new();
+     let mut sources = Vec::new();
+     let goals_report = goals.map(|g| {
+@@ -684,7 +705,8 @@
+         )
+     };
+     context_buckets.sort_by_key(order);
+-    CostReport {
++    let kept_rows: Vec<CostRow> = kept.iter().map(|r| (*r).clone()).collect();
++    let report = CostReport {
+         group_by: group_by.iter().map(|g| g.as_str().to_string()).collect(),
+         since: filter.since,
+         until: filter.until,
+@@ -706,7 +728,8 @@
+              many turns and have no bucket."
+                 .to_string(),
+         ],
+-    }
++    };
++    (report, kept_rows)
+ }
+ 
+ #[cfg(test)]
+--- a/crates/ta-goal/src/lib.rs
++++ b/crates/ta-goal/src/lib.rs
+@@ -20,6 +20,7 @@
+ pub mod chat_mode;
+ pub mod commit_context;
+ pub mod conversation;
++pub mod cost_export;
+ pub mod cost_report;
+ pub mod error;
+ pub mod events;
+--- a/docs/USAGE.md
++++ b/docs/USAGE.md
+@@ -14837,6 +14837,19 @@
+ - OMP's own per-message cost is used and marked **exact**. Claude Code costs are **estimated** from the price table (`.ta/pricing.toml`, then the built-in table); where a transcript splits cache writes by lifetime, the 1 hour part is priced at twice the input rate. A model with no price row is **unpriced**: its tokens are counted, its cost is 0 and nothing is invented. Add a row to `.ta/pricing.toml` to price it.
+ - The context-size table groups turns by prompt size (input plus cache-read plus cache-creation tokens): 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k. A long session that keeps re-reading a large context shows up as most of its cost in the top rows. TA goals are many turns each and are not in this table.
+ 
++#### Exporting the cost report to Meridian
++
++Add `--meridian <file.jsonl>` to write one record per session or goal in the shape Meridian's generic JSONL loader reads, so cost can be analysed against your KPIs:
++
++```bash
++ta cost report --since 2026-10-01 --meridian ~/meridian/cost.jsonl
++meridian analyze --source jsonl --path ~/meridian/cost.jsonl
++```
++
++The command prints the path, the record count and the exact `meridian` command to read the file. Each record has `id` (`<source>:<session>`), `title`, `timestamp` (the session's first turn), `tokens_input`, `tokens_output`, `source` and, for goals, `phase`. `tokens_input` is uncached input only. The rest is string metadata: `cost_usd`, `cost_exact` (`true` only when every turn's cost was reported by the runtime), `cost_kind` (`exact`, `estimated`, `unpriced` or `mixed`), `model`, `cache_read_tokens`, `cache_write_tokens`, `context_peak` (largest prompt in the session, `n/a` for goals), `workload` (`interactive` or `goal`) and `project`.
++
++The write is atomic (temp file, then rename) and safe to repeat: a record whose `id` is already in the file is replaced, new ids are appended, and any other line is left alone. Messages with repeated ids are counted once. `--since`, `--until` and `--project` limit what is exported. With `--json`, the export confirmation goes to stderr so stdout stays valid JSON.
++
+ ### Viewing aggregate stats
+ 
+ ```bash

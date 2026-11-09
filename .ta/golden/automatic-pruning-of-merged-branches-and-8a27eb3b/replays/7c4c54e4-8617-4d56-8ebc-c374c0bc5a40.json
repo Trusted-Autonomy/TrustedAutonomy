@@ -1,0 +1,73 @@
+{
+  "replay_id": "7c4c54e4-8617-4d56-8ebc-c374c0bc5a40",
+  "golden_id": "automatic-pruning-of-merged-branches-and-8a27eb3b",
+  "tag": "r2-none",
+  "set": [],
+  "goal_id": "a585ca65-5282-4623-91cd-967c07c4c91b",
+  "started_at": "2026-10-22T05:45:51.544223Z",
+  "completed_at": "2026-10-22T06:03:43.031755Z",
+  "outcome": "pr_ready",
+  "cost_usd": 3.6665109,
+  "cost_estimated": false,
+  "input_tokens": 72,
+  "output_tokens": 54502,
+  "cache_read_tokens": 3848768,
+  "cache_creation_tokens": 211151,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 20,
+  "lines_added": 1591,
+  "lines_removed": 14,
+  "diff_sha256": "1e465330c959144dc981eda5488633cdf7ab909340e01e6e184ea1c12744f4b5",
+  "similarity": 0.0650887573964497,
+  "check_passed": true,
+  "check_run": {
+    "command": "./dev cargo test -p ta-cleanup -p ta-submit",
+    "started_at": "2026-10-22T06:03:45.268826Z",
+    "finished_at": "2026-10-22T06:04:20.533557Z",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "sts::test_svn_adapter_check_failures_uses_default_empty_vec ... ok\ntest svn::tests::test_svn_adapter_detect ... ok\ntest svn::tests::test_svn_adapter_exclude_patterns ... ok\ntest svn::tests::test_svn_adapter_name ... ok\ntest svn::tests::test_svn_adapter_protected_targets ... ok\ntest svn::tests::test_svn_adapter_push_is_noop ... ok\ntest svn::tests::test_svn_adapter_verify_degrades_without_svn ... ok\ntest vcs_detect::tests::plugin_without_detect_markers_is_not_consulted ... ok\ntest vcs_detect::tests::project_local_plugin_with_markers_is_detected ... ok\ntest vcs_plugin_manifest::tests::default_timeout_is_30 ... ok\ntest vcs_plugin_manifest::tests::discover_vcs_plugins_empty_returns_empty ... ok\ntest vcs_plugin_manifest::tests::discover_vcs_plugins_finds_manifests ... ok\ntest vcs_plugin_manifest::tests::discover_vcs_plugins_skips_invalid ... ok\ntest vcs_plugin_manifest::tests::has_protected_targets_false ... ok\ntest vcs_plugin_manifest::tests::has_protected_targets_true ... ok\ntest vcs_plugin_manifest::tests::load_manifest_missing ... ok\ntest vcs_plugin_manifest::tests::load_valid_manifest ... ok\ntest vcs_plugin_manifest::tests::validate_empty_command ... ok\ntest vcs_plugin_manifest::tests::validate_wrong_type ... ok\ntest vcs_plugin_manifest::tests::vcs_plugin_source_display ... ok\ntest vcs_plugin_protocol::tests::commit_params_roundtrip ... ok\ntest vcs_plugin_protocol::tests::detect_params_roundtrip ... ok\ntest vcs_plugin_protocol::tests::handshake_params_roundtrip ... ok\ntest vcs_plugin_protocol::tests::handshake_result_roundtrip ... ok\ntest vcs_plugin_protocol::tests::protocol_version_is_one ... ok\ntest vcs_plugin_protocol::tests::request_roundtrip ... ok\ntest vcs_plugin_protocol::tests::response_error_roundtrip ... ok\ntest vcs_plugin_protocol::tests::response_success_roundtrip ... ok\ntest git::tests::test_prepare_preserves_uncommitted_changes_when_local_head_is_stale ... ok\ntest external_vcs_adapter::tests::plugin_non_zero_exit_returns_error ... ok\ntest messaging_adapter::tests::external_adapter_calls_mock_plugin ... ok\ntest messaging_adapter::tests::external_adapter_create_draft_returns_id ... ok\ntest registry::tests::test_select_adapter_loads_external_plugin ... ok\ntest social_adapter::tests::external_adapter_create_draft_returns_id ... ok\ntest social_adapter::tests::external_adapter_publish_commits_when_review_passes ... ok\ntest social_adapter::tests::external_adapter_health_returns_handle ... ok\ntest social_adapter::tests::external_adapter_create_scheduled_returns_id_and_time ... ok\n\ntest result: ok. 246 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s\n\n\nrunning 2 tests\ntest test_open_review_idempotency_returns_existing_pr ... ok\ntest test_open_review_uses_workflow_config ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s\n\n\nrunning 5 tests\ntest perforce_plugin_handshake_succeeds ... ok\ntest perforce_plugin_protected_targets ... ok\ntest perforce_plugin_exclude_patterns ... ok\ntest perforce_plugin_verify_not_on_protected_target ... ok\ntest perforce_plugin_save_restore_state_roundtrip ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s\n\n\nrunning 12 tests\ntest handshake_succeeds_with_mock_plugin ... ok\ntest save_state_returns_some ... ok\ntest detect_with_mock_plugin ... ok\ntest check_review_returns_open ... ok\ntest protected_targets_returns_mock_targets ... ok\ntest exclude_patterns_returns_mock_patterns ... ok\ntest merge_review_returns_merged_true ... ok\ntest revision_id_returns_mock_rev ... ok\ntest restore_state_round_trip ... ok\ntest sync_upstream_returns_updated_true ... ok\ntest verify_not_on_protected_target_succeeds ... ok\ntest full_lifecycle_detect_save_commit_restore ... ok\n\ntest result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+    "stderr_tail": "tokio-rustls v0.26.4\n   Compiling find-crate v0.6.3\n   Compiling polyval v0.6.2\n   Compiling fluent-langneg v0.13.1\n   Compiling intl_pluralrules v7.0.2\n   Compiling hyper-rustls v0.27.9\n   Compiling intl-memoizer v0.5.3\n   Compiling aead v0.5.2\n   Compiling reqwest v0.12.28\n   Compiling i18n-embed-impl v0.8.4\n   Compiling fluent-bundle v0.16.0\n   Compiling ghash v0.5.1\n   Compiling elliptic-curve v0.13.8\n   Compiling rust-embed v8.12.0\n   Compiling regex v1.13.1\n   Compiling primeorder v0.13.6\n   Compiling arc-swap v1.9.2\n   Compiling ta-plugin v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-plugin)\n   Compiling decision-gate v0.1.0 (https://github.com/Trusted-Autonomy/decision-gate?tag=v0.1.0#3813ad26)\n   Compiling poly1305 v0.8.0\n   Compiling futures-executor v0.3.34\n   Compiling aes v0.8.4\n   Compiling ctr v0.9.2\n   Compiling chacha20 v0.9.1\n   Compiling aes-gcm v0.10.3\n   Compiling chacha20poly1305 v0.10.1\n   Compiling futures v0.3.34\n   Compiling parking_lot v0.12.5\n   Compiling p256 v0.13.2\n   Compiling fluent v0.17.0\n   Compiling keccak v0.1.6\n   Compiling core-foundation v0.10.1\n   Compiling security-framework-sys v2.17.0\n   Compiling proc-macro-error-attr3 v3.1.0\n   Compiling security-framework v3.7.0\n   Compiling sha3 v0.10.9\n   Compiling hpke v0.12.0\n   Compiling proc-macro-error3 v3.1.0\n   Compiling i18n-embed v0.16.0\n   Compiling cookie-factory v0.3.3\n   Compiling salsa20 v0.10.2\n   Compiling pbkdf2 v0.12.2\n   Compiling kem v0.3.0-pre.0\n   Compiling secrecy v0.10.3\n   Compiling pin-project-internal v1.1.13\n   Compiling keyring-core v1.0.0\n   Compiling hybrid-array v0.2.3\n   Compiling nom v8.0.0\n   Compiling option-ext v0.2.0\n   Compiling strsim v0.11.1\n   Compiling bech32 v0.11.1\n   Compiling signature v2.2.0\n   Compiling io_tee v0.1.1\n   Compiling ed25519 v2.2.3\n   Compiling dirs-sys v0.4.1\n   Compiling scrypt v0.11.0\n   Compiling x25519-dalek v2.0.1\n   Compiling lazy_static v1.5.0\n   Compiling apple-native-keyring-store v1.0.2\n   Compiling crc32fast v1.5.1\n   Compiling i18n-embed-fl v0.10.1\n   Compiling keyring v4.1.6\n   Compiling dirs v5.0.1\n   Compiling ed25519-dalek v2.2.0\n   Compiling pin-project v1.1.13\n   Compiling ml-kem v0.2.3\n   Compiling adler2 v2.0.1\n   Compiling simd-adler32 v0.3.10\n   Compiling ta-lifecycle v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-lifecycle)\n   Compiling miniz_oxide v0.8.9\n   Compiling flate2 v1.1.9\n   Compiling age-core v0.12.0\n   Compiling ta-changeset v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-changeset)\n   Compiling age v0.12.1\n   Compiling ta-credentials v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-credentials)\n   Compiling ta-audit v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-audit)\n   Compiling ta-workspace v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-workspace)\n   Compiling ta-submit v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-submit)\n   Compiling ta-cleanup v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/a585ca65-5282-4623-91cd-967c07c4c91b/crates/ta-cleanup)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.76s\n     Running unittests src/lib.rs (target/debug/deps/ta_cleanup-f3c9a73673344015)\n     Running unittests src/lib.rs (target/debug/deps/ta_submit-370dd93a32b99328)\n     Running tests/git_open_review.rs (target/debug/deps/git_open_review-1726ecbad9c5a751)\n     Running tests/vcs_perforce_plugin.rs (target/debug/deps/vcs_perforce_plugin-cd7dd5067c805954)\n     Running tests/vcs_plugin_lifecycle.rs (target/debug/deps/vcs_plugin_lifecycle-57963194cf297e22)\n   Doc-tests ta_cleanup\n   Doc-tests ta_submit\n",
+    "tests": {
+      "passed": 301,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "run_index": 9,
+  "recomputed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "not chosen",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": false,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  },
+  "usage": {
+    "before": {
+      "plan_usage_pct": 17.0,
+      "budget_used_pct": 0.4,
+      "plan_captured_at": "2026-10-22T05:45:49Z",
+      "taken_at": "2026-10-22T05:45:51.542648Z"
+    },
+    "after": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 2.24,
+      "plan_captured_at": "2026-10-22T06:03:24Z",
+      "taken_at": "2026-10-22T06:03:43.031755Z"
+    },
+    "plan_usage_pct_delta": 1.0,
+    "budget_used_pct_delta": 1.84,
+    "note": null
+  }
+}

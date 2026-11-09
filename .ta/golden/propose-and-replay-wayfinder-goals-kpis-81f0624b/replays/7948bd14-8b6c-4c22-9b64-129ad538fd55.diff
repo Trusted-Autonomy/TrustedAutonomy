@@ -1,0 +1,2685 @@
+--- a/apps/ta-cli/src/commands/draft.rs
++++ b/apps/ta-cli/src/commands/draft.rs
+@@ -4711,6 +4711,26 @@
+                     println!("     {line}");
+                 }
+                 println!("     Written to Wayfinder only when this draft is approved and applied.");
++            } else if ta_mcp_gateway::tools::wayfinder_task::is_planning_tool(&action.tool_name) {
++                // Goal/KPI proposals: show what will be created, its ref:<n>
++                // (refs are 0-based draft indexes, the list number is 1-based)
++                // and the external_id it will be created under.
++                println!(
++                    "  {}. [{}] {} ({})",
++                    i + 1,
++                    action.disposition,
++                    action.description,
++                    action.kind,
++                );
++                for line in ta_mcp_gateway::tools::wayfinder_task::review_lines(
++                    pkg.package_id,
++                    i,
++                    &action.tool_name,
++                    &action.parameters,
++                ) {
++                    println!("     {line}");
++                }
++                println!("     Sent to Wayfinder only when this draft is approved and applied.");
+             } else {
+                 println!(
+                     "  {}. [{}] {} ({})",
+--- a/apps/ta-cli/src/commands/draft_task_replay.rs
++++ b/apps/ta-cli/src/commands/draft_task_replay.rs
+@@ -25,20 +25,34 @@
+ //! - A project with no `[plan] backend = "wayfinder"` is skipped with a log
+ //!   line, never an error: the rest of the draft has already applied.
+ //!
++//! The four goal/KPI proposals (`ta_propose_goal_create`,
++//! `ta_propose_kpi_metric_create`, `ta_propose_kpi_datapoint_add`,
++//! `ta_propose_kpi_create`) replay in declared order. Each create carries
++//! `external_id = ta_draft:<draft_id>:<n>` (n = the action's index in the
++//! draft) so Wayfinder dedupes it. A parameter `ref:<n>` names an earlier
++//! goal or metric of the same draft and is resolved from the ids earlier
++//! steps returned, which the ledger records (`action_id<TAB>returned_id`) so
++//! a re-apply after a partial failure resolves refs without re-creating.
++//! A step whose dependency failed or was not approved is not attempted, and
++//! the failure names that dependency.
++//!
+ //! Reviewed wiki writes (`ta_wiki_create` / `ta_wiki_update`, see
+ //! `ta_mcp_gateway::tools::wiki`) take this same path, with the same
+ //! gating, reviewer dispositions and ledger. They use the wiki write
+ //! credential, resolved here at apply time only.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::io::Write as _;
+ use std::path::Path;
+ 
+ use ta_changeset::draft_package::{ArtifactDisposition, DraftPackage, DraftStatus, PendingAction};
+-use ta_mcp_gateway::tools::wayfinder_task::ProposeKind;
++use ta_mcp_gateway::tools::wayfinder_task::{
++    parse_ref, planning_external_id, ProposeKind, REF_PREFIX,
++};
+ use ta_mcp_gateway::tools::wiki;
+ use ta_mcp_gateway::GatewayConfig;
+ use ta_plan_wayfinder::{
++    AddKpiDatapointRequest, CreateGoalRequest, CreateKpiMetricRequest, CreateOrgKpiRequest,
+     CreateTaskRequest, WayfinderClient, STATUS_DONE, STATUS_ON_HOLD, STATUS_OPEN,
+ };
+ 
+@@ -66,7 +80,7 @@
+         );
+         return;
+     }
+-    replay_actions(config, &pkg.changes.pending_actions);
++    replay_actions(config, pkg.package_id, &pkg.changes.pending_actions);
+ }
+ 
+ /// Only an actually-applied draft's proposals may reach Wayfinder.
+@@ -74,10 +88,16 @@
+     matches!(status, DraftStatus::Applied { .. })
+ }
+ 
+-/// Replays every `ta_propose_task_*` action in `actions`. Actions of other
+-/// tools are ignored (they are not this module's to replay).
+-pub(crate) fn replay_actions(config: &GatewayConfig, actions: &[PendingAction]) -> ReplaySummary {
++/// Replays every `ta_propose_*` task, goal/KPI and wiki action in `actions`.
++/// Actions of other tools are ignored (they are not this module's to
++/// replay). `draft_id` derives the `external_id` of goal/KPI creates.
++pub(crate) fn replay_actions(
++    config: &GatewayConfig,
++    draft_id: impl std::fmt::Display,
++    actions: &[PendingAction],
++) -> ReplaySummary {
+     let mut summary = replay_task_actions(config, actions);
++    replay_planning_actions(config, &draft_id.to_string(), actions, &mut summary);
+     replay_wiki_actions(config, actions, &mut summary);
+     summary
+ }
+@@ -89,6 +109,9 @@
+         let Some(kind) = ProposeKind::from_tool_name(&action.tool_name) else {
+             continue;
+         };
++        if kind.is_planning() {
++            continue;
++        }
+         if matches!(
+             action.disposition,
+             ArtifactDisposition::Rejected | ArtifactDisposition::Discuss
+@@ -406,16 +429,320 @@
+             client.update_task_status(task_id, STATUS_DONE, None)?;
+             Ok(format!("task {task_id} marked done"))
+         }
++        ProposeKind::GoalCreate
++        | ProposeKind::KpiMetricCreate
++        | ProposeKind::KpiDatapointAdd
++        | ProposeKind::KpiCreate => anyhow::bail!(
++            "{} is a goal/KPI proposal and replays through the ordered planning path, not here",
++            kind.tool_name()
++        ),
++    }
++}
++
++/// Resolves a real id or `ref:<n>` parameter to a Wayfinder id.
++/// `unavailable` maps an action index to why it produced no id.
++fn resolve_id(
++    value: &str,
++    ids: &HashMap<usize, String>,
++    unavailable: &HashMap<usize, String>,
++) -> anyhow::Result<String> {
++    if !value.starts_with(REF_PREFIX) {
++        return Ok(value.to_string());
++    }
++    let Some(n) = parse_ref(value) else {
++        anyhow::bail!("`{value}` is not a valid reference (expected ref:<n>)");
++    };
++    if let Some(id) = ids.get(&n) {
++        return Ok(id.clone());
++    }
++    match unavailable.get(&n) {
++        Some(why) => anyhow::bail!("depends on {value} (action {n}), which {why}"),
++        None => anyhow::bail!(
++            "{value} does not name an earlier goal/KPI proposal that produced an id \
++             (action {n} is not a replayed goal or metric create)"
++        ),
++    }
++}
++
++/// One goal/KPI create or datapoint. Returns (summary, returned id).
++fn replay_planning_one(
++    client: &WayfinderClient,
++    kind: ProposeKind,
++    p: &serde_json::Value,
++    external_id: String,
++    ids: &HashMap<usize, String>,
++    unavailable: &HashMap<usize, String>,
++) -> anyhow::Result<(String, String)> {
++    let num = |key: &str| -> anyhow::Result<f64> {
++        p.get(key)
++            .and_then(|v| v.as_f64())
++            .ok_or_else(|| anyhow::anyhow!("pending action is missing numeric parameter `{key}`"))
++    };
++    let status = |r: &ta_plan_wayfinder::CreatedResource| {
++        if r.created {
++            "created"
++        } else {
++            "already existed (idempotent repeat)"
++        }
++    };
++    match kind {
++        ProposeKind::GoalCreate => {
++            let parent = match str_param(p, "parent_goal_id") {
++                Some(v) => Some(resolve_id(v, ids, unavailable)?),
++                None => None,
++            };
++            let name = required(p, "name")?;
++            let r = client.create_goal(&CreateGoalRequest {
++                name: name.to_string(),
++                description: str_param(p, "description").map(str::to_string),
++                kind: required(p, "kind")?.to_string(),
++                parent_goal_id: parent,
++                target_date: str_param(p, "target_date").map(str::to_string),
++                external_id: Some(external_id.clone()),
++            })?;
++            Ok((
++                format!(
++                    "goal {} \"{name}\" {} (external_id {external_id})",
++                    r.id,
++                    status(&r)
++                ),
++                r.id,
++            ))
++        }
++        ProposeKind::KpiMetricCreate => {
++            let goal_id = resolve_id(required(p, "goal_id")?, ids, unavailable)?;
++            let label = required(p, "label")?;
++            let r = client.create_kpi_metric(
++                &goal_id,
++                &CreateKpiMetricRequest {
++                    label: label.to_string(),
++                    unit: required(p, "unit")?.to_string(),
++                    target: num("target")?,
++                    cadence: required(p, "cadence")?.to_string(),
++                    kind: required(p, "kind")?.to_string(),
++                    aggregation: required(p, "aggregation")?.to_string(),
++                    require_gate: p
++                        .get("require_gate")
++                        .and_then(|v| v.as_bool())
++                        .unwrap_or(false),
++                    weight: p.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
++                    external_id: Some(external_id.clone()),
++                },
++            )?;
++            Ok((
++                format!(
++                    "KPI metric {} \"{label}\" on goal {goal_id} {} (external_id {external_id})",
++                    r.id,
++                    status(&r)
++                ),
++                r.id,
++            ))
++        }
++        ProposeKind::KpiDatapointAdd => {
++            let metric_id = resolve_id(required(p, "metric_id")?, ids, unavailable)?;
++            let value = num("value")?;
++            let r = client.add_kpi_datapoint(
++                &metric_id,
++                &AddKpiDatapointRequest {
++                    value,
++                    source: str_param(p, "source").unwrap_or("manual").to_string(),
++                    external_id: Some(external_id.clone()),
++                },
++            )?;
++            Ok((
++                format!(
++                    "datapoint {value} on metric {metric_id} {} (external_id {external_id})",
++                    status(&r)
++                ),
++                r.id,
++            ))
++        }
++        ProposeKind::KpiCreate => {
++            let label = required(p, "label")?;
++            let r = client.create_org_kpi(&CreateOrgKpiRequest {
++                project_id: str_param(p, "project_id").map(str::to_string),
++                label: label.to_string(),
++                description: str_param(p, "description").unwrap_or("").to_string(),
++                weight: p.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
++                created_by: str_param(p, "created_by")
++                    .unwrap_or(ta_mcp_gateway::tools::wayfinder_task::KPI_CREATED_BY)
++                    .to_string(),
++                source_ref: str_param(p, "source_ref").map(str::to_string),
++                external_id: Some(external_id.clone()),
++            })?;
++            Ok((
++                format!(
++                    "org KPI {} \"{label}\" {} (external_id {external_id})",
++                    r.id,
++                    status(&r)
++                ),
++                r.id,
++            ))
++        }
++        _ => anyhow::bail!("{} is not a goal/KPI proposal", kind.tool_name()),
++    }
++}
++
++/// Replays the goal/KPI proposals in declared order. See the module docs.
++fn replay_planning_actions(
++    config: &GatewayConfig,
++    draft_id: &str,
++    actions: &[PendingAction],
++    summary: &mut ReplaySummary,
++) {
++    let ours: Vec<(usize, ProposeKind, &PendingAction)> = actions
++        .iter()
++        .enumerate()
++        .filter_map(|(i, a)| {
++            ProposeKind::from_tool_name(&a.tool_name)
++                .filter(|k| k.is_planning())
++                .map(|k| (i, k, a))
++        })
++        .collect();
++    if ours.is_empty() {
++        return;
++    }
++    let ledger_path = config.workspace_root.join(".ta").join(LEDGER_FILE);
++    let ledger = read_ledger_ids(&ledger_path);
++
++    let approved = |a: &PendingAction| {
++        !matches!(
++            a.disposition,
++            ArtifactDisposition::Rejected | ArtifactDisposition::Discuss
++        )
++    };
++    let needs_client = ours
++        .iter()
++        .any(|(_, _, a)| approved(a) && !ledger.contains_key(&a.action_id.to_string()));
++    let client = if needs_client {
++        match load_client(config, ours.len()) {
++            Some(c) => Some(c),
++            None => {
++                summary.backend_unavailable = true;
++                return;
++            }
++        }
++    } else {
++        None
++    };
++
++    let mut ids: HashMap<usize, String> = HashMap::new();
++    let mut unavailable: HashMap<usize, String> = HashMap::new();
++    let (mut replayed, mut failed, mut already) = (0usize, 0usize, 0usize);
++
++    for (index, kind, action) in ours {
++        let key = action.action_id.to_string();
++        if !approved(action) {
++            tracing::info!(
++                action_id = %action.action_id,
++                tool_name = %action.tool_name,
++                disposition = %action.disposition,
++                "not replaying goal/KPI proposal: reviewer did not approve this action"
++            );
++            summary.skipped_by_reviewer += 1;
++            unavailable.insert(index, "the reviewer did not approve".to_string());
++            continue;
++        }
++        if let Some(returned) = ledger.get(&key) {
++            tracing::info!(
++                action_id = %action.action_id,
++                tool_name = %action.tool_name,
++                index,
++                "skipping goal/KPI proposal: already replayed against Wayfinder (ledger hit)"
++            );
++            already += 1;
++            if let Some(id) = returned
++                .as_ref()
++                .filter(|_| kind != ProposeKind::KpiDatapointAdd)
++            {
++                ids.insert(index, id.clone());
++            }
++            continue;
++        }
++        let Some(client) = client.as_ref() else {
++            continue;
++        };
++        let external_id = planning_external_id(draft_id, index);
++        match replay_planning_one(
++            client,
++            kind,
++            &action.parameters,
++            external_id,
++            &ids,
++            &unavailable,
++        ) {
++            Ok((what, id)) => {
++                println!("  [applied] Wayfinder: {what}");
++                replayed += 1;
++                if let Err(e) = append_ledger(&ledger_path, &format!("{key}\t{id}")) {
++                    tracing::warn!(
++                        action_id = %action.action_id,
++                        tool_name = %action.tool_name,
++                        path = %ledger_path.display(),
++                        error = %e,
++                        "replayed goal/KPI proposal but could not record its id in the replay \
++                         ledger; a re-apply repeats it under the same external_id (safe) but \
++                         later ref:<n> steps need the ledger"
++                    );
++                }
++                ids.insert(index, id);
++            }
++            Err(e) => {
++                failed += 1;
++                unavailable.insert(index, format!("failed ({})", action.tool_name));
++                tracing::warn!(
++                    action_id = %action.action_id,
++                    tool_name = %action.tool_name,
++                    index,
++                    error = %e,
++                    "failed to replay approved goal/KPI proposal against Wayfinder"
++                );
++                eprintln!(
++                    "  [failed] Wayfinder {} (draft action {index}, ref:{index}): {e}\n           \
++                     Steps that reference ref:{index} were not attempted. The rest of the draft \
++                     is applied. Fix the cause above, then re-run `ta draft apply` for this \
++                     draft (finished steps are not repeated), or make the change in Wayfinder \
++                     by hand.",
++                    action.tool_name,
++                );
++            }
++        }
++    }
++
++    summary.replayed += replayed;
++    summary.failed += failed;
++    summary.already_replayed += already;
++    if replayed + failed + already > 0 {
++        println!(
++            "  Wayfinder goal/KPI proposals: {replayed} applied, {failed} failed, {already} already applied earlier"
++        );
+     }
+ }
+ 
++/// Ledger lines are `action_id` or `action_id<TAB>returned_id`; this reads
++/// only the action ids.
+ fn read_ledger(path: &Path) -> HashSet<String> {
++    read_ledger_ids(path).into_keys().collect()
++}
++
++/// action id -> id Wayfinder returned (None for task/wiki lines, which
++/// record no id).
++fn read_ledger_ids(path: &Path) -> HashMap<String, Option<String>> {
+     std::fs::read_to_string(path)
+         .map(|s| {
+             s.lines()
+                 .map(str::trim)
+                 .filter(|l| !l.is_empty())
+-                .map(str::to_string)
++                .map(|l| {
++                    let mut parts = l.splitn(2, '\t');
++                    let action = parts.next().unwrap_or("").trim().to_string();
++                    let id = parts
++                        .next()
++                        .map(str::trim)
++                        .filter(|i| !i.is_empty())
++                        .map(str::to_string);
++                    (action, id)
++                })
+                 .collect()
+         })
+         .unwrap_or_default()
+@@ -439,6 +766,8 @@
+     use ta_changeset::draft_package::{ActionKind, ApplyProvenance};
+     use uuid::Uuid;
+ 
++    const TEST_DRAFT: &str = "d0d0d0d0";
++
+     /// A `wiremock::MockServer` usable from synchronous tests:
+     /// `WayfinderClient` is `reqwest::blocking`, which panics inside an
+     /// existing tokio runtime, so the mock server gets its own runtime.
+@@ -474,6 +803,16 @@
+             );
+         }
+ 
++        /// Answers `POST <route>` with `status` and `body`.
++        fn post(&self, route: &str, status: u16, body: serde_json::Value) {
++            self.runtime.block_on(
++                wiremock::Mock::given(wiremock::matchers::method("POST"))
++                    .and(wiremock::matchers::path(route))
++                    .respond_with(wiremock::ResponseTemplate::new(status).set_body_json(body))
++                    .mount(&self.server),
++            );
++        }
++
+         /// (method, path, body) of every request received, in order.
+         fn requests(&self) -> Vec<(String, String, serde_json::Value)> {
+             self.runtime
+@@ -547,7 +886,7 @@
+         let mock = BlockingMockServer::start();
+         mock.respond_all_with_task(response_task_id);
+         write_wayfinder_plan_config(&config, &mock.server.uri());
+-        let summary = replay_actions(&config, actions);
++        let summary = replay_actions(&config, TEST_DRAFT, actions);
+         (summary, mock.requests())
+     }
+ 
+@@ -780,9 +1119,9 @@
+             ),
+         ];
+ 
+-        let first = replay_actions(&config, &actions);
++        let first = replay_actions(&config, TEST_DRAFT, &actions);
+         assert_eq!(first.replayed, 2);
+-        let second = replay_actions(&config, &actions);
++        let second = replay_actions(&config, TEST_DRAFT, &actions);
+         assert_eq!(second.replayed, 0);
+         assert_eq!(second.already_replayed, 2);
+         assert_eq!(
+@@ -811,7 +1150,7 @@
+             serde_json::json!({"task_id": "good"}),
+         );
+ 
+-        let s = replay_actions(&config, &[failing.clone(), ok.clone()]);
++        let s = replay_actions(&config, TEST_DRAFT, &[failing.clone(), ok.clone()]);
+         assert_eq!(s.failed, 1);
+         assert_eq!(s.replayed, 1);
+         let ledger = read_ledger(&config.workspace_root.join(".ta").join(LEDGER_FILE));
+@@ -843,6 +1182,7 @@
+         let (_dir, config) = project();
+         let s = replay_actions(
+             &config,
++            TEST_DRAFT,
+             &[action(
+                 ProposeKind::Complete,
+                 serde_json::json!({"task_id": "wf-1"}),
+@@ -855,7 +1195,7 @@
+     #[test]
+     fn no_task_proposals_means_no_backend_lookup_or_calls() {
+         let (_dir, config) = project();
+-        let s = replay_actions(&config, &[]);
++        let s = replay_actions(&config, TEST_DRAFT, &[]);
+         assert_eq!(s, ReplaySummary::default());
+     }
+ 
+@@ -916,7 +1256,7 @@
+         assert!(mock.requests().is_empty());
+ 
+         let actions = state.lock().unwrap().pending_actions[&goal].clone();
+-        let s = replay_actions(&config, &actions);
++        let s = replay_actions(&config, TEST_DRAFT, &actions);
+         assert_eq!(s.replayed, 2);
+         assert_eq!(s.failed, 0);
+         let reqs = mock.requests();
+@@ -950,7 +1290,7 @@
+             wiki_action("ta_wiki_create", ArtifactDisposition::Rejected),
+             wiki_action("ta_wiki_update", ArtifactDisposition::Discuss),
+         ];
+-        let s = replay_actions(&config, &actions);
++        let s = replay_actions(&config, TEST_DRAFT, &actions);
+         assert_eq!(s.skipped_by_reviewer, 2);
+         assert_eq!((s.replayed, s.failed), (0, 0));
+     }
+@@ -961,7 +1301,7 @@
+         // later re-apply must be able to retry it.
+         let (_dir, config) = project();
+         let a = wiki_action("ta_wiki_create", ArtifactDisposition::Approved);
+-        let s = replay_actions(&config, std::slice::from_ref(&a));
++        let s = replay_actions(&config, TEST_DRAFT, std::slice::from_ref(&a));
+         assert_eq!(s.failed, 1);
+         let ledger = read_ledger(&config.workspace_root.join(".ta").join(LEDGER_FILE));
+         assert!(!ledger.contains(&a.action_id.to_string()));
+@@ -976,8 +1316,447 @@
+             &a.action_id.to_string(),
+         )
+         .unwrap();
+-        let s = replay_actions(&config, std::slice::from_ref(&a));
++        let s = replay_actions(&config, TEST_DRAFT, std::slice::from_ref(&a));
+         assert_eq!(s.already_replayed, 1);
+         assert_eq!((s.replayed, s.failed), (0, 0));
+     }
++
++    // ── goal / KPI planning proposals ──
++
++    fn goal_a(name: &str, parent: serde_json::Value) -> PendingAction {
++        action(
++            ProposeKind::GoalCreate,
++            serde_json::json!({"name": name, "description": null, "kind": "objective",
++                "parent_goal_id": parent, "target_date": "2026-12-31"}),
++        )
++    }
++
++    fn metric_a(goal_id: &str, kind: &str) -> PendingAction {
++        action(
++            ProposeKind::KpiMetricCreate,
++            serde_json::json!({"goal_id": goal_id, "label": "Signups", "unit": "users",
++                "target": 100.0, "cadence": "weekly", "kind": kind, "aggregation": "sum",
++                "require_gate": false, "weight": 1.0}),
++        )
++    }
++
++    fn dp_a(metric_id: &str) -> PendingAction {
++        action(
++            ProposeKind::KpiDatapointAdd,
++            serde_json::json!({"metric_id": metric_id, "value": 42.0, "source": "manual"}),
++        )
++    }
++
++    fn org_kpi_a() -> PendingAction {
++        action(
++            ProposeKind::KpiCreate,
++            serde_json::json!({"project_id": null, "label": "Revenue", "description": "",
++                "weight": 1.0, "created_by": "trusted-autonomy", "source_ref": null}),
++        )
++    }
++
++    fn mount_happy_routes(mock: &BlockingMockServer) {
++        mock.post(
++            "/api/projects/proj-1/goals",
++            201,
++            serde_json::json!({"id": "g-1"}),
++        );
++        mock.post(
++            "/api/projects/proj-1/goals/g-1/kpi-metrics",
++            201,
++            serde_json::json!({"id": "m-1"}),
++        );
++        mock.post(
++            "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
++            201,
++            serde_json::json!({"id": "d-1"}),
++        );
++        mock.post(
++            "/api/orgs/org-1/kpis",
++            201,
++            serde_json::json!({"id": "k-1"}),
++        );
++    }
++
++    #[test]
++    fn planning_chain_replays_in_order_with_refs_paths_bodies_and_external_ids() {
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        mount_happy_routes(&mock);
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        let actions = [
++            goal_a("Grow", serde_json::Value::Null),
++            metric_a("ref:0", "external"),
++            dp_a("ref:1"),
++            org_kpi_a(),
++        ];
++        let s = replay_actions(&config, TEST_DRAFT, &actions);
++        assert_eq!((s.replayed, s.failed), (4, 0), "{s:?}");
++        let reqs = mock.requests();
++        assert_eq!(reqs.len(), 4);
++        assert_eq!(
++            reqs[0],
++            req(
++                "POST",
++                "/api/projects/proj-1/goals",
++                serde_json::json!({"name": "Grow", "kind": "objective",
++                    "target_date": "2026-12-31", "external_id": "ta_draft:d0d0d0d0:0"})
++            )
++        );
++        assert_eq!(reqs[1].1, "/api/projects/proj-1/goals/g-1/kpi-metrics");
++        assert_eq!(reqs[1].2["external_id"], "ta_draft:d0d0d0d0:1");
++        assert_eq!(reqs[1].2["target"], 100.0);
++        assert_eq!(reqs[1].2["cadence"], "weekly");
++        assert_eq!(reqs[1].2["require_gate"], false);
++        assert_eq!(
++            reqs[2],
++            req(
++                "POST",
++                "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
++                serde_json::json!({"value": 42.0, "source": "manual",
++                    "external_id": "ta_draft:d0d0d0d0:2"})
++            )
++        );
++        assert_eq!(reqs[3].1, "/api/orgs/org-1/kpis");
++        assert_eq!(reqs[3].2["external_id"], "ta_draft:d0d0d0d0:3");
++        assert!(reqs[3].2["project_id"].is_null());
++        assert_eq!(reqs[3].2["created_by"], "trusted-autonomy");
++    }
++
++    #[test]
++    fn external_id_index_counts_every_action_in_the_draft() {
++        // A task proposal at index 0 shifts the goal to index 1.
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        mount_happy_routes(&mock);
++        mock.runtime.block_on(
++            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
++                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
++                    serde_json::json!({"id": "wf-1", "status": "done", "hold_reason": null,
++                        "external_id": null, "updated_at": "1"}),
++                ))
++                .mount(&mock.server),
++        );
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        let actions = [
++            action(
++                ProposeKind::Complete,
++                serde_json::json!({"task_id": "wf-1"}),
++            ),
++            goal_a("Grow", serde_json::Value::Null),
++            metric_a("ref:1", "external"),
++        ];
++        let s = replay_actions(&config, TEST_DRAFT, &actions);
++        assert_eq!((s.replayed, s.failed), (3, 0), "{s:?}");
++        let posts: Vec<_> = mock
++            .requests()
++            .into_iter()
++            .filter(|r| r.0 == "POST")
++            .collect();
++        assert_eq!(posts[0].2["external_id"], "ta_draft:d0d0d0d0:1");
++        assert_eq!(posts[1].2["external_id"], "ta_draft:d0d0d0d0:2");
++        assert_eq!(posts[1].1, "/api/projects/proj-1/goals/g-1/kpi-metrics");
++    }
++
++    #[test]
++    fn parent_goal_ref_resolves() {
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        mount_happy_routes(&mock);
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        let actions = [
++            goal_a("Parent", serde_json::Value::Null),
++            goal_a("Child", serde_json::json!("ref:0")),
++        ];
++        replay_actions(&config, TEST_DRAFT, &actions);
++        assert_eq!(mock.requests()[1].2["parent_goal_id"], "g-1");
++    }
++
++    #[test]
++    fn reapply_is_idempotent_and_records_returned_ids() {
++        let (dir, config) = project();
++        let mock = BlockingMockServer::start();
++        mount_happy_routes(&mock);
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        let actions = [
++            goal_a("Grow", serde_json::Value::Null),
++            metric_a("ref:0", "external"),
++        ];
++        replay_actions(&config, TEST_DRAFT, &actions);
++        let ledger = std::fs::read_to_string(dir.path().join(".ta").join(LEDGER_FILE)).unwrap();
++        assert!(
++            ledger.contains(&format!("{}\tg-1", actions[0].action_id)),
++            "{ledger}"
++        );
++        let again = replay_actions(&config, TEST_DRAFT, &actions);
++        assert_eq!(
++            (again.replayed, again.failed, again.already_replayed),
++            (0, 0, 2)
++        );
++        assert_eq!(mock.requests().len(), 2, "nothing was re-sent");
++    }
++
++    #[test]
++    fn partial_failure_blocks_dependants_by_name_then_reapply_finishes() {
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        // Goal succeeds, the metric is rejected with a 500.
++        mock.post(
++            "/api/projects/proj-1/goals",
++            201,
++            serde_json::json!({"id": "g-1"}),
++        );
++        mock.post(
++            "/api/projects/proj-1/goals/g-1/kpi-metrics",
++            500,
++            serde_json::json!({"error": "boom"}),
++        );
++        let actions = [
++            goal_a("Grow", serde_json::Value::Null),
++            metric_a("ref:0", "external"),
++            dp_a("ref:1"),
++            org_kpi_a(),
++        ];
++        mock.post(
++            "/api/orgs/org-1/kpis",
++            201,
++            serde_json::json!({"id": "k-1"}),
++        );
++        let s = replay_actions(&config, TEST_DRAFT, &actions);
++        // goal + independent org KPI applied; metric failed; datapoint blocked.
++        assert_eq!((s.replayed, s.failed), (2, 2), "{s:?}");
++        assert!(
++            !mock.requests().iter().any(|r| r.1.contains("datapoints")),
++            "the dependant must not be attempted"
++        );
++
++        // Fix the server, re-apply: only the two failed steps run, and the
++        // goal ref still resolves from the ledger.
++        let mock2 = BlockingMockServer::start();
++        mock2.post(
++            "/api/projects/proj-1/goals/g-1/kpi-metrics",
++            201,
++            serde_json::json!({"id": "m-1"}),
++        );
++        mock2.post(
++            "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
++            201,
++            serde_json::json!({"id": "d-1"}),
++        );
++        let wf_toml = config.workspace_root.join(".ta/workflow.toml");
++        let text = std::fs::read_to_string(&wf_toml).unwrap();
++        std::fs::write(
++            &wf_toml,
++            text.replace(&mock.server.uri(), &mock2.server.uri()),
++        )
++        .unwrap();
++        let s2 = replay_actions(&config, TEST_DRAFT, &actions);
++        assert_eq!(
++            (s2.replayed, s2.failed, s2.already_replayed),
++            (2, 0, 2),
++            "{s2:?}"
++        );
++        let reqs = mock2.requests();
++        assert_eq!(reqs.len(), 2);
++        assert_eq!(reqs[0].1, "/api/projects/proj-1/goals/g-1/kpi-metrics");
++        assert_eq!(reqs[0].2["external_id"], "ta_draft:d0d0d0d0:1");
++        assert_eq!(reqs[1].1, "/api/projects/proj-1/kpi-metrics/m-1/datapoints");
++    }
++
++    #[test]
++    fn a_rejected_goal_blocks_what_references_it() {
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        mount_happy_routes(&mock);
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        let mut goal = goal_a("Grow", serde_json::Value::Null);
++        goal.disposition = ArtifactDisposition::Rejected;
++        let actions = [goal, metric_a("ref:0", "external")];
++        let s = replay_actions(&config, TEST_DRAFT, &actions);
++        assert_eq!(s.skipped_by_reviewer, 1);
++        assert_eq!(s.failed, 1);
++        assert_eq!(s.replayed, 0);
++        assert!(mock.requests().is_empty());
++    }
++
++    #[test]
++    fn resolve_id_error_names_the_failed_dependency() {
++        let ids = HashMap::new();
++        let mut unavailable = HashMap::new();
++        unavailable.insert(0, "failed (ta_propose_goal_create)".to_string());
++        let e = resolve_id("ref:0", &ids, &unavailable)
++            .unwrap_err()
++            .to_string();
++        assert!(
++            e.contains("ref:0") && e.contains("failed (ta_propose_goal_create)"),
++            "{e}"
++        );
++        assert!(resolve_id("ref:9", &ids, &unavailable).is_err());
++        assert!(resolve_id("ref:x", &ids, &unavailable).is_err());
++        assert_eq!(resolve_id("g-7", &ids, &unavailable).unwrap(), "g-7");
++    }
++
++    #[test]
++    fn forbidden_403_names_the_missing_right() {
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        mock.post(
++            "/api/projects/proj-1/goals",
++            403,
++            serde_json::json!({"error": "no"}),
++        );
++        mock.post(
++            "/api/orgs/org-1/kpis",
++            403,
++            serde_json::json!({"error": "no"}),
++        );
++        let s = replay_actions(
++            &config,
++            TEST_DRAFT,
++            &[goal_a("Grow", serde_json::Value::Null), org_kpi_a()],
++        );
++        assert_eq!((s.replayed, s.failed), (0, 2));
++        // The typed messages are asserted in ta-plan-wayfinder; here check
++        // they survive the anyhow conversion used by replay.
++        let client = {
++            let raw = ta_submit::WorkflowConfig::load_or_default(
++                &config.workspace_root.join(".ta").join("workflow.toml"),
++            );
++            let mut cc = ta_credentials::CredentialsConfig::for_project(&config.workspace_root);
++            cc.use_keychain = false;
++            let wf = ta_plan_wayfinder::WayfinderPlanConfig::load_with_credentials_config(
++                raw.plan.wayfinder.as_ref().unwrap(),
++                &cc,
++            )
++            .unwrap();
++            WayfinderClient::new(&wf).unwrap()
++        };
++        let ids = HashMap::new();
++        let none = HashMap::new();
++        let e = replay_planning_one(
++            &client,
++            ProposeKind::GoalCreate,
++            &goal_a("Grow", serde_json::Value::Null).parameters,
++            "ta_draft:x:0".into(),
++            &ids,
++            &none,
++        )
++        .unwrap_err()
++        .to_string();
++        assert!(e.contains("tasks:write") && e.contains("403"), "{e}");
++        let e = replay_planning_one(
++            &client,
++            ProposeKind::KpiCreate,
++            &org_kpi_a().parameters,
++            "ta_draft:x:3".into(),
++            &ids,
++            &none,
++        )
++        .unwrap_err()
++        .to_string();
++        assert!(e.contains("kpis:manage"), "{e}");
++    }
++
++    #[test]
++    fn datapoint_on_task_count_metric_surfaces_the_conflict_plainly() {
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        mock.post(
++            "/api/projects/proj-1/kpi-metrics/m-9/datapoints",
++            409,
++            serde_json::json!({"error": "task_count metrics derive from tasks; datapoints are not accepted"}),
++        );
++        let s = replay_actions(&config, TEST_DRAFT, &[dp_a("m-9")]);
++        assert_eq!((s.replayed, s.failed), (0, 1));
++        let client = {
++            let raw = ta_submit::WorkflowConfig::load_or_default(
++                &config.workspace_root.join(".ta").join("workflow.toml"),
++            );
++            let mut cc = ta_credentials::CredentialsConfig::for_project(&config.workspace_root);
++            cc.use_keychain = false;
++            let wf = ta_plan_wayfinder::WayfinderPlanConfig::load_with_credentials_config(
++                raw.plan.wayfinder.as_ref().unwrap(),
++                &cc,
++            )
++            .unwrap();
++            WayfinderClient::new(&wf).unwrap()
++        };
++        let e = replay_planning_one(
++            &client,
++            ProposeKind::KpiDatapointAdd,
++            &dp_a("m-9").parameters,
++            "ta_draft:x:0".into(),
++            &HashMap::new(),
++            &HashMap::new(),
++        )
++        .unwrap_err()
++        .to_string();
++        assert!(e.contains("conflict") && e.contains("task_count"), "{e}");
++    }
++
++    #[test]
++    fn captured_proposals_replay_end_to_end() {
++        // Capture through the real gateway handlers, then replay what they
++        // stored: proves tool names, parameters and replay agree.
++        use ta_mcp_gateway::tools::wayfinder_task as wt;
++        let (_dir, config) = project();
++        let mock = BlockingMockServer::start();
++        mount_happy_routes(&mock);
++        write_wayfinder_plan_config(&config, &mock.server.uri());
++        let mut gw = GatewayConfig::for_project(&config.workspace_root);
++        gw.credential_vault_use_keychain = false;
++        let state = std::sync::Arc::new(std::sync::Mutex::new(
++            ta_mcp_gateway::server::GatewayState::new(gw).unwrap(),
++        ));
++        let goal = Uuid::new_v4();
++        let g = goal.to_string();
++        wt::handle_propose_goal_create(
++            &state,
++            wt::ProposeGoalCreateParams {
++                name: "Grow".into(),
++                description: None,
++                kind: "objective".into(),
++                parent_goal_id: None,
++                target_date: None,
++                goal_run_id: g.clone(),
++            },
++        )
++        .unwrap();
++        wt::handle_propose_kpi_metric_create(
++            &state,
++            wt::ProposeKpiMetricCreateParams {
++                goal_id: "ref:0".into(),
++                label: "Signups".into(),
++                unit: "users".into(),
++                target: 10.0,
++                cadence: "daily".into(),
++                kind: "external".into(),
++                aggregation: "latest".into(),
++                require_gate: Some(true),
++                weight: Some(2.0),
++                goal_run_id: g.clone(),
++            },
++        )
++        .unwrap();
++        wt::handle_propose_kpi_datapoint_add(
++            &state,
++            wt::ProposeKpiDatapointAddParams {
++                metric_id: "ref:1".into(),
++                value: 3.0,
++                source: None,
++                goal_run_id: g,
++            },
++        )
++        .unwrap();
++        let captured = state.lock().unwrap().pending_actions[&goal].clone();
++        let s = replay_actions(&config, TEST_DRAFT, &captured);
++        assert_eq!((s.replayed, s.failed), (3, 0), "{s:?}");
++        let reqs = mock.requests();
++        assert_eq!(reqs[1].2["require_gate"], true);
++        assert_eq!(reqs[1].2["weight"], 2.0);
++        assert_eq!(reqs[2].2["source"], "manual");
++    }
+ }
+--- a/crates/ta-goal/src/chat_mode.rs
++++ b/crates/ta-goal/src/chat_mode.rs
+@@ -341,11 +341,37 @@
+             "ta_wayfinder_kpi_datapoint_add",
+             "ta_propose_task_create",
+             "ta_propose_task_complete",
++            "ta_propose_goal_create",
++            "ta_propose_kpi_metric_create",
++            "ta_propose_kpi_datapoint_add",
++            "ta_propose_kpi_create",
+         ] {
+             assert!(!is_chat_mode_mcp_tool(forbidden), "{forbidden}");
+         }
+     }
+ 
++    /// Chat mode has no `ta_propose_*` tool at all.
++    #[test]
++    fn chat_mode_has_no_propose_tools() {
++        for tool in CHAT_MODE_MCP_TOOLS {
++            assert!(!tool.starts_with("ta_propose_"), "{tool}");
++        }
++        for t in [
++            "ta_propose_task_create",
++            "ta_propose_task_update",
++            "ta_propose_task_reassign",
++            "ta_propose_task_needs_revision",
++            "ta_propose_task_on_hold",
++            "ta_propose_task_complete",
++            "ta_propose_goal_create",
++            "ta_propose_kpi_metric_create",
++            "ta_propose_kpi_datapoint_add",
++            "ta_propose_kpi_create",
++        ] {
++            assert!(!is_chat_mode_mcp_tool(t), "{t}");
++        }
++    }
++
+     /// The profile itself must never contain a tool that mutates anything
+     /// outside chat scratch: goal/draft/plan/wiki-write/task/external
+     /// tools are all absent.
+--- a/crates/ta-goal/src/tool_surface.rs
++++ b/crates/ta-goal/src/tool_surface.rs
+@@ -88,6 +88,10 @@
+     // External actions and outcome proposals.
+     ("ta_external_action", ToolEffect::Mutating),
+     ("ta_propose_task_update", ToolEffect::Mutating),
++    ("ta_propose_goal_create", ToolEffect::Mutating),
++    ("ta_propose_kpi_metric_create", ToolEffect::Mutating),
++    ("ta_propose_kpi_datapoint_add", ToolEffect::Mutating),
++    ("ta_propose_kpi_create", ToolEffect::Mutating),
+     // Unreal Engine.
+     ("ue5_python_exec", ToolEffect::Mutating),
+     ("ue5_scene_query", ToolEffect::ReadOnly),
+@@ -398,6 +402,19 @@
+     }
+ 
+     #[test]
++    fn goal_and_kpi_proposals_are_mutating_and_not_chat_tools() {
++        for t in [
++            "ta_propose_goal_create",
++            "ta_propose_kpi_metric_create",
++            "ta_propose_kpi_datapoint_add",
++            "ta_propose_kpi_create",
++        ] {
++            assert_eq!(classify_mcp_tool(t), Some(ToolEffect::Mutating), "{t}");
++            assert!(!crate::chat_mode::is_chat_mode_mcp_tool(t), "{t}");
++        }
++    }
++
++    #[test]
+     fn wiki_writes_stay_mutating_and_denied_to_read_only_roles() {
+         for t in ["ta_wiki_create", "ta_wiki_update"] {
+             assert_eq!(classify_mcp_tool(t), Some(ToolEffect::Mutating), "{t}");
+--- a/crates/ta-mcp-gateway/src/server.rs
++++ b/crates/ta-mcp-gateway/src/server.rs
+@@ -2193,6 +2193,66 @@
+         );
+         tools::wayfinder_task::handle_propose_task_complete(&self.state, params)
+     }
++
++    #[tool(
++        description = "Propose creating a Wayfinder goal. Captured for human review in this goal's draft; the goal is created only if the draft is approved and applied. Returns `ref` (ref:<n>) so later proposals in the same draft can refer to it."
++    )]
++    fn ta_propose_goal_create(
++        &self,
++        Parameters(params): Parameters<tools::wayfinder_task::ProposeGoalCreateParams>,
++    ) -> Result<CallToolResult, McpError> {
++        self.audit(
++            "ta_propose_goal_create",
++            None,
++            params.goal_run_id.parse().ok(),
++        );
++        tools::wayfinder_task::handle_propose_goal_create(&self.state, params)
++    }
++
++    #[tool(
++        description = "Propose a KPI metric under a Wayfinder goal (a real goal id, or ref:<n> for a goal proposed earlier in this draft). Captured for human review; created only if the draft is approved and applied."
++    )]
++    fn ta_propose_kpi_metric_create(
++        &self,
++        Parameters(params): Parameters<tools::wayfinder_task::ProposeKpiMetricCreateParams>,
++    ) -> Result<CallToolResult, McpError> {
++        self.audit(
++            "ta_propose_kpi_metric_create",
++            None,
++            params.goal_run_id.parse().ok(),
++        );
++        tools::wayfinder_task::handle_propose_kpi_metric_create(&self.state, params)
++    }
++
++    #[tool(
++        description = "Propose recording a KPI datapoint on a Wayfinder metric (a real metric id, or ref:<n>). Only `external` metrics accept datapoints. Captured for human review; recorded only if the draft is approved and applied."
++    )]
++    fn ta_propose_kpi_datapoint_add(
++        &self,
++        Parameters(params): Parameters<tools::wayfinder_task::ProposeKpiDatapointAddParams>,
++    ) -> Result<CallToolResult, McpError> {
++        self.audit(
++            "ta_propose_kpi_datapoint_add",
++            None,
++            params.goal_run_id.parse().ok(),
++        );
++        tools::wayfinder_task::handle_propose_kpi_datapoint_add(&self.state, params)
++    }
++
++    #[tool(
++        description = "Propose an org-level Wayfinder KPI. Captured for human review; created only if the draft is approved and applied."
++    )]
++    fn ta_propose_kpi_create(
++        &self,
++        Parameters(params): Parameters<tools::wayfinder_task::ProposeKpiCreateParams>,
++    ) -> Result<CallToolResult, McpError> {
++        self.audit(
++            "ta_propose_kpi_create",
++            None,
++            params.goal_run_id.parse().ok(),
++        );
++        tools::wayfinder_task::handle_propose_kpi_create(&self.state, params)
++    }
+ }
+ 
+ // ── ServerHandler implementation ─────────────────────────────────
+@@ -2372,8 +2432,10 @@
+         //           ta_propose_task_create, ta_propose_task_reassign,
+         //           ta_propose_task_needs_revision, ta_propose_task_on_hold,
+         //           ta_propose_task_complete
++        //           ta_propose_goal_create, ta_propose_kpi_metric_create,
++        //           ta_propose_kpi_datapoint_add, ta_propose_kpi_create
+         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+-        assert_eq!(tools.len(), 65, "expected 65 tools, got: {:?}", names);
++        assert_eq!(tools.len(), 69, "expected 69 tools, got: {:?}", names);
+         for kind in crate::tools::wayfinder_task::ProposeKind::ALL {
+             assert!(
+                 names.iter().any(|n| n == kind.tool_name()),
+--- a/crates/ta-mcp-gateway/src/tools/wayfinder_task.rs
++++ b/crates/ta-mcp-gateway/src/tools/wayfinder_task.rs
+@@ -18,9 +18,17 @@
+ //! validates its input and appends a `PendingAction` to in-memory gateway
+ //! state; there is no HTTP client anywhere in this file.
+ //!
+-//! All six tools share one dispatcher, [`ProposeKind`], so the gateway side
++//! The same capture path also carries four planning proposals
++//! (`ta_propose_goal_create`, `ta_propose_kpi_metric_create`,
++//! `ta_propose_kpi_datapoint_add`, `ta_propose_kpi_create`). They may refer
++//! to a goal or metric proposed EARLIER IN THE SAME DRAFT with `ref:<n>`,
++//! where `n` is that earlier action's index in the draft (returned as `ref`
++//! by the tool that proposed it); replay resolves it from the ids the earlier
++//! step returned.
++//!
++//! All ten tools share one dispatcher, [`ProposeKind`], so the gateway side
+ //! (tool name, capture) and the replay side (`tool_name` -> what to call)
+-//! agree on a single closed set rather than six independent string
++//! agree on a single closed set rather than ten independent string
+ //! constants.
+ //!
+ //! Deliberately simpler than `ta_external_action`: no action-type
+@@ -60,16 +68,28 @@
+     OnHold,
+     /// Task done by review (`status = done`).
+     Complete,
++    /// New goal (`POST goals`, idempotent upsert by `external_id`).
++    GoalCreate,
++    /// New KPI metric under a goal (`POST goals/:id/kpi-metrics`).
++    KpiMetricCreate,
++    /// Datapoint on a KPI metric (`POST kpi-metrics/:id/datapoints`).
++    KpiDatapointAdd,
++    /// New org-level KPI (`POST /api/orgs/:org/kpis`).
++    KpiCreate,
+ }
+ 
+ impl ProposeKind {
+-    pub const ALL: [ProposeKind; 6] = [
++    pub const ALL: [ProposeKind; 10] = [
+         ProposeKind::Update,
+         ProposeKind::Create,
+         ProposeKind::Reassign,
+         ProposeKind::NeedsRevision,
+         ProposeKind::OnHold,
+         ProposeKind::Complete,
++        ProposeKind::GoalCreate,
++        ProposeKind::KpiMetricCreate,
++        ProposeKind::KpiDatapointAdd,
++        ProposeKind::KpiCreate,
+     ];
+ 
+     /// The MCP tool name, and the `tool_name` every `PendingAction` of this
+@@ -82,14 +102,35 @@
+             ProposeKind::NeedsRevision => "ta_propose_task_needs_revision",
+             ProposeKind::OnHold => "ta_propose_task_on_hold",
+             ProposeKind::Complete => "ta_propose_task_complete",
++            ProposeKind::GoalCreate => "ta_propose_goal_create",
++            ProposeKind::KpiMetricCreate => "ta_propose_kpi_metric_create",
++            ProposeKind::KpiDatapointAdd => "ta_propose_kpi_datapoint_add",
++            ProposeKind::KpiCreate => "ta_propose_kpi_create",
+         }
+     }
+ 
++    /// True for the four goal/KPI kinds, which replay in declared order with
++    /// a draft-derived `external_id` and may carry `ref:<n>` references.
++    pub const fn is_planning(self) -> bool {
++        matches!(
++            self,
++            ProposeKind::GoalCreate
++                | ProposeKind::KpiMetricCreate
++                | ProposeKind::KpiDatapointAdd
++                | ProposeKind::KpiCreate
++        )
++    }
++
+     pub fn from_tool_name(name: &str) -> Option<Self> {
+         Self::ALL.into_iter().find(|k| k.tool_name() == name)
+     }
+ }
+ 
++/// True when `name` is one of the four goal/KPI proposal tools.
++pub fn is_planning_tool(name: &str) -> bool {
++    ProposeKind::from_tool_name(name).is_some_and(ProposeKind::is_planning)
++}
++
+ /// Kept for compatibility with existing callers: the `ta_propose_task_update`
+ /// tool name.
+ pub const TOOL_NAME: &str = ProposeKind::Update.tool_name();
+@@ -102,7 +143,45 @@
+ pub const MAX_TITLE_LEN: usize = 500;
+ pub const MAX_DESCRIPTION_LEN: usize = 10_000;
+ pub const MAX_REASON_LEN: usize = 2_000;
++pub const MAX_GOAL_KIND_LEN: usize = 32;
++pub const MAX_LABEL_LEN: usize = 200;
++pub const MAX_UNIT_LEN: usize = 64;
++pub const MAX_SOURCE_LEN: usize = 64;
++/// Numbers sent to Wayfinder (targets, weights, datapoint values) must be
++/// finite and within +-this bound, matching Wayfinder's own datapoint limit.
++pub const MAX_ABS_VALUE: f64 = 1e12;
+ 
++/// Closed lists, mirroring `wayfinder-core` (`MetricCadence`, `MetricKind`,
++/// `MetricAggregation`).
++pub const METRIC_CADENCES: [&str; 4] = ["none", "daily", "weekly", "monthly"];
++pub const METRIC_KINDS: [&str; 2] = ["task_count", "external"];
++pub const METRIC_AGGREGATIONS: [&str; 2] = ["sum", "latest"];
++
++/// Datapoints on a metric of this kind are refused by Wayfinder (409): the
++/// progress derives from tasks.
++pub const TASK_COUNT_KIND: &str = "task_count";
++
++/// `created_by` sent with every proposed org KPI.
++pub const KPI_CREATED_BY: &str = "trusted-autonomy";
++
++/// Prefix of a symbolic reference to an earlier proposal in the same draft.
++pub const REF_PREFIX: &str = "ref:";
++
++/// The `external_id` a planning proposal is created under: the draft id plus
++/// the action's index in the draft, so re-applying is idempotent.
++pub fn planning_external_id(draft_id: impl std::fmt::Display, index: usize) -> String {
++    format!("ta_draft:{draft_id}:{index}")
++}
++
++/// `Some(n)` when `value` is a well-formed `ref:<n>`.
++pub fn parse_ref(value: &str) -> Option<usize> {
++    let digits = value.strip_prefix(REF_PREFIX)?;
++    if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    digits.parse().ok()
++}
++
+ /// Prefix of the `external_id` derived when a create (or an on-hold
+ /// precursor) proposal carries none. Deterministic in `goal_run_id` +
+ /// `action_id`, so re-applying the same draft upserts the same task rather
+@@ -206,6 +285,83 @@
+     pub goal_run_id: String,
+ }
+ 
++#[derive(Debug, Clone, Deserialize, JsonSchema)]
++pub struct ProposeGoalCreateParams {
++    /// Goal name (required, single line).
++    pub name: String,
++    #[serde(default)]
++    pub description: Option<String>,
++    /// Goal kind: a lowercase slug of at most 32 characters (letters,
++    /// digits, '_' or '-'), e.g. "objective".
++    pub kind: String,
++    /// Optional parent: a real Wayfinder goal id, or `ref:<n>` for a goal
++    /// proposed earlier in this draft.
++    #[serde(default)]
++    pub parent_goal_id: Option<String>,
++    /// Optional target date, `YYYY-MM-DD`.
++    #[serde(default)]
++    pub target_date: Option<String>,
++    /// The UUID of the goal run this proposal is part of.
++    pub goal_run_id: String,
++}
++
++#[derive(Debug, Clone, Deserialize, JsonSchema)]
++pub struct ProposeKpiMetricCreateParams {
++    /// The goal the metric counts toward: a real Wayfinder goal id, or
++    /// `ref:<n>` for a goal proposed earlier in this draft.
++    pub goal_id: String,
++    pub label: String,
++    pub unit: String,
++    /// Finite number within +-1e12.
++    pub target: f64,
++    /// One of none, daily, weekly, monthly.
++    pub cadence: String,
++    /// One of task_count, external. Datapoints can only be added to
++    /// `external` metrics.
++    pub kind: String,
++    /// One of sum, latest.
++    pub aggregation: String,
++    #[serde(default)]
++    pub require_gate: Option<bool>,
++    /// Finite number within +-1e12; defaults to 1.0.
++    #[serde(default)]
++    pub weight: Option<f64>,
++    /// The UUID of the goal run this proposal is part of.
++    pub goal_run_id: String,
++}
++
++#[derive(Debug, Clone, Deserialize, JsonSchema)]
++pub struct ProposeKpiDatapointAddParams {
++    /// The metric to record on: a real Wayfinder metric id, or `ref:<n>` for
++    /// a metric proposed earlier in this draft.
++    pub metric_id: String,
++    /// Finite number within +-1e12.
++    pub value: f64,
++    /// Where the value came from; defaults to "manual".
++    #[serde(default)]
++    pub source: Option<String>,
++    /// The UUID of the goal run this proposal is part of.
++    pub goal_run_id: String,
++}
++
++#[derive(Debug, Clone, Deserialize, JsonSchema)]
++pub struct ProposeKpiCreateParams {
++    pub label: String,
++    #[serde(default)]
++    pub description: Option<String>,
++    /// Finite number within +-1e12; defaults to 1.0.
++    #[serde(default)]
++    pub weight: Option<f64>,
++    /// Restrict the KPI to one project; omit for an org-wide KPI.
++    #[serde(default)]
++    pub project_id: Option<String>,
++    /// Optional reference to where the KPI came from.
++    #[serde(default)]
++    pub source_ref: Option<String>,
++    /// The UUID of the goal run this proposal is part of.
++    pub goal_run_id: String,
++}
++
+ /// Distinguishes a missing field (`None`) from an explicit `null`
+ /// (`Some(None)`). Used with `#[serde(default)]`.
+ fn present_nullable<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+@@ -323,6 +479,120 @@
+     }
+ }
+ 
++/// Finite and within +-[`MAX_ABS_VALUE`].
++fn validate_number(kind: ProposeKind, field: &str, value: f64) -> Result<(), McpError> {
++    if !value.is_finite() || value.abs() > MAX_ABS_VALUE {
++        return Err(invalid(
++            kind,
++            format!("{field} must be a finite number within +-1e12 (got {value})"),
++        ));
++    }
++    Ok(())
++}
++
++fn validate_choice(
++    kind: ProposeKind,
++    field: &str,
++    value: &str,
++    allowed: &[&str],
++) -> Result<(), McpError> {
++    if allowed.contains(&value) {
++        return Ok(());
++    }
++    Err(invalid(
++        kind,
++        format!(
++            "{field} {value:?} is not one of: {} (Wayfinder's closed list)",
++            allowed.join(", ")
++        ),
++    ))
++}
++
++/// Lowercase slug: letters, digits, '_' and '-', non-empty, at most `max`.
++fn validate_slug(kind: ProposeKind, field: &str, value: &str, max: usize) -> Result<(), McpError> {
++    if value.is_empty()
++        || value.len() > max
++        || !value
++            .chars()
++            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
++    {
++        return Err(invalid(
++            kind,
++            format!(
++                "{field} must be 1 to {max} lowercase ASCII letters, digits, '_' or '-' \
++                 (e.g. \"objective\")"
++            ),
++        ));
++    }
++    Ok(())
++}
++
++fn validate_date(kind: ProposeKind, field: &str, value: &str) -> Result<(), McpError> {
++    let ok = value.len() == 10 && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok();
++    if ok {
++        Ok(())
++    } else {
++        Err(invalid(
++            kind,
++            format!("{field} must be a real calendar date formatted YYYY-MM-DD (got {value:?})"),
++        ))
++    }
++}
++
++/// A Wayfinder id or a `ref:<n>` reference to an earlier proposal. Returns
++/// the referenced index for a reference.
++fn validate_id_or_ref(
++    kind: ProposeKind,
++    field: &str,
++    value: &str,
++) -> Result<Option<usize>, McpError> {
++    if value.starts_with(REF_PREFIX) {
++        return parse_ref(value).map(Some).ok_or_else(|| {
++            invalid(
++                kind,
++                format!(
++                    "{field} {value:?} is not a valid reference; use ref:<n> where n is the \
++                     index returned as `ref` by the earlier proposal (e.g. ref:0)"
++                ),
++            )
++        });
++    }
++    validate_id(kind, field, value, MAX_ID_LEN)?;
++    Ok(None)
++}
++
++/// A reference must point at an EARLIER action of the right tool. Returns
++/// that action so a caller can inspect its parameters.
++fn check_ref<'a>(
++    kind: ProposeKind,
++    field: &str,
++    index: usize,
++    existing: &'a [PendingAction],
++    expect: ProposeKind,
++) -> Result<&'a PendingAction, McpError> {
++    let Some(target) = existing.get(index) else {
++        return Err(invalid(
++            kind,
++            format!(
++                "{field} ref:{index} points at no earlier proposal (this draft has {} so far); \
++                 a reference must name an earlier proposal in the same draft",
++                existing.len()
++            ),
++        ));
++    };
++    if target.tool_name != expect.tool_name() {
++        return Err(invalid(
++            kind,
++            format!(
++                "{field} ref:{index} is a {} proposal, but this needs a {} proposal",
++                target.tool_name,
++                expect.tool_name()
++            ),
++        ));
++    }
++    Ok(target)
++}
++
+ fn parse_goal_id(kind: ProposeKind, raw: &str) -> Result<Uuid, McpError> {
+     Uuid::parse_str(raw).map_err(|e| invalid(kind, format!("goal_run_id is not a valid UUID: {e}")))
+ }
+@@ -348,7 +618,7 @@
+     result: serde_json::Value,
+ }
+ 
+-/// The single capture path for every `ta_propose_task_*` tool: stores a
++/// The single capture path for every `ta_propose_*` tool: stores a
+ /// `StateChanging`, `Pending` `PendingAction` under the goal. Never calls
+ /// out to Wayfinder.
+ fn capture(
+@@ -357,31 +627,49 @@
+     goal_run_id: &str,
+     build: impl FnOnce(Uuid, Uuid) -> Proposal,
+ ) -> Result<CallToolResult, McpError> {
++    capture_with(state, kind, goal_run_id, |goal_id, action_id, _| {
++        Ok(build(goal_id, action_id))
++    })
++}
++
++/// [`capture`] for proposals that need the goal's earlier proposals (to
++/// check `ref:<n>` references and to learn their own index). `build` runs
++/// under the state lock, so the index it sees is the index the action gets.
++fn capture_with(
++    state: &Arc<Mutex<GatewayState>>,
++    kind: ProposeKind,
++    goal_run_id: &str,
++    build: impl FnOnce(Uuid, Uuid, &[PendingAction]) -> Result<Proposal, McpError>,
++) -> Result<CallToolResult, McpError> {
+     let goal_id = parse_goal_id(kind, goal_run_id)?;
+     let action_id = Uuid::new_v4();
+-    let proposal = build(goal_id, action_id);
+ 
+-    let pending = PendingAction {
+-        action_id,
+-        tool_name: kind.tool_name().to_string(),
+-        parameters: proposal.parameters,
+-        kind: ActionKind::StateChanging,
+-        intercepted_at: Utc::now(),
+-        description: proposal.description,
+-        target_uri: Some(proposal.target_uri),
+-        disposition: ArtifactDisposition::Pending,
+-    };
+-
+-    {
++    let proposal = {
+         let mut state = state
+             .lock()
+             .map_err(|e| McpError::internal_error(format!("lock poisoned: {e}"), None))?;
++        let existing = state
++            .pending_actions
++            .get(&goal_id)
++            .map(Vec::as_slice)
++            .unwrap_or(&[]);
++        let proposal = build(goal_id, action_id, existing)?;
+         state
+             .pending_actions
+             .entry(goal_id)
+             .or_default()
+-            .push(pending);
+-    }
++            .push(PendingAction {
++                action_id,
++                tool_name: kind.tool_name().to_string(),
++                parameters: proposal.parameters.clone(),
++                kind: ActionKind::StateChanging,
++                intercepted_at: Utc::now(),
++                description: proposal.description.clone(),
++                target_uri: Some(proposal.target_uri.clone()),
++                disposition: ArtifactDisposition::Pending,
++            });
++        proposal
++    };
+ 
+     let mut result = serde_json::json!({
+         "status": "captured_for_review",
+@@ -613,6 +901,272 @@
+     })
+ }
+ 
++// ── Goal / KPI planning proposals ───────────────────────────────
++
++fn ref_of(existing: &[PendingAction]) -> String {
++    format!("{REF_PREFIX}{}", existing.len())
++}
++
++pub fn handle_propose_goal_create(
++    state: &Arc<Mutex<GatewayState>>,
++    params: ProposeGoalCreateParams,
++) -> Result<CallToolResult, McpError> {
++    let kind = ProposeKind::GoalCreate;
++    validate_title(kind, "name", &params.name)?;
++    validate_slug(kind, "kind", &params.kind, MAX_GOAL_KIND_LEN)?;
++    validate_opt_description(kind, "description", params.description.as_deref())?;
++    let parent_ref = match &params.parent_goal_id {
++        Some(p) => validate_id_or_ref(kind, "parent_goal_id", p)?,
++        None => None,
++    };
++    if let Some(d) = &params.target_date {
++        validate_date(kind, "target_date", d)?;
++    }
++
++    capture_with(
++        state,
++        kind,
++        &params.goal_run_id,
++        |_, action_id, existing| {
++            if let Some(n) = parent_ref {
++                check_ref(kind, "parent_goal_id", n, existing, ProposeKind::GoalCreate)?;
++            }
++            let mut description = format!(
++                "Propose creating goal \"{}\" (kind {})",
++                params.name, params.kind
++            );
++            if let Some(p) = &params.parent_goal_id {
++                description.push_str(&format!(", under parent {p}"));
++            }
++            Ok(Proposal {
++                parameters: serde_json::json!({
++                    "name": params.name,
++                    "description": params.description,
++                    "kind": params.kind,
++                    "parent_goal_id": params.parent_goal_id,
++                    "target_date": params.target_date,
++                }),
++                description,
++                target_uri: format!("wayfinder://goals/proposed/{action_id}"),
++                result: serde_json::json!({ "ref": ref_of(existing) }),
++            })
++        },
++    )
++}
++
++pub fn handle_propose_kpi_metric_create(
++    state: &Arc<Mutex<GatewayState>>,
++    params: ProposeKpiMetricCreateParams,
++) -> Result<CallToolResult, McpError> {
++    let kind = ProposeKind::KpiMetricCreate;
++    let goal_ref = validate_id_or_ref(kind, "goal_id", &params.goal_id)?;
++    validate_text(kind, "label", &params.label, MAX_LABEL_LEN, true, true)?;
++    validate_text(kind, "unit", &params.unit, MAX_UNIT_LEN, true, true)?;
++    validate_number(kind, "target", params.target)?;
++    validate_choice(kind, "cadence", &params.cadence, &METRIC_CADENCES)?;
++    validate_choice(kind, "kind", &params.kind, &METRIC_KINDS)?;
++    validate_choice(
++        kind,
++        "aggregation",
++        &params.aggregation,
++        &METRIC_AGGREGATIONS,
++    )?;
++    let weight = params.weight.unwrap_or(1.0);
++    validate_number(kind, "weight", weight)?;
++    let require_gate = params.require_gate.unwrap_or(false);
++
++    capture_with(
++        state,
++        kind,
++        &params.goal_run_id,
++        |_, action_id, existing| {
++            if let Some(n) = goal_ref {
++                check_ref(kind, "goal_id", n, existing, ProposeKind::GoalCreate)?;
++            }
++            Ok(Proposal {
++                parameters: serde_json::json!({
++                    "goal_id": params.goal_id,
++                    "label": params.label,
++                    "unit": params.unit,
++                    "target": params.target,
++                    "cadence": params.cadence,
++                    "kind": params.kind,
++                    "aggregation": params.aggregation,
++                    "require_gate": require_gate,
++                    "weight": weight,
++                }),
++                description: format!(
++                    "Propose KPI metric \"{}\" ({} {}, {}, {}) under goal {}",
++                    params.label,
++                    params.target,
++                    params.unit,
++                    params.kind,
++                    params.cadence,
++                    params.goal_id
++                ),
++                target_uri: format!(
++                    "wayfinder://goals/{}/kpi-metrics/proposed/{action_id}",
++                    params.goal_id
++                ),
++                result: serde_json::json!({ "ref": ref_of(existing) }),
++            })
++        },
++    )
++}
++
++pub fn handle_propose_kpi_datapoint_add(
++    state: &Arc<Mutex<GatewayState>>,
++    params: ProposeKpiDatapointAddParams,
++) -> Result<CallToolResult, McpError> {
++    let kind = ProposeKind::KpiDatapointAdd;
++    let metric_ref = validate_id_or_ref(kind, "metric_id", &params.metric_id)?;
++    validate_number(kind, "value", params.value)?;
++    let source = params
++        .source
++        .clone()
++        .unwrap_or_else(|| "manual".to_string());
++    validate_text(kind, "source", &source, MAX_SOURCE_LEN, true, true)?;
++
++    capture_with(state, kind, &params.goal_run_id, |_, _, existing| {
++        if let Some(n) = metric_ref {
++            let target = check_ref(kind, "metric_id", n, existing, ProposeKind::KpiMetricCreate)?;
++            if target.parameters.get("kind").and_then(|k| k.as_str()) == Some(TASK_COUNT_KIND) {
++                return Err(invalid(
++                    kind,
++                    format!(
++                        "metric_id ref:{n} is a {TASK_COUNT_KIND} metric: Wayfinder refuses \
++                         datapoints on it because its progress is derived from tasks. Propose \
++                         the metric as kind `external` to record datapoints"
++                    ),
++                ));
++            }
++        }
++        Ok(Proposal {
++            parameters: serde_json::json!({
++                "metric_id": params.metric_id,
++                "value": params.value,
++                "source": source,
++            }),
++            description: format!(
++                "Propose recording datapoint {} on KPI metric {} (source {source})",
++                params.value, params.metric_id
++            ),
++            target_uri: format!("wayfinder://kpi-metrics/{}/datapoints", params.metric_id),
++            result: serde_json::json!({ "ref": ref_of(existing) }),
++        })
++    })
++}
++
++pub fn handle_propose_kpi_create(
++    state: &Arc<Mutex<GatewayState>>,
++    params: ProposeKpiCreateParams,
++) -> Result<CallToolResult, McpError> {
++    let kind = ProposeKind::KpiCreate;
++    validate_text(kind, "label", &params.label, MAX_LABEL_LEN, true, true)?;
++    validate_opt_description(kind, "description", params.description.as_deref())?;
++    let weight = params.weight.unwrap_or(1.0);
++    validate_number(kind, "weight", weight)?;
++    if let Some(p) = &params.project_id {
++        validate_id(kind, "project_id", p, MAX_ID_LEN)?;
++    }
++    if let Some(r) = &params.source_ref {
++        validate_text(kind, "source_ref", r, MAX_TITLE_LEN, true, true)?;
++    }
++
++    capture_with(
++        state,
++        kind,
++        &params.goal_run_id,
++        |_, action_id, existing| {
++            let scope = match &params.project_id {
++                Some(p) => format!("project {p}"),
++                None => "the whole org".to_string(),
++            };
++            Ok(Proposal {
++                parameters: serde_json::json!({
++                    "project_id": params.project_id,
++                    "label": params.label,
++                    "description": params.description.clone().unwrap_or_default(),
++                    "weight": weight,
++                    "created_by": KPI_CREATED_BY,
++                    "source_ref": params.source_ref,
++                }),
++                description: format!("Propose org KPI \"{}\" for {scope}", params.label),
++                target_uri: format!("wayfinder://kpis/proposed/{action_id}"),
++                result: serde_json::json!({ "ref": ref_of(existing) }),
++            })
++        },
++    )
++}
++
++/// Lines `ta draft view` prints under a pending goal/KPI proposal: what will
++/// be created, its `ref:<index>` (so a later proposal's reference can be
++/// followed), and the `external_id` apply will create it under.
++pub fn review_lines(
++    draft_id: impl std::fmt::Display,
++    index: usize,
++    tool_name: &str,
++    p: &serde_json::Value,
++) -> Vec<String> {
++    let get = |k: &str| -> String {
++        match p.get(k) {
++            Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
++            Some(serde_json::Value::Null) | None => "(none)".to_string(),
++            Some(serde_json::Value::String(_)) => "(none)".to_string(),
++            Some(v) => v.to_string(),
++        }
++    };
++    let mut lines = Vec::new();
++    match ProposeKind::from_tool_name(tool_name) {
++        Some(ProposeKind::GoalCreate) => {
++            lines.push(format!("Goal create (ref:{index}): {}", get("name")));
++            lines.push(format!("Kind: {}", get("kind")));
++            lines.push(format!("Parent: {}", get("parent_goal_id")));
++            lines.push(format!("Target date: {}", get("target_date")));
++            lines.push(format!("Description: {}", get("description")));
++        }
++        Some(ProposeKind::KpiMetricCreate) => {
++            lines.push(format!("KPI metric create (ref:{index}): {}", get("label")));
++            lines.push(format!("Goal: {}", get("goal_id")));
++            lines.push(format!(
++                "Target: {} {} ({}, {}, aggregation {})",
++                get("target"),
++                get("unit"),
++                get("kind"),
++                get("cadence"),
++                get("aggregation")
++            ));
++            lines.push(format!(
++                "Weight: {}, require gate: {}",
++                get("weight"),
++                get("require_gate")
++            ));
++        }
++        Some(ProposeKind::KpiDatapointAdd) => {
++            lines.push(format!("KPI datapoint add (ref:{index})"));
++            lines.push(format!("Metric: {}", get("metric_id")));
++            lines.push(format!(
++                "Value: {} (source {})",
++                get("value"),
++                get("source")
++            ));
++        }
++        Some(ProposeKind::KpiCreate) => {
++            lines.push(format!("Org KPI create (ref:{index}): {}", get("label")));
++            lines.push(format!("Project: {} (none = org-wide)", get("project_id")));
++            lines.push(format!("Weight: {}", get("weight")));
++            lines.push(format!("Description: {}", get("description")));
++            lines.push(format!("Source ref: {}", get("source_ref")));
++        }
++        _ => return lines,
++    }
++    lines.push(format!(
++        "Created on apply with external_id {}",
++        planning_external_id(draft_id, index)
++    ));
++    lines
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -667,6 +1221,267 @@
+         }
+     }
+ 
++    // ── goal / KPI planning proposals ──
++
++    fn goal_p(name: &str, goal: Uuid) -> ProposeGoalCreateParams {
++        ProposeGoalCreateParams {
++            name: name.into(),
++            description: None,
++            kind: "objective".into(),
++            parent_goal_id: None,
++            target_date: None,
++            goal_run_id: goal.to_string(),
++        }
++    }
++
++    fn metric_p(goal_id: &str, kind: &str, goal: Uuid) -> ProposeKpiMetricCreateParams {
++        ProposeKpiMetricCreateParams {
++            goal_id: goal_id.into(),
++            label: "Signups".into(),
++            unit: "users".into(),
++            target: 100.0,
++            cadence: "weekly".into(),
++            kind: kind.into(),
++            aggregation: "sum".into(),
++            require_gate: None,
++            weight: None,
++            goal_run_id: goal.to_string(),
++        }
++    }
++
++    fn dp_p(metric_id: &str, value: f64, goal: Uuid) -> ProposeKpiDatapointAddParams {
++        ProposeKpiDatapointAddParams {
++            metric_id: metric_id.into(),
++            value,
++            source: None,
++            goal_run_id: goal.to_string(),
++        }
++    }
++
++    fn kpi_p(goal: Uuid) -> ProposeKpiCreateParams {
++        ProposeKpiCreateParams {
++            label: "Revenue".into(),
++            description: None,
++            weight: None,
++            project_id: None,
++            source_ref: None,
++            goal_run_id: goal.to_string(),
++        }
++    }
++
++    fn pending(state: &Arc<Mutex<GatewayState>>, goal: Uuid) -> Vec<PendingAction> {
++        state
++            .lock()
++            .unwrap()
++            .pending_actions
++            .get(&goal)
++            .cloned()
++            .unwrap_or_default()
++    }
++
++    #[test]
++    fn planning_kinds_are_flagged_and_task_kinds_are_not() {
++        let planning: Vec<_> = ProposeKind::ALL
++            .iter()
++            .filter(|k| k.is_planning())
++            .collect();
++        assert_eq!(planning.len(), 4);
++        assert!(is_planning_tool("ta_propose_kpi_create"));
++        assert!(!is_planning_tool("ta_propose_task_create"));
++        assert_eq!(ProposeKind::ALL.len(), 10);
++    }
++
++    #[test]
++    fn ref_parsing_is_strict() {
++        assert_eq!(parse_ref("ref:0"), Some(0));
++        assert_eq!(parse_ref("ref:12"), Some(12));
++        for bad in [
++            "ref:",
++            "ref:-1",
++            "ref:1a",
++            "ref: 1",
++            "REF:1",
++            "ref:1234567",
++            "1",
++        ] {
++            assert_eq!(parse_ref(bad), None, "{bad}");
++        }
++        assert_eq!(planning_external_id("abc", 3), "ta_draft:abc:3");
++    }
++
++    #[test]
++    fn goal_create_captures_without_calling_out() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        let mut p = goal_p("Grow", goal);
++        p.target_date = Some("2026-12-31".into());
++        handle_propose_goal_create(&state, p).unwrap();
++        let a = only_pending(&state, goal);
++        assert_eq!(a.tool_name, "ta_propose_goal_create");
++        assert_eq!(a.parameters["name"], "Grow");
++        assert_eq!(a.parameters["kind"], "objective");
++        assert_eq!(a.parameters["target_date"], "2026-12-31");
++    }
++
++    #[test]
++    fn goal_create_validation() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        let mut p = goal_p("", goal);
++        assert!(handle_propose_goal_create(&state, p.clone()).is_err());
++        for bad in ["Objective", "", "has space", &"x".repeat(33)] {
++            p = goal_p("G", goal);
++            p.kind = bad.into();
++            assert!(handle_propose_goal_create(&state, p).is_err(), "{bad:?}");
++        }
++        for bad in ["2026-02-30", "2026-1-1", "tomorrow"] {
++            p = goal_p("G", goal);
++            p.target_date = Some(bad.into());
++            assert!(handle_propose_goal_create(&state, p).is_err(), "{bad}");
++        }
++        p = goal_p("G", Uuid::new_v4());
++        p.goal_run_id = "not-a-uuid".into();
++        assert!(handle_propose_goal_create(&state, p).is_err());
++        assert!(pending(&state, goal).is_empty());
++    }
++
++    #[test]
++    fn refs_must_point_at_earlier_proposals_of_the_right_tool() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        // Nothing earlier yet.
++        assert!(
++            handle_propose_kpi_metric_create(&state, metric_p("ref:0", "external", goal)).is_err()
++        );
++        handle_propose_goal_create(&state, goal_p("G", goal)).unwrap();
++        // ref:0 is a goal: fine for a metric, wrong for a datapoint.
++        handle_propose_kpi_metric_create(&state, metric_p("ref:0", "external", goal)).unwrap();
++        assert!(handle_propose_kpi_datapoint_add(&state, dp_p("ref:0", 1.0, goal)).is_err());
++        // Forward and self refs are refused.
++        assert!(
++            handle_propose_kpi_metric_create(&state, metric_p("ref:2", "external", goal)).is_err()
++        );
++        assert!(
++            handle_propose_kpi_metric_create(&state, metric_p("ref:x", "external", goal)).is_err()
++        );
++        // ref:1 is the metric: datapoint ok. A metric is not a valid parent goal.
++        handle_propose_kpi_datapoint_add(&state, dp_p("ref:1", 5.0, goal)).unwrap();
++        let mut g2 = goal_p("Child", goal);
++        g2.parent_goal_id = Some("ref:1".into());
++        assert!(handle_propose_goal_create(&state, g2).is_err());
++        let mut g3 = goal_p("Child", goal);
++        g3.parent_goal_id = Some("ref:0".into());
++        handle_propose_goal_create(&state, g3).unwrap();
++        assert_eq!(pending(&state, goal).len(), 4);
++    }
++
++    #[test]
++    fn capture_returns_the_ref_of_the_new_action() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        let first = handle_propose_goal_create(&state, goal_p("A", goal)).unwrap();
++        let second = handle_propose_goal_create(&state, goal_p("B", goal)).unwrap();
++        let text = |r: &CallToolResult| format!("{:?}", r.content);
++        assert!(text(&first).contains("ref:0"), "{}", text(&first));
++        assert!(text(&second).contains("ref:1"), "{}", text(&second));
++    }
++
++    #[test]
++    fn datapoint_on_a_ref_task_count_metric_is_vetoed_at_capture() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        handle_propose_goal_create(&state, goal_p("G", goal)).unwrap();
++        handle_propose_kpi_metric_create(&state, metric_p("ref:0", "task_count", goal)).unwrap();
++        let err = handle_propose_kpi_datapoint_add(&state, dp_p("ref:1", 1.0, goal)).unwrap_err();
++        assert!(err.message.contains("task_count"), "{}", err.message);
++        assert_eq!(pending(&state, goal).len(), 2);
++    }
++
++    #[test]
++    fn metric_validation_numbers_and_closed_lists() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        for bad in [f64::NAN, f64::INFINITY, 1.0000001e12, -1.0000001e12] {
++            let mut p = metric_p("g-1", "external", goal);
++            p.target = bad;
++            assert!(
++                handle_propose_kpi_metric_create(&state, p).is_err(),
++                "{bad}"
++            );
++            let mut p = metric_p("g-1", "external", goal);
++            p.weight = Some(bad);
++            assert!(
++                handle_propose_kpi_metric_create(&state, p).is_err(),
++                "{bad}"
++            );
++            assert!(handle_propose_kpi_datapoint_add(&state, dp_p("m-1", bad, goal)).is_err());
++        }
++        let mut p = metric_p("g-1", "external", goal);
++        p.cadence = "hourly".into();
++        assert!(handle_propose_kpi_metric_create(&state, p).is_err());
++        let mut p = metric_p("g-1", "bogus", goal);
++        p.aggregation = "sum".into();
++        assert!(handle_propose_kpi_metric_create(&state, p).is_err());
++        let mut p = metric_p("g-1", "external", goal);
++        p.aggregation = "avg".into();
++        assert!(handle_propose_kpi_metric_create(&state, p).is_err());
++        let mut p = metric_p("g-1", "external", goal);
++        p.label = "x".repeat(MAX_LABEL_LEN + 1);
++        assert!(handle_propose_kpi_metric_create(&state, p).is_err());
++        assert!(pending(&state, goal).is_empty());
++        // Boundary values pass and defaults are recorded.
++        let mut p = metric_p("g-1", "external", goal);
++        p.target = 1e12;
++        handle_propose_kpi_metric_create(&state, p).unwrap();
++        let a = only_pending(&state, goal);
++        assert_eq!(a.parameters["weight"], 1.0);
++        assert_eq!(a.parameters["require_gate"], false);
++    }
++
++    #[test]
++    fn datapoint_and_org_kpi_capture_defaults() {
++        let dir = tempfile::tempdir().unwrap();
++        let state = make_state(dir.path());
++        let goal = Uuid::new_v4();
++        handle_propose_kpi_datapoint_add(&state, dp_p("m-1", 7.5, goal)).unwrap();
++        handle_propose_kpi_create(&state, kpi_p(goal)).unwrap();
++        let all = pending(&state, goal);
++        assert_eq!(all[0].parameters["source"], "manual");
++        assert_eq!(all[0].parameters["value"], 7.5);
++        assert_eq!(all[1].tool_name, "ta_propose_kpi_create");
++        assert_eq!(all[1].parameters["created_by"], KPI_CREATED_BY);
++        assert!(all[1].parameters["project_id"].is_null());
++        assert_eq!(all[1].parameters["description"], "");
++        let mut bad = kpi_p(goal);
++        bad.label = String::new();
++        assert!(handle_propose_kpi_create(&state, bad).is_err());
++    }
++
++    #[test]
++    fn review_lines_show_ref_and_external_id() {
++        let lines = review_lines(
++            "draft-9",
++            2,
++            "ta_propose_kpi_metric_create",
++            &serde_json::json!({
++                "goal_id": "ref:0", "label": "Signups", "unit": "users", "target": 100.0,
++                "cadence": "weekly", "kind": "external", "aggregation": "sum",
++                "require_gate": false, "weight": 1.0
++            }),
++        );
++        let joined = lines.join("\n");
++        assert!(joined.contains("ref:2"), "{joined}");
++        assert!(joined.contains("Goal: ref:0"), "{joined}");
++        assert!(joined.contains("ta_draft:draft-9:2"), "{joined}");
++        assert!(review_lines("d", 0, "ta_propose_task_create", &serde_json::json!({})).is_empty());
++    }
++
+     // ── ProposeKind ──
+ 
+     #[test]
+@@ -674,7 +1489,7 @@
+         let mut seen = std::collections::HashSet::new();
+         for k in ProposeKind::ALL {
+             assert!(seen.insert(k.tool_name()), "duplicate {}", k.tool_name());
+-            assert!(k.tool_name().starts_with("ta_propose_task_"));
++            assert!(k.tool_name().starts_with("ta_propose_"));
+             assert_eq!(ProposeKind::from_tool_name(k.tool_name()), Some(k));
+         }
+         assert_eq!(ProposeKind::from_tool_name("ta_external_action"), None);
+--- a/crates/ta-plan-wayfinder/src/client.rs
++++ b/crates/ta-plan-wayfinder/src/client.rs
+@@ -103,6 +103,147 @@
+     pub tasks: Vec<TaskDto>,
+ }
+ 
++/// Body for `POST /api/projects/:id/goals`. Optional fields left `None` are
++/// omitted: on an upsert by `external_id` Wayfinder leaves omitted optional
++/// fields alone (only `parent_goal_id` is overwritten).
++#[derive(Debug, Clone, Serialize)]
++pub struct CreateGoalRequest {
++    pub name: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub description: Option<String>,
++    pub kind: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub parent_goal_id: Option<String>,
++    /// `YYYY-MM-DD`.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub target_date: Option<String>,
++    pub external_id: Option<String>,
++}
++
++/// Body for `POST /api/projects/:id/goals/:goal_id/kpi-metrics`.
++#[derive(Debug, Clone, Serialize)]
++pub struct CreateKpiMetricRequest {
++    pub label: String,
++    pub unit: String,
++    pub target: f64,
++    pub cadence: String,
++    pub kind: String,
++    pub aggregation: String,
++    pub require_gate: bool,
++    pub weight: f64,
++    pub external_id: Option<String>,
++}
++
++/// Body for `POST /api/projects/:id/kpi-metrics/:metric_id/datapoints`.
++#[derive(Debug, Clone, Serialize)]
++pub struct AddKpiDatapointRequest {
++    pub value: f64,
++    pub source: String,
++    pub external_id: Option<String>,
++}
++
++/// Body for `POST /api/orgs/:org_id/kpis`. `project_id: None` is an
++/// org-wide KPI and is sent as an explicit JSON `null`.
++#[derive(Debug, Clone, Serialize)]
++pub struct CreateOrgKpiRequest {
++    pub project_id: Option<String>,
++    pub label: String,
++    pub description: String,
++    pub weight: f64,
++    pub created_by: String,
++    pub source_ref: Option<String>,
++    pub external_id: Option<String>,
++}
++
++/// What a create route answered: the row id (needed to resolve `ref:<n>`
++/// references from later steps) and whether this call created it (201) or
++/// was an idempotent repeat (200).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct CreatedResource {
++    pub id: String,
++    pub created: bool,
++}
++
++/// Failure of a goal/KPI create call. Every variant names the route and
++/// status and says what to do about it; 403 names the missing right and 409
++/// is reported as a conflict with its fix.
++#[derive(Debug, thiserror::Error)]
++pub enum WayfinderWriteError {
++    #[error(
++        "Wayfinder returned 401 Unauthorized for POST {route}: the service-account token is \
++         unknown or revoked. Re-issue it in Wayfinder's Settings and store it again with \
++         `ta credential add`, then re-run `ta draft apply` for this draft."
++    )]
++    Unauthorized { route: String },
++    #[error(
++        "Wayfinder returned 403 Forbidden for POST {route}: the service account lacks the \
++         `{right}` right. Grant `{right}` to the pairing service account in Wayfinder's \
++         Settings, then re-run `ta draft apply` for this draft."
++    )]
++    Forbidden { route: String, right: &'static str },
++    #[error(
++        "Wayfinder returned 404 Not Found for POST {route}: {detail}. The goal, metric or \
++         project id in that route does not exist; check it (and `project_id` under \
++         [plan.wayfinder] in .ta/workflow.toml), then re-run `ta draft apply` for this draft."
++    )]
++    NotFound { route: String, detail: String },
++    #[error("Wayfinder reported a conflict (409) for POST {route}: {detail}. {fix}")]
++    Conflict {
++        route: String,
++        detail: String,
++        fix: &'static str,
++    },
++    #[error(
++        "Wayfinder rejected the request body with {status} for POST {route}: {detail}. Fix the \
++         proposal and propose it again in a new draft."
++    )]
++    Rejected {
++        route: String,
++        status: reqwest::StatusCode,
++        detail: String,
++    },
++    #[error(
++        "Wayfinder returned unexpected status {status} for POST {route}: {detail}. Check that \
++         Wayfinder is healthy and that `base_url` under [plan.wayfinder] in .ta/workflow.toml \
++         points at it, then re-run `ta draft apply` for this draft."
++    )]
++    UnexpectedStatus {
++        route: String,
++        status: reqwest::StatusCode,
++        detail: String,
++    },
++    #[error(
++        "POST {route} to Wayfinder timed out after {timeout:?}. Wayfinder may be down or \
++         overloaded: retry with `ta draft apply` for this draft (replay is idempotent)."
++    )]
++    Timeout { route: String, timeout: Duration },
++    #[error(
++        "request POST {route} to Wayfinder failed: {message}. Check that `base_url` under \
++         [plan.wayfinder] in .ta/workflow.toml is correct and reachable, then re-run `ta draft \
++         apply` for this draft."
++    )]
++    Request { route: String, message: String },
++}
++
++/// Right the pairing service account needs for goal, metric and datapoint
++/// creates.
++pub const RIGHT_TASKS_WRITE: &str = "tasks:write";
++/// Right needed to create an org-level KPI.
++pub const RIGHT_KPIS_MANAGE: &str = "kpis:manage";
++
++const GOAL_CONFLICT_FIX: &str = "The goal's parent would create a cycle. Pick a parent that is \
++     not a descendant of this goal and propose it again in a new draft.";
++const METRIC_CONFLICT_FIX: &str = "The same external_id was already used for a metric with \
++     different values. Re-applying the original draft is safe; to change the metric, propose \
++     it again in a new draft.";
++const DATAPOINT_CONFLICT_FIX: &str = "Either the metric is a task_count metric (its progress is \
++     derived from tasks, so datapoints are refused: record datapoints on an `external` metric) \
++     or this external_id was already used with a different value (propose the new value in a \
++     new draft).";
++const ORG_KPI_CONFLICT_FIX: &str = "The same external_id was already used for a KPI with \
++     different values. Re-applying the original draft is safe; to change the KPI, propose it \
++     again in a new draft.";
++
+ /// Distinguishes "the credential is dead" from "the credential is fine but
+ /// lacks the role for this specific call" — callers (`store.rs`) treat
+ /// these very differently: the former means the whole integration is
+@@ -487,6 +628,160 @@
+             })?;
+         parse_json_response(response, "bootstrapping via export")
+     }
++
++    /// `POST /api/projects/:id/goals`. Idempotent upsert by `external_id`.
++    pub fn create_goal(
++        &self,
++        req: &CreateGoalRequest,
++    ) -> Result<CreatedResource, WayfinderWriteError> {
++        self.post_create(
++            self.project_url(&["goals"]),
++            req,
++            RIGHT_TASKS_WRITE,
++            GOAL_CONFLICT_FIX,
++        )
++    }
++
++    /// `POST /api/projects/:id/goals/:goal_id/kpi-metrics`.
++    pub fn create_kpi_metric(
++        &self,
++        goal_id: &str,
++        req: &CreateKpiMetricRequest,
++    ) -> Result<CreatedResource, WayfinderWriteError> {
++        self.post_create(
++            self.project_url(&["goals", goal_id, "kpi-metrics"]),
++            req,
++            RIGHT_TASKS_WRITE,
++            METRIC_CONFLICT_FIX,
++        )
++    }
++
++    /// `POST /api/projects/:id/kpi-metrics/:metric_id/datapoints`. Wayfinder
++    /// answers 409 for a task_count metric; that message is passed through.
++    pub fn add_kpi_datapoint(
++        &self,
++        metric_id: &str,
++        req: &AddKpiDatapointRequest,
++    ) -> Result<CreatedResource, WayfinderWriteError> {
++        self.post_create(
++            self.project_url(&["kpi-metrics", metric_id, "datapoints"]),
++            req,
++            RIGHT_TASKS_WRITE,
++            DATAPOINT_CONFLICT_FIX,
++        )
++    }
++
++    /// `POST /api/orgs/:org_id/kpis`.
++    pub fn create_org_kpi(
++        &self,
++        req: &CreateOrgKpiRequest,
++    ) -> Result<CreatedResource, WayfinderWriteError> {
++        let mut url = self.base_url.clone();
++        {
++            let mut path = url
++                .path_segments_mut()
++                .expect("base_url is validated to be a path-having http(s) URL");
++            path.push("api")
++                .push("orgs")
++                .push(&self.org_id)
++                .push("kpis");
++        }
++        self.post_create(url, req, RIGHT_KPIS_MANAGE, ORG_KPI_CONFLICT_FIX)
++    }
++
++    fn post_create<B: Serialize>(
++        &self,
++        url: Url,
++        body: &B,
++        right: &'static str,
++        conflict_fix: &'static str,
++    ) -> Result<CreatedResource, WayfinderWriteError> {
++        let route = url.path().to_string();
++        let response = self
++            .http
++            .post(url)
++            .bearer_auth(self.secret.expose_secret())
++            .json(body)
++            .send()
++            .map_err(|source| {
++                if source.is_timeout() {
++                    WayfinderWriteError::Timeout {
++                        route: route.clone(),
++                        timeout: self.timeout,
++                    }
++                } else {
++                    WayfinderWriteError::Request {
++                        route: route.clone(),
++                        message: source.without_url().to_string(),
++                    }
++                }
++            })?;
++        let status = response.status();
++        if status.is_success() {
++            let value: serde_json::Value =
++                response
++                    .json()
++                    .map_err(|source| WayfinderWriteError::Request {
++                        route: route.clone(),
++                        message: format!("response was not valid JSON: {}", source.without_url()),
++                    })?;
++            let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
++                return Err(WayfinderWriteError::Request {
++                    route,
++                    message: format!("{status} response carried no string `id`"),
++                });
++            };
++            return Ok(CreatedResource {
++                id: id.to_string(),
++                created: status == reqwest::StatusCode::CREATED,
++            });
++        }
++        let detail = error_detail(response);
++        Err(match status {
++            s if s == reqwest::StatusCode::UNAUTHORIZED => {
++                WayfinderWriteError::Unauthorized { route }
++            }
++            s if s == reqwest::StatusCode::FORBIDDEN => {
++                WayfinderWriteError::Forbidden { route, right }
++            }
++            s if s == reqwest::StatusCode::NOT_FOUND => {
++                WayfinderWriteError::NotFound { route, detail }
++            }
++            s if s == reqwest::StatusCode::CONFLICT => WayfinderWriteError::Conflict {
++                route,
++                detail,
++                fix: conflict_fix,
++            },
++            s if s == reqwest::StatusCode::BAD_REQUEST
++                || s == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
++            {
++                WayfinderWriteError::Rejected {
++                    route,
++                    status,
++                    detail,
++                }
++            }
++            _ => WayfinderWriteError::UnexpectedStatus {
++                route,
++                status,
++                detail,
++            },
++        })
++    }
++}
++
++/// The `error` string of a Wayfinder error body, or the trimmed raw body,
++/// capped so a hostile or huge body cannot flood logs.
++fn error_detail(response: reqwest::blocking::Response) -> String {
++    let text = response.text().unwrap_or_default();
++    let detail = serde_json::from_str::<serde_json::Value>(&text)
++        .ok()
++        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
++        .unwrap_or_else(|| text.trim().to_string());
++    if detail.is_empty() {
++        return "(no detail in the response body)".to_string();
++    }
++    detail.chars().take(300).collect()
+ }
+ 
+ fn expect_success(
+@@ -1008,4 +1303,217 @@
+             .get_project_json(&["tasks", "../other"], &[])
+             .is_ok());
+     }
++
++    // ── goal / KPI create routes ──
++
++    fn goal_req() -> CreateGoalRequest {
++        CreateGoalRequest {
++            name: "Ship".into(),
++            description: None,
++            kind: "objective".into(),
++            parent_goal_id: None,
++            target_date: Some("2027-01-31".into()),
++            external_id: Some("ta_draft:d:0".into()),
++        }
++    }
++
++    fn metric_req() -> CreateKpiMetricRequest {
++        CreateKpiMetricRequest {
++            label: "Ads".into(),
++            unit: "ads".into(),
++            target: 500.0,
++            cadence: "none".into(),
++            kind: "external".into(),
++            aggregation: "sum".into(),
++            require_gate: false,
++            weight: 1.0,
++            external_id: Some("ta_draft:d:1".into()),
++        }
++    }
++
++    fn mount_post(mock: &BlockingMockServer, route: &str, template: ResponseTemplate) {
++        mock.block_on(
++            Mock::given(method("POST"))
++                .and(path(route))
++                .and(header("authorization", "Bearer wfsa_test_secret"))
++                .respond_with(template)
++                .mount(mock.server()),
++        );
++    }
++
++    #[test]
++    fn create_goal_posts_the_body_and_returns_the_id() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals",
++            ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "g-1"})),
++        );
++        let got = client_for(&mock).create_goal(&goal_req()).unwrap();
++        assert_eq!(
++            got,
++            CreatedResource {
++                id: "g-1".into(),
++                created: true
++            }
++        );
++    }
++
++    #[test]
++    fn an_idempotent_repeat_is_reported_as_not_created() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals/g-1/kpi-metrics",
++            ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "m-1"})),
++        );
++        let got = client_for(&mock)
++            .create_kpi_metric("g-1", &metric_req())
++            .unwrap();
++        assert_eq!(got.id, "m-1");
++        assert!(!got.created);
++    }
++
++    #[test]
++    fn datapoint_and_org_kpi_routes_are_the_contract_routes() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
++            ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "dp-1"})),
++        );
++        mount_post(
++            &mock,
++            "/api/orgs/org-1/kpis",
++            ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "k-1"})),
++        );
++        let client = client_for(&mock);
++        let dp = client
++            .add_kpi_datapoint(
++                "m-1",
++                &AddKpiDatapointRequest {
++                    value: 3.0,
++                    source: "manual".into(),
++                    external_id: Some("ta_draft:d:2".into()),
++                },
++            )
++            .unwrap();
++        assert_eq!(dp.id, "dp-1");
++        let kpi = client
++            .create_org_kpi(&CreateOrgKpiRequest {
++                project_id: None,
++                label: "Reach".into(),
++                description: "d".into(),
++                weight: 1.0,
++                created_by: "trusted-autonomy".into(),
++                source_ref: None,
++                external_id: Some("ta_draft:d:3".into()),
++            })
++            .unwrap();
++        assert_eq!(kpi.id, "k-1");
++    }
++
++    #[test]
++    fn forbidden_names_the_missing_right_per_route() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals",
++            ResponseTemplate::new(403),
++        );
++        mount_post(&mock, "/api/orgs/org-1/kpis", ResponseTemplate::new(403));
++        let client = client_for(&mock);
++        let goal = client.create_goal(&goal_req()).unwrap_err().to_string();
++        assert!(
++            goal.contains("403") && goal.contains("`tasks:write`"),
++            "{goal}"
++        );
++        assert!(goal.contains("/api/projects/proj-1/goals"), "{goal}");
++        let kpi = client
++            .create_org_kpi(&CreateOrgKpiRequest {
++                project_id: None,
++                label: "Reach".into(),
++                description: "d".into(),
++                weight: 1.0,
++                created_by: "ta".into(),
++                source_ref: None,
++                external_id: None,
++            })
++            .unwrap_err()
++            .to_string();
++        assert!(kpi.contains("`kpis:manage`"), "{kpi}");
++    }
++
++    #[test]
++    fn conflict_passes_wayfinders_message_through_with_a_fix() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/kpi-metrics/m-1/datapoints",
++            ResponseTemplate::new(409).set_body_json(serde_json::json!({
++                "error": "datapoints on a task_count metric are derived from tasks"
++            })),
++        );
++        let err = client_for(&mock)
++            .add_kpi_datapoint(
++                "m-1",
++                &AddKpiDatapointRequest {
++                    value: 1.0,
++                    source: "manual".into(),
++                    external_id: None,
++                },
++            )
++            .unwrap_err();
++        assert!(matches!(err, WayfinderWriteError::Conflict { .. }), "{err}");
++        let msg = err.to_string();
++        assert!(msg.contains("conflict (409)"), "{msg}");
++        assert!(
++            msg.contains("datapoints on a task_count metric are derived from tasks"),
++            "{msg}"
++        );
++        assert!(msg.contains("`external` metric"), "{msg}");
++    }
++
++    #[test]
++    fn not_found_bad_request_and_server_errors_are_distinct() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals/nope/kpi-metrics",
++            ResponseTemplate::new(404).set_body_json(serde_json::json!({"error": "unknown goal"})),
++        );
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals",
++            ResponseTemplate::new(400).set_body_json(serde_json::json!({"error": "bad kind"})),
++        );
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals/g-9/kpi-metrics",
++            ResponseTemplate::new(500).set_body_string("boom"),
++        );
++        let client = client_for(&mock);
++        let nf = client.create_kpi_metric("nope", &metric_req()).unwrap_err();
++        assert!(matches!(nf, WayfinderWriteError::NotFound { .. }));
++        assert!(nf.to_string().contains("unknown goal"), "{nf}");
++        let bad = client.create_goal(&goal_req()).unwrap_err();
++        assert!(matches!(bad, WayfinderWriteError::Rejected { .. }));
++        assert!(bad.to_string().contains("bad kind"), "{bad}");
++        let srv = client.create_kpi_metric("g-9", &metric_req()).unwrap_err();
++        assert!(matches!(srv, WayfinderWriteError::UnexpectedStatus { .. }));
++        assert!(srv.to_string().contains("500") && srv.to_string().contains("boom"));
++    }
++
++    #[test]
++    fn unauthorized_says_how_to_reissue_the_token() {
++        let mock = BlockingMockServer::start();
++        mount_post(
++            &mock,
++            "/api/projects/proj-1/goals",
++            ResponseTemplate::new(401),
++        );
++        let err = client_for(&mock).create_goal(&goal_req()).unwrap_err();
++        assert!(matches!(err, WayfinderWriteError::Unauthorized { .. }));
++        assert!(err.to_string().contains("ta credential add"), "{err}");
++    }
+ }
+--- a/crates/ta-plan-wayfinder/src/lib.rs
++++ b/crates/ta-plan-wayfinder/src/lib.rs
+@@ -20,7 +20,9 @@
+ mod test_support;
+ 
+ pub use client::{
+-    CreateTaskRequest, TaskDto, WayfinderClient, WayfinderClientError, WayfinderReadError,
++    AddKpiDatapointRequest, CreateGoalRequest, CreateKpiMetricRequest, CreateOrgKpiRequest,
++    CreateTaskRequest, CreatedResource, TaskDto, WayfinderClient, WayfinderClientError,
++    WayfinderReadError, WayfinderWriteError, RIGHT_KPIS_MANAGE, RIGHT_TASKS_WRITE,
+     STATUS_CANCELLED, STATUS_DONE, STATUS_IN_PROGRESS, STATUS_ON_HOLD, STATUS_OPEN,
+ };
+ pub use config::WayfinderPlanConfig;
+--- a/docs/USAGE.md
++++ b/docs/USAGE.md
+@@ -3225,6 +3225,45 @@
+ 
+ On apply, TA prints one `[applied]` or `[failed]` line per proposal. Proposals are replayed only when a person is present: from an interactive terminal, or when you pass `--replay-actions`. A non-interactive apply (a script, CI, the session auto-apply gate, the release pipeline) applies the files, prints how many external actions were not replayed, and leaves them for you to run with `ta draft apply <id> --replay-actions`. `--no-replay-actions`, or `TA_NO_REPLAY_ACTIONS=1`, turns replay off even in a terminal. `ta draft apply <id> --chain --dry-run` previews the whole chain and changes and replays nothing. A failed proposal never blocks the others or the file changes; fix the cause and re-run `ta draft apply`. Re-applying is safe: replayed proposals are recorded in `.ta/wayfinder-task-replay.log` and skipped next time, and created tasks always carry an `external_id` (derived from the goal and proposal ids when the agent did not supply one), so a task is never created twice. A project without `[plan] backend = "wayfinder"` simply skips the proposals with a log line. The Wayfinder service account needs only `member` role for these calls.
+ 
++#### Proposing Wayfinder Goals, KPI Metrics and Datapoints in a Draft
++
++Goals and KPIs follow the same rule as tasks: the Chief-of-Staff never writes to Wayfinder. A project-manager worker proposes them with four MCP tools, they ride in the same draft a person reviews, and they are sent to Wayfinder only when that draft is applied. None of these tools exist in a chat-mode session.
++
++| Tool | What it proposes | Applied as |
++|---|---|---|
++| `ta_propose_goal_create` | A goal: `name` and `kind` (a lowercase slug of at most 32 characters) required; `description`, `parent_goal_id`, `target_date` (`YYYY-MM-DD`) optional | `POST /api/projects/<project>/goals` |
++| `ta_propose_kpi_metric_create` | A KPI metric under a goal: `goal_id`, `label`, `unit`, `target`, `cadence` (`none`, `daily`, `weekly`, `monthly`), `kind` (`task_count`, `external`), `aggregation` (`sum`, `latest`); `require_gate` and `weight` optional | `POST .../goals/<goal>/kpi-metrics` |
++| `ta_propose_kpi_datapoint_add` | A datapoint: `metric_id`, `value`; `source` optional (default `manual`) | `POST .../kpi-metrics/<metric>/datapoints` |
++| `ta_propose_kpi_create` | An org-level KPI: `label`; `description`, `weight`, `project_id` (omit for org-wide), `source_ref` optional | `POST /api/orgs/<org>/kpis` |
++
++Every call needs `goal_run_id`. Numbers (`target`, `weight`, `value`) must be finite and within +-1e12, enum fields must use the listed values, and text fields have length caps. A bad call is refused when the agent makes it, not at review time.
++
++**Referring to something proposed earlier.** Each tool returns a `ref` such as `ref:0`. A later proposal in the same draft can pass that string wherever it would pass a Wayfinder id (`parent_goal_id`, `goal_id`, `metric_id`). The reference must point at an earlier proposal of the right kind. At apply time it is replaced with the id Wayfinder returned for that step.
++
++```text
++ta_propose_goal_create(name="Grow signups", kind="objective", ...)        -> ref:0
++ta_propose_kpi_metric_create(goal_id="ref:0", kind="external", ...)       -> ref:1
++ta_propose_kpi_datapoint_add(metric_id="ref:1", value=42)                 -> ref:2
++```
++
++A `task_count` metric takes its progress from tasks, and Wayfinder refuses datapoints on it. Proposing a datapoint on such a metric created in the same draft is refused up front. For a metric that already exists, Wayfinder's refusal is reported at apply time as a conflict. Propose the metric as `external` when you need datapoints.
++
++**What the reviewer sees.** `ta draft view <draft-id>` lists each proposal under pending actions with what will be created, its `ref:<n>`, and the `external_id` it will be created under:
++
++```text
++  2. [pending] Propose KPI metric "Signups" (100 users, external, weekly) under goal ref:0 (state_changing)
++     KPI metric create (ref:1): Signups
++     Goal: ref:0
++     Target: 100 users (external, weekly, aggregation sum)
++     Weight: 1.0, require gate: false
++     Created on apply with external_id ta_draft:<draft-id>:1
++     Sent to Wayfinder only when this draft is approved and applied.
++```
++
++The `ref:<n>` number is the proposal's position in the draft counted from 0, while the list number counts from 1. Rejecting or marking a proposal for discussion keeps it out of apply, and anything that refers to it is reported as not attempted.
++
++**Apply behavior.** Proposals are sent in the order they were made, using the same replay rules as task proposals. Every create carries `external_id` `ta_draft:<draft-id>:<n>`, so Wayfinder treats a repeat as the same object. If a step fails, the steps that refer to it are not attempted and the message names which step they were waiting on. Independent steps still run. Finished steps and their returned ids are recorded in `.ta/wayfinder-task-replay.log`, so after fixing the cause you re-run `ta draft apply <draft-id>` and only the unfinished steps are sent. Error messages name the route, the status and what to do. A 403 names the missing right: `tasks:write` for goals, metrics and datapoints, `kpis:manage` for org KPIs. A 409 is reported as a conflict, meaning the same `external_id` was already used with different contents.
++
+ #### Plan Lint
+ 
+ `ta plan lint` detects four classes of structural problems in PLAN.md:

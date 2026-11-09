@@ -1,0 +1,40 @@
+{
+  "replay_id": "3e9c3e51-b296-4421-8004-52ffa0ee0b9f",
+  "golden_id": "automatic-pruning-of-merged-branches-and-8a27eb3b",
+  "tag": "keep-none",
+  "set": [
+    "optimizers.input.use=none"
+  ],
+  "goal_id": "10ef44d3-2222-482e-95a7-7301912472c5",
+  "started_at": "2026-10-18T06:13:44.029124Z",
+  "completed_at": "2026-10-18T06:46:31.978204Z",
+  "outcome": "pr_ready",
+  "cost_usd": 3.719543500000001,
+  "cost_estimated": false,
+  "input_tokens": 78,
+  "output_tokens": 52704,
+  "cache_read_tokens": 4435961,
+  "cache_creation_tokens": 204477,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 17,
+  "diff_sha256": "bfecae5d42a5000fe72b20a66c449f36f81cd06bfc80e361330ae776951d6a37",
+  "similarity": 0.07865168539325842,
+  "check_passed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "none",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": false,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  }
+}

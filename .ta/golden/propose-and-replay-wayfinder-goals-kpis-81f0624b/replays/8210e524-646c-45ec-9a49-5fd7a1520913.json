@@ -1,0 +1,75 @@
+{
+  "replay_id": "8210e524-646c-45ec-9a49-5fd7a1520913",
+  "golden_id": "propose-and-replay-wayfinder-goals-kpis-81f0624b",
+  "tag": "r2-headroom",
+  "set": [
+    "optimizers.input.use=headroom"
+  ],
+  "goal_id": "5e214c95-0352-415d-b312-9391c1e54087",
+  "started_at": "2026-10-22T06:51:41.649873Z",
+  "completed_at": "2026-10-22T07:15:04.378975Z",
+  "outcome": "pr_ready",
+  "cost_usd": 2.0045871,
+  "cost_estimated": false,
+  "input_tokens": 82,
+  "output_tokens": 59582,
+  "cache_read_tokens": 3822206,
+  "cache_creation_tokens": 226983,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 9,
+  "lines_added": 2117,
+  "lines_removed": 60,
+  "diff_sha256": "289e9f6beebcc1bc16f7899e619029bc068d720ca2b11612896caea5e30c227e",
+  "similarity": 0.27207207207207207,
+  "check_passed": true,
+  "check_run": {
+    "command": "./dev cargo test -p ta-plan-wayfinder -p ta-goal -p ta-mcp-gateway",
+    "started_at": "2026-10-22T07:15:06.773103Z",
+    "finished_at": "2026-10-22T07:16:14.143305Z",
+    "exit_code": 0,
+    "passed": true,
+    "stdout_tail": "_reported_not_swallowed ... ok\ntest client::tests::a_task_id_with_path_characters_cannot_escape_the_project_route ... ok\ntest client::tests::an_unexpected_status_is_surfaced_with_the_status_code ... ok\ntest client::tests::add_dependency_treats_conflict_as_success ... ok\ntest client::tests::get_project_json_hits_the_project_route_with_bearer_auth_and_query ... ok\ntest client::tests::get_org_json_hits_the_org_route ... ok\ntest client::tests::list_tasks_forwards_updated_since_as_a_query_param ... ok\ntest client::tests::update_task_content_patches_the_content_endpoint ... ok\ntest client::tests::list_tasks_sends_bearer_auth_and_parses_the_response ... ok\ntest client::tests::update_task_assignee_sends_an_explicit_null_to_clear ... ok\ntest client::tests::update_task_assignee_patches_the_assignee_endpoint_with_assignee_id ... ok\ntest client::tests::update_task_content_omits_unset_fields_from_the_request_body ... ok\ntest client::tests::unauthorized_response_is_a_distinct_error_from_forbidden ... ok\ntest config::tests::empty_org_id_is_rejected ... ok\ntest config::tests::plaintext_http_against_a_public_host_is_rejected ... ok\ntest client::tests::get_project_json_keeps_401_403_404_and_other_statuses_distinct ... ok\ntest client::tests::update_task_status_patches_the_status_endpoint ... ok\ntest client::tests::kpi_metric_datapoint_and_org_kpi_use_their_routes ... ok\ntest client::tests::upsert_task_posts_the_request_body ... ok\ntest mapping::tests::awaiting_input_state_preserves_the_question_in_hold_reason ... ok\ntest client::tests::upsert_task_sends_assignee_id_only_when_set ... ok\ntest mapping::tests::closed_with_external_ref_is_done_not_cancelled ... ok\ntest mapping::tests::closed_without_external_ref_is_cancelled ... ok\ntest mapping::tests::custom_state_preserves_the_tag_in_hold_reason ... ok\ntest mapping::tests::goal_ids_round_trip ... ok\ntest mapping::tests::phase_gate_ids_round_trip ... ok\ntest mapping::tests::plan_status_mapping_is_stable_for_ordinary_statuses ... ok\ntest mapping::tests::terminal_success_states_map_to_done ... ok\ntest mapping::tests::wayfinder_status_reverse_mapping_treats_on_hold_conservatively ... ok\ntest secret::tests::debug_and_display_never_print_the_secret ... ok\ntest secret::tests::expose_secret_returns_the_real_value ... ok\ntest client::tests::write_errors_name_route_status_and_fix ... ok\ntest select::tests::missing_workflow_toml_defaults_to_file_backend ... ok\ntest config::tests::missing_credential_produces_an_actionable_error ... ok\ntest select::tests::explicit_file_backend_is_honored ... ok\ntest select::tests::wayfinder_backend_without_a_wayfinder_table_is_a_config_error ... ok\ntest select::tests::unknown_backend_is_a_config_error ... ok\ntest store::tests::bootstrap_export_surfaces_forbidden_for_a_member_role_token ... ok\ntest store::tests::bootstrap_export_populates_the_cache_for_known_ta_prefixes ... ok\ntest config::tests::plaintext_http_against_localhost_is_allowed ... ok\ntest config::tests::https_against_a_public_host_is_allowed ... ok\ntest store::tests::save_goal_pushes_a_task_and_wires_it_to_its_phases_gate ... ok\ntest store::tests::a_wayfinder_outage_never_blocks_the_local_write ... ok\ntest store::tests::update_phase_status_writes_locally_and_creates_a_gate_task_in_wayfinder ... ok\ntest store::tests::poll_changes_retries_a_previously_failed_push ... ok\ntest store::tests::update_phase_status_wires_a_dependency_edge_between_two_phases ... ok\ntest client::tests::get_project_json_reports_a_timeout_distinctly ... ok\n\ntest result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s\n\n\nrunning 2 tests\ntest crates/ta-goal/src/messaging_audit.rs - messaging_audit (line 9) ... ignored\ntest crates/ta-goal/src/social_audit.rs - social_audit (line 9) ... ignored\n\ntest result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+    "stderr_tail": "-certs v0.8.4\n   Compiling tryhard v0.5.2\n   Compiling rkyv v0.8.18\n   Compiling axum-core v0.5.6\n   Compiling serde_nanos v0.1.4\n   Compiling rand_distr v0.4.3\n   Compiling nuid v0.5.0\n   Compiling serde_repr v0.1.21\n   Compiling serde_path_to_error v0.1.20\n   Compiling memmap2 v0.9.11\n   Compiling rmcp v0.14.0\n   Compiling ta-workspace v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-workspace)\n   Compiling ta-workflow v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-workflow)\n   Compiling env_home v0.1.0\n   Compiling base64 v0.13.1\n   Compiling matchit v0.8.4\n   Compiling axum v0.8.9\n   Compiling which v7.0.3\n   Compiling ta-session v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-session)\n   Compiling async-nats v0.50.0\n   Compiling rmcp-macros v0.14.0\n   Compiling ta-submit v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-submit)\n   Compiling ruvector-core v2.3.0\n   Compiling sse-stream v0.2.6\n   Compiling pastey v0.2.3\n   Compiling ta-credential-broker v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-credential-broker)\n   Compiling ta-actions v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-actions)\n   Compiling ta-connector-fs v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-connectors/fs)\n   Compiling ta-connector-comfyui v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-connectors/comfyui)\n   Compiling ta-connector-unreal v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-connectors/unreal)\n   Compiling ta-events v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-events)\n   Compiling ta-connector-unity v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-connectors/unity)\n   Compiling deadpool-runtime v0.1.4\n   Compiling deadpool v0.12.3\n   Compiling assert-json-diff v2.0.2\n   Compiling wiremock v0.6.5\n   Compiling ta-memory v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-memory)\n   Compiling ta-plan v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-plan)\n   Compiling ta-plan-wayfinder v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-plan-wayfinder)\n   Compiling ta-agent-whiteboard v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-agent-whiteboard)\n   Compiling ta-mcp-gateway v0.17.12-alpha.5 (/Users/michael/development/TrustedAutonomy/.ta/staging/5e214c95-0352-415d-b312-9391c1e54087/crates/ta-mcp-gateway)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 59.34s\nwarning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1\nnote: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`\n     Running unittests src/lib.rs (target/debug/deps/ta_goal-3915f0b3cb7e938c)\n     Running unittests src/lib.rs (target/debug/deps/ta_mcp_gateway-98bf0054a36ef19b)\n     Running tests/origin_class_not_agent_settable.rs (target/debug/deps/origin_class_not_agent_settable-0bc03cb6bd9d9e8b)\n     Running unittests src/lib.rs (target/debug/deps/ta_plan_wayfinder-36acfd4136ffe2ad)\n   Doc-tests ta_goal\n   Doc-tests ta_mcp_gateway\n   Doc-tests ta_plan_wayfinder\n",
+    "tests": {
+      "passed": 751,
+      "failed": 0,
+      "ignored": 2
+    }
+  },
+  "run_index": 4,
+  "recomputed": null,
+  "failure": null,
+  "environment": {
+    "provenance": "measured at replay start",
+    "ta_version": "0.17.12-alpha.5",
+    "claude_code_version": "2.1.302 (Claude Code)",
+    "rtk_version": "rtk 1.0.1",
+    "headroom_version": "headroom, version 0.41.0",
+    "input_slot": "headroom",
+    "context_slot": "not chosen",
+    "output_slot": "not chosen",
+    "compression_enabled": true,
+    "anthropic_base_url": null,
+    "auto_compact_window": 200000,
+    "daemon_toml_sha256": "840ce07a62b30844a0c9918eecd0b4e4dc11d565f3567f4f4b290cb148b43a20",
+    "note": null
+  },
+  "usage": {
+    "before": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 6.45,
+      "plan_captured_at": "2026-10-22T06:51:25Z",
+      "taken_at": "2026-10-22T06:51:41.649072Z"
+    },
+    "after": {
+      "plan_usage_pct": 18.0,
+      "budget_used_pct": 7.45,
+      "plan_captured_at": "2026-10-22T07:14:54Z",
+      "taken_at": "2026-10-22T07:15:04.378975Z"
+    },
+    "plan_usage_pct_delta": 0.0,
+    "budget_used_pct_delta": 1.0,
+    "note": null
+  }
+}

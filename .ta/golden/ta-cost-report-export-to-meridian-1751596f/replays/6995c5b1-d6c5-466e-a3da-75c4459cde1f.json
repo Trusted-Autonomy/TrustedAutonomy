@@ -1,0 +1,25 @@
+{
+  "replay_id": "6995c5b1-d6c5-466e-a3da-75c4459cde1f",
+  "golden_id": "ta-cost-report-export-to-meridian-1751596f",
+  "tag": "none",
+  "set": [
+    "optimizers.input.use=none"
+  ],
+  "goal_id": "3fc3e27f-409e-4f98-ae06-f38b758e307d",
+  "started_at": "2026-10-17T04:59:03.095738Z",
+  "completed_at": "2026-10-17T04:59:55.030186Z",
+  "outcome": "running",
+  "cost_usd": 0.0,
+  "cost_estimated": false,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_creation_tokens": 0,
+  "turns": null,
+  "aborted_budget": false,
+  "files_changed": 0,
+  "diff_sha256": null,
+  "similarity": null,
+  "check_passed": null,
+  "failure": "the replay goal ended in state `running` without a draft package, so there is nothing to compare. See `ta goal status 3fc3e27f`."
+}

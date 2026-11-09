@@ -51,31 +51,33 @@ This is the same script real installs use (just a faster debug profile), so the 
 4. **Never re-push to trigger CI.** Every push to an open PR re-runs it. Fix locally, re-run `scripts/ci-local.sh`, then push once. To re-run a red CI job use the Actions "Re-run failed jobs" button, not an empty commit.
 5. **What CI runs (keep it cheap; do not add jobs).** A pull request runs `Version consistency` (seconds) and ONE ubuntu job (`Lint and Test (ubuntu-latest)`: fmt, clippy, test); docs-only pull requests stop after the cheap checks. macOS (`Lint and Test (macos-latest)`), `Windows Build` and `Linux Sandbox Conformance` run for real only on push to `main` (the composite-PR merge), `workflow_dispatch` (`gh workflow run ci.yml --ref <branch>`), or a pull request carrying the `full-ci` label when it is opened or pushed to; otherwise they are skipped (a skipped job reports success, so required check names still resolve). Linux Sandbox Conformance also runs on a PR that touches `crates/ta-runtime`. The nightly builds only when code (not just docs) changed since the last nightly. See the header of `.github/workflows/ci.yml`.
 
-## Git Workflow — Feature Branches + Pull Requests
+## Git Workflow — One Release Branch, One Pull Request
 
-All work MUST happen on feature branches. Never commit directly to `main`.
+Never commit directly to `main`. GitHub Actions minutes are limited, so a goal does **not** get its own pull request: a release gets one.
 
-1. **Create a feature branch** before starting work:
+1. **Open the release once** (a human runs this; it is refused in an agent context):
    ```bash
-   git checkout -b feature/<short-description>
+   ta release-set start <name> --goal "<release objective>" [--wayfinder-goal <id>] [--phase <id>...]
    ```
-   Use prefixes: `feature/`, `fix/`, `refactor/`, `docs/` as appropriate.
+   This creates `release/<name>` from `main`, records the release goal, and makes the release goal an umbrella goal in `ta goal list`. At most one release is open per project.
 
-2. **Commit to the feature branch** in logical working units as you go.
+2. **Every goal commits onto `release/<name>`.** `ta run`, `ta goal start` and `ta draft apply --git-commit` target the release branch automatically while a release is open. Apply commits locally and defers the push; no per-goal PR is opened. `ta release-set status` shows what landed, which goals look off-track, and how far the branch is ahead/behind `main`. Drift advice is advice only; it never blocks.
 
-3. **When the goal is complete**, push and open a pull request:
+3. **Cut the release with one PR:**
    ```bash
-   git push -u origin feature/<short-description>
-   gh pr create --title "Short description" --body "## Summary\n- what changed and why\n\n## Test plan\n- verification steps"
+   ta release-set cut
    ```
+   It merges the latest `main` into the release branch, runs the verify gate (refusing, with the exact failing command, if it fails), pushes once and opens ONE PR to `main` titled from the release goal, with the evidence line in the body. Review and merge that PR.
 
-4. **The PR is reviewed and merged** into `main` (squash or merge commit).
+4. **Hotfix exception.** A fix that cannot wait for the release goes to `main` on its own PR: `ta run "..." --hotfix --hotfix-reason "<why>"` and `ta draft apply <id> --hotfix --hotfix-reason "<why>"` (apply it from `main`, not from the release branch). It is recorded as a hotfix in the release state. Without an open release, goals use the configured `[submit.git] target_branch` as before.
 
-This applies to both manual work and TA-mediated goals. When `ta pr apply --git-commit` runs, the commit should land on a feature branch, not `main`.
+5. **Manual work** (not through TA) follows the same shape: commit on `release/<name>`, no PR per change. Use a `fix/` or `feature/` branch + PR only for a hotfix.
+
+`ta release` is the publish pipeline (version, tag, notes); `ta release-set` is the branch workflow above. See docs/USAGE.md "Release Sets".
 
 ## Rules
 
-- Never commit directly to `main` — always use a feature branch + PR
+- Never commit directly to `main` — commit onto the open `release/<name>` branch; `main` changes only through the one release PR (or a recorded hotfix PR)
 - **Before any `git checkout`, `git commit`, or `git push`**: check for `.ta/apply.lock`. If it exists and the PID inside is alive, a `ta draft apply` is in progress — wait for it to finish before touching the git repo. Doing git operations mid-apply causes "no changes to commit" rollbacks. (v0.15.11.1 will enforce this at the TA level; until then, enforce manually.)
 - **After every commit or set of commits, verify the working tree is clean**: run `git status` and confirm "nothing to commit, working tree clean". If there are uncommitted changes (e.g., Cargo.lock after a version bump, .ta/ files after a draft apply, unstaged modifications), commit or restore them before moving on. Never leave main in a dirty state.
 - Never disable or skip tests

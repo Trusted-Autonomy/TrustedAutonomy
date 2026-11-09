@@ -1,0 +1,17 @@
+# Goal: propose and replay Wayfinder goals, KPI metrics and datapoints through draft review (alpha point 4)
+
+Owner decision: the CoS never writes. A project-manager worker proposes goal, KPI and datapoint changes; they ride in the SAME draft a human reviews and are replayed against Wayfinder REST only when the draft is applied, exactly like ta_propose_task_* today.
+
+Read first: crates/ta-mcp-gateway/src/tools/wayfinder_task.rs (ProposeKind, params, handlers, derived_external_id, PendingAction capture), apps/ta-cli/src/commands/draft_task_replay.rs (replay_one, ledger, load_client), crates/ta-plan-wayfinder/src/client.rs (REST client), crates/ta-goal/src/tool_surface.rs (effects classification), and the Wayfinder REST contract in ~/development/alpha-channel/from-wayfinder/011-rest-contract-for-propose-and-replay.md (authoritative; the Wayfinder repo at ~/development/wayfinder is READ ONLY, use it to confirm enum values: MetricCadence, MetricKind, MetricAggregation in wayfinder-core).
+
+## Build
+1. Extend the closed set with four kinds: ta_propose_goal_create, ta_propose_kpi_metric_create, ta_propose_kpi_datapoint_add, ta_propose_kpi_create (org-level KPI). Same dispatcher pattern (one enum, tool name <-> replay agree), same validation limits style, goal_run_id required, input validated (finite values within +-1e12, enums checked against the closed lists, lengths capped).
+2. Replay REST (project pinned from config like tasks): POST /api/projects/<id>/goals; POST /api/projects/<id>/goals/<goal_id>/kpi-metrics; POST /api/projects/<id>/kpi-metrics/<metric_id>/datapoints; POST /api/orgs/<org_id>/kpis. Bodies exactly as in 011. Every create sends `external_id` derived deterministically as "ta_draft:<draft_id>:<n>" (n = the action's index within the draft) so re-applying is idempotent. Add client methods in ta-plan-wayfinder with typed errors that name route, status and fix; 409 on a different body under the same key is reported as "conflict" with the fix, 403 names the missing right (tasks:write for goal/metric/datapoint, kpis:manage for org KPI).
+3. A proposal may refer to a goal or metric created EARLIER IN THE SAME DRAFT (metric under a new goal; datapoint on a new metric). Support a symbolic reference "ref:<n>" resolved at replay from the ledger of ids the earlier actions returned; replay order = declared order, and a failed step stops dependants and says which. This must work on re-apply after partial failure (ledger records the returned ids).
+4. Datapoints on a task_count metric are refused by Wayfinder (409): surface the message plainly.
+5. Classify the four tools in tool_surface.rs (they are proposals, not live mutations) and make sure NONE are in CHAT_MODE_MCP_TOOLS (add/extend a test that chat mode has no ta_propose_*). Draft view must show each proposal readably (extend the existing renderer for task proposals).
+6. Tests: handler validation and capture; replay against the repo's existing mock Wayfinder pattern (request paths, bodies, external_id derivation, ref resolution, idempotent re-apply, partial failure then re-apply, 403/409 messages). Use tempfile::tempdir. None ignored.
+7. docs/USAGE.md how-to for the four tools and what a reviewer sees. No version annotations.
+
+## Rules
+No em dashes. Do not edit Cargo.toml versions or PLAN.md. Run ./dev cargo build/test/clippy -D warnings/fmt checks from CLAUDE.md. Note: PR #713 (ta_wayfinder_* read tools in server.rs) may be merged already; keep your server.rs edits minimal and additive to avoid conflicts. Report truthfully.

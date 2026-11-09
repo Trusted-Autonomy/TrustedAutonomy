@@ -508,6 +508,11 @@ impl GitAdapter {
     /// All characters are passed directly to git as command arguments, not
     /// through shell interpolation, so no shell-escaping is needed.
     fn branch_name(&self, ctx: &CommitContext, config: &SubmitConfig) -> String {
+        // A release is open (`ta release-set`): every goal commits onto the
+        // release branch, there is no per-goal branch.
+        if let Some(release_branch) = &config.git.release_branch {
+            return release_branch.clone();
+        }
         let prefix = &config.git.branch_prefix;
 
         // Step 1: lowercase + replace non-alphanumeric/dash with dash.
@@ -739,6 +744,27 @@ impl SourceAdapter for GitAdapter {
     fn prepare(&self, ctx: &CommitContext, config: &SubmitConfig) -> Result<()> {
         let branch_name = self.branch_name(ctx, config);
 
+        // Release routing: check out the existing release branch. It is created by
+        // `ta release-set start`; creating it here from origin/main would silently
+        // start a second, unrelated line of history.
+        if let Some(release_branch) = &config.git.release_branch {
+            let exists = !self
+                .git_cmd(&["branch", "--list", release_branch])?
+                .trim()
+                .is_empty();
+            if !exists {
+                return Err(SubmitError::InvalidState(format!(
+                    "release branch '{release_branch}' does not exist in this repository. \
+                     The open release (.ta/release-set.json) expects it. Recreate it with \
+                     `git branch {release_branch} <commit>` from the release's base commit \
+                     (see `ta release-set status`), or start over with \
+                     `ta release-set start`."
+                )));
+            }
+            tracing::info!("GitAdapter: switching to release branch {}", release_branch);
+            self.checkout_preserving_worktree(&["checkout", release_branch])?;
+            return Ok(());
+        }
         tracing::info!("GitAdapter: creating branch {}", branch_name);
 
         // Check if branch already exists — if so, just switch to it.

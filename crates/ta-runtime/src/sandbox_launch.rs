@@ -630,6 +630,12 @@ pub struct SandboxProfile {
     /// Exact files readable although they lie inside a denied tree: the goal's
     /// own system-prompt file. Read-only.
     pub read_files: Vec<PathBuf>,
+    /// Project roots the session may read and never write (the real project and any
+    /// `[chat] readable_projects` entry). Set only by [`SandboxProfile::with_project_read_roots`].
+    /// Each lies outside the class ceiling on purpose: the chat class reads project
+    /// content, but only here, read-only, and every protected path inside a root
+    /// (`.ta`, `.git`, the credential deny list) stays in `deny_paths` and wins.
+    pub read_roots: Vec<PathBuf>,
     pub unix_sockets: Vec<PathBuf>,
     /// The per-goal egress proxy is available to this launch.
     pub egress_proxy: bool,
@@ -824,6 +830,7 @@ impl SandboxProfile {
             allow_network,
             deny_paths,
             read_files,
+            read_roots: Vec::new(),
             unix_sockets,
             egress_proxy: ctx.egress_proxy,
             persona_applied,
@@ -843,7 +850,12 @@ impl SandboxProfile {
         SandboxPolicy {
             enabled: true,
             provider,
-            allow_read: self.allow_read.clone(),
+            allow_read: self
+                .allow_read
+                .iter()
+                .chain(self.read_roots.iter())
+                .cloned()
+                .collect(),
             allow_write: self.allow_write.clone(),
             allow_network: self.allow_network.clone(),
             deny_paths: self.deny_paths.clone(),
@@ -855,6 +867,61 @@ impl SandboxProfile {
             windows: Default::default(),
             violation_tag: Some(crate::seatbelt::violation_tag(&self.goal_id)),
         }
+    }
+}
+
+impl SandboxProfile {
+    /// Grant read-only access to project roots (the real project and the readable
+    /// projects of a chat session). Fails soft per root, loudly: a root that is relative,
+    /// is a filesystem root, or lies inside a protected path is dropped with a warning
+    /// (deny wins). For every kept root, its `.ta` and `.git` are added to `deny_paths`,
+    /// so a read grant on a project never exposes TA state or VCS internals. Nothing here
+    /// adds a write path: a root that also appears in `allow_write` is dropped from the
+    /// read set and reported, so "read-only" can never be quietly read-write.
+    pub fn with_project_read_roots(mut self, roots: &[PathBuf]) -> Self {
+        let ci = filesystem_is_case_insensitive();
+        for root in roots {
+            let root = normalize(root);
+            if !root.is_absolute() || root.components().count() < 2 {
+                self.warnings.push(format!(
+                    "ignored read-only project root {}: it must be an absolute path below the \
+                     filesystem root",
+                    root.display()
+                ));
+                continue;
+            }
+            if let Some(hit) = self.deny_paths.iter().find(|d| path_within(&root, d, ci)) {
+                self.warnings.push(format!(
+                    "ignored read-only project root {}: it lies inside protected path {}",
+                    root.display(),
+                    hit.display()
+                ));
+                continue;
+            }
+            if let Some(w) = self
+                .allow_write
+                .iter()
+                .find(|w| path_within(&root, w, ci) || path_within(w, &root, ci))
+            {
+                self.warnings.push(format!(
+                    "ignored read-only project root {}: it overlaps the writable path {}, and a \
+                     read-only grant must never be writable",
+                    root.display(),
+                    w.display()
+                ));
+                continue;
+            }
+            for sub in [".ta", ".git"] {
+                let d = root.join(sub);
+                if !self.deny_paths.contains(&d) {
+                    self.deny_paths.push(d);
+                }
+            }
+            if !self.read_roots.contains(&root) {
+                self.read_roots.push(root);
+            }
+        }
+        self
     }
 }
 
@@ -2485,5 +2552,54 @@ mod tests {
         );
         assert!(d.badge().starts_with("sandbox REFUSED"), "{}", d.badge());
         assert!(d.badge().contains("fs.deny_ta_tree"));
+    }
+    #[test]
+    fn chat_read_roots_are_read_only_and_keep_ta_and_git_denied() {
+        let c = ctx(RoleClass::Chat, false);
+        let other = PathBuf::from("/work/other-project");
+        let p = SandboxProfile::compile(None, &project_open(), &c)
+            .with_project_read_roots(&[c.project_root.clone(), other.clone()]);
+        assert_eq!(p.read_roots, vec![c.project_root.clone(), other.clone()]);
+        // The class ceiling still strips every ordinary read/write allowance.
+        assert!(p.allow_write.is_empty());
+        // `.ta` and `.git` of BOTH roots are denied, and the deny list is not shortened.
+        for root in [&c.project_root, &other] {
+            for sub in [".ta", ".git"] {
+                assert!(
+                    p.deny_paths.contains(&root.join(sub)),
+                    "{} must stay denied",
+                    root.join(sub).display()
+                );
+            }
+        }
+        let policy = p.to_policy(SandboxProvider::MacosSandboxExec);
+        assert!(policy.allow_read.contains(&other));
+        assert!(
+            policy.allow_write.is_empty(),
+            "a read-only root never becomes writable"
+        );
+    }
+
+    #[test]
+    fn chat_read_roots_that_would_be_writable_or_protected_are_dropped_loudly() {
+        let c = ctx(RoleClass::Worker, false);
+        let mut p = SandboxProfile::compile(None, &project_open(), &c);
+        p.allow_write = vec![PathBuf::from("/work/rw")];
+        let home_ssh = c
+            .user_home
+            .clone()
+            .map(|h| h.join(".ssh"))
+            .unwrap_or_else(|| PathBuf::from("/home/me/.ssh"));
+        let p = p.with_project_read_roots(&[
+            PathBuf::from("/work/rw/sub"),
+            home_ssh.join("keys"),
+            PathBuf::from("relative/dir"),
+            PathBuf::from("/"),
+        ]);
+        assert!(p.read_roots.is_empty(), "{:?}", p.read_roots);
+        let w = p.warnings.join("\n");
+        assert!(w.contains("writable path /work/rw"), "{w}");
+        assert!(w.contains("relative/dir"), "{w}");
+        assert!(w.contains("must be an absolute path"), "{w}");
     }
 }

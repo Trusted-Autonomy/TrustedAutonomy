@@ -125,6 +125,200 @@ pub fn compile_chat_manifest(
     Ok(manifest)
 }
 
+/// Biscuit scope carrying the right to read the real project root.
+pub const CHAT_SCOPE_PROJECT_READ: &str = "fs:read:project";
+const CHAT_SCOPE_READABLE_PREFIX: &str = "fs:read:readable:";
+const CHAT_SCOPE_TOOL_PREFIX: &str = "tool:read:";
+
+/// Resource pattern the real project root's files are checked against.
+pub const CHAT_PROJECT_RESOURCE_SCOPE: &str = "fs://project/**";
+
+/// Resource URI prefix of one registry-listed readable project.
+pub fn chat_readable_resource_prefix(label: &str) -> String {
+    format!("fs://readable/{label}/")
+}
+
+/// Resource URI a read-only chat tool (a Wayfinder or wiki read, plan
+/// status, community lookup) is checked against.
+pub fn chat_tool_resource(tool: &str) -> String {
+    format!("tool://{tool}")
+}
+
+/// A label naming one `[chat] readable_projects` entry. Labels become part
+/// of a policy resource URI and of a comma-joined biscuit scope list, so
+/// they are restricted to characters that can never be glob syntax, path
+/// separators or list separators.
+pub fn is_valid_readable_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 64
+        && label != "."
+        && label != ".."
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn is_valid_tool_name(tool: &str) -> bool {
+    !tool.is_empty()
+        && tool.len() <= 64
+        && tool
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// What a read-only chat session (the Chief of Staff) may read beyond its
+/// own session directory: the real project root, other registry-listed
+/// projects, and the named read tools that load project configuration
+/// (Wayfinder reads, wiki, plan status, community lookup).
+///
+/// This is a grant, not a mode: it is minted by the launcher as a biscuit
+/// (scopes from [`ChatReadAccess::to_scopes`]), verified by the gateway, and
+/// then compiled into the session's capability manifest by
+/// [`compile_chat_manifest_with_read_access`], where the same
+/// `PolicyEngine` that already refuses writes enforces it. It never carries
+/// a write, commit, email or network capability: there is no field for one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatReadAccess {
+    /// Read files of the real project root (`fs://project/**`).
+    pub project: bool,
+    /// Labels of registry-listed projects readable the same way.
+    pub readable_projects: Vec<String>,
+    /// Bare MCP tool names (`ta_wayfinder_task_list`, ...) allowed to read
+    /// project configuration from the real project root.
+    pub tools: Vec<String>,
+}
+
+impl ChatReadAccess {
+    /// True when nothing is granted (the pre-grant chat session).
+    pub fn is_empty(&self) -> bool {
+        !self.project && self.readable_projects.is_empty() && self.tools.is_empty()
+    }
+
+    /// The biscuit scopes expressing this grant. Order: project, readable
+    /// projects, tools.
+    pub fn to_scopes(&self) -> Vec<String> {
+        let mut scopes = Vec::new();
+        if self.project {
+            scopes.push(CHAT_SCOPE_PROJECT_READ.to_string());
+        }
+        scopes.extend(
+            self.readable_projects
+                .iter()
+                .map(|l| format!("{CHAT_SCOPE_READABLE_PREFIX}{l}")),
+        );
+        scopes.extend(
+            self.tools
+                .iter()
+                .map(|t| format!("{CHAT_SCOPE_TOOL_PREFIX}{t}")),
+        );
+        scopes
+    }
+
+    /// Recover a grant from verified biscuit scopes. Scopes this module does
+    /// not define, and labels or tool names that are not well-formed, are
+    /// dropped (a grant can only ever be narrower than what was minted).
+    pub fn from_scopes<S: AsRef<str>>(scopes: &[S]) -> Self {
+        let mut access = Self::default();
+        for scope in scopes {
+            let scope = scope.as_ref();
+            if scope == CHAT_SCOPE_PROJECT_READ {
+                access.project = true;
+            } else if let Some(label) = scope.strip_prefix(CHAT_SCOPE_READABLE_PREFIX) {
+                if is_valid_readable_label(label) {
+                    access.readable_projects.push(label.to_string());
+                }
+            } else if let Some(tool) = scope.strip_prefix(CHAT_SCOPE_TOOL_PREFIX) {
+                if is_valid_tool_name(tool) {
+                    access.tools.push(tool.to_string());
+                }
+            }
+        }
+        access
+    }
+}
+
+/// [`compile_chat_manifest`] plus the read grants of `access`:
+///
+/// - `fs.read` on `fs://project/**` (the real project root);
+/// - `fs.read` on `fs://readable/<label>/**` for each readable project;
+/// - `tool.read` on `tool://<name>` for each named read tool.
+///
+/// Nothing here is a write. The scratch-write grant of the base manifest is
+/// unchanged, so `fs.write_patch` on `fs://project/**` stays denied, as do
+/// git, email and external network (never granted: default-deny).
+pub fn compile_chat_manifest_with_read_access(
+    agent_id: &str,
+    workspace_resource_scope: &str,
+    validity_hours: i64,
+    access: &ChatReadAccess,
+) -> Result<CapabilityManifest, CompilerError> {
+    let mut manifest = compile_chat_manifest(agent_id, workspace_resource_scope, validity_hours)?;
+
+    for label in &access.readable_projects {
+        if !is_valid_readable_label(label) {
+            return Err(CompilerError::InvalidAction {
+                action: format!("fs_read on readable project '{label}'"),
+                message: "a readable project label may only contain letters, digits, '.', '_' \
+                          and '-'"
+                    .to_string(),
+            });
+        }
+    }
+    for tool in &access.tools {
+        if !is_valid_tool_name(tool) {
+            return Err(CompilerError::InvalidAction {
+                action: format!("tool_read on '{tool}'"),
+                message: "a read tool name may only contain lowercase letters, digits and '_'"
+                    .to_string(),
+            });
+        }
+    }
+
+    let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut fs_scopes = Vec::new();
+    if access.project {
+        fs_scopes.push(CHAT_PROJECT_RESOURCE_SCOPE.to_string());
+    }
+    fs_scopes.extend(
+        access
+            .readable_projects
+            .iter()
+            .map(|l| format!("{}**", chat_readable_resource_prefix(l))),
+    );
+    groups.push(("fs_read", fs_scopes));
+    groups.push((
+        "tool_read",
+        access.tools.iter().map(|t| chat_tool_resource(t)).collect(),
+    ));
+
+    for (action, resource_scope) in groups {
+        if resource_scope.is_empty() {
+            continue;
+        }
+        let profile = AlignmentProfile {
+            principal: "chat-session".to_string(),
+            autonomy_envelope: AutonomyEnvelope {
+                bounded_actions: vec![action.to_string()],
+                escalation_triggers: vec![],
+                forbidden_actions: vec![
+                    "network_external".to_string(),
+                    "credential_access".to_string(),
+                ],
+            },
+            constitution: "default-v1".to_string(),
+            coordination: CoordinationConfig::default(),
+        };
+        let options = CompilerOptions {
+            resource_scope,
+            validity_hours,
+        };
+        manifest
+            .grants
+            .extend(PolicyCompiler::compile(agent_id, &profile, &options)?.grants);
+    }
+    Ok(manifest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +437,139 @@ mod tests {
             "expected Deny for email send with no grant, got {:?}",
             decision
         );
+    }
+
+    fn cos_access() -> ChatReadAccess {
+        ChatReadAccess {
+            project: true,
+            readable_projects: vec!["sibling".to_string()],
+            tools: vec!["ta_wayfinder_task_list".to_string()],
+        }
+    }
+
+    fn decide(engine: &PolicyEngine, tool: &str, verb: &str, target: &str) -> PolicyDecision {
+        engine.evaluate(&PolicyRequest {
+            agent_id: "cos".to_string(),
+            tool: tool.to_string(),
+            verb: verb.to_string(),
+            target_uri: target.to_string(),
+        })
+    }
+
+    #[test]
+    fn read_access_grants_project_read_and_named_tool_reads_only() {
+        let manifest =
+            compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &cos_access()).unwrap();
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(manifest);
+
+        assert_eq!(
+            decide(&engine, "fs", "read", "fs://project/src/main.rs"),
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            decide(&engine, "fs", "read", "fs://readable/sibling/README.md"),
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            decide(&engine, "tool", "read", "tool://ta_wayfinder_task_list"),
+            PolicyDecision::Allow
+        );
+        // No grant for a tool that was not named, nor for an unlisted project.
+        for (tool, verb, target) in [
+            ("tool", "read", "tool://ta_wiki_search"),
+            ("fs", "read", "fs://readable/other/README.md"),
+            // Writes, commits, email, network: never granted.
+            ("fs", "write_patch", "fs://project/src/main.rs"),
+            ("fs", "write_patch", "fs://readable/sibling/x"),
+            ("fs", "apply", "fs://project/src/main.rs"),
+            ("git", "commit", "fs://project/**"),
+            ("email", "send", "mailto:a@example.com"),
+            ("network", "external", "https://example.com"),
+        ] {
+            assert!(
+                matches!(
+                    decide(&engine, tool, verb, target),
+                    PolicyDecision::Deny { .. }
+                ),
+                "{tool}.{verb} on {target} must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn secrets_backstop_still_wins_over_the_project_read_grant() {
+        let manifest =
+            compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &cos_access()).unwrap();
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(manifest);
+        for target in [
+            "fs://project/.env",
+            "fs://project/deploy/server.pem",
+            "fs://project/.ssh/id_ed25519",
+            "fs://readable/sibling/.env",
+        ] {
+            assert!(
+                matches!(
+                    decide(&engine, "fs", "read", target),
+                    PolicyDecision::Deny { .. }
+                ),
+                "{target} must stay unreadable"
+            );
+        }
+    }
+
+    #[test]
+    fn without_read_access_the_manifest_has_no_project_or_tool_grants() {
+        let manifest =
+            compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &ChatReadAccess::default())
+                .unwrap();
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(manifest);
+        assert!(matches!(
+            decide(&engine, "fs", "read", "fs://project/src/main.rs"),
+            PolicyDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            decide(&engine, "tool", "read", "tool://ta_wayfinder_task_list"),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn scopes_round_trip_and_malformed_scopes_are_dropped() {
+        let access = cos_access();
+        assert_eq!(ChatReadAccess::from_scopes(&access.to_scopes()), access);
+
+        let hostile = ChatReadAccess::from_scopes(&[
+            "fs:write:project",
+            "fs:read:readable:../etc",
+            "fs:read:readable:a/b",
+            "fs:read:readable:a*",
+            "tool:read:Ta Evil",
+            "email:send:all",
+        ]);
+        assert!(hostile.is_empty(), "{hostile:?}");
+    }
+
+    #[test]
+    fn malformed_labels_and_tool_names_are_refused_at_compile_time() {
+        for bad in ["", "a/b", "a*", "..", "x,y"] {
+            let access = ChatReadAccess {
+                project: false,
+                readable_projects: vec![bad.to_string()],
+                tools: vec![],
+            };
+            assert!(
+                compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &access).is_err(),
+                "label {bad:?} must be refused"
+            );
+        }
+        let access = ChatReadAccess {
+            project: false,
+            readable_projects: vec![],
+            tools: vec!["Bad Tool".to_string()],
+        };
+        assert!(compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &access).is_err());
     }
 }

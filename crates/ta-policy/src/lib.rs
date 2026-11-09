@@ -46,7 +46,11 @@ pub use business_budget::{
 };
 pub use capability::{CapabilityGrant, CapabilityManifest};
 pub use cascade::{CliOverrides, PolicyCascade};
-pub use chat_manifest::{compile_chat_manifest, CHAT_SCRATCH_DIR};
+pub use chat_manifest::{
+    chat_readable_resource_prefix, chat_tool_resource, compile_chat_manifest,
+    compile_chat_manifest_with_read_access, is_valid_readable_label, ChatReadAccess,
+    CHAT_PROJECT_RESOURCE_SCOPE, CHAT_SCOPE_PROJECT_READ, CHAT_SCRATCH_DIR,
+};
 pub use compiler::{CompilerError, CompilerOptions, PolicyCompiler};
 pub use constitution::{
     AccessConstitution, ConstitutionEntry, ConstitutionError, ConstitutionStore,

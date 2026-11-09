@@ -1,0 +1,2068 @@
+--- a/PLAN.md
++++ b/PLAN.md
+@@ -11248,12 +11248,12 @@
+ 
+ **Goal**: `/api/spend` only sees TA goals. Measured on 2026-10-13, the expensive workload is long interactive Claude Code and OMP sessions (one session: 64% cache read, 31% cache write, 5% output, average context 491k tokens), which TA cannot see. Add one command that reports spend across goals and interactive sessions, with the context-size breakdown that exposed the cost driver. Spec: same file, section 3.
+ 
+-1. [ ] **`ta cost report`** reads (each source optional, auto-detected): TA goals through the existing `ta_goal::spend::aggregate`; Claude Code sessions under `~/.claude/projects/**/*.jsonl`; OMP sessions under `~/.omp/agent/sessions/**/*.jsonl`. Flags: `--since`, `--until` (reuse `parse_time_bound`), `--group-by day|source|model|project|context_bucket|origin_class`, `--project`, `--json`.
+-2. [ ] **Correct counting.** Claude assistant rows are deduplicated by `message.id` (last row wins; streamed rows repeat an id) and `<synthetic>` rows are skipped. OMP uses the per-message usage and cost it already records. A test proves a transcript with repeated ids is counted once.
+-3. [ ] **1 hour cache write rate.** Add a `cache_write_1h` rate to `token_cost.rs` (2x input) and use `cache_creation.ephemeral_1h_input_tokens` when a transcript splits the write classes. Costs are marked `exact` when the runtime or OMP reports them and `estimated` otherwise; an unknown model is never given an invented price.
+-4. [ ] **Context buckets.** Report turns, cache-read tokens and cost for context sizes 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k, per source.
+-5. [ ] **Honest output.** A header says which sources were found and which were missing, how many rows were deduplicated, and which costs are estimated. Missing source directories are reported, not errors.
+-6. [ ] Tests against a tempdir fixture of both transcript formats; totals match an independent sum. `docs/USAGE.md` how-to with example output.
++1. [x] **`ta cost report`** reads (each source optional, auto-detected): TA goals through the existing `ta_goal::spend::aggregate`; Claude Code sessions under `~/.claude/projects/**/*.jsonl`; OMP sessions under `~/.omp/agent/sessions/**/*.jsonl`. Flags: `--since`, `--until` (reuse `parse_time_bound`), `--group-by day|source|model|project|context_bucket|origin_class`, `--project`, `--json`.
++2. [x] **Correct counting.** Claude assistant rows are deduplicated by `message.id` (last row wins; streamed rows repeat an id) and `<synthetic>` rows are skipped. OMP uses the per-message usage and cost it already records. A test proves a transcript with repeated ids is counted once.
++3. [x] **1 hour cache write rate.** Add a `cache_write_1h` rate to `token_cost.rs` (2x input) and use `cache_creation.ephemeral_1h_input_tokens` when a transcript splits the write classes. Costs are marked `exact` when the runtime or OMP reports them and `estimated` otherwise; an unknown model is never given an invented price.
++4. [x] **Context buckets.** Report turns, cache-read tokens and cost for context sizes 0 to 50k, 50 to 100k, 100 to 200k, 200 to 400k and over 400k, per source.
++5. [x] **Honest output.** A header says which sources were found and which were missing, how many rows were deduplicated, and which costs are estimated. Missing source directories are reported, not errors.
++6. [x] Tests against a tempdir fixture of both transcript formats; totals match an independent sum. `docs/USAGE.md` how-to with example output.
+ 
+ **Effort**: M.
+ 
+--- /dev/null
++++ b/apps/ta-cli/src/commands/cost.rs
+@@ -0,0 +1,417 @@
++//! `ta cost report`: spend across TA goals and interactive agent sessions.
++//!
++//! Reads, each source optional and auto-detected: the project's goal records,
++//! Claude Code transcripts (`~/.claude/projects`) and OMP transcripts
++//! (`~/.omp/agent/sessions`). The counting rules live in `ta_goal::cost_report`.
++
++use std::path::PathBuf;
++
++use anyhow::Context;
++use clap::Subcommand;
++use ta_goal::cost_report::{
++    build_report, goal_rows, parse_cost_group_by, scan_claude_dir, scan_omp_dir, CostFilter,
++    CostReport, SourceStatus,
++};
++use ta_goal::spend::parse_time_bound;
++use ta_goal::{GoalRunStore, PriceTable};
++use ta_mcp_gateway::GatewayConfig;
++
++#[derive(Debug, Subcommand)]
++pub enum CostCommands {
++    /// Report spend across TA goals, Claude Code sessions and OMP sessions.
++    ///
++    /// Sources found: this project's goals, `~/.claude/projects/**/*.jsonl` and
++    /// `~/.omp/agent/sessions/**/*.jsonl`. A missing source is reported, not an
++    /// error. Claude rows are deduplicated by message id. Costs are exact when
++    /// the source reported them and estimated from the price table otherwise
++    /// (`.ta/pricing.toml` overrides rates).
++    Report {
++        /// Only spend at or after this time (RFC 3339 or YYYY-MM-DD).
++        #[arg(long)]
++        since: Option<String>,
++        /// Only spend before this time (RFC 3339 or YYYY-MM-DD).
++        #[arg(long)]
++        until: Option<String>,
++        /// Group by a comma-separated list of: day, source, model, project,
++        /// context_bucket, origin_class.
++        #[arg(long, default_value = "source")]
++        group_by: String,
++        /// Only projects whose name contains this text (case-insensitive).
++        #[arg(long)]
++        project: Option<String>,
++        /// Print the report as JSON.
++        #[arg(long)]
++        json: bool,
++    },
++}
++
++pub fn execute(command: &CostCommands, config: &GatewayConfig) -> anyhow::Result<()> {
++    match command {
++        CostCommands::Report {
++            since,
++            until,
++            group_by,
++            project,
++            json,
++        } => {
++            let home = home_dir();
++            let sources = SourcePaths {
++                claude: home.as_ref().map(|h| h.join(".claude").join("projects")),
++                omp: home
++                    .as_ref()
++                    .map(|h| h.join(".omp").join("agent").join("sessions")),
++            };
++            let report = run_report(
++                config,
++                &sources,
++                since.as_deref(),
++                until.as_deref(),
++                group_by,
++                project.as_deref(),
++            )?;
++            if *json {
++                println!("{}", serde_json::to_string_pretty(&report)?);
++            } else {
++                print!("{}", render(&report));
++            }
++            Ok(())
++        }
++    }
++}
++
++fn home_dir() -> Option<PathBuf> {
++    std::env::var_os("HOME")
++        .or_else(|| std::env::var_os("USERPROFILE"))
++        .filter(|h| !h.is_empty())
++        .map(PathBuf::from)
++}
++
++/// Where the transcript sources live. `None` means the home directory is unknown.
++pub struct SourcePaths {
++    pub claude: Option<PathBuf>,
++    pub omp: Option<PathBuf>,
++}
++
++pub fn run_report(
++    config: &GatewayConfig,
++    sources: &SourcePaths,
++    since: Option<&str>,
++    until: Option<&str>,
++    group_by: &str,
++    project: Option<&str>,
++) -> anyhow::Result<CostReport> {
++    let group_by = parse_cost_group_by(group_by).map_err(anyhow::Error::msg)?;
++    let since = since
++        .map(parse_time_bound)
++        .transpose()
++        .map_err(|e| anyhow::anyhow!("--since: {e}"))?;
++    let until = until
++        .map(parse_time_bound)
++        .transpose()
++        .map_err(|e| anyhow::anyhow!("--until: {e}"))?;
++    if let (Some(s), Some(u)) = (since, until) {
++        anyhow::ensure!(
++            s < u,
++            "--since ({s}) must be before --until ({u}). Swap them or widen the range."
++        );
++    }
++    let table = PriceTable::load(&config.workspace_root);
++    let mut rows = Vec::new();
++    let mut statuses = Vec::new();
++
++    // TA goals: this project's goal records.
++    let project_name = config
++        .workspace_root
++        .file_name()
++        .map(|n| n.to_string_lossy().to_string())
++        .unwrap_or_else(|| "project".to_string());
++    let mut goal_status = SourceStatus {
++        source: "ta_goal".to_string(),
++        location: config.goals_dir.display().to_string(),
++        found: config.goals_dir.is_dir(),
++        ..SourceStatus::default()
++    };
++    if goal_status.found {
++        let goals = GoalRunStore::new(&config.goals_dir)
++            .and_then(|s| s.list())
++            .with_context(|| {
++                format!(
++                    "reading goal records from {}. Check the directory is readable, or run from \
++                     a project root that has a .ta directory",
++                    config.goals_dir.display()
++                )
++            })?;
++        let goals: Vec<_> = goals
++            .into_iter()
++            .map(|g| (project_name.clone(), g))
++            .collect();
++        goal_status.rows_read = goals.len() as u64;
++        goal_status.rows_counted = goals.len() as u64;
++        rows.extend(goal_rows(&goals));
++    }
++    statuses.push(goal_status);
++
++    for (dir, is_claude) in [(&sources.claude, true), (&sources.omp, false)] {
++        let name = if is_claude { "claude_code" } else { "omp" };
++        match dir {
++            Some(d) => {
++                let (r, st) = if is_claude {
++                    scan_claude_dir(d, &table)
++                } else {
++                    scan_omp_dir(d, &table)
++                };
++                rows.extend(r);
++                statuses.push(st);
++            }
++            None => statuses.push(SourceStatus {
++                source: name.to_string(),
++                location: "(home directory unknown: set HOME)".to_string(),
++                found: false,
++                ..SourceStatus::default()
++            }),
++        }
++    }
++    tracing::info!(
++        rows = rows.len(),
++        sources = statuses.iter().filter(|s| s.found).count(),
++        "cost report scanned"
++    );
++    let filter = CostFilter {
++        since,
++        until,
++        project: project.map(str::to_string),
++    };
++    Ok(build_report(&rows, statuses, &group_by, &filter))
++}
++
++fn thousands(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::new();
++    for (i, c) in s.chars().enumerate() {
++        if i > 0 && (s.len() - i).is_multiple_of(3) {
++            out.push(',');
++        }
++        out.push(c);
++    }
++    out
++}
++
++/// The terminal report.
++pub fn render(r: &CostReport) -> String {
++    use std::fmt::Write;
++    let mut o = String::new();
++    let _ = writeln!(o, "Sources:");
++    for s in &r.sources {
++        if !s.found {
++            let _ = writeln!(o, "  {:<12} not found ({}); skipped", s.source, s.location);
++        } else if s.source == "ta_goal" {
++            let _ = writeln!(
++                o,
++                "  {:<12} {} goal(s) in {}",
++                s.source, s.rows_counted, s.location
++            );
++        } else {
++            let _ = writeln!(
++                o,
++                "  {:<12} {} file(s), {} row(s) read, {} counted, {} duplicate(s) dropped, {} synthetic skipped, {} unreadable ({})",
++                s.source, s.files, s.rows_read, s.rows_counted, s.deduplicated,
++                s.synthetic_skipped, s.unreadable_rows, s.location
++            );
++        }
++    }
++    if let (None, None) = (r.since, r.until) {
++    } else {
++        let f = |t: Option<chrono::DateTime<chrono::Utc>>| {
++            t.map(|t| t.format("%Y-%m-%d %H:%M").to_string())
++                .unwrap_or_else(|| "...".to_string())
++        };
++        let _ = writeln!(o, "Range: {} to {}", f(r.since), f(r.until));
++    }
++    if let Some(p) = &r.project_filter {
++        let _ = writeln!(o, "Project filter: {p}");
++    }
++    let _ = writeln!(o);
++    let label = if r.group_by.is_empty() {
++        "all".to_string()
++    } else {
++        r.group_by.join(" / ")
++    };
++    let _ = writeln!(
++        o,
++        "{:<34} {:>8} {:>6} {:>13} {:>13} {:>15} {:>13} {:>10}",
++        label, "turns", "goals", "input", "output", "cache read", "cache write", "cost USD"
++    );
++    for g in &r.groups {
++        let key = if g.group.is_empty() {
++            "all".to_string()
++        } else {
++            g.group.values().cloned().collect::<Vec<_>>().join(" / ")
++        };
++        let t = &g.totals;
++        let _ = writeln!(
++            o,
++            "{:<34} {:>8} {:>6} {:>13} {:>13} {:>15} {:>13} {:>10.2}{}",
++            key,
++            thousands(t.turns),
++            thousands(t.goals),
++            thousands(t.input_tokens),
++            thousands(t.output_tokens),
++            thousands(t.cache_read_tokens),
++            thousands(t.cache_write_tokens),
++            t.usd,
++            if t.estimated_rows > 0 { " ~" } else { "" }
++        );
++    }
++    let t = &r.totals;
++    let _ = writeln!(
++        o,
++        "{:<34} {:>8} {:>6} {:>13} {:>13} {:>15} {:>13} {:>10.2}",
++        "TOTAL",
++        thousands(t.turns),
++        thousands(t.goals),
++        thousands(t.input_tokens),
++        thousands(t.output_tokens),
++        thousands(t.cache_read_tokens),
++        thousands(t.cache_write_tokens),
++        t.usd
++    );
++    let _ = writeln!(o, "  (~ = includes costs estimated from the price table)");
++    if !r.context_buckets.is_empty() {
++        let _ = writeln!(o, "\nContext size per turn:");
++        let _ = writeln!(
++            o,
++            "{:<12} {:<10} {:>9} {:>16} {:>10}",
++            "source", "context", "turns", "cache read", "cost USD"
++        );
++        for b in &r.context_buckets {
++            let _ = writeln!(
++                o,
++                "{:<12} {:<10} {:>9} {:>16} {:>10.2}",
++                b.source,
++                b.bucket,
++                thousands(b.turns),
++                thousands(b.cache_read_tokens),
++                b.usd
++            );
++        }
++    }
++    let _ = writeln!(o);
++    for n in &r.notes {
++        let _ = writeln!(o, "Note: {n}");
++    }
++    o
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::path::Path;
++
++    fn config(root: &Path) -> GatewayConfig {
++        GatewayConfig::for_project(root)
++    }
++
++    fn write(path: &Path, text: &str) {
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(path, text).unwrap();
++    }
++
++    #[test]
++    fn report_over_both_transcript_formats_and_missing_goals() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().join("proj");
++        std::fs::create_dir_all(&root).unwrap();
++        let claude = dir.path().join("home/.claude/projects");
++        let omp = dir.path().join("home/.omp/agent/sessions");
++        let row = |id: &str, out: u64| {
++            serde_json::json!({
++                "type": "assistant", "timestamp": "2026-10-07T10:00:00Z",
++                "message": {"id": id, "model": "claude-sonnet-5-5",
++                    "usage": {"input_tokens": 0, "output_tokens": out,
++                              "cache_read_input_tokens": 1_000_000,
++                              "cache_creation_input_tokens": 0}}
++            })
++            .to_string()
++        };
++        write(
++            &claude.join("-p/s.jsonl"),
++            &[row("a", 1), row("a", 1_000_000), row("b", 0)].join("\n"),
++        );
++        write(
++            &omp.join("-p/o.jsonl"),
++            r#"{"type":"message","id":"x","timestamp":"2026-10-07T11:00:00Z","message":{"role":"assistant","model":"claude-sonnet-5-5","usage":{"input":10,"output":20,"cacheRead":30,"cacheWrite":0,"cost":{"total":2.5}}}}"#,
++        );
++        let sources = SourcePaths {
++            claude: Some(claude),
++            omp: Some(omp),
++        };
++        let r = run_report(&config(&root), &sources, None, None, "source", None).unwrap();
++        // Claude: a (1M out = 15.0, 1M read = 0.30) + b (1M read = 0.30) = 15.6; OMP 2.5.
++        assert!((r.totals.usd - 18.1).abs() < 1e-9, "{}", r.totals.usd);
++        assert_eq!(r.totals.turns, 3);
++        let claude_src = r
++            .sources
++            .iter()
++            .find(|s| s.source == "claude_code")
++            .unwrap();
++        assert_eq!(claude_src.deduplicated, 1);
++        let goals_src = r.sources.iter().find(|s| s.source == "ta_goal").unwrap();
++        assert!(
++            !goals_src.found,
++            "no .ta/goals directory: reported, not an error"
++        );
++        let text = render(&r);
++        assert!(text.contains("not found"), "{text}");
++        assert!(text.contains("1 duplicate(s) dropped"), "{text}");
++        assert!(text.contains("Context size per turn"), "{text}");
++        assert!(text.contains("TOTAL"), "{text}");
++    }
++
++    #[test]
++    fn missing_sources_and_unknown_home_do_not_fail() {
++        let dir = tempfile::tempdir().unwrap();
++        let sources = SourcePaths {
++            claude: Some(dir.path().join("nope")),
++            omp: None,
++        };
++        let r = run_report(&config(dir.path()), &sources, None, None, "source", None).unwrap();
++        assert_eq!(r.totals.usd, 0.0);
++        assert!(r.sources.iter().all(|s| !s.found));
++        assert!(render(&r).contains("skipped"));
++    }
++
++    #[test]
++    fn bad_flags_say_what_to_do() {
++        let dir = tempfile::tempdir().unwrap();
++        let s = SourcePaths {
++            claude: None,
++            omp: None,
++        };
++        let c = config(dir.path());
++        let e = run_report(&c, &s, None, None, "week", None)
++            .unwrap_err()
++            .to_string();
++        assert!(e.contains("--group-by"), "{e}");
++        let e = run_report(&c, &s, Some("soon"), None, "source", None)
++            .unwrap_err()
++            .to_string();
++        assert!(e.contains("--since"), "{e}");
++        let e = run_report(
++            &c,
++            &s,
++            Some("2026-10-09"),
++            Some("2026-10-08"),
++            "source",
++            None,
++        )
++        .unwrap_err()
++        .to_string();
++        assert!(e.contains("before --until"), "{e}");
++    }
++
++    #[test]
++    fn thousands_separators() {
++        assert_eq!(thousands(0), "0");
++        assert_eq!(thousands(1_234_567), "1,234,567");
++    }
++}
+--- a/apps/ta-cli/src/commands/mod.rs
++++ b/apps/ta-cli/src/commands/mod.rs
+@@ -14,6 +14,7 @@
+ pub mod constitution;
+ pub mod context;
+ pub mod conversation;
++pub mod cost;
+ pub mod credential_helper;
+ pub mod credentials;
+ pub mod daemon;
+--- a/apps/ta-cli/src/main.rs
++++ b/apps/ta-cli/src/main.rs
+@@ -1080,6 +1080,15 @@
+         command: commands::stats::StatsCommands,
+     },
+ 
++    /// Spend across TA goals and interactive Claude Code / OMP sessions.
++    ///
++    /// `ta cost report` groups spend by day, source, model, project, context
++    /// size or origin class, and shows which costs are exact versus estimated.
++    Cost {
++        #[command(subcommand)]
++        command: commands::cost::CostCommands,
++    },
++
+     /// Generic cost experiments: assign goals to named config-override arms
+     /// and report delta cost/savings from velocity history.
+     ///
+@@ -2208,6 +2217,7 @@
+             commands::workflow::execute(command, config)
+         }
+         Commands::Stats { command } => commands::stats::execute(command, config),
++        Commands::Cost { command } => commands::cost::execute(command, config),
+         Commands::Experiment { command } => commands::experiment::execute(command, config),
+         Commands::Community { command } => {
+             if warn_legacy {
+--- /dev/null
++++ b/crates/ta-goal/src/cost_report.rs
+@@ -0,0 +1,1401 @@
++// cost_report.rs: spend across TA goals and interactive agent sessions (v0.17.12.18).
++//
++// `ta cost report` answers "where is the money going" across three sources:
++//   * TA goals            the goal records (`GoalRun`), the same data `GET /api/spend` reads;
++//   * Claude Code         `~/.claude/projects/**/*.jsonl` transcripts;
++//   * OMP                 `~/.omp/agent/sessions/**/*.jsonl` transcripts.
++//
++// Everything here is pure (text in, records out) except `collect_jsonl`, so it
++// is tested against tempdir fixtures and never touches a real home directory.
++//
++// Counting rules that matter for correctness:
++//   * Claude streams one assistant message as several transcript rows that
++//     repeat the same `message.id`. Rows are deduplicated by id across every
++//     file scanned, last row wins. Counting every row overstates a long
++//     session by about 2.5x. Rows whose model is `<synthetic>` (client-side
++//     placeholders, never billed) are skipped.
++//   * OMP records usage and cost per message; its own cost is used as is.
++//   * A cost is `exact` when the source reported it (OMP `usage.cost.total`,
++//     Claude `costUSD`, a runtime-reported goal cost), `estimated` when it came
++//     from the price table, and `unpriced` when the model has no row. No price
++//     is ever invented.
++//   * Cache writes are priced per class: the 1 hour class (2x input) when the
++//     transcript splits them (`cache_creation.ephemeral_1h_input_tokens`),
++//     otherwise the 5 minute class.
++//
++// The OMP reader accepts the field names OMP writes per assistant message
++// (`usage.input`, `output`, `cacheRead`, `cacheWrite`, `cost.total`) and the
++// snake_case spellings of the same names; a line it cannot read is counted in
++// the source's `unreadable_rows`, never silently dropped.
++
++use std::collections::{BTreeMap, HashMap};
++use std::path::{Path, PathBuf};
++
++use chrono::{DateTime, TimeZone, Utc};
++use serde::{Deserialize, Serialize};
++
++use crate::goal_run::GoalRun;
++use crate::token_cost::{CostSource, PriceTable, TokenUsage};
++
++// ── Records ─────────────────────────────────────────────────────────────────
++
++/// Where a row of spend came from.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum CostSourceKind {
++    /// A TA goal record.
++    TaGoal,
++    /// A Claude Code session transcript.
++    ClaudeCode,
++    /// An OMP session transcript.
++    Omp,
++}
++
++impl CostSourceKind {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            CostSourceKind::TaGoal => "ta_goal",
++            CostSourceKind::ClaudeCode => "claude_code",
++            CostSourceKind::Omp => "omp",
++        }
++    }
++}
++
++/// How trustworthy a row's cost is.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum CostKind {
++    /// The source reported the cost.
++    Exact,
++    /// Computed from a price-table row.
++    Estimated,
++    /// No price for the model; tokens are counted, the cost is 0.
++    Unpriced,
++}
++
++/// One billed unit: a deduplicated assistant turn of a session, or a whole goal.
++#[derive(Debug, Clone, PartialEq)]
++pub struct SpendRow {
++    pub source: CostSourceKind,
++    pub session: String,
++    pub project: String,
++    pub timestamp: Option<DateTime<Utc>>,
++    pub model: String,
++    pub input: u64,
++    pub output: u64,
++    pub cache_read: u64,
++    /// Cache writes with the 5 minute TTL (or unsplit writes).
++    pub cache_write_5m: u64,
++    /// Cache writes with the 1 hour TTL.
++    pub cache_write_1h: u64,
++    pub usd: f64,
++    pub cost: CostKind,
++    /// Goals only: why the goal started.
++    pub origin_class: Option<String>,
++    /// `true` for one assistant turn, `false` for a whole goal.
++    pub is_turn: bool,
++}
++
++impl SpendRow {
++    /// Prompt size of the turn: every input-side token the model saw.
++    pub fn context_tokens(&self) -> u64 {
++        self.input
++            .saturating_add(self.cache_read)
++            .saturating_add(self.cache_write_5m)
++            .saturating_add(self.cache_write_1h)
++    }
++
++    pub fn cache_write(&self) -> u64 {
++        self.cache_write_5m.saturating_add(self.cache_write_1h)
++    }
++
++    pub fn total_tokens(&self) -> u64 {
++        self.context_tokens().saturating_add(self.output)
++    }
++
++    /// The context-size bucket of a turn; `n/a` for a goal, which is one row
++    /// covering many turns.
++    pub fn bucket(&self) -> &'static str {
++        if self.is_turn {
++            context_bucket(self.context_tokens())
++        } else {
++            "n/a"
++        }
++    }
++}
++
++/// The context-size buckets, smallest first.
++pub const CONTEXT_BUCKETS: [&str; 5] = ["0-50k", "50-100k", "100-200k", "200-400k", ">400k"];
++
++/// The bucket for a prompt of `tokens` tokens. Lower bounds are inclusive.
++pub fn context_bucket(tokens: u64) -> &'static str {
++    match tokens {
++        0..=49_999 => CONTEXT_BUCKETS[0],
++        50_000..=99_999 => CONTEXT_BUCKETS[1],
++        100_000..=199_999 => CONTEXT_BUCKETS[2],
++        200_000..=399_999 => CONTEXT_BUCKETS[3],
++        _ => CONTEXT_BUCKETS[4],
++    }
++}
++
++fn price_row(row: &mut SpendRow, table: &PriceTable, reported_usd: Option<f64>) {
++    if let Some(usd) = reported_usd.filter(|v| v.is_finite() && *v >= 0.0) {
++        row.usd = usd;
++        row.cost = CostKind::Exact;
++        return;
++    }
++    let usage = TokenUsage {
++        input: row.input,
++        output: row.output,
++        cache_read: row.cache_read,
++        cache_creation: row.cache_write_5m,
++    };
++    match table.price_split(&row.model, &usage, row.cache_write_1h) {
++        Some(usd) => {
++            row.usd = usd;
++            row.cost = CostKind::Estimated;
++        }
++        None => {
++            row.usd = 0.0;
++            row.cost = CostKind::Unpriced;
++        }
++    }
++}
++
++// ── Source status ───────────────────────────────────────────────────────────
++
++/// What the scan of one source found, for the report header.
++#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
++pub struct SourceStatus {
++    pub source: String,
++    /// The directory (or goals directory) that was looked at.
++    pub location: String,
++    pub found: bool,
++    pub files: u64,
++    /// Candidate usage rows read (assistant rows with usage).
++    pub rows_read: u64,
++    /// Rows left after deduplication and skips.
++    pub rows_counted: u64,
++    /// Rows dropped because their message id was already counted.
++    pub deduplicated: u64,
++    /// `<synthetic>` placeholder rows skipped.
++    pub synthetic_skipped: u64,
++    /// Lines that were not valid JSON or lacked a readable usage block.
++    pub unreadable_rows: u64,
++    /// Rows left out because they have no timestamp and a time bound is set.
++    pub no_timestamp_skipped: u64,
++    /// Why the source could not be read, if it could not.
++    pub error: Option<String>,
++}
++
++// ── Claude Code ─────────────────────────────────────────────────────────────
++
++fn num(v: &serde_json::Value, key: &str) -> u64 {
++    v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
++}
++
++fn parse_timestamp(v: &serde_json::Value) -> Option<DateTime<Utc>> {
++    match v {
++        serde_json::Value::String(s) => DateTime::parse_from_rfc3339(s.trim())
++            .ok()
++            .map(|d| d.with_timezone(&Utc)),
++        serde_json::Value::Number(n) => {
++            let n = n.as_i64()?;
++            // Milliseconds since the epoch (seconds would put every row in 1970).
++            let ms = if n > 100_000_000_000 { n } else { n * 1000 };
++            Utc.timestamp_millis_opt(ms).single()
++        }
++        _ => None,
++    }
++}
++
++fn last_component(path: &str) -> String {
++    path.trim_end_matches(['/', '\\'])
++        .rsplit(['/', '\\'])
++        .next()
++        .unwrap_or(path)
++        .to_string()
++}
++
++/// Accumulates Claude Code assistant rows across files, deduplicated by
++/// `message.id` (last row wins).
++#[derive(Debug, Default)]
++pub struct ClaudeScan {
++    by_id: HashMap<String, usize>,
++    rows: Vec<SpendRow>,
++    /// Reported cost per row, parallel to `rows`.
++    reported: Vec<Option<f64>>,
++    status: SourceStatus,
++}
++
++impl ClaudeScan {
++    pub fn new(location: &Path) -> Self {
++        Self {
++            status: SourceStatus {
++                source: CostSourceKind::ClaudeCode.as_str().to_string(),
++                location: location.display().to_string(),
++                found: true,
++                ..SourceStatus::default()
++            },
++            ..Self::default()
++        }
++    }
++
++    /// Read one transcript. `project_hint` names the project when a row has no
++    /// `cwd`; `session_hint` names the session when a row has no `sessionId`.
++    pub fn ingest(&mut self, text: &str, project_hint: &str, session_hint: &str) {
++        self.status.files += 1;
++        for line in text.lines().filter(|l| !l.trim().is_empty()) {
++            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
++                self.status.unreadable_rows += 1;
++                continue;
++            };
++            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
++                continue;
++            }
++            let Some(msg) = v.get("message") else {
++                continue;
++            };
++            let Some(usage) = msg.get("usage").filter(|u| u.is_object()) else {
++                continue;
++            };
++            let model = msg.get("model").and_then(|m| m.as_str()).unwrap_or("");
++            self.status.rows_read += 1;
++            if model == "<synthetic>" {
++                self.status.synthetic_skipped += 1;
++                continue;
++            }
++            let total_write = num(usage, "cache_creation_input_tokens");
++            let split = usage.get("cache_creation").filter(|c| c.is_object());
++            let (w5, w1) = match split {
++                Some(c) => {
++                    let w1 = num(c, "ephemeral_1h_input_tokens");
++                    let w5 = c
++                        .get("ephemeral_5m_input_tokens")
++                        .and_then(|x| x.as_u64())
++                        .unwrap_or_else(|| total_write.saturating_sub(w1));
++                    (w5, w1)
++                }
++                None => (total_write, 0),
++            };
++            let project = v
++                .get("cwd")
++                .and_then(|c| c.as_str())
++                .map(last_component)
++                .unwrap_or_else(|| project_hint.to_string());
++            let row = SpendRow {
++                source: CostSourceKind::ClaudeCode,
++                session: v
++                    .get("sessionId")
++                    .and_then(|s| s.as_str())
++                    .unwrap_or(session_hint)
++                    .to_string(),
++                project,
++                timestamp: v.get("timestamp").and_then(parse_timestamp),
++                model: model.to_string(),
++                input: num(usage, "input_tokens"),
++                output: num(usage, "output_tokens"),
++                cache_read: num(usage, "cache_read_input_tokens"),
++                cache_write_5m: w5,
++                cache_write_1h: w1,
++                usd: 0.0,
++                cost: CostKind::Unpriced,
++                origin_class: None,
++                is_turn: true,
++            };
++            let reported = v.get("costUSD").and_then(|c| c.as_f64());
++            match msg.get("id").and_then(|i| i.as_str()) {
++                Some(id) => match self.by_id.get(id) {
++                    Some(&at) => {
++                        self.status.deduplicated += 1;
++                        self.rows[at] = row;
++                        self.reported[at] = reported;
++                    }
++                    None => {
++                        self.by_id.insert(id.to_string(), self.rows.len());
++                        self.rows.push(row);
++                        self.reported.push(reported);
++                    }
++                },
++                // No id to deduplicate on: count it once, as written.
++                None => {
++                    self.rows.push(row);
++                    self.reported.push(reported);
++                }
++            }
++        }
++    }
++
++    /// Record a file that could not be read.
++    pub fn note_unreadable_file(&mut self, path: &Path, err: &std::io::Error) {
++        self.status.unreadable_rows += 1;
++        tracing::warn!(path = %path.display(), error = %err, "could not read a Claude Code transcript; skipping it");
++    }
++
++    /// Price the rows and return them with the scan status.
++    pub fn finish(mut self, table: &PriceTable) -> (Vec<SpendRow>, SourceStatus) {
++        for (row, reported) in self.rows.iter_mut().zip(&self.reported) {
++            price_row(row, table, *reported);
++        }
++        self.status.rows_counted = self.rows.len() as u64;
++        (self.rows, self.status)
++    }
++}
++
++// ── OMP ─────────────────────────────────────────────────────────────────────
++
++fn omp_field(v: &serde_json::Value, camel: &str, snake: &str) -> u64 {
++    v.get(camel)
++        .or_else(|| v.get(snake))
++        .and_then(|x| x.as_u64())
++        .unwrap_or(0)
++}
++
++/// Read one OMP session file. Appends turns to `out` and counts into `status`.
++pub fn ingest_omp(
++    text: &str,
++    project_hint: &str,
++    session: &str,
++    table: &PriceTable,
++    out: &mut Vec<SpendRow>,
++    status: &mut SourceStatus,
++) {
++    status.files += 1;
++    let mut project = project_hint.to_string();
++    for line in text.lines().filter(|l| !l.trim().is_empty()) {
++        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
++            status.unreadable_rows += 1;
++            continue;
++        };
++        // A session header carries the working directory.
++        if let Some(cwd) = v
++            .get("cwd")
++            .and_then(|c| c.as_str())
++            .filter(|_| v.get("message").is_none())
++        {
++            project = last_component(cwd);
++            continue;
++        }
++        let msg = v.get("message").unwrap_or(&v);
++        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
++            continue;
++        }
++        let Some(usage) = msg.get("usage").filter(|u| u.is_object()) else {
++            continue;
++        };
++        status.rows_read += 1;
++        let model = msg.get("model").and_then(|m| m.as_str()).unwrap_or("");
++        if model == "<synthetic>" {
++            status.synthetic_skipped += 1;
++            continue;
++        }
++        let ts = v
++            .get("timestamp")
++            .or_else(|| msg.get("timestamp"))
++            .and_then(parse_timestamp);
++        let mut row = SpendRow {
++            source: CostSourceKind::Omp,
++            session: session.to_string(),
++            project: project.clone(),
++            timestamp: ts,
++            model: model.to_string(),
++            input: omp_field(usage, "input", "input_tokens"),
++            output: omp_field(usage, "output", "output_tokens"),
++            cache_read: omp_field(usage, "cacheRead", "cache_read"),
++            cache_write_5m: omp_field(usage, "cacheWrite", "cache_write"),
++            cache_write_1h: 0,
++            usd: 0.0,
++            cost: CostKind::Unpriced,
++            origin_class: None,
++            is_turn: true,
++        };
++        let reported = usage
++            .get("cost")
++            .and_then(|c| c.get("total").or(Some(c)))
++            .and_then(|t| t.as_f64());
++        price_row(&mut row, table, reported);
++        out.push(row);
++        status.rows_counted += 1;
++    }
++}
++
++// ── Goals ───────────────────────────────────────────────────────────────────
++
++/// One spend row per goal record.
++pub fn goal_rows(goals: &[(String, GoalRun)]) -> Vec<SpendRow> {
++    goals
++        .iter()
++        .map(|(project, g)| {
++            let u = g.token_usage();
++            SpendRow {
++                source: CostSourceKind::TaGoal,
++                session: g.goal_run_id.to_string(),
++                project: project.clone(),
++                timestamp: Some(g.created_at),
++                model: g.agent_model.clone(),
++                input: u.input,
++                output: u.output,
++                cache_read: u.cache_read,
++                cache_write_5m: u.cache_creation,
++                cache_write_1h: 0,
++                usd: g.cost_usd,
++                cost: match g.cost_source {
++                    CostSource::Runtime => CostKind::Exact,
++                    CostSource::Table => CostKind::Estimated,
++                    CostSource::None => CostKind::Unpriced,
++                },
++                origin_class: Some(g.effective_origin_class().to_string()),
++                is_turn: false,
++            }
++        })
++        .collect()
++}
++
++// ── File discovery ──────────────────────────────────────────────────────────
++
++/// Every `*.jsonl` file under `root`, sorted, depth-first. A directory that
++/// cannot be listed is returned in the second list with its error so the
++/// caller can report it. Symlinked directories are not followed.
++pub fn collect_jsonl(root: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, std::io::Error)>) {
++    let mut files = Vec::new();
++    let mut errors = Vec::new();
++    let mut stack = vec![root.to_path_buf()];
++    while let Some(dir) = stack.pop() {
++        let entries = match std::fs::read_dir(&dir) {
++            Ok(e) => e,
++            Err(e) => {
++                errors.push((dir, e));
++                continue;
++            }
++        };
++        for entry in entries.flatten() {
++            let path = entry.path();
++            let Ok(ft) = entry.file_type() else { continue };
++            if ft.is_dir() {
++                stack.push(path);
++            } else if ft.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
++                files.push(path);
++            }
++        }
++    }
++    files.sort();
++    (files, errors)
++}
++
++/// Scan a Claude Code projects directory. `None` status `found` means missing.
++pub fn scan_claude_dir(root: &Path, table: &PriceTable) -> (Vec<SpendRow>, SourceStatus) {
++    if !root.is_dir() {
++        return (
++            Vec::new(),
++            SourceStatus {
++                source: CostSourceKind::ClaudeCode.as_str().to_string(),
++                location: root.display().to_string(),
++                found: false,
++                ..SourceStatus::default()
++            },
++        );
++    }
++    let mut scan = ClaudeScan::new(root);
++    let (files, errors) = collect_jsonl(root);
++    for (dir, e) in &errors {
++        scan.note_unreadable_file(dir, e);
++    }
++    for f in files {
++        let project = f
++            .strip_prefix(root)
++            .ok()
++            .and_then(|p| p.components().next())
++            .map(|c| c.as_os_str().to_string_lossy().to_string())
++            .unwrap_or_default();
++        let session = f
++            .file_stem()
++            .map(|s| s.to_string_lossy().to_string())
++            .unwrap_or_default();
++        match std::fs::read_to_string(&f) {
++            Ok(text) => scan.ingest(&text, &project, &session),
++            Err(e) => scan.note_unreadable_file(&f, &e),
++        }
++    }
++    scan.finish(table)
++}
++
++/// Scan an OMP sessions directory.
++pub fn scan_omp_dir(root: &Path, table: &PriceTable) -> (Vec<SpendRow>, SourceStatus) {
++    let mut status = SourceStatus {
++        source: CostSourceKind::Omp.as_str().to_string(),
++        location: root.display().to_string(),
++        found: root.is_dir(),
++        ..SourceStatus::default()
++    };
++    let mut rows = Vec::new();
++    if !status.found {
++        return (rows, status);
++    }
++    let (files, errors) = collect_jsonl(root);
++    for (dir, e) in &errors {
++        status.unreadable_rows += 1;
++        tracing::warn!(path = %dir.display(), error = %e, "could not list an OMP sessions directory; skipping it");
++    }
++    for f in files {
++        let project = f
++            .strip_prefix(root)
++            .ok()
++            .and_then(|p| p.components().next())
++            .map(|c| c.as_os_str().to_string_lossy().to_string())
++            .unwrap_or_default();
++        let session = f
++            .file_stem()
++            .map(|s| s.to_string_lossy().to_string())
++            .unwrap_or_default();
++        match std::fs::read_to_string(&f) {
++            Ok(text) => ingest_omp(&text, &project, &session, table, &mut rows, &mut status),
++            Err(e) => {
++                status.unreadable_rows += 1;
++                tracing::warn!(path = %f.display(), error = %e, "could not read an OMP session file; skipping it");
++            }
++        }
++    }
++    (rows, status)
++}
++
++// ── Report ──────────────────────────────────────────────────────────────────
++
++/// A dimension to group the report by.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
++pub enum CostGroup {
++    Day,
++    Source,
++    Model,
++    Project,
++    ContextBucket,
++    OriginClass,
++}
++
++impl CostGroup {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            CostGroup::Day => "day",
++            CostGroup::Source => "source",
++            CostGroup::Model => "model",
++            CostGroup::Project => "project",
++            CostGroup::ContextBucket => "context_bucket",
++            CostGroup::OriginClass => "origin_class",
++        }
++    }
++}
++
++/// Parse `--group-by`: a comma-separated list of dimension names.
++pub fn parse_cost_group_by(s: &str) -> Result<Vec<CostGroup>, String> {
++    let mut out = Vec::new();
++    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
++        let g = match part {
++            "day" => CostGroup::Day,
++            "source" => CostGroup::Source,
++            "model" => CostGroup::Model,
++            "project" => CostGroup::Project,
++            "context_bucket" => CostGroup::ContextBucket,
++            "origin_class" => CostGroup::OriginClass,
++            other => {
++                return Err(format!(
++                    "unknown --group-by {other:?}: expected a comma-separated list of day, \
++                     source, model, project, context_bucket, origin_class (for example \
++                     --group-by source,model)"
++                ))
++            }
++        };
++        if out.contains(&g) {
++            return Err(format!(
++                "--group-by lists {part:?} twice; list each name once"
++            ));
++        }
++        out.push(g);
++    }
++    Ok(out)
++}
++
++/// Totals for one group.
++#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
++pub struct CostTotals {
++    /// Assistant turns (transcript rows).
++    pub turns: u64,
++    /// TA goals.
++    pub goals: u64,
++    pub input_tokens: u64,
++    pub output_tokens: u64,
++    pub cache_read_tokens: u64,
++    pub cache_write_tokens: u64,
++    pub total_tokens: u64,
++    pub usd: f64,
++    pub exact_rows: u64,
++    pub estimated_rows: u64,
++    pub unpriced_rows: u64,
++}
++
++impl CostTotals {
++    fn add(&mut self, r: &SpendRow) {
++        if r.is_turn {
++            self.turns += 1;
++        } else {
++            self.goals += 1;
++        }
++        self.input_tokens = self.input_tokens.saturating_add(r.input);
++        self.output_tokens = self.output_tokens.saturating_add(r.output);
++        self.cache_read_tokens = self.cache_read_tokens.saturating_add(r.cache_read);
++        self.cache_write_tokens = self.cache_write_tokens.saturating_add(r.cache_write());
++        self.total_tokens = self.total_tokens.saturating_add(r.total_tokens());
++        self.usd += r.usd;
++        match r.cost {
++            CostKind::Exact => self.exact_rows += 1,
++            CostKind::Estimated => self.estimated_rows += 1,
++            CostKind::Unpriced => self.unpriced_rows += 1,
++        }
++    }
++}
++
++/// One group of the report.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct CostGroupRow {
++    pub group: BTreeMap<String, String>,
++    #[serde(flatten)]
++    pub totals: CostTotals,
++}
++
++/// One cell of the context-bucket table.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct BucketRow {
++    pub source: String,
++    pub bucket: String,
++    pub turns: u64,
++    pub cache_read_tokens: u64,
++    pub usd: f64,
++}
++
++/// The whole report.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct CostReport {
++    pub group_by: Vec<String>,
++    pub since: Option<DateTime<Utc>>,
++    pub until: Option<DateTime<Utc>>,
++    pub project_filter: Option<String>,
++    pub sources: Vec<SourceStatus>,
++    pub groups: Vec<CostGroupRow>,
++    pub totals: CostTotals,
++    /// Turns per context-size bucket, per transcript source.
++    pub context_buckets: Vec<BucketRow>,
++    /// Plain statements about how the numbers were made.
++    pub notes: Vec<String>,
++}
++
++/// The filters of one report.
++#[derive(Debug, Clone, Default)]
++pub struct CostFilter {
++    pub since: Option<DateTime<Utc>>,
++    pub until: Option<DateTime<Utc>>,
++    /// Case-insensitive substring of the project name.
++    pub project: Option<String>,
++}
++
++impl CostFilter {
++    fn keeps(&self, r: &SpendRow, skipped_no_ts: &mut BTreeMap<CostSourceKind, u64>) -> bool {
++        if let Some(p) = &self.project {
++            if !r.project.to_lowercase().contains(&p.to_lowercase()) {
++                return false;
++            }
++        }
++        if self.since.is_some() || self.until.is_some() {
++            let Some(ts) = r.timestamp else {
++                *skipped_no_ts.entry(r.source).or_default() += 1;
++                return false;
++            };
++            if self.since.is_some_and(|s| ts < s) || self.until.is_some_and(|u| ts >= u) {
++                return false;
++            }
++        }
++        true
++    }
++}
++
++fn key_of(r: &SpendRow, d: CostGroup) -> String {
++    match d {
++        CostGroup::Day => r
++            .timestamp
++            .map(|t| t.format("%Y-%m-%d").to_string())
++            .unwrap_or_else(|| "unknown".to_string()),
++        CostGroup::Source => r.source.as_str().to_string(),
++        CostGroup::Model => {
++            if r.model.is_empty() {
++                "unknown".to_string()
++            } else {
++                r.model.clone()
++            }
++        }
++        CostGroup::Project => {
++            if r.project.is_empty() {
++                "unknown".to_string()
++            } else {
++                r.project.clone()
++            }
++        }
++        CostGroup::ContextBucket => r.bucket().to_string(),
++        CostGroup::OriginClass => r.origin_class.clone().unwrap_or_else(|| "n/a".to_string()),
++    }
++}
++
++/// Filter, group and total `rows`. `sources` is the scan status of each source
++/// (found or missing) and is carried into the report header.
++pub fn build_report(
++    rows: &[SpendRow],
++    mut sources: Vec<SourceStatus>,
++    group_by: &[CostGroup],
++    filter: &CostFilter,
++) -> CostReport {
++    let mut groups: BTreeMap<Vec<String>, CostTotals> = BTreeMap::new();
++    let mut totals = CostTotals::default();
++    let mut buckets: BTreeMap<(String, usize), BucketRow> = BTreeMap::new();
++    let mut skipped_no_ts: BTreeMap<CostSourceKind, u64> = BTreeMap::new();
++    for r in rows {
++        if !filter.keeps(r, &mut skipped_no_ts) {
++            continue;
++        }
++        let key: Vec<String> = group_by.iter().map(|d| key_of(r, *d)).collect();
++        groups.entry(key).or_default().add(r);
++        totals.add(r);
++        if r.is_turn {
++            let b = context_bucket(r.context_tokens());
++            let idx = CONTEXT_BUCKETS.iter().position(|x| *x == b).unwrap_or(0);
++            let e = buckets
++                .entry((r.source.as_str().to_string(), idx))
++                .or_insert_with(|| BucketRow {
++                    source: r.source.as_str().to_string(),
++                    bucket: b.to_string(),
++                    turns: 0,
++                    cache_read_tokens: 0,
++                    usd: 0.0,
++                });
++            e.turns += 1;
++            e.cache_read_tokens = e.cache_read_tokens.saturating_add(r.cache_read);
++            e.usd += r.usd;
++        }
++    }
++    for s in &mut sources {
++        let kind = [
++            CostSourceKind::TaGoal,
++            CostSourceKind::ClaudeCode,
++            CostSourceKind::Omp,
++        ]
++        .into_iter()
++        .find(|k| k.as_str() == s.source);
++        if let Some(n) = kind.and_then(|k| skipped_no_ts.get(&k)) {
++            s.no_timestamp_skipped = *n;
++        }
++    }
++    let names: Vec<String> = group_by.iter().map(|d| d.as_str().to_string()).collect();
++    let group_rows = groups
++        .into_iter()
++        .map(|(key, totals)| CostGroupRow {
++            group: names.iter().cloned().zip(key).collect(),
++            totals,
++        })
++        .collect();
++
++    let mut notes = Vec::new();
++    let dedup: u64 = sources.iter().map(|s| s.deduplicated).sum();
++    let synth: u64 = sources.iter().map(|s| s.synthetic_skipped).sum();
++    notes.push(format!(
++        "Claude Code rows are deduplicated by message id (last row wins): {dedup} repeated row(s) \
++         dropped, {synth} <synthetic> row(s) skipped."
++    ));
++    if totals.estimated_rows > 0 || totals.unpriced_rows > 0 {
++        notes.push(format!(
++            "{} row(s) are priced from the price table (estimates; override rates in \
++             .ta/pricing.toml), {} row(s) have exact costs reported by their source, {} row(s) \
++             have no price for their model (tokens counted, cost 0).",
++            totals.estimated_rows, totals.exact_rows, totals.unpriced_rows
++        ));
++    }
++    let no_ts: u64 = sources.iter().map(|s| s.no_timestamp_skipped).sum();
++    if no_ts > 0 {
++        notes.push(format!(
++            "{no_ts} row(s) without a timestamp were left out because --since/--until is set."
++        ));
++    }
++    CostReport {
++        group_by: names,
++        since: filter.since,
++        until: filter.until,
++        project_filter: filter.project.clone(),
++        sources,
++        groups: group_rows,
++        totals,
++        context_buckets: buckets.into_values().collect(),
++        notes,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::origin::OriginClass;
++    use std::path::PathBuf;
++
++    fn claude_line(
++        id: &str,
++        model: &str,
++        ts: &str,
++        input: u64,
++        out: u64,
++        read: u64,
++        w: u64,
++    ) -> String {
++        serde_json::json!({
++            "type": "assistant",
++            "sessionId": "s1",
++            "cwd": "/work/alpha",
++            "timestamp": ts,
++            "message": {
++                "id": id, "model": model,
++                "usage": {
++                    "input_tokens": input, "output_tokens": out,
++                    "cache_read_input_tokens": read, "cache_creation_input_tokens": w
++                }
++            }
++        })
++        .to_string()
++    }
++
++    fn scan(text: &str) -> (Vec<SpendRow>, SourceStatus) {
++        let mut s = ClaudeScan::new(Path::new("/x"));
++        s.ingest(text, "proj", "sess");
++        s.finish(&PriceTable::builtin())
++    }
++
++    #[test]
++    fn repeated_message_ids_are_counted_once_and_the_last_row_wins() {
++        // m1 streams three rows (output grows), m2 one row.
++        let text = [
++            claude_line(
++                "m1",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:00:00Z",
++                10,
++                5,
++                1000,
++                0,
++            ),
++            claude_line(
++                "m1",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:00:01Z",
++                10,
++                50,
++                1000,
++                0,
++            ),
++            claude_line(
++                "m1",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:00:02Z",
++                10,
++                500,
++                1000,
++                0,
++            ),
++            claude_line(
++                "m2",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:01:00Z",
++                20,
++                7,
++                2000,
++                100,
++            ),
++        ]
++        .join("\n");
++        let (rows, status) = scan(&text);
++        assert_eq!(rows.len(), 2);
++        assert_eq!(status.rows_read, 4);
++        assert_eq!(status.deduplicated, 2);
++        assert_eq!(status.rows_counted, 2);
++        let out: u64 = rows.iter().map(|r| r.output).sum();
++        assert_eq!(out, 500 + 7, "last row of m1 wins, not the sum of its rows");
++        let read: u64 = rows.iter().map(|r| r.cache_read).sum();
++        assert_eq!(read, 3000);
++    }
++
++    #[test]
++    fn ids_repeated_across_files_are_deduplicated_too() {
++        let a = claude_line(
++            "m1",
++            "claude-sonnet-5-5",
++            "2026-10-07T10:00:00Z",
++            1,
++            1,
++            1,
++            0,
++        );
++        let mut s = ClaudeScan::new(Path::new("/x"));
++        s.ingest(&a, "p", "one");
++        s.ingest(&a, "p", "two");
++        let (rows, status) = s.finish(&PriceTable::builtin());
++        assert_eq!(rows.len(), 1);
++        assert_eq!(status.deduplicated, 1);
++        assert_eq!(status.files, 2);
++    }
++
++    #[test]
++    fn synthetic_rows_and_non_assistant_rows_are_skipped() {
++        let text = [
++            claude_line("s1", "<synthetic>", "2026-10-07T10:00:00Z", 0, 0, 0, 0),
++            r#"{"type":"user","message":{"content":"hi"}}"#.to_string(),
++            "not json".to_string(),
++            claude_line(
++                "m1",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:00:00Z",
++                1,
++                1,
++                0,
++                0,
++            ),
++        ]
++        .join("\n");
++        let (rows, status) = scan(&text);
++        assert_eq!(rows.len(), 1);
++        assert_eq!(status.synthetic_skipped, 1);
++        assert_eq!(status.unreadable_rows, 1);
++    }
++
++    #[test]
++    fn one_hour_cache_writes_are_priced_at_twice_the_input_rate() {
++        // Sonnet 5.5: input 3.00. 1M 5m writes = 3.75, 1M 1h writes = 6.00.
++        let line = serde_json::json!({
++            "type": "assistant", "timestamp": "2026-10-07T10:00:00Z",
++            "message": {"id": "m", "model": "claude-sonnet-5-5", "usage": {
++                "input_tokens": 0, "output_tokens": 0,
++                "cache_read_input_tokens": 0,
++                "cache_creation_input_tokens": 2_000_000,
++                "cache_creation": {
++                    "ephemeral_5m_input_tokens": 1_000_000,
++                    "ephemeral_1h_input_tokens": 1_000_000
++                }
++            }}
++        })
++        .to_string();
++        let (rows, _) = scan(&line);
++        assert_eq!(rows[0].cache_write_5m, 1_000_000);
++        assert_eq!(rows[0].cache_write_1h, 1_000_000);
++        assert!((rows[0].usd - 9.75).abs() < 1e-9, "{}", rows[0].usd);
++        assert_eq!(rows[0].cost, CostKind::Estimated);
++
++        // Unsplit writes use the 5 minute rate.
++        let (rows, _) = scan(&claude_line(
++            "m",
++            "claude-sonnet-5-5",
++            "2026-10-07T10:00:00Z",
++            0,
++            0,
++            0,
++            1_000_000,
++        ));
++        assert!((rows[0].usd - 3.75).abs() < 1e-9);
++
++        // Only the 1h figure is given: the rest of the total is 5m.
++        let line = serde_json::json!({
++            "type": "assistant",
++            "message": {"id": "m", "model": "claude-sonnet-5-5", "usage": {
++                "cache_creation_input_tokens": 1_500_000,
++                "cache_creation": {"ephemeral_1h_input_tokens": 1_000_000}
++            }}
++        })
++        .to_string();
++        let (rows, _) = scan(&line);
++        assert_eq!(
++            (rows[0].cache_write_5m, rows[0].cache_write_1h),
++            (500_000, 1_000_000)
++        );
++    }
++
++    #[test]
++    fn unknown_models_are_unpriced_and_reported_costs_are_exact() {
++        let (rows, _) = scan(&claude_line(
++            "m",
++            "mystery-model",
++            "2026-10-07T10:00:00Z",
++            100,
++            100,
++            0,
++            0,
++        ));
++        assert_eq!(rows[0].cost, CostKind::Unpriced);
++        assert_eq!(rows[0].usd, 0.0);
++        assert_eq!(rows[0].total_tokens(), 200, "tokens still counted");
++
++        let line = serde_json::json!({
++            "type": "assistant", "costUSD": 1.25,
++            "message": {"id": "m", "model": "mystery-model", "usage": {"input_tokens": 1}}
++        })
++        .to_string();
++        let (rows, _) = scan(&line);
++        assert_eq!(rows[0].cost, CostKind::Exact);
++        assert_eq!(rows[0].usd, 1.25);
++    }
++
++    #[test]
++    fn price_table_overrides_apply_to_transcripts() {
++        let table = PriceTable::from_toml(
++            "[[model]]\nname = \"mystery\"\ninput = 1.0\noutput = 2.0\ncache_read = 0.1\ncache_write = 1.5\ncache_write_1h = 4.0\n",
++            Path::new("pricing.toml"),
++        )
++        .unwrap();
++        let line = claude_line(
++            "m",
++            "mystery-model",
++            "2026-10-07T10:00:00Z",
++            1_000_000,
++            1_000_000,
++            0,
++            0,
++        );
++        let mut s = ClaudeScan::new(Path::new("/x"));
++        s.ingest(&line, "p", "s");
++        let (rows, _) = s.finish(&table);
++        assert!((rows[0].usd - 3.0).abs() < 1e-9);
++        assert_eq!(rows[0].cost, CostKind::Estimated);
++    }
++
++    fn omp_line(
++        id: &str,
++        ts: &str,
++        input: u64,
++        out: u64,
++        read: u64,
++        write: u64,
++        cost: Option<f64>,
++    ) -> String {
++        let mut usage = serde_json::json!({
++            "input": input, "output": out, "cacheRead": read, "cacheWrite": write
++        });
++        if let Some(c) = cost {
++            usage["cost"] = serde_json::json!({"input": 0.0, "total": c});
++        }
++        serde_json::json!({
++            "type": "message", "id": id, "timestamp": ts,
++            "message": {"role": "assistant", "model": "claude-sonnet-5-5", "usage": usage}
++        })
++        .to_string()
++    }
++
++    #[test]
++    fn omp_uses_its_own_recorded_cost() {
++        let text = [
++            r#"{"type":"session","cwd":"/work/beta"}"#.to_string(),
++            omp_line("a", "2026-10-08T10:00:00Z", 10, 20, 300, 40, Some(0.42)),
++            omp_line("b", "2026-10-08T11:00:00Z", 1_000_000, 0, 0, 0, None),
++            r#"{"type":"message","message":{"role":"user","content":"hi"}}"#.to_string(),
++        ]
++        .join("\n");
++        let mut rows = Vec::new();
++        let mut status = SourceStatus::default();
++        ingest_omp(
++            &text,
++            "dirname",
++            "sess",
++            &PriceTable::builtin(),
++            &mut rows,
++            &mut status,
++        );
++        assert_eq!(rows.len(), 2);
++        assert_eq!(
++            rows[0].project, "beta",
++            "the session header's cwd names the project"
++        );
++        assert_eq!((rows[0].usd, rows[0].cost), (0.42, CostKind::Exact));
++        assert_eq!(rows[0].cache_write_5m, 40);
++        assert_eq!(rows[1].cost, CostKind::Estimated);
++        assert!((rows[1].usd - 3.0).abs() < 1e-9);
++        assert_eq!(status.rows_counted, 2);
++    }
++
++    #[test]
++    fn missing_source_directories_are_reported_not_errors() {
++        let dir = tempfile::tempdir().unwrap();
++        let missing = dir.path().join("nope");
++        let (rows, st) = scan_claude_dir(&missing, &PriceTable::builtin());
++        assert!(rows.is_empty() && !st.found && st.error.is_none());
++        let (rows, st) = scan_omp_dir(&missing, &PriceTable::builtin());
++        assert!(rows.is_empty() && !st.found);
++    }
++
++    fn fixture() -> (tempfile::TempDir, Vec<SpendRow>, Vec<SourceStatus>) {
++        let dir = tempfile::tempdir().unwrap();
++        let claude = dir.path().join("claude");
++        let omp = dir.path().join("omp");
++        std::fs::create_dir_all(claude.join("-work-alpha")).unwrap();
++        std::fs::create_dir_all(omp.join("--work-beta--")).unwrap();
++        // Claude: m1 streamed twice; turns at 30k, 150k and 500k context.
++        let text = [
++            claude_line(
++                "m1",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:00:00Z",
++                100,
++                1,
++                30_000,
++                0,
++            ),
++            claude_line(
++                "m1",
++                "claude-sonnet-5-5",
++                "2026-10-07T10:00:01Z",
++                100,
++                9,
++                30_000,
++                0,
++            ),
++            claude_line(
++                "m2",
++                "claude-sonnet-5-5",
++                "2026-10-08T10:00:00Z",
++                0,
++                100,
++                150_000,
++                0,
++            ),
++            claude_line(
++                "m3",
++                "claude-sonnet-5-5",
++                "2026-10-09T10:00:00Z",
++                0,
++                100,
++                400_000,
++                100_000,
++            ),
++        ]
++        .join("\n");
++        std::fs::write(claude.join("-work-alpha/s1.jsonl"), text).unwrap();
++        let text = [
++            r#"{"type":"session","cwd":"/work/beta"}"#.to_string(),
++            omp_line(
++                "a",
++                "2026-10-08T10:00:00Z",
++                1_000,
++                200,
++                60_000,
++                0,
++                Some(0.5),
++            ),
++            omp_line(
++                "b",
++                "2026-10-09T10:00:00Z",
++                1_000,
++                200,
++                20_000,
++                0,
++                Some(0.25),
++            ),
++        ]
++        .join("\n");
++        std::fs::write(omp.join("--work-beta--/o1.jsonl"), text).unwrap();
++        let table = PriceTable::builtin();
++        let (mut rows, s1) = scan_claude_dir(&claude, &table);
++        let (r2, s2) = scan_omp_dir(&omp, &table);
++        rows.extend(r2);
++        (dir, rows, vec![s1, s2])
++    }
++
++    #[test]
++    fn totals_match_an_independent_sum() {
++        let (_d, rows, sources) = fixture();
++        assert_eq!(sources[0].deduplicated, 1);
++        let report = build_report(&rows, sources, &[CostGroup::Source], &CostFilter::default());
++
++        // Independent arithmetic, written out by hand (Sonnet 5.5: 3 / 15 / 0.30 / 3.75).
++        // m1 (last row): 100 in, 9 out, 30,000 read.
++        let m1 = 100.0 / 1e6 * 3.0 + 9.0 / 1e6 * 15.0 + 30_000.0 / 1e6 * 0.30;
++        let m2 = 100.0 / 1e6 * 15.0 + 150_000.0 / 1e6 * 0.30;
++        let m3 = 100.0 / 1e6 * 15.0 + 400_000.0 / 1e6 * 0.30 + 100_000.0 / 1e6 * 3.75;
++        let claude = report
++            .groups
++            .iter()
++            .find(|g| g.group["source"] == "claude_code")
++            .unwrap();
++        assert!(
++            (claude.totals.usd - (m1 + m2 + m3)).abs() < 1e-9,
++            "{}",
++            claude.totals.usd
++        );
++        assert_eq!(claude.totals.turns, 3);
++        assert_eq!(claude.totals.output_tokens, 9 + 100 + 100);
++        assert_eq!(claude.totals.cache_read_tokens, 30_000 + 150_000 + 400_000);
++        assert_eq!(claude.totals.estimated_rows, 3);
++
++        let omp = report
++            .groups
++            .iter()
++            .find(|g| g.group["source"] == "omp")
++            .unwrap();
++        assert!((omp.totals.usd - 0.75).abs() < 1e-9);
++        assert_eq!(omp.totals.exact_rows, 2);
++
++        let sum: f64 = report.groups.iter().map(|g| g.totals.usd).sum();
++        assert!((report.totals.usd - sum).abs() < 1e-9);
++        assert!((report.totals.usd - (m1 + m2 + m3 + 0.75)).abs() < 1e-9);
++    }
++
++    #[test]
++    fn context_buckets_split_turns_per_source() {
++        let (_d, rows, sources) = fixture();
++        let report = build_report(&rows, sources, &[], &CostFilter::default());
++        let cell = |src: &str, b: &str| {
++            report
++                .context_buckets
++                .iter()
++                .find(|c| c.source == src && c.bucket == b)
++                .map(|c| (c.turns, c.cache_read_tokens))
++        };
++        assert_eq!(cell("claude_code", "0-50k"), Some((1, 30_000)));
++        assert_eq!(cell("claude_code", "100-200k"), Some((1, 150_000)));
++        assert_eq!(cell("claude_code", ">400k"), Some((1, 400_000)));
++        assert_eq!(cell("claude_code", "50-100k"), None);
++        assert_eq!(cell("omp", "50-100k"), Some((1, 60_000)), "61k context");
++        assert_eq!(cell("omp", "0-50k"), Some((1, 20_000)), "21.2k context");
++    }
++
++    #[test]
++    fn bucket_edges_are_inclusive_at_the_lower_bound() {
++        assert_eq!(context_bucket(0), "0-50k");
++        assert_eq!(context_bucket(49_999), "0-50k");
++        assert_eq!(context_bucket(50_000), "50-100k");
++        assert_eq!(context_bucket(200_000), "200-400k");
++        assert_eq!(context_bucket(400_000), ">400k");
++    }
++
++    #[test]
++    fn filters_apply_to_time_and_project() {
++        let (_d, rows, sources) = fixture();
++        let f = CostFilter {
++            since: Some(crate::spend::parse_time_bound("2026-10-08").unwrap()),
++            until: Some(crate::spend::parse_time_bound("2026-10-09").unwrap()),
++            project: None,
++        };
++        let r = build_report(&rows, sources.clone(), &[CostGroup::Day], &f);
++        assert_eq!(r.groups.len(), 1);
++        assert_eq!(r.groups[0].group["day"], "2026-10-08");
++        assert_eq!(
++            r.totals.turns, 2,
++            "one Claude turn and one OMP turn on the 8th"
++        );
++
++        let f = CostFilter {
++            project: Some("BETA".into()),
++            ..CostFilter::default()
++        };
++        let r = build_report(&rows, sources, &[CostGroup::Project], &f);
++        assert_eq!(r.groups.len(), 1);
++        assert_eq!(r.groups[0].group["project"], "beta");
++    }
++
++    #[test]
++    fn rows_without_a_timestamp_are_counted_when_a_bound_is_set() {
++        let mut row = scan(&claude_line(
++            "m",
++            "claude-sonnet-5-5",
++            "2026-10-07T10:00:00Z",
++            1,
++            1,
++            0,
++            0,
++        ))
++        .0
++        .remove(0);
++        row.timestamp = None;
++        let st = SourceStatus {
++            source: "claude_code".into(),
++            ..SourceStatus::default()
++        };
++        let f = CostFilter {
++            since: Some(Utc::now()),
++            ..CostFilter::default()
++        };
++        let r = build_report(&[row], vec![st], &[], &f);
++        assert_eq!(r.totals.turns, 0);
++        assert_eq!(r.sources[0].no_timestamp_skipped, 1);
++        assert!(r.notes.iter().any(|n| n.contains("without a timestamp")));
++    }
++
++    #[test]
++    fn goals_group_by_origin_class_and_match_the_spend_aggregate() {
++        let mut g1 = GoalRun::new(
++            "a",
++            "o",
++            "claude-code",
++            PathBuf::from("/w"),
++            PathBuf::from("/s"),
++        );
++        g1.origin_class = Some(OriginClass::Asked);
++        g1.input_tokens = 10;
++        g1.output_tokens = 20;
++        g1.cache_read_input_tokens = 30;
++        g1.cache_creation_input_tokens = 40;
++        g1.cost_usd = 1.5;
++        g1.cost_source = CostSource::Runtime;
++        let mut g2 = GoalRun::new(
++            "b",
++            "o",
++            "claude-code",
++            PathBuf::from("/w"),
++            PathBuf::from("/s"),
++        );
++        g2.output_tokens = 5;
++        g2.cost_usd = 0.5;
++        g2.cost_source = CostSource::Table;
++        let goals = vec![("proj".to_string(), g1), ("proj".to_string(), g2)];
++        let rows = goal_rows(&goals);
++        let report = build_report(
++            &rows,
++            Vec::new(),
++            &[CostGroup::OriginClass],
++            &CostFilter::default(),
++        );
++        let classes: Vec<_> = report
++            .groups
++            .iter()
++            .map(|g| g.group["origin_class"].as_str())
++            .collect();
++        assert_eq!(classes, ["asked", "unasked"]);
++        assert_eq!(report.totals.goals, 2);
++        assert_eq!(report.totals.turns, 0);
++        assert_eq!(
++            (report.totals.exact_rows, report.totals.estimated_rows),
++            (1, 1)
++        );
++        assert!(report.context_buckets.is_empty(), "a goal is not a turn");
++
++        let agg = crate::spend::aggregate(&goals, &[], None, None);
++        assert!((report.totals.usd - agg.totals.usd).abs() < 1e-9);
++        assert_eq!(report.totals.total_tokens, agg.totals.total_tokens);
++    }
++
++    #[test]
++    fn group_by_parsing_names_the_valid_values() {
++        assert_eq!(
++            parse_cost_group_by("day, source").unwrap(),
++            [CostGroup::Day, CostGroup::Source]
++        );
++        assert!(parse_cost_group_by("").unwrap().is_empty());
++        let e = parse_cost_group_by("week").unwrap_err();
++        assert!(
++            e.contains("context_bucket") && e.contains("--group-by"),
++            "{e}"
++        );
++        assert!(parse_cost_group_by("day,day").is_err());
++    }
++
++    #[test]
++    fn numeric_timestamps_are_read_as_milliseconds() {
++        let t = parse_timestamp(&serde_json::json!(1_791_000_000_000_i64)).unwrap();
++        assert_eq!(t.format("%Y").to_string(), "2026");
++        let t = parse_timestamp(&serde_json::json!(1_791_000_000_i64)).unwrap();
++        assert_eq!(t.format("%Y").to_string(), "2026");
++    }
++}
+--- a/crates/ta-goal/src/lib.rs
++++ b/crates/ta-goal/src/lib.rs
+@@ -20,6 +20,7 @@
+ pub mod chat_mode;
+ pub mod commit_context;
+ pub mod conversation;
++pub mod cost_report;
+ pub mod error;
+ pub mod events;
+ pub mod experiment;
+--- a/crates/ta-goal/src/token_cost.rs
++++ b/crates/ta-goal/src/token_cost.rs
+@@ -23,8 +23,10 @@
+ //
+ // Cache rates follow Anthropic's published multipliers: a cache read costs
+ // 0.1x the input price and a cache write (5 minute TTL) costs 1.25x. A write
+-// with the 1 hour TTL costs 2x; the runtime does not split the two in the
+-// field TA reads, so one write rate is used.
++// with the 1 hour TTL costs 2x (`cache_write_1h_per_m`). The goal usage report
++// does not split the two classes, so goals use the 5 minute rate; `ta cost
++// report` reads transcripts that do split them (`cache_creation.
++// ephemeral_1h_input_tokens`) and prices each class with its own rate.
+ 
+ use std::path::{Path, PathBuf};
+ 
+@@ -41,6 +43,9 @@
+     pub cache_read_per_m: f64,
+     /// USD per 1M cache-creation (cache-write) input tokens.
+     pub cache_write_per_m: f64,
++    /// USD per 1M cache-creation tokens written with the 1 hour TTL (2x input
++    /// unless a `.ta/pricing.toml` row says otherwise).
++    pub cache_write_1h_per_m: f64,
+ }
+ 
+ /// Token counts for one goal, split the way the agent runtime reports them.
+@@ -79,6 +84,7 @@
+         output_per_m: output,
+         cache_read_per_m: cache_read,
+         cache_write_per_m: cache_write,
++        cache_write_1h_per_m: input * 2.0,
+     }
+ }
+ 
+@@ -164,6 +170,9 @@
+     output: f64,
+     cache_read: f64,
+     cache_write: f64,
++    /// Optional; defaults to 2x `input`.
++    #[serde(default)]
++    cache_write_1h: Option<f64>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+@@ -212,6 +221,7 @@
+                 ("output", row.output),
+                 ("cache_read", row.cache_read),
+                 ("cache_write", row.cache_write),
++                ("cache_write_1h", row.cache_write_1h.unwrap_or(0.0)),
+             ] {
+                 if !v.is_finite() || v < 0.0 {
+                     return Err(format!(
+@@ -224,11 +234,11 @@
+                     ));
+                 }
+             }
+-            overrides.push((
+-                name,
+-                row.exact,
+-                rate(row.input, row.output, row.cache_read, row.cache_write),
+-            ));
++            let mut r = rate(row.input, row.output, row.cache_read, row.cache_write);
++            if let Some(w) = row.cache_write_1h {
++                r.cache_write_1h_per_m = w;
++            }
++            overrides.push((name, row.exact, r));
+         }
+         Ok(Self {
+             overrides,
+@@ -297,6 +307,15 @@
+     pub fn price(&self, model: &str, usage: &TokenUsage) -> Option<f64> {
+         self.rate_for(model).map(|r| price_with(&r, usage))
+     }
++
++    /// Like [`price`](Self::price) for a usage whose cache writes are split:
++    /// `usage.cache_creation` holds the 5 minute writes and `write_1h` the
++    /// 1 hour writes, priced at `cache_write_1h_per_m`.
++    pub fn price_split(&self, model: &str, usage: &TokenUsage, write_1h: u64) -> Option<f64> {
++        self.rate_for(model).map(|r| {
++            price_with(&r, usage) + (write_1h as f64 / 1_000_000.0) * r.cache_write_1h_per_m
++        })
++    }
+ }
+ 
+ /// The cost arithmetic: each token kind times its per-million rate.
+@@ -453,6 +472,36 @@
+     }
+ 
+     #[test]
++    fn one_hour_cache_write_rate_is_twice_input_unless_overridden() {
++        for row in BUILTIN_RATES {
++            assert!(
++                (row.rate.cache_write_1h_per_m - 2.0 * row.rate.input_per_m).abs() < 1e-9,
++                "{:?}",
++                row.names
++            );
++        }
++        // 1M 5m writes (3.75) + 1M 1h writes (6.00) on Sonnet.
++        let t = PriceTable::builtin();
++        let u = usage(0, 0, 0, 1_000_000);
++        let p = t.price_split("claude-sonnet-5-5", &u, 1_000_000).unwrap();
++        assert!((p - 9.75).abs() < 1e-9, "{p}");
++        assert!(t.price_split("qwen3.5:9b", &u, 5).is_none());
++
++        let o = PriceTable::from_toml(
++            "[[model]]\nname = \"x\"\ninput = 1.0\noutput = 1.0\ncache_read = 0.1\ncache_write = 1.25\ncache_write_1h = 3.0\n",
++            Path::new("pricing.toml"),
++        )
++        .unwrap();
++        assert_eq!(o.rate_for("x-1").unwrap().cache_write_1h_per_m, 3.0);
++        let d = PriceTable::from_toml(
++            "[[model]]\nname = \"x\"\ninput = 1.0\noutput = 1.0\ncache_read = 0.1\ncache_write = 1.25\n",
++            Path::new("pricing.toml"),
++        )
++        .unwrap();
++        assert_eq!(d.rate_for("x-1").unwrap().cache_write_1h_per_m, 2.0);
++    }
++
++    #[test]
+     fn ollama_and_unknown_claude_names_have_no_rate() {
+         assert!(rate_for_model("qwen3.5:9b").is_none());
+         assert!(rate_for_model("llama3.3:70b").is_none());
+--- a/docs/USAGE.md
++++ b/docs/USAGE.md
+@@ -14796,6 +14796,53 @@
+ 
+ When a ceiling is reached TA stops the agent, prints which ceiling and what was used, records the outcome `aborted_budget` on the goal, and builds the draft from the partial work, marked as incomplete (`ta draft view` says so first). What it can promise: TA reads the runtime's usage report after each agent turn, so the agent is stopped at the first turn boundary after the ceiling is crossed. Overshoot is possible by up to one turn (a single long turn can cost a lot); undershoot is capped, since a goal is never stopped before it reaches the ceiling. Ceilings are enforced only for headless runs, because that is where TA reads the usage report. `--max-usd` needs a price: from the runtime's reported cost or the price table. For an unpriced model it warns and only `--max-tokens` applies. A goal that finishes on its own over the ceiling is not marked incomplete.
+ 
++### Spend across goals and interactive sessions
++
++`ta cost report` answers "where is the money going" across TA goals and the long interactive sessions TA does not launch. Each source is optional and auto-detected:
++
++- TA goals: this project's goal records
++- Claude Code sessions: `~/.claude/projects/**/*.jsonl`
++- OMP sessions: `~/.omp/agent/sessions/**/*.jsonl`
++
++```bash
++ta cost report                                   # grouped by source
++ta cost report --since 2026-10-01 --group-by day
++ta cost report --group-by source,model --project myapp
++ta cost report --group-by context_bucket         # cost by prompt size
++ta cost report --group-by origin_class           # goals only: asked / suggested / unasked
++ta cost report --json                            # machine-readable
++```
++
++`--since` and `--until` take a date or an RFC 3339 time. `--group-by` takes a comma-separated list of `day`, `source`, `model`, `project`, `context_bucket`, `origin_class`. `--project` matches a project name by case-insensitive substring.
++
++Example output:
++
++```
++Sources:
++  ta_goal      12 goal(s) in /work/app/.ta/goals
++  claude_code  3 file(s), 2832 row(s) read, 1267 counted, 1565 duplicate(s) dropped, 0 synthetic skipped, 0 unreadable (/home/me/.claude/projects)
++  omp          not found (/home/me/.omp/agent/sessions); skipped
++
++source                                turns  goals         input        output      cache read   cache write   cost USD
++claude_code                           1,267      0         3,100       990,000     603,000,000    14,600,000     283.42 ~
++ta_goal                                   0     12       410,000     2,100,000      90,000,000     6,000,000      41.10 ~
++TOTAL                                 1,267     12       413,100     3,090,000     693,000,000    20,600,000     324.52
++
++Context size per turn:
++source       context        turns       cache read   cost USD
++claude_code  0-50k            140       3,100,000       2.90
++claude_code  >400k            610     420,000,000     181.00
++```
++
++How the numbers are made:
++
++- **Deduplicated.** Claude Code writes one message as several transcript rows with the same message id. Each id is counted once (the last row wins), and `<synthetic>` placeholder rows are skipped. The header says how many rows were dropped.
++- **Exact or estimated.** A cost is exact when its source reported it (OMP, or a goal whose runtime reported the cost). Otherwise it is estimated from the price table and marked `~`. A model with no price row is counted in tokens with a cost of 0; TA never invents a price. Put real rates in `.ta/pricing.toml`.
++- **Cache writes.** When a transcript splits cache writes, the 1 hour class is priced at 2x the input rate and the 5 minute class at 1.25x. In `.ta/pricing.toml` a row may add `cache_write_1h` (USD per million tokens) to change the 1 hour rate.
++- **Context size.** Each turn is placed in a bucket by the size of its prompt (fresh input plus cache read plus cache write): 0-50k, 50-100k, 100-200k, 200-400k, over 400k. Long sessions that sit in the top buckets are where cache-read cost piles up.
++- **Missing sources** are listed as skipped, not as errors. With `--since` or `--until`, rows that carry no timestamp are left out and counted in a note.
++
++
+ ### Viewing aggregate stats
+ 
+ ```bash
