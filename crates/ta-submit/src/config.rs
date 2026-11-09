@@ -112,6 +112,11 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub wiki: WikiConfig,
 
+    /// `[chat]` section: what read-only chat sessions (the Chief of Staff)
+    /// may read outside the session's own project. See [`ChatConfig`].
+    #[serde(default)]
+    pub chat: ChatConfig,
+
     /// Task intake funnel caps and expiry (`ta_request_task`). See
     /// [`ta_task_intake::TaskIntakeConfig`] for the keys and defaults.
     #[serde(default)]
@@ -1784,6 +1789,24 @@ impl Default for WikiConfig {
     fn default() -> Self {
         Self { seed_context: true }
     }
+}
+
+/// `[chat]` section of `.ta/workflow.toml`.
+///
+/// ```toml
+/// [chat]
+/// readable_projects = ["wayfinder", "/Users/me/development/other-project"]
+/// ```
+///
+/// The Chief of Staff always reads its own project's root read-only. This
+/// list is the ONLY way to widen that: each entry is an absolute project
+/// path or the name of a project registered in `office.yaml`, and is
+/// readable exactly like the main root (read-only, same secret deny-list,
+/// symlinks out of it refused). Default empty: nothing else is readable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatConfig {
+    #[serde(default)]
+    pub readable_projects: Vec<String>,
 }
 
 /// Garbage collection / draft lifecycle configuration
@@ -3607,6 +3630,16 @@ on_max_iterations = "fail"
             std::fs::write(&path, c).unwrap();
         }
         WorkflowConfig::wiki_seed_context(&path)
+    }
+
+    #[test]
+    fn chat_readable_projects_default_empty_and_parse() {
+        let none: WorkflowConfig = toml::from_str("").unwrap();
+        assert!(none.chat.readable_projects.is_empty());
+        let some: WorkflowConfig =
+            toml::from_str("[chat]\nreadable_projects = [\"wayfinder\", \"/abs/other\"]\n")
+                .unwrap();
+        assert_eq!(some.chat.readable_projects, vec!["wayfinder", "/abs/other"]);
     }
 
     #[test]

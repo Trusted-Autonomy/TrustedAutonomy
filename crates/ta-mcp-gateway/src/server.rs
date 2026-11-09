@@ -9,6 +9,7 @@
 // This file contains state, config, CallerMode, and ServerHandler dispatch.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -111,6 +112,11 @@ pub struct FsReadParams {
     pub goal_run_id: String,
     /// Relative path within the workspace.
     pub path: String,
+    /// Chat mode only: which project to read. Omit for the session's own
+    /// project; pass the name of a project listed in `[chat]
+    /// readable_projects` to read that one instead (read-only, same rules).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Parameters for `ta_fs_list`.
@@ -429,6 +435,23 @@ pub struct GatewayState {
     /// (`TA_CHAT_WAYFINDER_PROJECT_ID`). Read by the `ta_wayfinder_*` tools,
     /// which never accept a project from a tool argument.
     pub chat_wayfinder_project_id: Option<String>,
+    /// Policy identity (`<agent>:chat:<session>`) of the locked chat
+    /// session, once locked. Read-tool grants are checked against it.
+    pub chat_policy_id: Option<String>,
+    /// The projects a chat session's read grant covers: the real project
+    /// root and the registry-listed projects whose labels the grant names.
+    /// `None` when the session holds no read grant.
+    pub chat_read_roots: Option<ChatReadRoots>,
+}
+
+/// Roots a chat session's read grant covers (see
+/// `GatewayState::chat_read_roots`).
+#[derive(Debug, Clone)]
+pub struct ChatReadRoots {
+    /// The real project root (canonical).
+    pub project_root: PathBuf,
+    /// Registry-listed projects the grant names, with canonical roots.
+    pub readable: Vec<crate::chat_launch::ReadableProject>,
 }
 
 /// Caller mode determines what operations the MCP gateway allows.
@@ -583,6 +606,8 @@ impl GatewayState {
             active_project: None,
             chat_lock: None,
             chat_wayfinder_project_id: None,
+            chat_policy_id: None,
+            chat_read_roots: None,
         })
     }
 
@@ -832,6 +857,27 @@ impl GatewayState {
         resource_scope: &str,
         validity_hours: i64,
     ) -> Result<GoalRun, GatewayError> {
+        self.start_chat_session_with_access(
+            agent_id,
+            goal_run_id,
+            resource_scope,
+            validity_hours,
+            &ta_policy::ChatReadAccess::default(),
+        )
+    }
+
+    /// `start_chat_session_with_id` whose manifest also carries the read
+    /// grants of `access` (`ta_policy::compile_chat_manifest_with_read_access`).
+    /// The caller is responsible for having verified `access` against a
+    /// biscuit grant; an empty `access` is the plain read-only chat manifest.
+    pub fn start_chat_session_with_access(
+        &mut self,
+        agent_id: &str,
+        goal_run_id: Uuid,
+        resource_scope: &str,
+        validity_hours: i64,
+        access: &ta_policy::ChatReadAccess,
+    ) -> Result<GoalRun, GatewayError> {
         ta_goal::chat_mode::validate_chat_agent_id(agent_id)
             .map_err(|msg| GatewayError::Other(format!("cannot start chat session: {}", msg)))?;
         let expected_policy_id = format!(
@@ -879,15 +925,19 @@ impl GatewayState {
         // manifest_id internally: keep GoalRun's own manifest_id field
         // consistent with what's actually loaded, rather than leaving it
         // at the placeholder value GoalRun::new() assigned.
-        let manifest =
-            ta_policy::compile_chat_manifest(&policy_agent_id, resource_scope, validity_hours)
-                .map_err(|e| {
-                    let msg = format!(
+        let manifest = ta_policy::compile_chat_manifest_with_read_access(
+            &policy_agent_id,
+            resource_scope,
+            validity_hours,
+            access,
+        )
+        .map_err(|e| {
+            let msg = format!(
                 "chat manifest compilation failed for agent '{}' with resource scope '{}': {}",
                 agent_id, resource_scope, e
             );
-                    GatewayError::Other(msg)
-                })?;
+            GatewayError::Other(msg)
+        })?;
         goal_run.manifest_id = manifest.manifest_id;
         self.policy_engine.load_manifest(manifest);
 
@@ -924,14 +974,22 @@ impl GatewayState {
                 existing
             )));
         }
-        let goal = self.start_chat_session_with_id(
+        let policy_id = crate::chat_launch::chat_policy_id(&launch.agent_id, launch.session_id);
+        let (access, roots) = self.resolve_chat_read_grant(launch, &policy_id)?;
+        let goal = self.start_chat_session_with_access(
             &launch.agent_id,
             launch.session_id,
             crate::chat_launch::CHAT_RESOURCE_SCOPE,
             crate::chat_launch::CHAT_VALIDITY_HOURS,
+            &access,
         )?;
         self.chat_lock = Some(goal.goal_run_id);
         self.chat_wayfinder_project_id = launch.wayfinder_project_id.clone();
+        self.chat_policy_id = Some(policy_id);
+        if let Some(roots) = &roots {
+            self.config.project_root = Some(roots.project_root.clone());
+        }
+        self.chat_read_roots = roots;
         tracing::info!(
             session_id = %goal.goal_run_id,
             agent_id = %launch.agent_id,
@@ -995,6 +1053,144 @@ impl GatewayState {
             target_uri: format!("fs://workspace/{}", normalize_workspace_relative(path)),
         };
         Ok(self.policy_engine.evaluate(&request))
+    }
+
+    /// Check policy for a read of `path` inside a project a chat read grant
+    /// covers: the real project root (`label == None`, resource
+    /// `fs://project/<path>`) or one registry-listed project (resource
+    /// `fs://readable/<label>/<path>`). Same path hygiene as
+    /// [`Self::check_policy`]; the same secrets backstop applies.
+    pub fn check_project_read_policy(
+        &self,
+        agent_id: &str,
+        label: Option<&str>,
+        path: &str,
+    ) -> Result<PolicyDecision, GatewayError> {
+        if let Err(reason) = ta_workspace::path_safety::validate_relative_path(path) {
+            return Ok(PolicyDecision::Deny {
+                reason: format!(
+                    "path '{path}' is not a project-relative path ({reason}). Pass a path \
+                     relative to the project root, e.g. 'src/main.rs'."
+                ),
+            });
+        }
+        let relative = normalize_workspace_relative(path);
+        let target_uri = match label {
+            None => format!("fs://project/{relative}"),
+            Some(label) => format!(
+                "{}{relative}",
+                ta_policy::chat_readable_resource_prefix(label)
+            ),
+        };
+        Ok(self.policy_engine.evaluate(&PolicyRequest {
+            agent_id: agent_id.to_string(),
+            tool: "fs".to_string(),
+            verb: "read".to_string(),
+            target_uri,
+        }))
+    }
+
+    /// The root a read tool that loads PROJECT CONFIGURATION (the Wayfinder
+    /// reads, wiki, plan status, community lookup) resolves
+    /// `.ta/workflow.toml`, `.ta/wiki-resources.toml`, the plan file and the
+    /// credential vault from: always the SOURCE project root, never a
+    /// staging copy (see `GatewayConfig::source_root`).
+    ///
+    /// A chat session may use the real root only if its capability manifest
+    /// carries `tool.read` on `tool://<tool>` (minted from the biscuit read
+    /// grant). Without it the call is refused, saying so; it does not fall
+    /// back to the session's private directory, where there is nothing to
+    /// read.
+    pub fn read_tool_root(&self, tool: &str) -> Result<PathBuf, rmcp::ErrorData> {
+        let Some(policy_id) = &self.chat_policy_id else {
+            return Ok(self.config.source_root());
+        };
+        let decision = self.policy_engine.evaluate(&PolicyRequest {
+            agent_id: policy_id.clone(),
+            tool: "tool".to_string(),
+            verb: "read".to_string(),
+            target_uri: ta_policy::chat_tool_resource(tool),
+        });
+        match decision {
+            PolicyDecision::Allow => Ok(self.config.source_root()),
+            other => {
+                tracing::warn!(
+                    tool,
+                    policy_id = %policy_id,
+                    decision = ?other,
+                    "chat session has no read grant for this tool"
+                );
+                Err(rmcp::ErrorData::invalid_request(
+                    format!(
+                        "{tool}: this chat session holds no read grant for the project \
+                         (capability tool:read:{tool} is not in its manifest), so it cannot read \
+                         the project's configuration. A Chief-of-Staff launch gets the grant from \
+                         `ta run` ({}); re-launch through `ta run --chat-mode` or a chat_mode \
+                         persona.",
+                        crate::chat_launch::ENV_CHAT_READ_GRANT
+                    ),
+                    None,
+                ))
+            }
+        }
+    }
+
+    /// Verify the launch's read grant and resolve the roots it covers.
+    /// No grant: an empty access and no roots (the session can read neither
+    /// the project nor its configuration). A grant that does not verify is
+    /// an error (fail closed, see `verify_chat_read_grant`).
+    fn resolve_chat_read_grant(
+        &self,
+        launch: &crate::chat_launch::ChatLaunch,
+        policy_id: &str,
+    ) -> Result<(ta_policy::ChatReadAccess, Option<ChatReadRoots>), GatewayError> {
+        let Some(token) = &launch.read_grant else {
+            tracing::warn!(
+                session_id = %launch.session_id,
+                "chat session launched without a read grant ({}): it cannot read the project or \
+                 its configuration",
+                crate::chat_launch::ENV_CHAT_READ_GRANT
+            );
+            return Ok((ta_policy::ChatReadAccess::default(), None));
+        };
+        let project_root = launch.project_root.clone().ok_or_else(|| {
+            GatewayError::Other(format!(
+                "{} is set but {} is not: the gateway does not know which project's key the \
+                 read grant was minted under. Re-launch through `ta run --chat-mode`.",
+                crate::chat_launch::ENV_CHAT_READ_GRANT,
+                crate::chat_launch::ENV_CHAT_PROJECT_ROOT
+            ))
+        })?;
+        let mut access =
+            crate::chat_launch::verify_chat_read_grant(&project_root, token, policy_id)?;
+        let canonical = project_root.canonicalize().map_err(|e| {
+            GatewayError::Other(format!(
+                "chat project root {} cannot be resolved: {e}. Re-launch from the project.",
+                project_root.display()
+            ))
+        })?;
+        let listed = crate::chat_launch::load_readable_projects(&canonical)?;
+        let mut readable = Vec::new();
+        for label in std::mem::take(&mut access.readable_projects) {
+            match listed.iter().find(|p| p.label == label) {
+                Some(p) => {
+                    access.readable_projects.push(label);
+                    readable.push(p.clone());
+                }
+                None => tracing::warn!(
+                    label = %label,
+                    "read grant names a readable project that [chat] readable_projects no \
+                     longer lists; it is not readable in this session"
+                ),
+            }
+        }
+        Ok((
+            access,
+            Some(ChatReadRoots {
+                project_root: canonical,
+                readable,
+            }),
+        ))
     }
 
     /// Save a PR package to both in-memory cache and disk.
@@ -2791,6 +2987,7 @@ mod tests {
             FsReadParams {
                 goal_run_id: goal_run_id.clone(),
                 path: "notes.txt".to_string(),
+                project: None,
             },
         );
         assert!(
@@ -2839,6 +3036,7 @@ mod tests {
             FsReadParams {
                 goal_run_id,
                 path: ".env".to_string(),
+                project: None,
             },
         );
         // Assert on the actual error message, not just is_err(): the test
@@ -2894,6 +3092,7 @@ mod tests {
             FsReadParams {
                 goal_run_id,
                 path: abs_path.clone(),
+                project: None,
             },
         );
         match result {
@@ -2931,6 +3130,7 @@ mod tests {
             FsReadParams {
                 goal_run_id,
                 path: abs_path,
+                project: None,
             },
         );
         let err = result.expect_err("absolute path outside workspace must be rejected");
@@ -2961,6 +3161,7 @@ mod tests {
                 FsReadParams {
                     goal_run_id: goal_run_id.clone(),
                     path: path.to_string(),
+                    project: None,
                 },
             );
             let err = result.expect_err("parent traversal must be rejected");
@@ -3060,6 +3261,7 @@ mod tests {
                 FsReadParams {
                     goal_run_id: goal_run_id.clone(),
                     path: path.to_string(),
+                    project: None,
                 },
             )
             .unwrap_or_else(|e| panic!("legit read of '{}' failed: {}", path, e.message));
@@ -3335,6 +3537,7 @@ mod tests {
             FsReadParams {
                 goal_run_id: goal_run_id.clone(),
                 path: "a/b.txt".to_string(),
+                project: None,
             },
         )
         .unwrap_or_else(|e| panic!("chat read failed: {}", e.message));
@@ -3411,6 +3614,7 @@ mod tests {
             FsReadParams {
                 goal_run_id: chat_goal_run_id,
                 path: "notes.txt".to_string(),
+                project: None,
             },
         );
         assert!(
@@ -3833,14 +4037,9 @@ mod tests {
     /// handlers, so `[wiki] seed_context = false` refuses them too.
     #[test]
     fn chat_mode_wiki_reads_are_refused_when_seed_context_is_false() {
-        let launch = chat_launch("chief-of-staff");
-        let (server, dir) = chat_mode_server(&[], &launch);
-        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
-        std::fs::write(
-            dir.path().join(".ta/workflow.toml"),
-            "[wiki]\nseed_context = false\n",
-        )
-        .unwrap();
+        let (server, project, _session_dir, _id) =
+            chat_server_with_grant("chief-of-staff", "[wiki]\nseed_context = false\n", &[], &[]);
+        assert!(project.path().join(".ta/workflow.toml").is_file());
 
         let expect_refused = |tool: &str, r: Result<CallToolResult, McpError>| {
             let msg = r.expect_err(tool).to_string();
@@ -3881,6 +4080,8 @@ mod tests {
             session_id: Uuid::new_v4(),
             workspace_root: None,
             wayfinder_project_id: None,
+            project_root: None,
+            read_grant: None,
         }
     }
 
@@ -4047,6 +4248,359 @@ mod tests {
         }
     }
 
+    /// A chat-mode server for the Chief of Staff the way `ta run` launches
+    /// it: a private, empty session directory as `workspace_root`, the REAL
+    /// project (a separate directory) named by `TA_CHAT_PROJECT_ROOT`, and
+    /// a biscuit read grant minted under that project's custody.
+    /// `workflow_extra` is written to the project's `.ta/workflow.toml`
+    /// together with a `[chat] readable_projects` list of `readable`
+    /// (absolute paths); each is also named in the grant.
+    fn chat_server_with_grant(
+        agent: &str,
+        workflow_extra: &str,
+        project_files: &[(&str, &[u8])],
+        readable: &[&std::path::Path],
+    ) -> (TaGatewayServer, tempfile::TempDir, tempfile::TempDir, Uuid) {
+        let project = tempdir().unwrap();
+        let session_dir = tempdir().unwrap();
+        for (path, content) in project_files {
+            let full_path = project.path().join(path);
+            std::fs::create_dir_all(full_path.parent().unwrap()).unwrap();
+            std::fs::write(&full_path, content).unwrap();
+        }
+        let listed: Vec<String> = readable
+            .iter()
+            .map(|p| format!("\"{}\"", p.display()))
+            .collect();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            format!(
+                "{workflow_extra}\n[chat]\nreadable_projects = [{}]\n",
+                listed.join(", ")
+            ),
+        )
+        .unwrap();
+        let session_id = Uuid::new_v4();
+        let access = ta_policy::ChatReadAccess {
+            project: true,
+            readable_projects: readable
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+                .collect(),
+            tools: ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS
+                .iter()
+                .map(|t| t.to_string())
+                .collect(),
+        };
+        let token = crate::chat_launch::mint_chat_read_grant(
+            project.path(),
+            &crate::chat_launch::chat_policy_id(agent, session_id),
+            &access,
+        )
+        .unwrap();
+        let launch = crate::chat_launch::ChatLaunch {
+            agent_id: agent.to_string(),
+            session_id,
+            workspace_root: None,
+            wayfinder_project_id: None,
+            project_root: Some(project.path().to_path_buf()),
+            read_grant: Some(token),
+        };
+        let mut config = GatewayConfig::for_project(session_dir.path());
+        config.credential_vault_use_keychain = false;
+        let server = TaGatewayServer::new_chat_mode(config, &launch).unwrap();
+        (server, project, session_dir, session_id)
+    }
+
+    fn fs_read_text(
+        server: &TaGatewayServer,
+        goal_run_id: Uuid,
+        project: Option<&str>,
+        path: &str,
+    ) -> Result<String, String> {
+        tools::fs::handle_fs_read(
+            &server.state,
+            FsReadParams {
+                goal_run_id: goal_run_id.to_string(),
+                path: path.to_string(),
+                project: project.map(str::to_string),
+            },
+        )
+        .map(|r| r.content[0].raw.as_text().unwrap().text.clone())
+        .map_err(|e| e.message.to_string())
+    }
+
+    /// The Chief of Staff reads the REAL project root, read-only, and
+    /// nothing else: not the infrastructure under it, not secrets, not what
+    /// a symlink points at outside it, not a project nobody listed.
+    #[test]
+    fn chat_cos_reads_the_real_project_and_nothing_outside_the_grant() {
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-BODY").unwrap();
+        let other_parent = tempdir().unwrap();
+        let other = other_parent.path().join("other-proj");
+        std::fs::create_dir_all(other.join("docs")).unwrap();
+        std::fs::write(other.join("docs/readme.md"), "other readme").unwrap();
+        let unlisted = tempdir().unwrap();
+        std::fs::write(unlisted.path().join("x.txt"), "unlisted").unwrap();
+
+        let (server, project, session_dir, id) = chat_server_with_grant(
+            "chief-of-staff",
+            "",
+            &[
+                ("src/lib.rs", b"pub fn real() {}"),
+                (".env", b"TOKEN=1"),
+                (".git/config", b"[core]"),
+                (".ta/audit.jsonl", b"{}"),
+            ],
+            &[&other],
+        );
+
+        // The real file, not a copy: the session dir has no such file.
+        assert!(!session_dir.path().join("src/lib.rs").exists());
+        assert_eq!(
+            fs_read_text(&server, id, None, "src/lib.rs").unwrap(),
+            "pub fn real() {}"
+        );
+        // Secrets and infrastructure stay unreadable.
+        for denied in [
+            ".env",
+            ".git/config",
+            ".ta/audit.jsonl",
+            ".ta/workflow.toml",
+        ] {
+            let err = fs_read_text(&server, id, None, denied).unwrap_err();
+            assert!(!err.contains("TOKEN=1") && !err.contains("[core]"), "{err}");
+        }
+        // Path escapes.
+        let abs = outside.path().join("secret.txt").display().to_string();
+        for escape in [abs.as_str(), "../secret.txt", "src/../../x"] {
+            assert!(fs_read_text(&server, id, None, escape).is_err(), "{escape}");
+        }
+
+        // A listed project is readable exactly like the main root.
+        assert_eq!(
+            fs_read_text(&server, id, Some("other-proj"), "docs/readme.md").unwrap(),
+            "other readme"
+        );
+        // An unlisted project, by name or by path, is refused.
+        let err = fs_read_text(&server, id, Some("unlisted"), "x.txt").unwrap_err();
+        assert!(
+            err.contains("not readable") && err.contains("other-proj"),
+            "{err}"
+        );
+        let by_path = unlisted.path().join("x.txt").display().to_string();
+        assert!(fs_read_text(&server, id, None, &by_path).is_err());
+        assert!(fs_read_text(&server, id, Some("other-proj"), &by_path).is_err());
+        let _ = project;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chat_cos_symlinks_cannot_lead_out_of_a_root_or_into_infrastructure() {
+        use std::os::unix::fs::symlink;
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "TOPSECRET-BODY").unwrap();
+        let other_parent = tempdir().unwrap();
+        let other = other_parent.path().join("other-proj");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("ok.txt"), "fine").unwrap();
+
+        let (server, project, _session_dir, id) = chat_server_with_grant(
+            "chief-of-staff",
+            "",
+            &[("src/lib.rs", b"x"), (".git/config", b"[core]")],
+            &[&other],
+        );
+        // A symlink out of the MAIN root and out of a LISTED root.
+        symlink(outside.path(), project.path().join("escape")).unwrap();
+        symlink(outside.path(), other.join("escape")).unwrap();
+        // A symlink to TA/VCS infrastructure inside the root.
+        symlink(project.path().join(".git"), project.path().join("docs")).unwrap();
+
+        let main_escape = fs_read_text(&server, id, None, "escape/secret.txt").unwrap_err();
+        assert!(!main_escape.contains("TOPSECRET-BODY"), "{main_escape}");
+        let listed_escape =
+            fs_read_text(&server, id, Some("other-proj"), "escape/secret.txt").unwrap_err();
+        assert!(!listed_escape.contains("TOPSECRET-BODY"), "{listed_escape}");
+        let infra = fs_read_text(&server, id, None, "docs/config").unwrap_err();
+        assert!(infra.contains("infrastructure"), "{infra}");
+        // The listed root itself still reads fine.
+        assert_eq!(
+            fs_read_text(&server, id, Some("other-proj"), "ok.txt").unwrap(),
+            "fine"
+        );
+    }
+
+    /// A write attempt through MCP is refused and the real project is not
+    /// touched; no write tool exists on the surface either.
+    #[test]
+    fn chat_cos_cannot_write_the_real_project_through_mcp() {
+        let (server, project, _session_dir, id) =
+            chat_server_with_grant("chief-of-staff", "", &[("src/lib.rs", b"original")], &[]);
+        let write = tools::fs::handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: id.to_string(),
+                path: "src/lib.rs".to_string(),
+                content: "pwned".to_string(),
+            },
+        );
+        assert!(write.is_err(), "writing project source must be refused");
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            "original"
+        );
+        for mutating in [
+            "ta_goal_start",
+            "ta_draft",
+            "ta_pr_build",
+            "ta_external_action",
+        ] {
+            assert!(!server.tool_router.has_route(mutating), "{mutating}");
+        }
+    }
+
+    /// A read grant narrows what the session may DO, never which tools it
+    /// sees: the routed surface is identical with and without one.
+    #[test]
+    fn chat_read_grant_does_not_widen_the_tool_surface() {
+        let (granted, _p, _s, _id) = chat_server_with_grant("chief-of-staff", "", &[], &[]);
+        let (plain, _d) = chat_mode_server(&[], &chat_launch("chief-of-staff"));
+        let mut a = granted.tool_names();
+        let mut b = plain.tool_names();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        for name in &a {
+            assert!(ta_goal::chat_mode::is_chat_mode_mcp_tool(name), "{name}");
+        }
+    }
+
+    /// Plan status resolves PLAN.md from the real project root, and when
+    /// there is none it says which path it looked at and why.
+    #[test]
+    fn chat_cos_plan_status_reads_the_real_plan_and_names_the_path_when_missing() {
+        let (server, project, session_dir, _id) = chat_server_with_grant(
+            "chief-of-staff",
+            "",
+            &[(
+                "PLAN.md",
+                b"### v0.1 \xe2\x80\x94 Alpha Phase\n<!-- status: done -->\n\n### v0.2 \xe2\x80\x94 Beta Phase\n<!-- status: pending -->\n",
+            )],
+            &[],
+        );
+        let plan = |s: &TaGatewayServer| {
+            let r = tools::plan::handle_plan_status(
+                &s.state,
+                PlanStatusParams {
+                    phase: None,
+                    done_window: None,
+                    pending_window: None,
+                    format: None,
+                },
+            )
+            .unwrap();
+            r.content[0].raw.as_text().unwrap().text.clone()
+        };
+        let text = plan(&server);
+        assert!(
+            text.contains("Alpha Phase") && text.contains("Beta Phase"),
+            "{text}"
+        );
+
+        std::fs::remove_file(project.path().join("PLAN.md")).unwrap();
+        let missing = plan(&server);
+        assert!(
+            missing.contains(&project.path().join("PLAN.md").display().to_string()),
+            "must name the path it looked at: {missing}"
+        );
+        assert!(
+            missing.contains(&session_dir.path().display().to_string()),
+            "must name the workspace root it did NOT use: {missing}"
+        );
+        assert!(missing.contains("project root"), "{missing}");
+    }
+
+    /// Without a grant the CoS gets the refusal, with the remedy; with one
+    /// it does not.
+    #[test]
+    fn chat_session_without_a_grant_cannot_read_project_config() {
+        let launch = chat_launch("chief-of-staff");
+        let (server, _dir) = chat_mode_server(&[], &launch);
+        let err = tools::plan::handle_plan_status(
+            &server.state,
+            PlanStatusParams {
+                phase: None,
+                done_window: None,
+                pending_window: None,
+                format: None,
+            },
+        )
+        .unwrap_err()
+        .message
+        .to_string();
+        assert!(err.contains("holds no read grant"), "{err}");
+        assert!(err.contains("TA_CHAT_READ_GRANT"), "{err}");
+    }
+
+    /// Fix F for a normal staged goal: the gateway's workspace is the
+    /// staging copy, which holds no PLAN.md and no `.ta/` config. Plan status
+    /// and the wiki read gate resolve both from the source project.
+    #[test]
+    fn staged_goal_plan_status_and_wiki_gate_use_the_source_project() {
+        let project = tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "### v0.1 \u{2014} Real Phase\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            "[wiki]\nseed_context = false\n",
+        )
+        .unwrap();
+        let staging = project
+            .path()
+            .join(".ta/staging")
+            .join(Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&staging).unwrap();
+        let mut config = GatewayConfig::for_project(&staging);
+        config.credential_vault_use_keychain = false;
+        let server = TaGatewayServer::new(config).unwrap();
+
+        let status = tools::plan::handle_plan_status(
+            &server.state,
+            PlanStatusParams {
+                phase: None,
+                done_window: None,
+                pending_window: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        let text = status.content[0].raw.as_text().unwrap().text.clone();
+        assert!(text.contains("Real Phase"), "{text}");
+
+        let refused = tools::wiki::require_wiki_reads_enabled(&server.state, "ta_wiki_search")
+            .unwrap_err()
+            .message
+            .to_string();
+        assert!(refused.contains("seed_context = false"), "{refused}");
+        assert!(
+            refused.contains(
+                &project
+                    .path()
+                    .join(".ta/workflow.toml")
+                    .display()
+                    .to_string()
+            ),
+            "{refused}"
+        );
+    }
+
     fn outcome_params(outcome: &str) -> crate::tools::whiteboard::OutcomeSendParams {
         crate::tools::whiteboard::OutcomeSendParams {
             candidate_id: "wayfinder-task:t1#abc".to_string(),
@@ -4144,6 +4698,7 @@ mod tests {
             FsReadParams {
                 goal_run_id: chat_id.clone(),
                 path: "notes.txt".to_string(),
+                project: None,
             },
         );
         assert!(read.is_ok(), "chat read failed: {:?}", read.err());
@@ -4205,6 +4760,7 @@ mod tests {
             FsReadParams {
                 goal_run_id: chat_id,
                 path: ".env".to_string(),
+                project: None,
             },
         );
         assert!(secret

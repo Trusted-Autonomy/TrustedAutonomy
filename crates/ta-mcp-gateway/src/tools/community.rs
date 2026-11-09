@@ -202,7 +202,7 @@ pub fn handle_community_search(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
     call_hub(
-        &state.config.workspace_root,
+        &state.read_tool_root("community_search")?,
         "community_search",
         json!({
             "query": params.query,
@@ -221,7 +221,7 @@ pub fn handle_community_get(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
     call_hub(
-        &state.config.workspace_root,
+        &state.read_tool_root("community_get")?,
         "community_get",
         json!({
             "id": params.id,

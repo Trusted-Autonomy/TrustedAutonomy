@@ -21,7 +21,7 @@
 // lock-mismatch error); a malformed session id or a reserved agent id is a
 // hard startup error, never a silent fallback to an unrestricted server.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -38,6 +38,17 @@ pub const ENV_CHAT_SESSION_ID: &str = "TA_CHAT_SESSION_ID";
 pub const ENV_CHAT_AGENT_ID: &str = "TA_CHAT_AGENT_ID";
 /// Workspace root chat reads resolve against (the goal's staging copy).
 pub const ENV_CHAT_WORKSPACE_ROOT: &str = "TA_CHAT_WORKSPACE_ROOT";
+/// The REAL project root a read-only chat session reads (never a copy of
+/// it). `ta run` sets it for a chat-mode launch; the gateway reads project
+/// configuration (`.ta/workflow.toml`, `.ta/wiki-resources.toml`, the plan
+/// file) from here and serves `ta_fs_read` from here, subject to the read
+/// grant below.
+pub const ENV_CHAT_PROJECT_ROOT: &str = "TA_CHAT_PROJECT_ROOT";
+/// The biscuit grant ([`mint_chat_read_grant`]) that lets the session read
+/// [`ENV_CHAT_PROJECT_ROOT`]. Without it the session gets no project read
+/// access at all: every read that needs it is refused with a message
+/// saying so.
+pub const ENV_CHAT_READ_GRANT: &str = "TA_CHAT_READ_GRANT";
 
 /// The Wayfinder project this chat session is bound to (the CoS wake
 /// context). Optional: when absent the pin is `[plan.wayfinder].project_id`
@@ -61,6 +72,11 @@ pub struct ChatLaunch {
     pub workspace_root: Option<PathBuf>,
     /// Wayfinder project this session is pinned to, from the wake context.
     pub wayfinder_project_id: Option<String>,
+    /// The real project root this session reads (`TA_CHAT_PROJECT_ROOT`).
+    pub project_root: Option<PathBuf>,
+    /// Biscuit read grant (`TA_CHAT_READ_GRANT`), verified by the gateway
+    /// against the project's broker key.
+    pub read_grant: Option<String>,
 }
 
 impl ChatLaunch {
@@ -126,13 +142,255 @@ impl ChatLaunch {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let project_root = get(ENV_CHAT_PROJECT_ROOT)
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
+        let read_grant = get(ENV_CHAT_READ_GRANT)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Ok(Some(Self {
             agent_id,
             session_id,
             workspace_root,
             wayfinder_project_id,
+            project_root,
+            read_grant,
         }))
     }
+}
+
+/// The policy identity of a chat session (`<agent>:chat:<session>`), the id
+/// its manifest and its read grant are bound to.
+pub fn chat_policy_id(agent_id: &str, session_id: Uuid) -> String {
+    format!(
+        "{}{}{}",
+        agent_id,
+        ta_goal::chat_mode::CHAT_POLICY_ID_MARKER,
+        session_id
+    )
+}
+
+/// Credential id carried by chat read grants. They are not tied to any
+/// stored credential; the nil id can never name one.
+const CHAT_READ_CREDENTIAL_ID: Uuid = Uuid::nil();
+
+/// Mint the biscuit grant for a chat session's read access: signed with the
+/// project's broker root key (the same custody connector credential grants
+/// use), bound to the session's policy identity, expiring with the
+/// session's manifest. The scopes are `ta_policy::ChatReadAccess::to_scopes`.
+pub fn mint_chat_read_grant(
+    project_root: &Path,
+    policy_agent_id: &str,
+    access: &ta_policy::ChatReadAccess,
+) -> Result<String, GatewayError> {
+    let broker =
+        ta_credential_broker::CredentialBroker::open_for_project(project_root).map_err(|e| {
+            GatewayError::Other(format!(
+                "could not open the credential broker for {} to mint the chat read grant: {e}. \
+                 Run `ta doctor` to check the project's credential custody.",
+                project_root.display()
+            ))
+        })?;
+    let granted = broker
+        .grant(
+            CHAT_READ_CREDENTIAL_ID,
+            policy_agent_id,
+            access.to_scopes(),
+            (CHAT_VALIDITY_HOURS as u64) * 3600,
+        )
+        .map_err(|e| GatewayError::Other(format!("could not mint the chat read grant: {e}")))?;
+    Ok(granted.token)
+}
+
+/// Verify a chat read grant (signature, expiry, revocation, every
+/// attenuation hop) and return what it still authorizes. Fails closed: a
+/// forged, expired, revoked or differently-bound token is an error, never an
+/// empty grant, so a broken launch is visible instead of silently losing
+/// access.
+pub fn verify_chat_read_grant(
+    project_root: &Path,
+    token: &str,
+    policy_agent_id: &str,
+) -> Result<ta_policy::ChatReadAccess, GatewayError> {
+    let rejected = |why: String| {
+        GatewayError::Other(format!(
+            "chat read grant ({ENV_CHAT_READ_GRANT}) rejected for session identity \
+             '{policy_agent_id}': {why}. The Chief of Staff gets no project read access without \
+             a valid grant; re-launch through `ta run --chat-mode` (or a chat_mode persona) to \
+             mint a fresh one."
+        ))
+    };
+    let broker =
+        ta_credential_broker::CredentialBroker::open_for_project(project_root).map_err(|e| {
+            rejected(format!(
+                "could not open the credential broker for {}: {e}",
+                project_root.display()
+            ))
+        })?;
+    let scopes = broker
+        .effective_scopes(token)
+        .map_err(|e| rejected(e.to_string()))?;
+    let Some(first) = scopes.first() else {
+        return Err(rejected("the token carries no scopes".to_string()));
+    };
+    let verified = broker
+        .authorize_scope(token, first)
+        .map_err(|e| rejected(e.to_string()))?;
+    if verified.agent_id != policy_agent_id {
+        return Err(rejected(format!(
+            "the token was minted for '{}', not for this session",
+            verified.agent_id
+        )));
+    }
+    Ok(ta_policy::ChatReadAccess::from_scopes(&scopes))
+}
+
+/// One entry of `[chat] readable_projects`, resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadableProject {
+    /// The name the agent passes as `project` to `ta_fs_read`: a registered
+    /// project's name, or the directory's own name for an absolute path.
+    pub label: String,
+    /// Canonical absolute root.
+    pub root: PathBuf,
+}
+
+/// Resolve `[chat] readable_projects` from the source project's
+/// `.ta/workflow.toml` (default: none). Names resolve through the project
+/// registry (`office.yaml`, or `$TA_OFFICE_CONFIG`).
+pub fn load_readable_projects(project_root: &Path) -> Result<Vec<ReadableProject>, GatewayError> {
+    let workflow_toml = project_root.join(".ta").join("workflow.toml");
+    if !workflow_toml.is_file() {
+        return Ok(Vec::new());
+    }
+    let workflow = ta_submit::WorkflowConfig::load(&workflow_toml).map_err(|e| {
+        GatewayError::Other(format!(
+            "could not read [chat] readable_projects: {} did not parse: {e}. Fix the TOML and \
+             re-launch.",
+            workflow_toml.display()
+        ))
+    })?;
+    let office = std::env::var_os("TA_OFFICE_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_root.join("office.yaml"));
+    resolve_readable_projects(project_root, &workflow.chat.readable_projects, &office)
+}
+
+/// Resolve `entries` (absolute paths or registered project names) to
+/// canonical roots. An entry that cannot be resolved is an error naming the
+/// entry, what was tried and what to change: the registry is the owner's
+/// explicit widening of read access, so a typo must be loud, not dropped.
+pub fn resolve_readable_projects(
+    project_root: &Path,
+    entries: &[String],
+    office_yaml: &Path,
+) -> Result<Vec<ReadableProject>, GatewayError> {
+    let main_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut out: Vec<ReadableProject> = Vec::new();
+    for raw in entries {
+        let entry = raw.trim();
+        let err = |why: String| {
+            GatewayError::Other(format!(
+                "[chat] readable_projects entry '{entry}' is unusable: {why}. Fix \
+                 `readable_projects` in {}/.ta/workflow.toml (an absolute project path, or a \
+                 project name registered in office.yaml).",
+                project_root.display()
+            ))
+        };
+        if entry.is_empty() {
+            return Err(err("it is empty".to_string()));
+        }
+        let path = if Path::new(entry).is_absolute() {
+            PathBuf::from(entry)
+        } else {
+            registered_project_path(office_yaml, entry).map_err(err)?
+        };
+        let root = path
+            .canonicalize()
+            .map_err(|e| err(format!("{} cannot be resolved: {e}", path.display())))?;
+        if !root.is_dir() {
+            return Err(err(format!("{} is not a directory", root.display())));
+        }
+        if root.parent().is_none() {
+            return Err(err("the filesystem root is not a project".to_string()));
+        }
+        if home_dir().is_some_and(|h| h.canonicalize().is_ok_and(|h| h == root)) {
+            return Err(err(
+                "the home directory is not a project; list the project directory itself"
+                    .to_string(),
+            ));
+        }
+        if root == main_root {
+            return Err(err(
+                "it is the main project, which is always readable".to_string()
+            ));
+        }
+        let label = if Path::new(entry).is_absolute() {
+            root.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            entry.to_string()
+        };
+        if !ta_policy::is_valid_readable_label(&label) {
+            return Err(err(format!(
+                "its name '{label}' is not usable as a project label (letters, digits, '.', '_' \
+                 and '-' only); register the project in office.yaml under a simple name and \
+                 list that name"
+            )));
+        }
+        if out.iter().any(|p| p.label == label) {
+            return Err(err(format!(
+                "another entry already uses the label '{label}'; register one of them under a \
+                 different name"
+            )));
+        }
+        out.push(ReadableProject { label, root });
+    }
+    Ok(out)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// `projects.<name>.path` from a project registry file (`office.yaml`).
+fn registered_project_path(office_yaml: &Path, name: &str) -> Result<PathBuf, String> {
+    let text = std::fs::read_to_string(office_yaml).map_err(|e| {
+        format!(
+            "it is not an absolute path, and no project registry could be read at {} ({e})",
+            office_yaml.display()
+        )
+    })?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| {
+        format!(
+            "the project registry {} did not parse: {e}",
+            office_yaml.display()
+        )
+    })?;
+    let path = doc
+        .get("projects")
+        .and_then(|p| p.get(name))
+        .and_then(|p| p.get("path"))
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| {
+            format!(
+                "no project named '{name}' is registered in {}",
+                office_yaml.display()
+            )
+        })?;
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home_dir()
+            .map(|h| h.join(rest))
+            .ok_or_else(|| format!("registered path '{path}' needs HOME, which is not set"));
+    }
+    Ok(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -208,5 +466,124 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains(":chat:"), "{}", err);
+    }
+
+    #[test]
+    fn parses_project_root_and_read_grant() {
+        let launch = ChatLaunch::from_vars(vars(&[
+            (ENV_CHAT_MODE, "1"),
+            (ENV_CHAT_PROJECT_ROOT, "/work/proj"),
+            (ENV_CHAT_READ_GRANT, " tok "),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(launch.project_root, Some(PathBuf::from("/work/proj")));
+        assert_eq!(launch.read_grant.as_deref(), Some("tok"));
+        let none = ChatLaunch::from_vars(vars(&[(ENV_CHAT_MODE, "1")]))
+            .unwrap()
+            .unwrap();
+        assert_eq!((none.project_root, none.read_grant), (None, None));
+    }
+
+    fn read_access() -> ta_policy::ChatReadAccess {
+        ta_policy::ChatReadAccess {
+            project: true,
+            readable_projects: vec!["other".to_string()],
+            tools: vec!["ta_plan_status".to_string()],
+        }
+    }
+
+    #[test]
+    fn read_grant_round_trips_through_the_broker_custody() {
+        let project = tempfile::tempdir().unwrap();
+        let id = chat_policy_id("chief-of-staff", Uuid::new_v4());
+        let token = mint_chat_read_grant(project.path(), &id, &read_access()).unwrap();
+        let got = verify_chat_read_grant(project.path(), &token, &id).unwrap();
+        assert_eq!(got, read_access());
+    }
+
+    #[test]
+    fn read_grant_for_another_session_or_a_forged_token_is_refused() {
+        let project = tempfile::tempdir().unwrap();
+        let id = chat_policy_id("chief-of-staff", Uuid::new_v4());
+        let token = mint_chat_read_grant(project.path(), &id, &read_access()).unwrap();
+
+        let other = chat_policy_id("chief-of-staff", Uuid::new_v4());
+        let err = verify_chat_read_grant(project.path(), &token, &other)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not for this session"), "{err}");
+        assert!(err.contains(ENV_CHAT_READ_GRANT), "{err}");
+
+        let forged = verify_chat_read_grant(project.path(), "not-a-biscuit", &id)
+            .unwrap_err()
+            .to_string();
+        assert!(forged.contains("rejected"), "{forged}");
+    }
+
+    fn registry(dir: &Path, body: &str) -> PathBuf {
+        let p = dir.join("office.yaml");
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn readable_projects_default_empty_and_resolve_paths_and_registered_names() {
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        let other = base.path().join("other");
+        let named = base.path().join("named-dir");
+        for d in [&main, &other, &named] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let office = registry(
+            base.path(),
+            &format!("projects:\n  wayfinder:\n    path: {}\n", named.display()),
+        );
+        assert!(resolve_readable_projects(&main, &[], &office)
+            .unwrap()
+            .is_empty());
+        let got = resolve_readable_projects(
+            &main,
+            &[other.display().to_string(), "wayfinder".to_string()],
+            &office,
+        )
+        .unwrap();
+        assert_eq!(got[0].label, "other");
+        assert_eq!(got[0].root, other.canonicalize().unwrap());
+        assert_eq!(got[1].label, "wayfinder");
+        assert_eq!(got[1].root, named.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn readable_projects_typos_and_dangerous_entries_are_loud() {
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        let other = base.path().join("other");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let office = registry(base.path(), "projects: {}\n");
+        let one = |entry: &str| {
+            resolve_readable_projects(&main, &[entry.to_string()], &office)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(one("nope").contains("no project named 'nope'"));
+        assert!(one("").contains("empty"));
+        assert!(
+            one(&base.path().join("missing").display().to_string()).contains("cannot be resolved")
+        );
+        assert!(one(&main.display().to_string()).contains("always readable"));
+        assert!(one("/").contains("filesystem root"));
+        let dup = resolve_readable_projects(
+            &main,
+            &[other.display().to_string(), other.display().to_string()],
+            &office,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(dup.contains("already uses the label"), "{dup}");
+        // Every error names the file to fix.
+        assert!(one("nope").contains("workflow.toml"));
     }
 }
