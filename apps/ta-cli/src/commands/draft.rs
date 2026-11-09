@@ -15657,7 +15657,9 @@ fn run() {
         assert!(release_prs[0].contains("[--base][main]"));
         assert!(release_prs[0].contains("Ship the billing invoice export"));
         assert!(
-            std::fs::read_to_string(&gh.log).unwrap().contains("release-set gate"),
+            std::fs::read_to_string(&gh.log)
+                .unwrap()
+                .contains("release-set gate"),
             "the PR body carries the evidence line"
         );
         assert_eq!(prs.len(), 2, "hotfix PR + release PR only: {prs:?}");

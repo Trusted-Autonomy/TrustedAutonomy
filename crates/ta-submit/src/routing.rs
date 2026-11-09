@@ -268,8 +268,10 @@ mod tests {
     fn non_git_adapter_with_an_open_release_is_refused_with_the_way_out() {
         let dir = tempfile::tempdir().unwrap();
         open_release(dir.path());
-        let mut s = SubmitConfig::default();
-        s.adapter = "svn".into();
+        let s = SubmitConfig {
+            adapter: "svn".into(),
+            ..SubmitConfig::default()
+        };
         let err = resolve_route(dir.path(), &s, None).unwrap_err().to_string();
         assert!(err.contains("--hotfix") && err.contains("svn"), "{err}");
     }
