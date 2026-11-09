@@ -1,5 +1,12 @@
 ## Unreleased
 
+**Chief of Staff read access**
+
+- **Fixed: the Chief of Staff could not read Wayfinder, the wiki or the plan.** The gateway read tools looked for `.ta/workflow.toml` and `.ta/wiki-resources.toml` in the staging copy, which has neither, and answered "no Wayfinder configuration". They now read the source project root, and plan-status names the path it looked at and why it found nothing.
+- **Chat mode no longer copies the project.** The CoS gets a thin session directory, reads the real project read-only through `ta_fs_read` (new `project` argument) and the read tools, and its scratch writes are discarded. The OS sandbox grants read-only (no write) on the project root; `.ta`, `.git`, the state directory and credentials stay unreadable.
+- **Capability grant.** A chat launch mints a read grant (read on `fs://project/**` plus the named read tools) into the credential broker; a session without it keeps the old refusal.
+- **`[chat] readable_projects`** in `.ta/workflow.toml` lets the CoS read other projects (absolute path or a name from `office.yaml`), read-only with the same deny-list. Default empty.
+
 **Lazy copy-on-write staging**
 
 - **New `[staging] strategy = "lazy"`.** Staging is populated with directory-level `clonefile` (APFS) or per-file reflinks (Btrfs/XFS); ext4, NTFS, other volumes and Windows fall back to the full copy and the goal output says why. A metadata baseline stored outside staging (`.ta/staging-baselines/<goal-id>.json`) lets `ta draft build` open only files the agent wrote, deleted, renamed or added. Goal start no longer SHA-256s the whole source tree in this mode. Default stays `full`. Design and measurements: `docs/design/lazy-cow-staging.md`.

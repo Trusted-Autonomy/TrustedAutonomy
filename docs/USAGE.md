@@ -6282,6 +6282,33 @@ On Windows the box has two layers, and `ta run` prints which ones it got on the 
 
 **Running the checks yourself.** `TA_REQUIRE_SANDBOX_CONFORMANCE=1 cargo test -p ta-runtime --test windows_conformance -- --nocapture` runs the suite on a Windows machine. It also prints `FINDING` lines saying whether an AppContainer process can see Credential Manager entries and use per-user DPAPI.
 
+### Chief of Staff Read Access
+
+The chat-mode Chief of Staff (CoS) reads your real project, read-only, with no copy of it.
+
+- **Config comes from the real project.** `ta_wayfinder_*`, the wiki tools and plan-status read `.ta/workflow.toml`, `.ta/wiki-resources.toml` and the plan file from the source project root. If plan-status finds nothing it prints the path it looked at and why.
+- **Files.** `ta_fs_read` reads a file under the real project root (its optional `project` argument names a project from `readable_projects`). `.ta/`, `.git/` and the secret deny-list (`.env`, keys, credentials) stay unreadable, and a symlink that leaves the root is refused. Nothing in the project can be written: the MCP surface offers only read tools and the sandbox gives no write on the root. Scratch writes go to the session directory and are discarded.
+- **The grant.** At launch `ta run` mints a read grant for the session: read on `fs://project/**` and on the named read tools, nothing else. A session without that grant gets the old refusal.
+- **Other projects.** To let the CoS read another project, list it in the source project's `.ta/workflow.toml`:
+
+  ```toml
+  [chat]
+  readable_projects = ["/Users/me/development/other-repo", "wayfinder"]   # absolute path or a name from office.yaml
+  ```
+
+  Each listed root is read exactly like the main one (read-only, same deny-list). Nothing else outside the root is readable. A name or path that does not resolve stops the launch with a message naming it.
+
+**Which agent and model each role uses** (no build needed):
+
+| What | Key | Legal values |
+|---|---|---|
+| Project default agent | `[agent] default` in `.ta/workflow.toml` | an agent framework name (`claude-code`, `codex`, ...) or `"auto"` |
+| Per workload type | `[workload_agents].<type>` | agent name |
+| Team role | `agent_id` in the role's team config, or `ta team assign <role> <agent-or-model>` | an agent name, a model id such as `claude-opus-5`, or `auto` |
+| Persona | `agent` in the persona file, or `ta persona set-agent <name> <agent>` | agent name, model id or `auto` |
+| One launch | `ta run --model <id>`, `--tier local\|light\|standard\|max`, `--effort` | a concrete model id always wins over a tier |
+
+
 ### Default-On Isolation for Chief of Staff and Team Roles
 
 Chief-of-staff (CoS) and chat sessions, and every team role, start inside the OS sandbox with no setup. The default posture is `balanced`. A solo `ta run` worker with no team role is still not boxed unless you set `[sandbox] enabled = true` or `[security] level = "mid"`.
