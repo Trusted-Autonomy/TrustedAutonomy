@@ -1,5 +1,5 @@
 # Trusted Autonomy — Development Plan
-> Canonical plan for the project. Machine-parseable: each phase has a `<!-- status: done|in_progress|pending -->` marker.
+> Canonical plan for the project. Machine-parseable: each phase has a status marker line (`done`, `in_progress` or `pending`, written as an HTML comment).
 > Updated automatically by `ta pr apply` when a goal with `--phase` completes.
 ---                                                                                                                                                                                                                                                             
 ## Versioning & Release Policy
@@ -46,7 +46,7 @@ TA's architecture maps to emerging AI governance standards. Rather than bolt-on 
 ---
 ## Completed Phases (Phase 0 through v0.8)
 > **Archived**: Phases 0–4c, v0.1–v0.1.2, v0.2.0–v0.2.4, v0.3.0–v0.3.6, v0.4.0–v0.4.5, v0.5.0–v0.5.7, v0.6.0–v0.6.3, v0.7.0–v0.7.7, v0.8.0–v0.8.2 have been moved to [`docs/PLAN-ARCHIVE.md`](docs/PLAN-ARCHIVE.md).
-> All are `<!-- status: done -->` except v0.1 and v0.1.1 which are `<!-- status: deferred -->`.
+> All are `done` except v0.1 and v0.1.1 which are `deferred`.
 ---
 ## Release Sequence & Phase Priority
 ### Road to Public Alpha
@@ -1258,7 +1258,7 @@ Agent: [starts goal for Phase 1]
    - On completion, moves the generated project to the target directory
    - Has access to `ta init`, filesystem write, and plan generation tools
    - Does NOT have access to `ta goal start`, `ta draft build`, or other runtime tools (it's creating the project, not executing goals)
-   - System prompt includes: plan format specification (PLAN.md with `<!-- status: pending -->` markers), versioning policy, phase sizing guidelines
+   - System prompt includes: plan format specification (PLAN.md with `pending` status markers), versioning policy, phase sizing guidelines
    - Conversation is multi-turn: agent asks clarifying questions, proposes a plan, user refines, agent generates
    - Agent tools available:
      - `ta_scaffold` — create directory structure, Cargo.toml/package.json/etc.
@@ -1268,7 +1268,7 @@ Agent: [starts goal for Phase 1]
    - Each phase has: title, goal description, numbered items, implementation scope, version
    - Phase sizing: guide the agent to create phases that are 1-4 hours of work each
    - Dependencies: note which phases depend on others
-   - Phase markers: all start as `<!-- status: pending -->`
+   - Phase markers: all start as `pending`
    - Versioning: auto-assign version numbers (v0.1.0 for phase 1, v0.2.0 for phase 2, etc.)
    - `ta new --template rust-lib` → Library crate, docs, benchmarks
    - `ta new --template ts-api` → Node.js, Express/Fastify, TypeScript
@@ -3816,7 +3816,7 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 - Items 10–14 (E2E harness): from v0.13.17 items 21–25 — DaemonHandle infrastructure + real test bodies ✓
 #### Version: `0.13.17-alpha.7`
 > **⬇ PUBLIC BETA** — v0.13.x complete: runtime flexibility (local models, containers), enterprise governance (audit ledger, action governance, compliance), community ecosystem, and goal workflow automation. TA is ready for team and enterprise deployments.
-**Trigger**: After all v0.13.17.x phases (through v0.13.17.7) are `<!-- status: done -->`.
+**Trigger**: After all v0.13.17.x phases (through v0.13.17.7) are `done`.
 **Steps**:
 1. Pin binary version to `0.13.17-alpha.7` in `Cargo.toml` and `CLAUDE.md`
 2. Push tag `public-alpha-v0.13.17.7` → triggers release workflow
@@ -3866,7 +3866,7 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 ### v0.14.3 — Plan Phase Ordering Enforcement
 <!-- status: done -->
 **Goal**: Prevent the version divergence that occurred when v0.14.0–v0.14.2 were implemented before completing v0.13.17.x. TA should warn (or block) when a goal targets a phase that is numerically later than an incomplete earlier phase.
-1. [x] **`ta plan status --check-order`**: Walk all plan phases in numeric order. If a phase with a higher version number is `<!-- status: done -->` while a lower-numbered phase is still `<!-- status: pending -->`, print a warning: `"Phase v0.14.2 is done but v0.13.17.2 is still pending — phases are out of order."` Exit code 0 (warn only, not blocking).
+1. [x] **`ta plan status --check-order`**: Walk all plan phases in numeric order. If a phase with a higher version number is `done` while a lower-numbered phase is still `pending`, print a warning: `"Phase v0.14.2 is done but v0.13.17.2 is still pending — phases are out of order."` Exit code 0 (warn only, not blocking).
 2. [x] **Phase dependency declarations**: Allow phases to declare `depends_on = ["v0.13.17.3"]` via `<!-- depends_on: v0.13.17.3 -->` comment in PLAN.md. `ta plan status` shows dependency warnings. `ta run` blocks if a declared dependency is not done (regardless of version order).
 3. [x] **Version-phase sync check**: `ta plan status --check-versions` verifies the workspace binary version matches the highest completed phase. If `0.13.17.3` is done but binary is `0.14.2-alpha`, print: `"Binary version (0.14.2-alpha) is ahead of highest sequential completed phase (0.13.17.3). Consider pinning for release — see CLAUDE.md 'Public Release Process'."`.
 ### v0.13.16 — Local Model Agent (`ta-agent-ollama`) & Advanced Swarm
@@ -4321,7 +4321,7 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 7. [x] **Wire into draft.rs post-commit scan**: Replace the `if adapter.name() != "git"` guard and raw `Command::new("git")` block with `if let Some(diff_text) = adapter.commit_diff() { ... }`. Remove the TODO comment.
 8. [x] **Raw-git audit in `governed_workflow.rs` and `run.rs`**: Find every `Command::new("git")` call. Classify each as: (a) must stay (bootstrap/no-adapter context), (b) no-op (already guarded), or (c) promote to adapter method. Fix class (c) occurrences.
 9. [x] **Auto-commit `.ta/` jsonl at `ta run` start** (`apps/ta-cli/src/commands/run.rs`): Before copying workspace to staging, check if `goal-audit.jsonl`, `plan_history.jsonl`, or `velocity-history.jsonl` are dirty. If yes, commit them directly on the current branch with message `"chore: auto-commit workflow audit trail (pre-goal)"`. Eliminates the "WARNING: Working tree has uncommitted changes" noise at every goal start.
-10. [x] **Plan-patch marker regression fix** (`apps/ta-cli/src/commands/draft.rs`): The plan-patch diff from staging replaces `<!-- status: done -->` with `---` whenever staging predates manual marker additions to source. Fix: when applying a plan-patch hunk that would change a status marker line from `<!-- status: done -->` to `---`, skip that hunk. Status marker lines are source-authoritative — staging never wins on them.
+10. [x] **Plan-patch marker regression fix** (`apps/ta-cli/src/commands/draft.rs`): The plan-patch diff from staging replaces the `done` status marker with `---` whenever staging predates manual marker additions to source. Fix: when applying a plan-patch hunk that would change a status marker line from the `done` status marker to `---`, skip that hunk. Status marker lines are source-authoritative — staging never wins on them.
 11. [x] **Staging directory GC** (`apps/ta-cli/src/commands/draft.rs`, `crates/ta-workspace/src/overlay.rs`): (a) Auto-delete staging dir immediately on successful apply (not just on GC threshold). (b) Add `[workspace] staging_max_gb = 5.0` config key (default 5 GB, not 20 GB). (c) On goal start, if staging total exceeds cap, remove oldest completed/failed dirs before creating new staging. (d) Future: lazy copy-on-write via hardlinks for read-only files — spec the interface in a `// TODO(cow):` comment, implement if time permits.
 12. [x] **Tests**: `commit_diff()` returns diff text for git adapter. Perforce/SVN/external return `None` when no changelist. `NoneAdapter` always returns `None`. Post-commit scan in `draft.rs` scans when `commit_diff()` returns `Some`, skips when `None`. Auto-commit fires on dirty `.ta/` at goal start. Plan-patch skips status marker hunks. Staging GC removes oldest dirs when cap exceeded.
 13. [x] **USAGE.md**: Update "Draft Apply" section with note on staging GC and the new `staging_max_gb` config key.
@@ -5602,7 +5602,7 @@ version_set = "v0.15.*"
 
 ```
 
-These resolve at runtime via `ta plan next` iteration — only phases with `<!-- status: pending -->` are candidates.
+These resolve at runtime via `ta plan next` iteration — only phases with the `pending` status marker are candidates.
 
 #### Mode A — PR-per-phase (serial, VCS-synced)
 
@@ -5704,7 +5704,7 @@ name = "pr_sync"
 
 Phases may include a `#### Human Review` subsection (4th-level heading). Items under it are human-only — an agent must never check them off:
 
-### v0.15.X — Some Phase <!-- status: done -->
+### v0.15.X — Some Phase
 <!-- status: done -->
 
 - [x] Agent writes code
@@ -7047,7 +7047,7 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 **Depends on**: v0.15.24.1 (audit trail integrity), v0.15.24.2 (phase claim locking)
 
 
-1. [x] **`ta plan compact` command** (`apps/ta-cli/src/commands/plan.rs`): For each completed `v0.X` milestone (all sub-phases `done`, `X` < current release minor), write a milestone summary block to `PLAN-ARCHIVE.md` and replace the full phase detail in PLAN.md with a single `### v0.X — <name> *(compacted)*` block containing a 3-5 sentence human summary and `<!-- status: done -->`. Idempotent — running twice produces no change.
+1. [x] **`ta plan compact` command** (`apps/ta-cli/src/commands/plan.rs`): For each completed `v0.X` milestone (all sub-phases `done`, `X` < current release minor), write a milestone summary block to `PLAN-ARCHIVE.md` and replace the full phase detail in PLAN.md with a single `### v0.X — <name> *(compacted)*` block containing a 3-5 sentence human summary and the `done` status marker. Idempotent — running twice produces no change.
 
 2. [x] **`PLAN-ARCHIVE.md` format**: One section per compacted milestone. Each section preserves: phase IDs, titles, all items (checked state), version string, merge PR link (from `plan_history.jsonl`), and compaction date. Machine-readable enough for `ta plan history <phase>` lookups.
 
@@ -7243,7 +7243,7 @@ pub enum NoteDelivery {
 
 2. [x] **Staging-base drift detection** (`crates/ta-workspace/src/overlay.rs` or `draft.rs`): At `ta draft apply` time, compare the stored `plan_snapshot.sha256` against the SHA of `PLAN.md` at the staging base commit (`git show <base-sha>:PLAN.md | sha256`). If they differ, log `WARN: PLAN.md staging base is stale — base sha differs from current source base` with both SHAs. Informational; merge may still be clean, but flags the risk.
 
-3. [x] **Post-merge structural validation** (`crates/ta-workspace/src/overlay.rs`): After 3-way merge produces a candidate PLAN.md, validate before writing to source: (a) all `### v0.x.y` headings from source are present in merged result; (b) each heading has a matching `<!-- status: ... -->` marker; (c) no phase section contains only blank lines between heading and next `---` or `###`. Returns `PlanValidationError` with structured report of what is missing.
+3. [x] **Post-merge structural validation** (`crates/ta-workspace/src/overlay.rs`): After 3-way merge produces a candidate PLAN.md, validate before writing to source: (a) all `### v0.x.y` headings from source are present in merged result; (b) each heading has a matching the `...` status marker marker; (c) no phase section contains only blank lines between heading and next `---` or `###`. Returns `PlanValidationError` with structured report of what is missing.
 
 4. [x] **Apply guard**: If `PlanValidationError` is returned, abort the PLAN.md portion of the apply, write the failed merge result to `.ta/plan-merge-failed-<goal-id>.md` for inspection, and surface an actionable error: `PLAN.md merge validation failed — see .ta/plan-merge-failed-<goal-id>.md. Restore manually and re-run 'ta draft apply --skip-plan-merge'.` Add `--skip-plan-merge` flag for emergency use (logged to audit trail).
 
@@ -7327,13 +7327,13 @@ pub enum NoteDelivery {
 ### v0.15.29.2 — PLAN.md Integrity: Item Consistency Enforcement
 <!-- status: done -->
 
-**Goal**: A `<!-- status: done -->` phase section must never contain unchecked `[ ]` items. Detect this inconsistency during validation and auto-correct it at apply time.
+**Goal**: A phase section marked `done` must never contain unchecked `[ ]` items. Detect this inconsistency during validation and auto-correct it at apply time.
 
-**Why**: When a goal completes and sets `<!-- status: done -->`, the agent marks all items `[x]` in staging. However, if the plan-patch or 3-way merge step loses item content (blank lines from base drift, or plan-patch injected mid-section), some items can revert to `[ ]` while the status stays `done`. The v0.15.28.1 validator catches blank sections and missing status markers but not item/status agreement. This produces a misleading `done` section with unchecked items — observed in v0.15.29.1 immediately after merge.
+**Why**: When a goal completes and sets the `done` status marker, the agent marks all items `[x]` in staging. However, if the plan-patch or 3-way merge step loses item content (blank lines from base drift, or plan-patch injected mid-section), some items can revert to `[ ]` while the status stays `done`. The v0.15.28.1 validator catches blank sections and missing status markers but not item/status agreement. This produces a misleading `done` section with unchecked items — observed in v0.15.29.1 immediately after merge.
 
 **Depends on**: v0.15.28.1 (validation infrastructure), v0.15.28.2 (pre-merge rebase)
 
-1. [x] **Add item-status consistency check to post-merge validator** (`crates/ta-workspace/src/plan_validation.rs`): Scan every `<!-- status: done -->` section for `[ ]` items after merge. Report as `[vX.Y.Z] section is 'done' but N item(s) are unchecked — possible merge corruption`. Warning-level (not abort); status marker is authoritative.
+1. [x] **Add item-status consistency check to post-merge validator** (`crates/ta-workspace/src/plan_validation.rs`): Scan every the `done` status marker section for `[ ]` items after merge. Report as `[vX.Y.Z] section is 'done' but N item(s) are unchecked — possible merge corruption`. Warning-level (not abort); status marker is authoritative.
 
 2. [x] **Auto-correct at apply time**: When a phase transitions to `done` in this apply, auto-convert any remaining `[ ]` items to `[x]` before writing to source. Log each correction: `[plan] auto-checked item N in vX.Y.Z (phase is done; checkmark lost in merge)`.
 
@@ -7757,7 +7757,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 **Why this phase exists**: v0.16.0.1 fixed the JS crash and active-goals display but didn't address the plan parser itself. The `### v0.15.9` heading is absent from PLAN.md (historical staging drift) — the parser never matches it, so `plan_history` entries for that phase show as unresolved in the dashboard. Additionally, the plan tab renders phases as a flat list; sub-phases (`v0.X.Y.Z`) have no visual nesting or hierarchy to indicate they are incremental improvements within a parent phase.
 
-1. [x] **Add missing `### v0.15.9` heading** (PLAN.md): Insert heading + `<!-- status: done -->` before the existing `#### Version: 0.15.9-alpha` marker so the plan parser can find and resolve the phase. (Already done as part of this PLAN.md commit.)
+1. [x] **Add missing `### v0.15.9` heading** (PLAN.md): Insert heading + the `done` status marker before the existing `#### Version: 0.15.9-alpha` marker so the plan parser can find and resolve the phase. (Already done as part of this PLAN.md commit.)
 
 2. [x] **Sub-phase nesting in Studio plan tab** (`assets/index.html`): Detect `vX.Y.Z.N` phase IDs and render them indented under their parent (`vX.Y.Z`) with a connecting visual (left border or tree line). Parent phases show a chevron to expand/collapse sub-phases. Sub-phases that are `done` show as a green check inside the parent row rather than a full card.
 
@@ -8059,7 +8059,7 @@ ta plan init --pragma --discover
 
 - [x] **Immutable title as opaque text**: Goal title set once at creation from the user-supplied string. Never updated. On storage: strip ANSI escape sequences, collapse runs of whitespace/newlines to single space, trim to a reasonable max length (e.g. 500 chars) with truncation marker. On display: render as plain text — no Markdown interpretation, no shell expansion. The title field must never be treated as a script or template at any point in the pipeline.
 - [x] **Non-interactive prompt policy**: When a command that would normally prompt the user runs in a non-interactive context (no TTY, inside a goal agent), check for a configured automation policy in `~/.config/ta/config.toml` or `.ta/config.toml` (e.g. `[plan_init] auto_write_schema = true`). If a policy exists and is approved: proceed non-interactively with a log line noting the automated action. If no policy: abort with an error that includes — what was attempted, why it requires user input, how to set `auto_write_schema = true` to allow it in future, and that it was likely triggered unintentionally by the agent calling an interactive command. Error text should be actionable, not just "not a TTY".
-- [x] **Terminal draft states must release phase claim**: When a draft reaches any terminal state that is NOT apply, the daemon must: (a) call `phase_claims.release(phase_id)` on the in-memory claim registry, and (b) reset the PLAN.md `<!-- status: in_progress -->` marker back to `<!-- status: pending -->`. The terminal states that release are: `Denied`, `Closed` (abandoned without apply). The terminal state that completes is: `Applied` — which sets PLAN.md to `done` and GoalRun to `Applied/Completed`. This rule must be enforced at the daemon event handler, not left to callers. Currently `phase_claim.rs` documents `release()` as "used in deny/delete flows" but no deny flow actually calls it — the comment is aspirational, not implemented. Fix: wire `DraftDenied` and `GoalDeleted` events in `notification_dispatcher.rs` (or a new `phase_claim_sync.rs`) to call `release()` + reset PLAN.md. The `draft close` path needs the same treatment. Also add a `ta doctor` check that detects `in_progress` phases in PLAN.md with no live goal claim, and offers to reset them.
+- [x] **Terminal draft states must release phase claim**: When a draft reaches any terminal state that is NOT apply, the daemon must: (a) call `phase_claims.release(phase_id)` on the in-memory claim registry, and (b) reset the PLAN.md the `in_progress` status marker marker back to the `pending` status marker. The terminal states that release are: `Denied`, `Closed` (abandoned without apply). The terminal state that completes is: `Applied` — which sets PLAN.md to `done` and GoalRun to `Applied/Completed`. This rule must be enforced at the daemon event handler, not left to callers. Currently `phase_claim.rs` documents `release()` as "used in deny/delete flows" but no deny flow actually calls it — the comment is aspirational, not implemented. Fix: wire `DraftDenied` and `GoalDeleted` events in `notification_dispatcher.rs` (or a new `phase_claim_sync.rs`) to call `release()` + reset PLAN.md. The `draft close` path needs the same treatment. Also add a `ta doctor` check that detects `in_progress` phases in PLAN.md with no live goal claim, and offers to reset them.
 - [x] **Tests**: `title_strips_ansi_codes`, `title_collapses_whitespace`, `title_never_exceeds_max_length`, `noninteractive_without_policy_errors_with_guidance`, `noninteractive_with_policy_proceeds_and_logs`, `denied_draft_releases_phase_claim`, `denied_draft_resets_planmd_to_pending`, `closed_goal_releases_phase_claim`, `applied_draft_marks_phase_done`
 
 **Depends on**: v0.16.1.6
@@ -10873,7 +10873,7 @@ While tracing this, an **undocumented earlier PLAN.md write site** was found tha
 
 **Goal**: `ta draft apply` must change exactly what the draft says and nothing else, and `--dry-run` must change nothing. Every TA-built draft since 2026-10-10 has needed a hand repair of `PLAN.md` after apply, and the last one flipped four unrelated human-gate checkboxes to done, which falsely records human sign-offs. This is the process-fidelity fix that lets the TA flow be used without manual cleanup; it comes before v0.17.11.27.
 
-1. [x] **Plan merge changes only the target phase.** After apply, `PLAN.md` must be byte-for-byte identical to the pre-apply file except the target phase's `<!-- status: ... -->` marker and the checkbox state of that phase's own numbered items. Find the writer (the plan-merge path in `ta draft apply --phase`, plus the earlier PLAN.md write site documented in this file) and stop it rewriting anything else: no blank-line removal anywhere (including inside code fences), no checkbox change in any other phase, no reordering. Golden tests over a copy of the real `PLAN.md` and over a fixture with look-alike phase headings; a property test that every line outside the target phase block is unchanged.
+1. [x] **Plan merge changes only the target phase.** After apply, `PLAN.md` must be byte-for-byte identical to the pre-apply file except the target phase's the `...` status marker marker and the checkbox state of that phase's own numbered items. Find the writer (the plan-merge path in `ta draft apply --phase`, plus the earlier PLAN.md write site documented in this file) and stop it rewriting anything else: no blank-line removal anywhere (including inside code fences), no checkbox change in any other phase, no reordering. Golden tests over a copy of the real `PLAN.md` and over a fixture with look-alike phase headings; a property test that every line outside the target phase block is unchanged.
 2. [x] **A draft's own `PLAN.md` edits are honored.** When a draft includes item checkmarks for the target phase, apply must carry them; when the phase has items the agent could not complete, leave them unchecked and say which (Deferred Items Policy), never auto-check.
 3. [x] **`ta draft apply --dry-run` changes nothing.** Observed 2026-10-10: it copied files into the source tree on a new feature branch, marked the draft and goal Applied and deleted the staging directory. A dry run prints what it would do and leaves files, branches, goal state, draft state and staging untouched. Regression test that snapshots the tree, branches, goal and draft state around a dry run.
 4. [x] **Apply never leaves uncommitted changes on a protected branch.** `--no-submit` applied straight onto `main`'s working tree. Switch to (or create) the feature branch before writing any file, and refuse with an actionable message if that is impossible.
@@ -11361,6 +11361,7 @@ Status notes. The Windows-only FFI files (`windows_pipe.rs`, `egress_pipe.rs`, `
    - [x] The verification-failure context in `ta run` (`[verify] on_failure = "agent"`, both re-launch sites in `run.rs`, via `commands/input_minimizer.rs`) now calls `apply_for_command` when a first-party minimizer is selected: the original is stored under `.ta/compression/originals/`, each use is appended to `.ta/compression/input-metrics.jsonl`, `ta compression status` shows the totals, and `--set optimizers.input.use=first-party` reaches it through `experiment_overrides`. Tested: per-kind reductions keep errors, failing tests and summaries; metrics and recoverable original through the real `apply`; other commands' output left alone; no minimizer selected keeps the old line cap.
    - [ ] NOT DONE: the replay comparison (spec S5d). Replay one golden entry with `--set optimizers.input.use=first-party`, with `rtk` and with `none`, and read `ta golden report`. It needs real agent goals, which spend money, so it waits for the owner. Until then the byte reductions are measured on fixtures only, not whole-goal tokens, and a minimizer is not recommended as a default.
 4. [x] **Keep failure history across a daemon restart.** `run_supervisor` used to delete `.ta/compression/status.json` at startup, discarding the previous run's `last_failure` and `notice`. It now keeps them (`begin_run`), resets the process fields and restart count, marks the record `carried_over`, and `ta compression status` shows the failure as from before the last daemon restart. It clears when the optimizer passes its first health check, and a failure in the new run replaces it. Tested in `prompt_optimizer_supervisor.rs` (carry-over, clear on healthy, new failure not cleared, disabled start keeps it).
+5. [ ] **Investigate "Portal by Spotify" (the `shunt` plugin) as another way to cut input tokens.** Source: https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90 (Dimitri Mazmanov, Spotify Engineering); code: https://github.com/sorantis/portal-ai-plugins (the plugin) and https://github.com/spotify/portal-ai-plugins (marketplace). What it claims: Claude Code spends most input tokens READING files, so a `PreToolUse` hook blocks a `Read` over a size threshold (`SHUNT_MIN_LINES`, default 350) and a `cat`/`head`/`tail` of a large file, and tells the agent to hand the reading to a cheaper model (Portal "AiKA modes" `bulk-reader` and `code-writer`, both Gemini 2.5 Flash) through two wrapper scripts. Reported mean saving on bulk reads about 90%. Reported limits: delegation cannot edit or reason (the agent must still do that itself), each delegated call adds 10 to 30 seconds with a 30 second cap, and it depends on Spotify's own Portal service (access not verified), so TA cannot depend on it. What to do: (a) read the plugin's hooks and decide whether the "block a big read, return a summary from a cheaper model" pattern belongs in the `InputOptimizer` slot next to RTK (`ta-context-opt`: a hook-kind optimizer whose summary comes from a configurable cheap model, with the original kept on disk so it is reversible); (b) measure on TA's own golden entries (`ta golden replay --set optimizers.input.use=...`) against `none`, `rtk` and `first-party`, and record the whole-goal token and cost delta, because the 90% is per bulk read, not per goal; (c) check the quality risk (a summary loses detail an agent needs to edit correctly) and the latency cost before recommending it. Outcome to record here: adopt, adopt behind an opt-in setting, or reject, with the numbers. Needs real agent goals, so it waits for the owner like items 1 and 3.
 
 **Effort**: M.
 

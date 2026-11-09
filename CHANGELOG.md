@@ -6,6 +6,10 @@
 - **Preflight before anything is published:** the run stops with the crate names if a workspace crate depends on a git-only crate that is not on crates.io. The four such crates (`decision-gate`, `typed-ask`, `task-graph`, `consensus-panel`) now carry `version = "0.1.0"` next to their `git = ...` source; they must be published first (see "Publishing to crates.io" in `docs/USAGE.md`).
 - The crates.io existence check now sends a User-Agent (crates.io requires one).
 
+**PLAN.md status markers**
+
+- **A phase's status marker may only stand on a line of its own.** Prose that quoted the marker (17 lines in old phases) made text searches report finished phases (`v0.9.9`, `v0.14.3`, `v0.15.14`, `v0.16.1.6.1`) as pending; `ta plan list` was never fooled. Those lines now describe the marker in words, and `scripts/check-plan-markers.sh` (in `ci-local` and CI) fails when it reappears inside other text.
+
 
 **Agent login and launch failures**
 
