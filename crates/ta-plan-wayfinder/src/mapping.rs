@@ -215,6 +215,15 @@ mod tests {
     }
 
     #[test]
+    fn release_umbrella_goal_is_in_progress_not_on_hold() {
+        let (status, hold_reason) = goal_state_to_wayfinder(&GoalRunState::Custom {
+            tag: ta_goal::goal_run::RELEASE_OPEN_TAG.to_string(),
+        });
+        assert_eq!(status, STATUS_IN_PROGRESS);
+        assert_eq!(hold_reason, None);
+    }
+
+    #[test]
     fn closed_with_external_ref_is_done_not_cancelled() {
         let (status, _) = goal_state_to_wayfinder(&GoalRunState::Closed {
             reason: None,

@@ -171,6 +171,9 @@ memory/work_queue.md
 .ta/apply-runs/
 .ta/wake-attempts/
 .ta/wake-completed/
+.ta/release-set.json
+.ta/release-set.lock
+.ta/release-sets/
 .ta/bin/
 .ta/memory/
 .ta/link-cache/
@@ -237,6 +240,9 @@ memory/work_queue.md
 .ta/nats-server.pid
 .ta/wake-attempts/
 .ta/wake-completed/
+.ta/release-set.json
+.ta/release-set.lock
+.ta/release-sets/
 .ta/attention/
 .ta/wake-dead-letter.jsonl
 .ta/daemon.pid

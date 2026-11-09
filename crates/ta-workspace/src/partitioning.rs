@@ -68,6 +68,9 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "apply-runs/", // detached `ta draft apply --detach` run records and logs: machine-local
     "wake-attempts/", // per-message wake-on-demand launch attempts (retry cap state): machine-local
     "wake-completed/", // finished wake-on-demand sequences (redelivery guard): machine-local
+    "release-set.json", // `ta release-set` open/cut release record (branch, goal, landed goals): machine-local; the release branch and its PR are the shared record
+    "release-set.lock", // `ta release-set` state-file lock
+    "release-sets/",    // cut releases archived by the next `ta release-set start`: machine-local
     "launch-failed-outbox/", // launch_failed outcomes waiting for the stream: machine-local
     "launch-failed-published/", // goals whose launch failure was already reported: machine-local
     "bin/", // staged shell/CLI credential shim binaries (v0.17.6.7) — a machine-local copy of the `gh` wrapper, never committed
