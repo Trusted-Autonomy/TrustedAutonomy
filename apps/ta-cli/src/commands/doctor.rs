@@ -580,12 +580,12 @@ fn windows_target_result(installed: &str) -> CheckResult {
     if installed.lines().any(|l| l.trim() == WINDOWS_TARGET) {
         CheckResult::ok(
             "Windows target",
-            format!("{WINDOWS_TARGET} installed; run scripts/check-windows.sh before opening a PR"),
+            format!("{WINDOWS_TARGET} installed; scripts/check-windows.sh runs in the [verify] gate before a draft is built (or run it by hand before opening a PR)"),
         )
     } else {
         CheckResult::warn(
             "Windows target",
-            format!("{WINDOWS_TARGET} is not installed, so Windows-only compile errors (such as dead_code on cfg(unix) helpers) are only found in CI, 20-25 minutes later"),
+            format!("{WINDOWS_TARGET} is not installed, so the [verify] gate skips its Windows compile check and Windows-only errors (such as dead_code on cfg(unix) helpers) are only found in CI, 20-25 minutes later"),
             format!("Run: rustup target add {WINDOWS_TARGET}, then scripts/check-windows.sh"),
         )
     }

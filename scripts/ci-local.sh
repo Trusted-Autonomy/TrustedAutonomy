@@ -261,39 +261,9 @@ if want windows; then
             run_step "windows add rustup target" host_env rustup target add --toolchain "$RUST_VER" "$WIN_TARGET"
         fi
         STUBS="$CACHE/win-stubs"
-        mkdir -p "$STUBS/bin"
-        cat >"$STUBS/stub-cc" <<'STUB'
-#!/bin/sh
-# Stand-in C compiler for cargo check/clippy: "compiling" creates the -o file.
-out=""; prev=""
-for a in "$@"; do
-  [ "$prev" = "-o" ] && out="$a"
-  case "$a" in -o?*) out="${a#-o}";; /Fo*) out="${a#/Fo}";; esac
-  prev="$a"
-done
-case " $* " in *" --version "*|*" -v "*) echo "stub-cc 0.0";; esac
-[ -n "$out" ] && [ "$out" != /dev/null ] && : > "$out"
-exit 0
-STUB
-        cat >"$STUBS/stub-ar" <<'STUB'
-#!/bin/sh
-# Stand-in archiver and nasm: create the output archive/object named on the command line.
-for a in "$@"; do
-  case "$a" in -out:*|-OUT:*|/OUT:*|/out:*) p="${a#*:}"; : > "$p"; exit 0;; esac
-done
-prev=""
-for a in "$@"; do
-  [ "$prev" = "-o" ] && { : > "$a"; exit 0; }
-  prev="$a"
-done
-for a in "$@"; do
-  case "$a" in -*|/*|cq|crs|cr|rcs|s|q|r|c) continue;; esac
-  : > "$a"; exit 0
-done
-exit 0
-STUB
-        cp "$STUBS/stub-ar" "$STUBS/bin/nasm"
-        chmod +x "$STUBS/stub-cc" "$STUBS/stub-ar" "$STUBS/bin/nasm"
+        # Stand-in C toolchain (shared with scripts/check-windows.sh): see scripts/lib/win-stubs.sh.
+        . "$ROOT/scripts/lib/win-stubs.sh"
+        win_stubs_setup "$STUBS"
         # nasm sits alone in $STUBS/bin: a stub named cc/ar on PATH would break host linking of build scripts.
         win_env() {
             host_env PATH="$STUBS/bin:$BASE_PATH" CARGO_TARGET_DIR="$CACHE/target-windows" \
