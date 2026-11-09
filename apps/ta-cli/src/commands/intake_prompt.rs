@@ -178,7 +178,11 @@ pub(crate) fn build_agent_prompt(
         p
     };
     if let Some(intake) = intake {
-        let (data, dropped) = truncate_to(&intake.text, MAX_PROMPT_INTAKE_BYTES);
+        // Hidden characters (escape sequences, bidi overrides, zero-width text) are
+        // stripped before the text is cut and fenced, the same rule every other
+        // untrusted sink follows (`ta_goal::untrusted`).
+        let clean = ta_goal::untrusted::sanitize(&intake.text);
+        let (data, dropped) = truncate_to(&clean, MAX_PROMPT_INTAKE_BYTES);
         let boundary = choose_boundary(data, random_boundary);
         prompt.push_str("\n\n");
         prompt.push_str(&render_untrusted_intake(

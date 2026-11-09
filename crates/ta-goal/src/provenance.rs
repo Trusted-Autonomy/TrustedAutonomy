@@ -330,7 +330,13 @@ fn choose_boundary(data: &str) -> String {
 /// random and never occurs inside the data, and the per-line prefix means even
 /// a line that imitates a boundary or a TA heading stays visibly quoted data.
 pub fn fence_untrusted(label: &str, text: &str, indent: &str) -> String {
-    let boundary = choose_boundary(text);
+    fence_with_boundary(label, text, indent, &choose_boundary(text))
+}
+
+/// [`fence_untrusted`] with the boundary token supplied by the caller, which
+/// must make sure it does not occur in `text`. Shared with `crate::untrusted`,
+/// which tests the collision rule with a deterministic generator.
+pub(crate) fn fence_with_boundary(label: &str, text: &str, indent: &str, boundary: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{indent}----- BEGIN UNTRUSTED DATA ({label}) {boundary} -----\n"
