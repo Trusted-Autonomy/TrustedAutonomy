@@ -344,6 +344,14 @@ pub enum DraftCommands {
         /// is long and the caller has a time limit.
         #[arg(long)]
         detach: bool,
+        /// While a release is open (`ta release-set`), apply THIS draft to main with its own
+        /// branch and PR instead of committing it onto the release branch. Needs
+        /// `--hotfix-reason`; recorded as a hotfix in the release state.
+        #[arg(long, requires = "hotfix_reason")]
+        hotfix: bool,
+        /// Why this draft cannot wait for the release (mandatory with `--hotfix`).
+        #[arg(long, requires = "hotfix")]
+        hotfix_reason: Option<String>,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -913,6 +921,8 @@ fn execute_command(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Resul
             no_replay_actions,
             allow_stale_base,
             detach,
+            hotfix,
+            hotfix_reason,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -928,6 +938,20 @@ fn execute_command(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Resul
             }
 
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+
+            // `--hotfix`: validated, persisted on the goal (so a detached or chained apply
+            // sees it) and carried for this process; a dry run only previews it.
+            let hotfix_reason_value =
+                super::release_set::hotfix_reason_from_flags(*hotfix, hotfix_reason.as_deref())?;
+            let _hotfix_guard =
+                super::release_set::CliHotfixGuard::set(hotfix_reason_value.clone());
+            if let Some(reason) = hotfix_reason_value.as_deref() {
+                if !*dry_run {
+                    if let Ok(pkg_id) = uuid::Uuid::parse_str(&resolved) {
+                        super::release_set::mark_draft_goal_hotfix(config, pkg_id, reason)?;
+                    }
+                }
+            }
 
             if *detach {
                 if *dry_run {
@@ -4738,6 +4762,22 @@ fn view_package(
         }
     }
 
+    // Release set: where applying this draft goes and whether it is on track for the open
+    // release (advice only; computed now from the release goal, so it is always current).
+    if let Some(block) = GoalRunStore::new(&config.goals_dir)
+        .ok()
+        .and_then(|gs| gs.list().ok())
+        .and_then(|goals| {
+            goals
+                .into_iter()
+                .find(|g| g.pr_package_id == Some(pkg.package_id))
+        })
+        .and_then(|g| super::release_set::render_track_block(&config.workspace_root, &g))
+    {
+        println!();
+        print!("{block}");
+    }
+
     // Constitution evaluation recorded when the draft was submitted: which rule
     // decided each item, in which mode, and the conversation reviewer's findings.
     if let Some(record) = ta_mcp_gateway::constitution_gate::load_record(
@@ -7150,6 +7190,70 @@ fn ensure_off_protected_branch(
     })
 }
 
+/// Release pre-flight: make sure the working tree is on the release branch BEFORE any file is
+/// written, so the apply commits onto it (whatever branch the user was on, protected or not).
+fn ensure_on_release_branch(
+    adapter: &dyn ta_submit::SourceAdapter,
+    ctx: &CommitContext,
+    submit_config: &ta_submit::SubmitConfig,
+    release_branch: &str,
+    will_commit: bool,
+    draft_ref: &str,
+) -> anyhow::Result<BranchPreflight> {
+    if adapter.name() == "none" {
+        anyhow::bail!(
+            "A release is open (branch {release_branch}) but no git adapter is active for this \
+             directory, so the apply cannot be routed onto it. Run `ta draft apply {draft_ref}` \
+             from the project's git working tree, or apply it as a hotfix: add --hotfix \
+             --hotfix-reason \"...\"."
+        );
+    }
+    let branch = adapter
+        .current_branch()
+        .unwrap_or_else(|_| "unknown".to_string());
+    if branch == release_branch {
+        eprintln!("[apply] VCS pre-flight: already on release branch '{release_branch}' -- ok.");
+        return Ok(BranchPreflight {
+            original_branch: Some(branch.clone()),
+            working_branch: Some(branch),
+        });
+    }
+    eprintln!(
+        "[apply] On '{branch}' -- switching to release branch '{release_branch}' before writing any files..."
+    );
+    adapter.prepare(ctx, submit_config).map_err(|e| {
+        anyhow::anyhow!(
+            "Release pre-flight failed: could not switch to release branch '{release_branch}'.\n\
+             Aborted with no changes made (still on '{branch}').\n\
+             VCS error: {e}\n\
+             \n\
+             What to do: make the working tree clean enough to switch branches (`git status`), or \
+             `git switch {release_branch}` yourself, then re-run:\n  ta draft apply {draft_ref}\n\
+             To send this one to main instead: ta draft apply {draft_ref} --hotfix --hotfix-reason \"...\""
+        )
+    })?;
+    let now = adapter
+        .current_branch()
+        .unwrap_or_else(|_| "unknown".to_string());
+    if now != release_branch {
+        anyhow::bail!(
+            "Release pre-flight: expected to be on '{release_branch}' after switching but the \
+             working tree is on '{now}'. Aborted with no changes made. `git switch \
+             {release_branch}` yourself and re-run `ta draft apply {draft_ref}`."
+        );
+    }
+    if !will_commit {
+        eprintln!(
+            "[apply] Changes will be written to '{release_branch}' and left UNCOMMITTED there. \
+             Review with `git diff`, then commit on this branch."
+        );
+    }
+    Ok(BranchPreflight {
+        original_branch: Some(branch),
+        working_branch: Some(now),
+    })
+}
+
 /// `ta draft apply --dry-run`: print what an apply would do and change NOTHING.
 ///
 /// This runs before the apply lock, auto-approval, branch creation, file copies, plan
@@ -7243,10 +7347,41 @@ fn dry_run_apply_preview(
     }
 
     // Branch handling, as the real pre-flight would do it.
-    let wf = ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+    let mut wf = ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+    let mut release_route: Option<ta_submit::routing::SubmitRoute> = None;
+    match super::release_set::route_for_goal(&target_dir, &wf.submit, goal) {
+        Ok(route) => {
+            println!("[dry-run] Target: {}", route.describe());
+            wf.submit = route.submit.clone();
+            if matches!(route.kind, ta_submit::routing::RouteKind::Release { .. }) {
+                release_route = Some(route);
+            }
+        }
+        Err(e) => println!("[dry-run] Target: a real apply would be REFUSED: {e}"),
+    }
     let adapter = ta_submit::select_adapter(&target_dir, &wf.submit);
     if adapter.name() == "none" {
         println!("[dry-run] VCS: no adapter detected; files would be copied with no VCS steps.");
+    } else if let Some(route) = &release_route {
+        let branch = adapter
+            .current_branch()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let release_branch = route.target_branch();
+        if branch == release_branch {
+            println!(
+                "[dry-run] Branch: on release branch '{release_branch}' -- would commit there."
+            );
+        } else {
+            println!(
+                "[dry-run] Branch: on '{branch}' -- would switch to release branch \
+                 '{release_branch}' BEFORE writing any file, commit there, and switch back."
+            );
+        }
+        if git_push || git_review {
+            println!(
+                "[dry-run] Push/PR: deferred -- `ta release-set cut` pushes once and opens the one PR."
+            );
+        }
     } else {
         let branch = adapter
             .current_branch()
@@ -8013,23 +8148,48 @@ fn apply_package(
     // v0.17.11.29: this runs for --no-submit too. A protected branch is never written to,
     // with or without a commit; `--no-submit` leaves the changes uncommitted on the
     // feature branch instead of in the working tree of `main`.
+    // Release set: where this goal's commit goes (hotfix > open release > configured target).
+    // Decided once, before anything is written, and reused by the submit block below.
+    let route = {
+        let wf_path = target_dir.join(".ta/workflow.toml");
+        let wf_config = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+        super::release_set::route_for_goal(&target_dir, &wf_config.submit, goal)?
+    };
+    let on_release = matches!(route.kind, ta_submit::routing::RouteKind::Release { .. });
+    if on_release || matches!(route.kind, ta_submit::routing::RouteKind::Hotfix { .. }) {
+        eprintln!("[apply] Release set: {}", route.describe());
+    }
     let (original_branch, preflight_branch) = {
         use ta_submit::{select_adapter, WorkflowConfig};
         let wf_path = target_dir.join(".ta/workflow.toml");
-        let wf_config = WorkflowConfig::load_or_default(&wf_path);
+        let mut wf_config = WorkflowConfig::load_or_default(&wf_path);
+        wf_config.submit = route.submit.clone();
         let adapter = select_adapter(&target_dir, &wf_config.submit);
-        if adapter.name() != "none" {
+        // The base-staleness check compares HEAD with origin/<default>. A release branch is
+        // meant to trail main until `ta release-set cut` merges main in, so it is skipped there.
+        if adapter.name() != "none" && !on_release {
             // Before anything is written: a base behind origin makes a PR that
             // shows newer upstream work as deletions.
             super::apply_base::enforce_current_base(&target_dir, id)?;
         }
-        let pre = ensure_off_protected_branch(
-            adapter.as_ref(),
-            &CommitContext::from(goal),
-            &wf_config.submit,
-            git_commit,
-            id,
-        )?;
+        let pre = if on_release {
+            ensure_on_release_branch(
+                adapter.as_ref(),
+                &CommitContext::from(goal),
+                &wf_config.submit,
+                route.target_branch(),
+                git_commit,
+                id,
+            )?
+        } else {
+            ensure_off_protected_branch(
+                adapter.as_ref(),
+                &CommitContext::from(goal),
+                &wf_config.submit,
+                git_commit,
+                id,
+            )?
+        };
         (pre.original_branch, pre.working_branch)
     };
 
@@ -9348,7 +9508,28 @@ fn apply_package(
 
         // Load workflow config if it exists.
         let workflow_config_path = target_dir.join(".ta/workflow.toml");
-        let workflow_config = WorkflowConfig::load_or_default(&workflow_config_path);
+        let mut workflow_config = WorkflowConfig::load_or_default(&workflow_config_path);
+        // Release set: the adapter, branch naming, push and PR all follow the routed target.
+        workflow_config.submit = route.submit.clone();
+        // Under an open release nothing is pushed and no PR opens per goal: the push and the
+        // one PR to main are deferred to `ta release-set cut`.
+        let (git_push, git_review) = if route.defers_push() {
+            if git_push || git_review {
+                println!(
+                    "[apply] Release '{}' is open: the push and the PR are deferred to \
+                     `ta release-set cut` (this goal is committed locally onto {}).",
+                    match &route.kind {
+                        ta_submit::routing::RouteKind::Release { release_name, .. } =>
+                            release_name.as_str(),
+                        _ => "",
+                    },
+                    route.target_branch()
+                );
+            }
+            (false, false)
+        } else {
+            (git_push, git_review)
+        };
 
         // Select adapter via registry (auto-detects VCS if config is default "none").
         let adapter: Box<dyn SourceAdapter> = select_adapter(&target_dir, &workflow_config.submit);
@@ -9775,6 +9956,26 @@ fn apply_package(
                     }
                 }
 
+                // Release set: this goal is now on the release branch (or, for a hotfix, on
+                // its own branch to main). Record it so `ta release-set status` and the cut
+                // PR list it. The commit stands even if the record cannot be written.
+                if let Some(sha) = vcs_commit_sha.as_deref() {
+                    if let Err(e) = super::release_set::record_applied(
+                        &target_dir,
+                        goal,
+                        &pkg.package_id.to_string(),
+                        Some(sha),
+                        &route.kind,
+                    ) {
+                        eprintln!(
+                            "[release] Warning: the goal was committed ({}) but could not be \
+                             recorded in the release state: {e}. Run `ta release-set status`; \
+                             the commit is on the branch either way.",
+                            &sha[..sha.len().min(8)]
+                        );
+                    }
+                }
+
                 // Pre-push version agreement check (v0.17.0.12.3).
                 // Verify that Cargo.toml and CLAUDE.md agree on the version BEFORE
                 // pushing, so CI's version-check job doesn't catch a drift first.
@@ -9916,12 +10117,13 @@ fn apply_package(
                             anyhow::bail!(
                                 "PR creation failed: {}\n\n\
                                  Branch '{}' was pushed successfully. To create the PR manually:\n\
-                                 \n  gh pr create --head {} --base main\n\
+                                 \n  gh pr create --head {} --base {}\n\
                                  \nOr retry automatically once the issue is resolved:\n\
                                  \n  ta draft reopen-review {}",
                                 e,
                                 branch_display,
                                 branch_display,
+                                workflow_config.submit.git.target_branch,
                                 short_id,
                             );
                         }
@@ -13160,7 +13362,16 @@ fn draft_pr_status(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
             );
             println!("To create the missing PR:");
             println!("  ta draft reopen-review {}", &package_id.to_string()[..8]);
-            println!("  gh pr create --head {} --base main", vcs.branch);
+            let target_branch = ta_submit::WorkflowConfig::load_or_default(
+                &config.workspace_root.join(".ta/workflow.toml"),
+            )
+            .submit
+            .git
+            .target_branch;
+            println!(
+                "  gh pr create --head {} --base {}",
+                vcs.branch, target_branch
+            );
         }
     }
 
@@ -13220,9 +13431,10 @@ fn draft_reopen_review(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
     if adapter.name() == "none" {
         anyhow::bail!(
             "No VCS adapter detected in {}.\n\
-             Create the PR manually:\n  gh pr create --head {} --base main",
+             Create the PR manually:\n  gh pr create --head {} --base {}",
             target_dir.display(),
             branch,
+            workflow_config.submit.git.target_branch,
         );
     }
 
@@ -13264,10 +13476,11 @@ fn draft_reopen_review(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
             anyhow::bail!(
                 "PR creation failed: {}\n\n\
                  Branch '{}' is on the remote. Create the PR manually:\n\
-                 \n  gh pr create --head {} --base main",
+                 \n  gh pr create --head {} --base {}",
                 e,
                 branch,
                 branch,
+                workflow_config.submit.git.target_branch,
             );
         }
     }

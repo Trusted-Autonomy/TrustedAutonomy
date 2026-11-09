@@ -584,6 +584,21 @@ fn start_goal(
             pid,
         )?;
 
+        // Release set: link under the open release's umbrella and print drift advice.
+        // Advice only; a failure here never blocks the goal.
+        let mut goal = goal;
+        match super::release_set::stamp_new_goal(&mut goal, &source_dir, store) {
+            Ok(()) => {
+                if goal.release.is_some() {
+                    store.save(&goal)?;
+                }
+            }
+            Err(e) => eprintln!(
+                "[release] Warning: could not check this goal against the open release: {e}. \
+                 The goal still starts; run `ta release-set status` to see the release."
+            ),
+        }
+
         println!(
             "Goal started: {} (extending parent staging)",
             goal.goal_run_id
@@ -694,6 +709,15 @@ fn start_goal(
         // Transition: Created → Configured → Running.
         goal.transition(GoalRunState::Configured)?;
         goal.transition(GoalRunState::Running)?;
+
+        // Release set: link under the open release's umbrella and print drift advice.
+        // Advice only; a failure here never blocks the goal.
+        if let Err(e) = super::release_set::stamp_new_goal(&mut goal, &source_dir, store) {
+            eprintln!(
+                "[release] Warning: could not check this goal against the open release: {e}. \
+                 The goal still starts; run `ta release-set status` to see the release."
+            );
+        }
 
         store.save_with_tag(&mut goal)?;
 
