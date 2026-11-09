@@ -1,57 +1,69 @@
 #!/usr/bin/env bash
-# Compile-only Windows check (v0.17.12.25 item 6): the same
-# `cargo check --all-targets` with warnings denied that the "Windows Check" CI
-# job runs, so `dead_code` on cfg(unix)-only helpers and other Windows-only
-# compile failures show up before a PR is opened instead of 20-25 minutes into CI.
+# Compile-only Windows check (v0.17.12.25 item 6): `cargo check --all-targets` for
+# x86_64-pc-windows-msvc with warnings denied, the same compile gate CI runs on a
+# Windows runner. `dead_code` on cfg(unix)-only helpers and other Windows-only compile
+# failures show up here instead of 20-25 minutes into CI.
 #
-# Usage: scripts/check-windows.sh [extra cargo args, e.g. -p ta-goal]
+# Usage: scripts/check-windows.sh [--skip-if-unavailable] [extra cargo args, e.g. -p ta-goal]
+#
+#   --skip-if-unavailable  for the `[verify]` gate of `ta run` / `ta draft apply`: when
+#                          the check cannot run on this machine (no rustup, target not
+#                          installed, or already a Windows host) say so loudly and exit 0
+#                          instead of blocking. Without the flag those cases exit 2.
 #
 # Needs the target installed once:  rustup target add x86_64-pc-windows-msvc
-# Limit: crates that build C code for MSVC (ring, aws-lc-sys via TLS) need
-# NASM / clang-cl and cannot be cross-checked from macOS or Linux. With
-# --keep-going cargo still checks every crate that does not depend on them,
-# and the script says so. CI checks the whole workspace on a Windows runner.
+# The C dependencies (ring, aws-lc-sys) are given a stand-in C toolchain (see
+# scripts/lib/win-stubs.sh), so the WHOLE workspace is checked from macOS or Linux.
+# Only compiling is checked: nothing is linked, so Windows test EXECUTION (CRLF
+# handling, paths) stays a CI job.
 set -uo pipefail
 
 TARGET=x86_64-pc-windows-msvc
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+SKIP_IF_UNAVAILABLE=0
+if [[ "${1:-}" == "--skip-if-unavailable" ]]; then
+    SKIP_IF_UNAVAILABLE=1
+    shift
+fi
+
+unavailable() { # message...
+    echo "check-windows: $*" >&2
+    if [[ $SKIP_IF_UNAVAILABLE -eq 1 ]]; then
+        echo "check-windows: SKIPPED. Windows-only compile errors will NOT be caught before CI on this machine." >&2
+        exit 0
+    fi
+    exit 2
+}
+
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+        unavailable "this is already a Windows host: the ordinary build and tests cover it; nothing to cross-check."
+        ;;
+esac
 if ! command -v rustup >/dev/null 2>&1; then
-    echo "check-windows: rustup not found; cannot verify the $TARGET target is installed." >&2
-    echo "  Install rustup (https://rustup.rs), then: rustup target add $TARGET" >&2
-    exit 2
+    unavailable "rustup not found; cannot verify the $TARGET target is installed. Install rustup (https://rustup.rs), then: rustup target add $TARGET"
 fi
-if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
-    echo "check-windows: target $TARGET is not installed." >&2
-    echo "  Run: rustup target add $TARGET   (adds only the target's std library)" >&2
-    exit 2
+if ! (cd "$ROOT" && rustup target list --installed 2>/dev/null) | grep -qx "$TARGET"; then
+    unavailable "target $TARGET is not installed. Run: rustup target add $TARGET   (adds only the target's std library)"
 fi
 
-echo "check-windows: RUSTFLAGS='-D warnings' cargo check --workspace --all-targets --keep-going --target $TARGET $*"
-log=$(mktemp)
-trap 'rm -f "$log"' EXIT
-RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" \
-    cargo check --workspace --all-targets --keep-going --target "$TARGET" "$@" 2>&1 | tee "$log"
-status=${PIPESTATUS[0]}
+STUBS="${TMPDIR:-/tmp}/ta-check-windows-stubs.$$"
+trap 'rm -rf "$STUBS"' EXIT
+# shellcheck source=lib/win-stubs.sh
+. "$ROOT/scripts/lib/win-stubs.sh"
+win_stubs_setup "$STUBS"
 
-# Failures from C-building dependencies are an environment limit, not a finding.
-env_failures=$(grep -cE "failed to run custom build command for .(ring|aws-lc-sys)" "$log" || true)
-real_errors=$(grep -E "^(error|warning)" "$log" \
-    | grep -vE "failed to run custom build command for .(ring|aws-lc-sys)|build failed, waiting|could not compile .(ring|aws-lc-sys)|aborting due to|warning: .*(ring|aws-lc-sys)@" \
-    | grep -vE "^error: (could not compile .* due to|failed to run custom build)" || true)
-
+cd "$ROOT" || exit 2
+echo "check-windows: RUSTFLAGS='-D warnings' cargo check --workspace --all-targets --target $TARGET $* (C dependencies stubbed; compile only)"
+PATH="$WIN_STUBS_PATH:$PATH" RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" \
+    cargo check --workspace --all-targets --target "$TARGET" "$@"
+status=$?
 if [[ $status -eq 0 ]]; then
     echo "check-windows: OK (whole workspace compiles for $TARGET)."
     exit 0
 fi
-if [[ -n "$real_errors" ]]; then
-    echo "check-windows: FAILED. Windows-only errors or warnings:" >&2
-    echo "$real_errors" >&2
-    exit 1
-fi
-if [[ $env_failures -gt 0 ]]; then
-    echo "check-windows: no Windows errors in the crates that could be checked, but ring/aws-lc-sys" >&2
-    echo "  cannot build C code for $TARGET on this host, so crates depending on TLS were NOT checked." >&2
-    echo "  CI's 'Windows Check' job covers the whole workspace." >&2
-    exit 0
-fi
-echo "check-windows: cargo failed (exit $status) for a reason this script does not recognise; see the output above." >&2
+echo "check-windows: FAILED (cargo exit $status). The errors above appear only when compiling for Windows:" >&2
+echo "  a helper whose only caller is #[cfg(unix)] fails dead_code; put it under the same cfg or use it on both platforms." >&2
+echo "  Re-run just this check with: scripts/check-windows.sh" >&2
 exit $status

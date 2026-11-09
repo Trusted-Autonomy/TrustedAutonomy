@@ -65,6 +65,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "advisor-notes/",
     "team-sessions/", // persistent team session state (v0.17.5.1)
     "draft-build-ctx/",
+    "apply-runs/", // detached `ta draft apply --detach` run records and logs: machine-local
     "wake-attempts/", // per-message wake-on-demand launch attempts (retry cap state): machine-local
     "wake-completed/", // finished wake-on-demand sequences (redelivery guard): machine-local
     "launch-failed-outbox/", // launch_failed outcomes waiting for the stream: machine-local

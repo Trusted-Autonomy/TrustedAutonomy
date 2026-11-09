@@ -5843,7 +5843,10 @@ pub fn execute(
                 if !verification_warnings.is_empty() {
                     if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
                         if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.verification_warnings = verification_warnings;
+                            super::smoke::merge_warnings(
+                                &mut pkg.verification_warnings,
+                                &verification_warnings,
+                            );
                             let _ = super::draft::save_package(config, &pkg);
                         }
                     }
@@ -5853,7 +5856,10 @@ pub fn execute(
                 if !validation_log.is_empty() {
                     if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
                         if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.validation_log = validation_log;
+                            super::smoke::merge_validation_log(
+                                &mut pkg.validation_log,
+                                &validation_log,
+                            );
                             let _ = super::draft::save_package(config, &pkg);
                         }
                     }

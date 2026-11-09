@@ -447,7 +447,7 @@ fn run_single_command(
 /// - With `no_output_timeout`, a step that prints nothing for that long is killed and
 ///   reported as HUNG, naming the tests that started and never finished.
 /// - `position` is (1-based index, total) used in heartbeat and error labels.
-fn run_single_command_ext(
+pub(crate) fn run_single_command_ext(
     cmd: &str,
     working_dir: &Path,
     limits: &CommandLimits,

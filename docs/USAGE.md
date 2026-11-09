@@ -2835,6 +2835,36 @@ The scan is static and grep-based (no agent), runs in under a second, and is non
 
 The scanner counts `inject_*` and `restore_*` call sites in each changed `.rs` file. If a file has more inject calls than restore calls and contains early `return` statements, it is flagged as a candidate for review.
 
+### Smoke Cases (Run the Real Command Before the Draft)
+
+Unit tests can pass for behaviour that is wrong in real use. A smoke case runs the real command in a scratch git repository (a temporary directory with one commit) and checks that it succeeds, or, for a bad-input case, that it is refused with the message you expect. The smoke stage runs on every draft build (`ta run`, the background build, `ta draft build`) without a human.
+
+```toml
+# .ta/workflow.toml
+[smoke]
+on_failure = "block"                       # "block" (default): no draft is created. "warn": failures ride along as draft warnings.
+default_timeout_secs = 900                 # per case; a case can set timeout_secs
+new_command_paths = ["src/commands/*.rs"]  # adding one of these files adds a command: it needs smoke cases
+
+[[smoke.cases]]
+name = "replay-swapped-prompt"
+covers = "src/commands/golden.rs"          # run when the draft changes this path; omit to run on every draft
+setup = ["echo a > a.txt"]                 # shell steps run in the scratch repo first
+run = "$TA_SMOKE_TA golden replay swapped" # the command under test
+expect = "failure"                         # "success" (default) or "failure"
+expect_output = "no longer matches the hash"  # required for "failure": a crash must not pass as a refusal
+```
+
+The command runs with the scratch repository as its working directory and these variables set: `TA_SMOKE_PROJECT` (the tree under test, the goal's staging copy), `TA_SMOKE_SCRATCH`, and `TA_SMOKE_TA` (a command prefix that runs this project's `ta` through `cargo run`; set it yourself to use a prebuilt binary). `HOME` points into the scratch directory, and `TA_NO_KEYCHAIN=1` and `TA_TEST_NO_EXTERNAL_AGENTS=1` are always set, so a case cannot reach the keychain or start a paid agent.
+
+What the stage enforces:
+
+- Cases whose `covers` matches a changed file (and cases without `covers`) run. The draft may add cases of its own in its copy of `.ta/workflow.toml`, but it cannot relax the project's `on_failure` or replace a project case.
+- A draft that adds a file matching `new_command_paths` must have a case covering that exact file, and at least one covering case must be a bad-input case (`expect = "failure"`). Otherwise the build stops and names the `[[smoke.cases]]` entry to add.
+- Each case and the checklist item "smoke-tested the headline behaviour, including bad input" are recorded in the draft's validation log (`ta draft view`). A failing entry also blocks `ta draft approve`.
+
+Run the cases by hand with `ta smoke` (all), `ta smoke --case <name>`, `ta smoke --list`, or `ta smoke --dir <staging>` to test a goal's staging copy. `TA_SMOKE_TA=target/debug/ta ta smoke` uses a prebuilt binary instead of `cargo run`.
+
 ### Constitution Config (`constitution.toml`)
 
 You can define project-specific invariants, inject/restore rules, and validation steps in `.ta/constitution.toml`. This makes TA's scanner and release gate aware of your codebase's conventions — not just TA's own internal patterns.
@@ -4955,7 +4985,7 @@ The daemon line separates four cases, so a busy daemon is not mistaken for a dea
 
 When you run `ta doctor` inside the TA source tree, it also reports whether the Windows build target is installed (`rustup target add x86_64-pc-windows-msvc`), because `scripts/check-windows.sh` needs it.
 
-`scripts/check-windows.sh` runs a compile-only `cargo check --workspace --all-targets` for `x86_64-pc-windows-msvc` with warnings denied, the same check the `Windows Check` CI job runs. Run it before opening a PR that touches `cfg(unix)`/`cfg(windows)` code, paths or process handling. From a Mac or Linux host the crates that build C code for TLS (`ring`, `aws-lc-sys`) need a Windows C toolchain and cannot be checked; the script reports exactly which crates it could not check, and CI covers those.
+`scripts/check-windows.sh` runs a compile-only `cargo check --workspace --all-targets` for `x86_64-pc-windows-msvc` with warnings denied, the same check the `Windows Check` CI job runs. It gives the C dependencies for TLS (`ring`, `aws-lc-sys`) a stand-in C toolchain (`scripts/lib/win-stubs.sh`, shared with `scripts/ci-local.sh`), so the whole workspace is checked from a Mac or Linux host; nothing is linked or run, so Windows test execution stays a CI job. This repository's `[verify]` gate runs `scripts/check-windows.sh --skip-if-unavailable` before a draft is built, so a Windows-only compile error (such as `dead_code` on a helper only `cfg(unix)` code calls) stops the draft instead of failing CI 20 minutes later. With `--skip-if-unavailable`, a machine without `rustup` or the Windows target prints a loud `SKIPPED` line and the gate passes; without the flag the script exits 2 there. You can also run it before opening a PR that touches `cfg(unix)`/`cfg(windows)` code, paths or process handling.
 
 **Diagnosing and fixing health issues:** `ta doctor --fix` lists every fixable finding once, each with a stable id, and then acts on that same list. The count in "Found N issue(s)" is the number of prompts you are asked, and applying one fix never reorders the others.
 
@@ -8981,7 +9011,7 @@ ta draft apply <draft-id> --force-apply
 
 - **A branch behind `origin`.** Before anything is written, the apply compares the checked-out branch with the local `origin/main` (or `origin/master`, or whatever `origin/HEAD` names). If the branch lacks commits that are on it, the apply stops with the commit it expected and the fix: `git fetch origin && git merge --ff-only origin/main` (on a feature branch, `git rebase origin/main`), then re-run `ta draft apply <id>`. Without that, the pull request would show everyone else's newer work as deletions. The check reads local refs only; it never fetches. For a stacked branch whose pull request targets another branch, pass `--allow-stale-base`. Without a git repository, an `origin` remote or an `origin/main` ref, the check is skipped.
 - **A dead apply.** If an earlier `ta draft apply` was killed (for example by a caller timeout), the next apply first rolls back or finishes anything it journaled, then reports the stale `.ta/apply.lock`: the draft it belonged to, the dead PID, when it started, what recovery did, and any uncommitted paths it could not account for (inspect with `git status`). **Re-running `ta draft apply <id>` is the resume.** To drop the draft instead, run `ta draft close <id>`. `ta draft apply --status` shows the same commands for a stale lock.
-- **Long verification.** The pre-submit verification prints how long its last run took. A caller with a shorter timeout kills it; run the apply detached instead: `nohup ta draft apply <id> > apply.log 2>&1 &`, then watch `ta draft apply --status`.
+- **Long verification.** The pre-submit verification prints how long its last run took. A caller with a shorter timeout kills it; run the apply detached instead: `ta draft apply <id> --detach`. It starts the apply as a background process in its own session, prints the run id, PID and log path, and returns at once; the apply keeps running if the terminal or caller ends. `ta draft apply --status` then shows the phase (`verifying (pre-submit checks)`, `committing`, `pushing the branch`, ...) with how long it has been in it and how long the apply has run, and after it ends, whether it succeeded or failed, in which phase and why, plus the next command to run. Follow the output with `tail -f .ta/apply-runs/<run>.log`. Only one apply runs at a time: `--detach` refuses to start while another is in progress. `--detach` cannot be combined with `--dry-run`. The last 10 run records are kept in `.ta/apply-runs/` (git-ignored).
 
 ### External Diff Handlers
 
