@@ -9,6 +9,7 @@ pub mod apply_base;
 pub mod apply_queue;
 pub mod audit;
 pub mod build;
+pub mod build_budget;
 pub mod build_cache;
 pub mod capabilities;
 pub mod chat_launch;

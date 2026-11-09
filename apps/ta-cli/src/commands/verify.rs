@@ -55,12 +55,16 @@ pub fn run_verification_in_staging(
     run_verification_with_env(config, staging_dir, &env)
 }
 
-/// The cargo environment for commands run in a goal's staging directory.
+/// The cargo environment for commands run in a goal's staging directory: the build
+/// directory, and the same lean-build variables the goal's agent was given so the
+/// gates reuse the agent's compiled output.
 pub fn goal_cargo_env(staging_dir: &Path) -> Vec<(String, String)> {
     if staging_dir.join("Cargo.toml").exists() {
         let target = super::build_cache::gate_target_dir(staging_dir)
             .unwrap_or_else(|| goal_target_dir(staging_dir));
-        vec![("CARGO_TARGET_DIR".to_string(), target.display().to_string())]
+        let mut env = vec![("CARGO_TARGET_DIR".to_string(), target.display().to_string())];
+        env.extend(super::build_cache::gate_lean_env(staging_dir));
+        env
     } else {
         Vec::new()
     }

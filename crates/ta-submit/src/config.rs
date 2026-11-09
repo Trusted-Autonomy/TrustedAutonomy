@@ -2263,6 +2263,45 @@ pub struct StagingConfig {
     /// no cap. Default: 20.
     #[serde(default = "default_build_cache_max_gb")]
     pub build_cache_max_gb: f64,
+    /// Cargo builds in a goal run with `CARGO_PROFILE_DEV_DEBUG=0` (no debug
+    /// info) and `CARGO_INCREMENTAL=0` (no incremental cache), which keeps a
+    /// goal's build output to a fraction of the default. An agent that needs a
+    /// debugger sets `[agent_env]` values for these two variables, which win, or
+    /// this is set to `false`. Default: true.
+    #[serde(default = "default_lean_builds")]
+    pub lean_builds: bool,
+    /// Most build output one goal may add, in GB: the growth of the shared build
+    /// cache since the goal started, or the goal's own `target/`. Checked while
+    /// the agent runs; see `goal_build_over_budget`. `0` means no budget.
+    /// Default: 10.
+    #[serde(default = "default_goal_build_max_gb")]
+    pub goal_build_max_gb: f64,
+    /// What happens when a goal is over `goal_build_max_gb`, or free disk falls
+    /// below `min_disk_mb`, while its agent runs: `"stop"` ends the agent (its
+    /// work so far is kept and the draft is built from it) or `"warn"` only
+    /// reports it. Default: `"stop"`.
+    #[serde(default)]
+    pub goal_build_over_budget: BuildBudgetAction,
+}
+
+/// Reaction to a goal build going over its disk budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildBudgetAction {
+    /// End the agent process tree.
+    #[default]
+    Stop,
+    /// Report it and let the agent continue.
+    Warn,
+}
+
+impl BuildBudgetAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Warn => "warn",
+        }
+    }
 }
 
 impl Default for StagingConfig {
@@ -2275,12 +2314,23 @@ impl Default for StagingConfig {
             reclaim_build_output: default_reclaim_build_output(),
             build_cache: default_build_cache(),
             build_cache_max_gb: default_build_cache_max_gb(),
+            lean_builds: default_lean_builds(),
+            goal_build_max_gb: default_goal_build_max_gb(),
+            goal_build_over_budget: BuildBudgetAction::default(),
         }
     }
 }
 
 fn default_build_cache() -> bool {
     true
+}
+
+fn default_lean_builds() -> bool {
+    true
+}
+
+fn default_goal_build_max_gb() -> f64 {
+    10.0
 }
 
 fn default_build_cache_max_gb() -> f64 {
@@ -2487,6 +2537,26 @@ mod tests {
         assert_eq!(c.retention_days, 90);
         assert!(c.archive);
         assert!(!c.model_assist);
+    }
+
+    #[test]
+    fn goal_build_budget_defaults_and_overrides() {
+        let d = WorkflowConfig::default().staging;
+        assert!(d.lean_builds);
+        assert_eq!(d.goal_build_max_gb, 10.0);
+        assert_eq!(d.goal_build_over_budget, BuildBudgetAction::Stop);
+        let c: WorkflowConfig = toml::from_str(
+            "[staging]\nlean_builds = false\ngoal_build_max_gb = 0\ngoal_build_over_budget = \"warn\"\n",
+        )
+        .unwrap();
+        assert!(!c.staging.lean_builds);
+        assert_eq!(c.staging.goal_build_max_gb, 0.0);
+        assert_eq!(c.staging.goal_build_over_budget, BuildBudgetAction::Warn);
+        assert_eq!(BuildBudgetAction::Warn.as_str(), "warn");
+        assert!(toml::from_str::<WorkflowConfig>(
+            "[staging]\ngoal_build_over_budget = \"explode\"\n"
+        )
+        .is_err());
     }
 
     #[test]
