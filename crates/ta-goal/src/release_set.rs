@@ -251,7 +251,8 @@ impl ReleaseSet {
     /// re-applied draft) so the list never double counts.
     pub fn record_landed(&mut self, landed: LandedGoal) {
         self.goals_landed.retain(|g| g.goal_id != landed.goal_id);
-        self.off_track.retain(|g| g.goal_id != landed.goal_id);
+        // The off-track advice is kept: a flagged goal that lands is exactly what the
+        // reviewer of the release PR needs to see.
         self.goals_landed.push(landed);
     }
 
@@ -969,7 +970,11 @@ mod tests {
             "a re-applied draft is not double counted"
         );
         assert_eq!(rs.goals_landed[0].commit.as_deref(), Some("def"));
-        assert!(rs.off_track.is_empty(), "landing clears the off-track note");
+        assert_eq!(
+            rs.off_track.len(),
+            1,
+            "landing keeps the off-track note: the goal is in the release now, and the advice stays visible until the cut"
+        );
 
         let h = Uuid::new_v4();
         rs.record_off_track(h, "fix", vec!["why".into()]);

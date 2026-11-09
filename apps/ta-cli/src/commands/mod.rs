@@ -77,6 +77,7 @@ pub mod pty_capture;
 pub mod publish;
 pub mod release;
 pub mod release_git;
+pub mod release_set;
 pub mod review_packet;
 pub mod rules;
 pub mod rules_gate;

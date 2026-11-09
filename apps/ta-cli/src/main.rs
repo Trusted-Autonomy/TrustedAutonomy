@@ -1080,6 +1080,15 @@ enum Commands {
         #[command(subcommand)]
         command: commands::release::ReleaseCommands,
     },
+    /// One open release per project: every goal commits onto `release/<name>`, cut by ONE PR.
+    ///
+    /// `ta release-set start <name> --goal "..."` opens the release; `ta release-set status`
+    /// shows it (`--json` for Wayfinder); `ta release-set cut` merges main, runs the gate,
+    /// pushes once and opens the one PR to main. Not `ta release` (the publish pipeline).
+    ReleaseSet {
+        #[command(subcommand)]
+        command: commands::release_set::ReleaseSetCommands,
+    },
     /// Multi-project office daemon management.
     #[command(hide = true)]
     Office {
@@ -2412,6 +2421,7 @@ fn dispatch_raw(
         }
         Commands::New { command } => commands::new::execute(command, config),
         Commands::Release { command } => commands::release::execute(command, config),
+        Commands::ReleaseSet { command } => commands::release_set::execute(command, config),
         Commands::Shell {
             init,
             tui,
@@ -2676,6 +2686,7 @@ fn command_prints_json(cmd: Option<&Commands>) -> bool {
         Some(Commands::TermsStatus { json }) | Some(Commands::Capabilities { json }) => *json,
         Some(Commands::State { command }) => commands::state_dir::prints_json(command),
         Some(Commands::AgentLogin { command }) => commands::agent_login::prints_json(command),
+        Some(Commands::ReleaseSet { command }) => commands::release_set::prints_json(command),
         _ => false,
     }
 }
