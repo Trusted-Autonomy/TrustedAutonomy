@@ -485,3 +485,94 @@ fn finish_reconciles_with_the_persisted_log_and_reports_capture_health() {
         );
     }
 }
+
+/// Refused-read occurrences of the `.ssh` key that `log show` holds for `tag`
+/// since `since`: the ground truth for what the OS logged.
+fn persisted_occurrences(tag: &str, since: chrono::DateTime<chrono::Local>) -> u64 {
+    let out = Command::new("/usr/bin/log")
+        .args([
+            "show",
+            "--style",
+            "ndjson",
+            "--start",
+            &since.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "--predicate",
+            &format!(r#"sender == "Sandbox" AND eventMessage CONTAINS "{tag}""#),
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("/usr/bin/log show must run");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| ta_runtime::seatbelt_log::parse_ndjson_line(l, tag))
+        .filter(|v| v.target.contains(".ssh") && v.operation.starts_with("file-read"))
+        .map(|v| u64::from(v.count))
+        .sum()
+}
+
+/// Delivery under a burst with NO per-denial retry: the case the live stream
+/// alone gets wrong. Each round makes 100 refused reads back to back, then
+/// finishes the capture. `report.live_denials` is what the live stream alone
+/// delivered (the behaviour before the persisted-log reconciliation existed);
+/// `live + recovered` is what `finish` delivers now. Both numbers are printed
+/// so a regression is visible in the test output. `persisted` is the ground
+/// truth read straight from `log show`: delivery must cover all of it. A burst
+/// can still fall short of 100 when the OS itself never logged some denials;
+/// that shortfall shows as `persisted < 100` and cannot be recovered.
+#[test]
+fn burst_of_hundred_denials_is_delivered_after_reconciliation() {
+    const ROUNDS: usize = 3;
+    const BURST: usize = 100;
+    let mut live_only = Vec::new();
+    let mut delivered = Vec::new();
+    let mut persisted_all = Vec::new();
+    for round in 1..=ROUNDS {
+        let since = chrono::Local::now() - chrono::Duration::seconds(2);
+        let w = world();
+        if !can_run(&w) {
+            return;
+        }
+        let Some((tail, seen, start)) = live_tail(&w) else {
+            return;
+        };
+        for i in 1..=BURST {
+            assert!(
+                !sandboxed(&w, &["read", s(&w.ssh_key)]),
+                "round {round} read {i}: the read must be denied"
+            );
+        }
+        let report = tail.finish(start, std::time::Duration::from_secs(60));
+        // Ground truth, read independently of TA's tail: what `log show` holds now
+        // for this goal's tag. It tells a denial the OS never logged apart from
+        // one the tail failed to deliver.
+        let persisted = persisted_occurrences(w.policy.violation_tag.as_deref().unwrap(), since);
+        eprintln!("round {round}: the persisted log holds {persisted} of {BURST} denials");
+        persisted_all.push(persisted);
+        eprintln!("round {round}: {}", report.summary());
+        // Repeats the kernel collapsed ("N duplicate reports") stand for several
+        // refusals, so compare occurrences, not report lines.
+        let live = report.live_occurrences;
+        let total = report.live_occurrences + report.recovered_occurrences;
+        // No denial is delivered twice: the sink saw exactly what the report counts.
+        assert_eq!(
+            ssh_denial_seen(&seen) as u64,
+            report.live_denials + report.recovered_denials
+        );
+        assert!(
+            total <= BURST as u64,
+            "round {round}: {total} occurrences for {BURST} refused reads"
+        );
+        assert!(
+            total >= persisted,
+            "round {round}: the persisted log holds {persisted} occurrences but only {total} \
+             were delivered: a denial the OS logged was lost by TA's capture"
+        );
+        live_only.push(live);
+        delivered.push(total);
+    }
+    eprintln!(
+        "burst of {BURST} x {ROUNDS} rounds, occurrences delivered: live stream alone \
+         {live_only:?}; after reconciliation {delivered:?}; persisted log holds {persisted_all:?}"
+    );
+}
