@@ -282,6 +282,56 @@ pub(crate) fn chat_mode_agent_env(
     ]
 }
 
+/// The two environment entries that give a chat session read access to the REAL project
+/// root: `TA_CHAT_PROJECT_ROOT` and `TA_CHAT_READ_GRANT`.
+///
+/// The grant is a biscuit minted here, in `ta run` (outside the agent's sandbox), from the
+/// project's broker key. It is bound to this session's policy identity and carries the read
+/// scopes the Chief of Staff gets: the project root, every `[chat] readable_projects` entry
+/// of `project_root/.ta/workflow.toml`, and the named read tools
+/// ([`ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS`]). It carries no write, commit, email or
+/// network scope. A `readable_projects` entry that cannot be resolved refuses the launch
+/// (naming the entry) instead of being dropped, because it is an explicit widening of access.
+pub(crate) fn chat_mode_read_env(
+    plan: &ChatModeLaunchPlan,
+    project_root: &Path,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let readable = ta_mcp_gateway::chat_launch::load_readable_projects(project_root).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot launch chat-mode session: {e}. Fix `[chat] readable_projects` in {}/.ta/workflow.toml \
+             (an absolute path or a project name registered in office.yaml) and re-launch.",
+            project_root.display()
+        )
+    })?;
+    let access = ta_policy::ChatReadAccess {
+        project: true,
+        readable_projects: readable.iter().map(|p| p.label.clone()).collect(),
+        tools: ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect(),
+    };
+    let policy_id = ta_mcp_gateway::chat_launch::chat_policy_id(&plan.agent_id, plan.session_id);
+    let token =
+        ta_mcp_gateway::chat_launch::mint_chat_read_grant(project_root, &policy_id, &access)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot launch chat-mode session: {e}. The Chief of Staff reads the project \
+                     only with a minted grant, so it was not launched."
+                )
+            })?;
+    Ok(vec![
+        (
+            ta_mcp_gateway::chat_launch::ENV_CHAT_PROJECT_ROOT.to_string(),
+            project_root.display().to_string(),
+        ),
+        (
+            ta_mcp_gateway::chat_launch::ENV_CHAT_READ_GRANT.to_string(),
+            token,
+        ),
+    ])
+}
+
 /// The Wayfinder project a chat launch for `project_root` is pinned to, as the one
 /// environment entry the agent's `ta serve` reads (`TA_CHAT_WAYFINDER_PROJECT_ID`).
 ///
@@ -392,7 +442,11 @@ pub(crate) fn chat_mode_context_section(plan: &ChatModeLaunchPlan) -> String {
          This session runs in TA chat mode. Use only the TA MCP tools available to you; \
          native shell and file tools are disabled.\n\n\
          - Pass `goal_run_id = \"{}\"` to `ta_fs_read`, `ta_fs_list`, `ta_fs_diff` and `ta_fs_write`.\n\
-         - You can read the workspace. Writes are allowed only under `{}/` and are discarded \
+         - You read the real project, read-only: `ta_fs_read` takes the project's files \
+         (relative paths) and, for a project named in `[chat] readable_projects`, a `project` \
+         argument. `ta_plan_status` and the Wayfinder and wiki read tools use the project's \
+         real configuration. There is no project copy.\n\
+         - Writes are allowed only under `{}/` (your private scratch) and are discarded \
          when the session ends.\n\
          - You cannot start goals, build or apply drafts, change the plan, edit the wiki, \
          update tasks, or take external actions. Answer in your reply instead.\n",
@@ -794,5 +848,87 @@ mod tests {
             assert!(cli_chat_mode_requested());
         }
         assert!(!cli_chat_mode_requested());
+    }
+
+    #[test]
+    fn chat_read_env_mints_a_grant_for_the_project_and_its_readable_projects_only() {
+        let allowed: Vec<String> = Vec::new();
+        let plan = plan_chat_mode_launch(&inputs(&allowed)).unwrap().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            format!(
+                "[chat]\nreadable_projects = [\"{}\"]\n",
+                other.path().display()
+            ),
+        )
+        .unwrap();
+
+        let env: std::collections::HashMap<String, String> =
+            chat_mode_read_env(&plan, project.path())
+                .unwrap()
+                .into_iter()
+                .collect();
+        assert_eq!(
+            env[ta_mcp_gateway::chat_launch::ENV_CHAT_PROJECT_ROOT],
+            project.path().display().to_string()
+        );
+        let token = &env[ta_mcp_gateway::chat_launch::ENV_CHAT_READ_GRANT];
+        let policy_id =
+            ta_mcp_gateway::chat_launch::chat_policy_id(&plan.agent_id, plan.session_id);
+        let access =
+            ta_mcp_gateway::chat_launch::verify_chat_read_grant(project.path(), token, &policy_id)
+                .unwrap();
+        assert!(access.project);
+        assert_eq!(access.readable_projects.len(), 1);
+        for t in ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS {
+            assert!(access.tools.iter().any(|x| x == t), "{t} missing");
+        }
+        // No write-ish scope: the grant carries exactly the read vocabulary.
+        assert!(access
+            .tools
+            .iter()
+            .all(|t| !t.contains("write") && !t.contains("update") && !t.contains("start")));
+        // The token is bound to this session: another session's identity is refused.
+        let other_id =
+            ta_mcp_gateway::chat_launch::chat_policy_id(&plan.agent_id, uuid::Uuid::new_v4());
+        assert!(ta_mcp_gateway::chat_launch::verify_chat_read_grant(
+            project.path(),
+            token,
+            &other_id
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn chat_read_env_refuses_to_launch_with_an_unresolvable_readable_project() {
+        let allowed: Vec<String> = Vec::new();
+        let plan = plan_chat_mode_launch(&inputs(&allowed)).unwrap().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            "[chat]\nreadable_projects = [\"/definitely/not/a/project-root\"]\n",
+        )
+        .unwrap();
+        let err = chat_mode_read_env(&plan, project.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/definitely/not/a/project-root"), "{err}");
+        assert!(err.contains("readable_projects"), "{err}");
+    }
+
+    #[test]
+    fn chat_context_section_describes_real_root_read_only_access() {
+        let allowed: Vec<String> = Vec::new();
+        let plan = plan_chat_mode_launch(&inputs(&allowed)).unwrap().unwrap();
+        let section = chat_mode_context_section(&plan);
+        assert!(section.contains("read-only"));
+        assert!(section.contains("readable_projects"));
+        assert!(
+            section.contains("no project copy") || section.contains("There is no project copy")
+        );
     }
 }

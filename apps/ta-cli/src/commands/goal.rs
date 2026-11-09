@@ -714,6 +714,75 @@ fn start_goal(
     Ok(())
 }
 
+/// Start a goal for a chat-mode (read-only) session WITHOUT copying the project.
+///
+/// The session directory `<staging_dir>/<goal-id>` is a thin, goal-scoped home for the
+/// agent: its injected context file, its `.claude/settings.local.json` and its private
+/// scratch. It holds no project files. The agent reads the real project root through the
+/// gateway's read-only tools (and, under the sandbox, a read-only grant on that root),
+/// so there is nothing to diff, build or apply when the session ends. The goal record
+/// still carries `source_dir` so the gateway resolves config and plan from the real root.
+pub fn start_chat_goal_without_copy(
+    config: &GatewayConfig,
+    store: &GoalRunStore,
+    title: &str,
+    objective: &str,
+    agent: &str,
+    phase: Option<&str>,
+    source: Option<&std::path::Path>,
+) -> anyhow::Result<ta_goal::GoalRun> {
+    let source_dir = source.unwrap_or(&config.workspace_root);
+    let source_dir = source_dir
+        .canonicalize()
+        .unwrap_or_else(|_| source_dir.to_path_buf());
+    let final_objective = if objective.is_empty() {
+        title.to_string()
+    } else {
+        objective.to_string()
+    };
+    let mut goal = ta_goal::GoalRun::new(
+        title,
+        &final_objective,
+        agent,
+        PathBuf::new(),
+        config.store_dir.join("placeholder"),
+    );
+    let goal_id = goal.goal_run_id.to_string();
+    let session_dir = config.staging_dir.join(&goal_id);
+    std::fs::create_dir_all(&session_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Could not create the chat session directory {}: {}. The chat-mode agent was not \
+             launched. Check that {} is writable and retry.",
+            session_dir.display(),
+            e,
+            config.staging_dir.display()
+        )
+    })?;
+    super::sandbox_launch::prepare_staging(&source_dir, &goal_id, &session_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Could not prepare the chat session directory {}: {}",
+            session_dir.display(),
+            e
+        )
+    })?;
+
+    goal.workspace_path = session_dir.clone();
+    goal.store_path = config.store_dir.join(&goal_id);
+    goal.source_dir = Some(source_dir);
+    goal.plan_phase = phase.map(|p| p.to_string());
+    goal.transition(GoalRunState::Configured)?;
+    goal.transition(GoalRunState::Running)?;
+    store.save_with_tag(&mut goal)?;
+
+    println!("Chat session started: {}", goal.goal_run_id);
+    println!("  Title:   {}", goal.title);
+    println!(
+        "  Session: {} (no project copy; the project root is read through TA, read-only)",
+        session_dir.display()
+    );
+    Ok(goal)
+}
+
 /// Resolve a goal ID from a tag, full UUID, or an 8+ character prefix.
 fn resolve_goal_id(id: &str, store: &GoalRunStore) -> anyhow::Result<Uuid> {
     // Try tag resolution first (v0.11.2.3).
@@ -4471,6 +4540,49 @@ mod tests {
         assert!(goals[0].workspace_path.exists());
         assert!(goals[0].workspace_path.join("README.md").exists());
         assert!(goals[0].workspace_path.join("src/main.rs").exists());
+    }
+
+    #[test]
+    fn chat_goal_gets_a_thin_session_dir_and_no_project_copy() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        let goal = start_chat_goal_without_copy(
+            &config,
+            &store,
+            "CoS",
+            "answer",
+            "chief-of-staff",
+            None,
+            Some(project.path()),
+        )
+        .unwrap();
+
+        assert_eq!(goal.state, GoalRunState::Running);
+        let source = project.path().canonicalize().unwrap();
+        assert_eq!(goal.source_dir.as_deref(), Some(source.as_path()));
+        assert!(goal.workspace_path.is_dir());
+        assert_eq!(
+            goal.workspace_path.parent().unwrap(),
+            config.staging_dir.as_path()
+        );
+        // Nothing of the project was copied.
+        assert!(!goal.workspace_path.join("README.md").exists());
+        assert!(!goal.workspace_path.join("src").exists());
+        // The guard `ta run` applies before launching still accepts the directory.
+        ta_workspace::verify_staging_isolation(
+            &goal.workspace_path,
+            &source,
+            &goal.goal_run_id.to_string(),
+        )
+        .unwrap();
+        // The goal is persisted and the project tree is untouched.
+        assert_eq!(store.list().unwrap().len(), 1);
+        assert!(project.path().join("README.md").is_file());
     }
 
     // ── v0.4.1.2 tests: follow-up draft continuity ──

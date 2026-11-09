@@ -50,26 +50,8 @@ pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatter
     excludes
 }
 
-/// Typed "the diff is empty" error from a draft build, so callers can tell
-/// it apart from real failures without matching on message text.
-/// `ta run` uses it to treat an empty diff as the normal successful outcome
-/// of a chat-mode launch (a chief-of-staff conversation makes no file
-/// changes), while every other goal keeps the error.
-#[derive(Debug)]
-pub struct NoChangesInStaging {
-    pub message: String,
-}
-
-impl std::fmt::Display for NoChangesInStaging {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for NoChangesInStaging {}
-
 fn no_changes_error(message: String) -> anyhow::Error {
-    anyhow::Error::new(NoChangesInStaging { message })
+    anyhow::anyhow!(message)
 }
 
 /// The agent finished and left nothing to review. A goal `ta run` already moved
@@ -109,12 +91,6 @@ fn finish_goal_without_changes(config: &GatewayConfig, goal_run_id: uuid::Uuid) 
             tracing::warn!(goal_id = %goal_run_id, error = %e, "no-changes goal not completed: invalid transition from {}", g.state)
         }
     }
-}
-
-/// Whether `err` (anywhere in its chain) is a `NoChangesInStaging`.
-pub fn is_no_changes_error(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|e| e.downcast_ref::<NoChangesInStaging>().is_some())
 }
 
 #[derive(Debug, Subcommand)]
@@ -19743,24 +19719,12 @@ fn run() {
             "build_package should fail when diff is empty and no memory entries exist"
         );
         let err = result.err().unwrap();
-        assert!(
-            is_no_changes_error(&err),
-            "an empty diff must be the typed NoChangesInStaging error so `ta run` can \
-             tell it apart from real failures"
-        );
         let msg = err.to_string();
         assert!(
             msg.contains("No changes detected"),
             "error should mention 'No changes detected'; got: {}",
             msg
         );
-    }
-
-    #[test]
-    fn other_errors_are_not_mistaken_for_no_changes() {
-        assert!(!is_no_changes_error(&anyhow::anyhow!(
-            "No changes detected in staging workspace (plain text, not the typed error)"
-        )));
     }
 
     #[test]
