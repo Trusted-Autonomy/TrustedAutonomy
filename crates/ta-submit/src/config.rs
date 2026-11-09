@@ -2357,10 +2357,12 @@ fn default_notify_title() -> String {
 /// Configured in `workflow.toml` under `[staging]`:
 /// ```toml
 /// [staging]
-/// strategy = "smart"   # "full" | "smart" | "refs-cow"
+/// strategy = "lazy"    # "full" | "lazy" | "smart" | "refs-cow" | "projfs"
 /// ```
 ///
 /// - **Full** (default): byte-for-byte copy, always works, may be slow for large workspaces.
+/// - **Lazy**: copy-on-write staging (APFS `clonefile`, Linux reflink) that costs disk and
+///   time only for files the agent writes; falls back to the full copy and says so.
 /// - **Smart**: symlinks `.taignore`/`protected_paths` entries instead of copying them —
 ///   near-zero staging cost for large ignored directories (e.g., `node_modules/`, UE Content/).
 /// - **RefsCow**: Windows ReFS Dev Drive only — instant zero-cost clone via
@@ -2371,6 +2373,9 @@ pub enum StagingStrategy {
     /// Byte-for-byte copy of the source project. Always works; may be slow for large workspaces.
     #[default]
     Full,
+    /// Lazy copy-on-write staging. Falls back to a full copy when the filesystem cannot
+    /// clone (the goal output names the mechanism and the reason).
+    Lazy,
     /// Symlink excluded directories instead of copying. Fast for large workspaces with many ignored dirs.
     Smart,
     /// Windows ReFS CoW clone. Auto-falls back to `smart` on non-ReFS volumes.
@@ -2387,6 +2392,7 @@ impl StagingStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Full => "full",
+            Self::Lazy => "lazy",
             Self::Smart => "smart",
             Self::RefsCow => "refs-cow",
             Self::ProjFs => "projfs",

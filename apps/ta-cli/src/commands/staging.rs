@@ -93,7 +93,9 @@ fn inspect(config: &GatewayConfig, goal_id_hint: Option<&str>) -> anyhow::Result
     println!();
 
     // Load workflow config for strategy.
-    let workflow = ta_submit::config::WorkflowConfig::load_or_default(&config.workspace_root);
+    let workflow = ta_submit::config::WorkflowConfig::load_or_default(
+        &config.workspace_root.join(".ta/workflow.toml"),
+    );
     let configured_strategy = workflow.staging.strategy.as_str();
     println!("  Configured strategy: {}", configured_strategy);
 

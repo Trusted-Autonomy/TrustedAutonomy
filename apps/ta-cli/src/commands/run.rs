@@ -3423,9 +3423,12 @@ pub fn execute(
         let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
         let excludes = ta_workspace::ExcludePatterns::load(&source_dir);
         // v0.13.13: Use configured staging strategy.
-        let workflow = ta_submit::config::WorkflowConfig::load_or_default(&source_dir);
+        let workflow = ta_submit::config::WorkflowConfig::load_or_default(
+            &source_dir.join(".ta/workflow.toml"),
+        );
         let staging_mode = match workflow.staging.strategy {
             ta_submit::config::StagingStrategy::Full => ta_workspace::OverlayStagingMode::Full,
+            ta_submit::config::StagingStrategy::Lazy => ta_workspace::OverlayStagingMode::Lazy,
             ta_submit::config::StagingStrategy::Smart => ta_workspace::OverlayStagingMode::Smart,
             ta_submit::config::StagingStrategy::RefsCow => {
                 ta_workspace::OverlayStagingMode::RefsCow
@@ -3460,6 +3463,11 @@ pub fn execute(
         println!("Reusing existing goal: {}", goal_uuid);
         println!("  Title:   {}", existing.title);
         println!("  Staging: {}", existing.workspace_path.display());
+        if staging_mode == ta_workspace::OverlayStagingMode::Lazy {
+            if let Some(stat) = overlay.copy_stat() {
+                println!("  {}", stat.size_report());
+            }
+        }
         existing
     } else {
         super::goal::execute(

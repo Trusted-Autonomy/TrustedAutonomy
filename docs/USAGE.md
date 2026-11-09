@@ -1507,22 +1507,51 @@ This means:
 - Multiple goals can run concurrently without interfering with each other.
 - If something goes wrong, you reject the draft and start over.
 
-**Copy-on-write staging**: TA automatically selects the most efficient staging strategy for your platform:
-
-- **macOS (APFS)** and **Linux (Btrfs/XFS)**: uses the kernel's native COW reflink mechanism — staging appears instantly with zero additional disk space until the agent writes a file.
-- **Windows (ReFS/Dev Drive)**: uses `FSCTL_DUPLICATE_EXTENTS_TO_FILE` for instant zero-copy staging.
-- **Linux (FUSE available)**: uses a FUSE overlay, intercepting writes at the VFS level — no upfront copy at all.
-- **All other platforms**: uses Smart mode (symlinks for excluded directories) or a full byte-for-byte copy as a final fallback.
-
-The default `strategy = "auto"` probes your filesystem at workspace creation time and selects the best option. You can pin a strategy in `.ta/workflow.toml`:
+**Staging strategies**: `[staging] strategy` in `.ta/workflow.toml` picks how the copy is made:
 
 ```toml
 [staging]
-strategy = "smart"    # "auto" | "full" | "smart" | "refs-cow" | "fuse"
-warn_above_gb = 2.0   # warn in `ta doctor` if staging exceeds this size (0 = silent)
+strategy = "full"     # "full" (default) | "lazy" | "smart" | "refs-cow" | "projfs"
 ```
 
-Use `ta staging inspect` to see which strategy is active, file counts, disk usage, and current exclude patterns.
+- `full`: copy the project. On APFS (macOS) and Btrfs/XFS (Linux) each file is a copy-on-write clone, so no extra disk is used until the agent writes it. Always works.
+- `lazy`: copy-on-write staging that costs disk and time only for files the agent writes. See "Lazy copy-on-write staging" below.
+- `smart`: symlink excluded directories instead of copying them (large ignored trees).
+- `refs-cow`: Windows ReFS Dev Drive; falls back to `smart` on NTFS.
+- `projfs`: Windows Projected File System virtual workspace (see below); falls back to `smart`.
+
+Use `ta staging inspect` to see file counts, disk usage, and current exclude patterns.
+
+**Lazy copy-on-write staging**
+
+```toml
+[staging]
+strategy = "lazy"
+```
+
+With `lazy`, `ta goal start` and `ta run` print the mechanism they used (the figures below are from this repository on APFS):
+
+```
+  Staging: lazy copy-on-write via APFS clonefile (directory trees) in 0.27s: 16 directory clone(s) covering 1571 files, 36 file clone(s), 0 file(s) / 0.0 MB physically copied, 1 symlink(s) kept, 0 skipped. Baseline of 1608 files (49.2 MB logical); the draft will only read files the agent writes
+```
+
+`full` mode prints the same kind of line, for comparison: `Staging: 1608 files (49.2 MB) via APFS clone (COW) in 0.3s`. On APFS and Btrfs/XFS the full copy already clones file by file, so the disk saving of `lazy` there is small; what `lazy` removes is the whole-project read and SHA-256 pass at goal start and the whole-tree read at `ta draft build`.
+
+- **macOS (APFS, source and `.ta/staging` on one volume)**: whole directory trees are cloned with one `clonefile(2)` call each. A goal that writes nothing uses about no extra disk.
+- **Linux (Btrfs, XFS with reflink)**: per-file reflink clones.
+- **Anything else** (ext4, NTFS, HFS+, source and staging on different volumes, Windows): the output says `lazy copy-on-write was requested but is unavailable here (<reason>); used the full copy`. The goal still works; staging is a normal full copy.
+
+The agent sees an ordinary project directory and uses its normal tools; shell commands, editors and compilers need nothing special. What differs from `full`:
+
+- Right after staging is created TA records a metadata baseline of the staging tree in `.ta/staging-baselines/<goal-id>.json` (outside the staging directory, so the agent cannot edit it). `ta draft build` then opens only the files whose metadata changed, or that were added or removed, instead of reading every file in both trees. Files the agent rewrote with identical content are still not part of the draft.
+- A source file changed by someone else after the goal started, but not by the agent, never appears in the draft.
+- Conflict detection at apply time compares size and modification time of source files against goal start instead of hashing the whole project. A source file that was only touched (same content, new mtime) and that the agent also edited is reported as a conflict; resolve it as usual with `--conflict-resolution merge|force-overwrite`. `PLAN.md`, `CLAUDE.md`, `Cargo.toml`, `docs/USAGE.md` and `memory/*.md` keep content hashes and 3-way merge.
+- Symlinks: relative links that stay inside the project are kept as links. A link to a file that points outside the project (or is absolute) is replaced by a copy of the file. A link to a directory outside the project, and sockets/FIFOs, are left out with a warning, so a write inside staging can never reach the real tree.
+- If TA is killed while it is creating a lazy staging, `ta draft build` refuses to use that staging and tells you to delete it and start the goal again; it never reports the half-built tree as deletions.
+- `target/`, `node_modules/` and the other build-output directories are still left out of staging and never become part of a draft.
+- `ta gc` / `ta doctor` size figures count the logical size of cloned files; the real disk use of an untouched lazy staging is near zero. Compare `df` before and after if you need the true number.
+
+To go back to the plain copy, set `strategy = "full"`.
 
 **Fast staging on Windows (ProjFS)**
 

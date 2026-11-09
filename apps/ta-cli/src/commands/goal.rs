@@ -612,9 +612,12 @@ fn start_goal(
         let excludes = super::draft::load_excludes_with_adapter(&source_dir);
 
         // v0.13.13: Use configured staging strategy (default: Full).
-        let workflow = ta_submit::config::WorkflowConfig::load_or_default(&source_dir);
+        let workflow = ta_submit::config::WorkflowConfig::load_or_default(
+            &source_dir.join(".ta/workflow.toml"),
+        );
         let staging_mode = match workflow.staging.strategy {
             ta_submit::config::StagingStrategy::Full => ta_workspace::OverlayStagingMode::Full,
+            ta_submit::config::StagingStrategy::Lazy => ta_workspace::OverlayStagingMode::Lazy,
             ta_submit::config::StagingStrategy::Smart => ta_workspace::OverlayStagingMode::Smart,
             ta_submit::config::StagingStrategy::RefsCow => {
                 ta_workspace::OverlayStagingMode::RefsCow
@@ -700,6 +703,9 @@ fn start_goal(
         }
         println!("  Title:   {}", goal.title);
         println!("  Staging: {}", overlay.staging_dir().display());
+        if let Some(stat) = overlay.copy_stat() {
+            println!("  {}", stat.size_report());
+        }
         println!();
         println!("Agent workspace ready. To enter:");
         println!("  cd {}", overlay.staging_dir().display());
@@ -3676,7 +3682,9 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
 
         // ── Staging strategy check ────────────────────────────────
         print!("  Staging strategy... ");
-        let workflow = ta_submit::config::WorkflowConfig::load_or_default(&config.workspace_root);
+        let workflow = ta_submit::config::WorkflowConfig::load_or_default(
+            &config.workspace_root.join(".ta/workflow.toml"),
+        );
         let strategy = &workflow.staging.strategy;
         match strategy {
             ta_submit::config::StagingStrategy::Full => {
@@ -3692,6 +3700,32 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
                     warn += 1;
                 } else {
                     println!("full (ok)");
+                    pass += 1;
+                }
+            }
+            ta_submit::config::StagingStrategy::Lazy => {
+                let staging_root = config.workspace_root.join(".ta").join("staging");
+                if staging_root.is_dir() {
+                    let mechanism = ta_workspace::lazy_cow::choose_mechanism(
+                        &config.workspace_root,
+                        &staging_root,
+                    );
+                    match mechanism {
+                        ta_workspace::lazy_cow::LazyMechanism::FullCopy { reason } => {
+                            println!("lazy (will fall back to a full copy: {})", reason);
+                            println!(
+                                "    Set [staging] strategy = \"full\" in .ta/workflow.toml to \
+                                 make that explicit."
+                            );
+                            warn += 1;
+                        }
+                        other => {
+                            println!("lazy (ok — {})", other.description());
+                            pass += 1;
+                        }
+                    }
+                } else {
+                    println!("lazy (ok — clone support is probed when a goal starts)");
                     pass += 1;
                 }
             }

@@ -1,5 +1,11 @@
 ## Unreleased
 
+**Lazy copy-on-write staging**
+
+- **New `[staging] strategy = "lazy"`.** Staging is populated with directory-level `clonefile` (APFS) or per-file reflinks (Btrfs/XFS); ext4, NTFS, other volumes and Windows fall back to the full copy and the goal output says why. A metadata baseline stored outside staging (`.ta/staging-baselines/<goal-id>.json`) lets `ta draft build` open only files the agent wrote, deleted, renamed or added. Goal start no longer SHA-256s the whole source tree in this mode. Default stays `full`. Design and measurements: `docs/design/lazy-cow-staging.md`.
+- **Fixed: `[staging] strategy` in `.ta/workflow.toml` was never read by `ta goal start`, `ta run` or the doctor/status output.** They passed the project directory instead of the file to the config loader, which fails silently and returns defaults, so every goal used `full`. They now read `.ta/workflow.toml`; projects that had `smart`, `refs-cow` or `projfs` configured (and silently ignored) will now get that strategy.
+- `ta goal start` prints the staging size/time line in every mode. Apply safety failures for deleted files now show the base and current size/mtime.
+
 **Defects found during the autonomous run**
 
 - **`ta draft apply --detach`** starts the apply as a background process in its own session and returns at once, so a long pre-submit verification survives a caller timeout. It prints the run id, PID and log path (`.ta/apply-runs/<run>.log`). `ta draft apply --status` now shows the phase the apply is in (`verifying (pre-submit checks)`, `committing`, `pushing the branch`, ...) with how long it has been there and how long the apply has run, and afterwards whether the detached run succeeded or failed, in which phase and why. Without `--detach` nothing changes. `.ta/apply-runs/` is git-ignored and keeps the last 10 runs.
