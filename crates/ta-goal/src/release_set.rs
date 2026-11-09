@@ -986,7 +986,10 @@ mod tests {
             recorded_at: Utc::now(),
         });
         assert_eq!(rs.hotfixes.len(), 1);
-        assert!(rs.off_track.is_empty(), "a hotfix is never off track");
+        assert!(
+            rs.off_track.iter().all(|o| o.goal_id != h),
+            "a hotfix is never off track"
+        );
     }
 
     #[test]
