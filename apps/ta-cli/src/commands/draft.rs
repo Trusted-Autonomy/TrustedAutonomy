@@ -344,6 +344,14 @@ pub enum DraftCommands {
         /// is long and the caller has a time limit.
         #[arg(long)]
         detach: bool,
+        /// While a release is open (`ta release-set`), apply THIS draft to main with its own
+        /// branch and PR instead of committing it onto the release branch. Needs
+        /// `--hotfix-reason`; recorded as a hotfix in the release state.
+        #[arg(long, requires = "hotfix_reason")]
+        hotfix: bool,
+        /// Why this draft cannot wait for the release (mandatory with `--hotfix`).
+        #[arg(long, requires = "hotfix")]
+        hotfix_reason: Option<String>,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -913,6 +921,8 @@ fn execute_command(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Resul
             no_replay_actions,
             allow_stale_base,
             detach,
+            hotfix,
+            hotfix_reason,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -928,6 +938,20 @@ fn execute_command(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Resul
             }
 
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+
+            // `--hotfix`: validated, persisted on the goal (so a detached or chained apply
+            // sees it) and carried for this process; a dry run only previews it.
+            let hotfix_reason_value =
+                super::release_set::hotfix_reason_from_flags(*hotfix, hotfix_reason.as_deref())?;
+            let _hotfix_guard =
+                super::release_set::CliHotfixGuard::set(hotfix_reason_value.clone());
+            if let Some(reason) = hotfix_reason_value.as_deref() {
+                if !*dry_run {
+                    if let Ok(pkg_id) = uuid::Uuid::parse_str(&resolved) {
+                        super::release_set::mark_draft_goal_hotfix(config, pkg_id, reason)?;
+                    }
+                }
+            }
 
             if *detach {
                 if *dry_run {
@@ -4738,6 +4762,22 @@ fn view_package(
         }
     }
 
+    // Release set: where applying this draft goes and whether it is on track for the open
+    // release (advice only; computed now from the release goal, so it is always current).
+    if let Some(block) = GoalRunStore::new(&config.goals_dir)
+        .ok()
+        .and_then(|gs| gs.list().ok())
+        .and_then(|goals| {
+            goals
+                .into_iter()
+                .find(|g| g.pr_package_id == Some(pkg.package_id))
+        })
+        .and_then(|g| super::release_set::render_track_block(&config.workspace_root, &g))
+    {
+        println!();
+        print!("{block}");
+    }
+
     // Constitution evaluation recorded when the draft was submitted: which rule
     // decided each item, in which mode, and the conversation reviewer's findings.
     if let Some(record) = ta_mcp_gateway::constitution_gate::load_record(
@@ -7150,6 +7190,70 @@ fn ensure_off_protected_branch(
     })
 }
 
+/// Release pre-flight: make sure the working tree is on the release branch BEFORE any file is
+/// written, so the apply commits onto it (whatever branch the user was on, protected or not).
+fn ensure_on_release_branch(
+    adapter: &dyn ta_submit::SourceAdapter,
+    ctx: &CommitContext,
+    submit_config: &ta_submit::SubmitConfig,
+    release_branch: &str,
+    will_commit: bool,
+    draft_ref: &str,
+) -> anyhow::Result<BranchPreflight> {
+    if adapter.name() == "none" {
+        anyhow::bail!(
+            "A release is open (branch {release_branch}) but no git adapter is active for this \
+             directory, so the apply cannot be routed onto it. Run `ta draft apply {draft_ref}` \
+             from the project's git working tree, or apply it as a hotfix: add --hotfix \
+             --hotfix-reason \"...\"."
+        );
+    }
+    let branch = adapter
+        .current_branch()
+        .unwrap_or_else(|_| "unknown".to_string());
+    if branch == release_branch {
+        eprintln!("[apply] VCS pre-flight: already on release branch '{release_branch}' -- ok.");
+        return Ok(BranchPreflight {
+            original_branch: Some(branch.clone()),
+            working_branch: Some(branch),
+        });
+    }
+    eprintln!(
+        "[apply] On '{branch}' -- switching to release branch '{release_branch}' before writing any files..."
+    );
+    adapter.prepare(ctx, submit_config).map_err(|e| {
+        anyhow::anyhow!(
+            "Release pre-flight failed: could not switch to release branch '{release_branch}'.\n\
+             Aborted with no changes made (still on '{branch}').\n\
+             VCS error: {e}\n\
+             \n\
+             What to do: make the working tree clean enough to switch branches (`git status`), or \
+             `git switch {release_branch}` yourself, then re-run:\n  ta draft apply {draft_ref}\n\
+             To send this one to main instead: ta draft apply {draft_ref} --hotfix --hotfix-reason \"...\""
+        )
+    })?;
+    let now = adapter
+        .current_branch()
+        .unwrap_or_else(|_| "unknown".to_string());
+    if now != release_branch {
+        anyhow::bail!(
+            "Release pre-flight: expected to be on '{release_branch}' after switching but the \
+             working tree is on '{now}'. Aborted with no changes made. `git switch \
+             {release_branch}` yourself and re-run `ta draft apply {draft_ref}`."
+        );
+    }
+    if !will_commit {
+        eprintln!(
+            "[apply] Changes will be written to '{release_branch}' and left UNCOMMITTED there. \
+             Review with `git diff`, then commit on this branch."
+        );
+    }
+    Ok(BranchPreflight {
+        original_branch: Some(branch),
+        working_branch: Some(now),
+    })
+}
+
 /// `ta draft apply --dry-run`: print what an apply would do and change NOTHING.
 ///
 /// This runs before the apply lock, auto-approval, branch creation, file copies, plan
@@ -7243,10 +7347,41 @@ fn dry_run_apply_preview(
     }
 
     // Branch handling, as the real pre-flight would do it.
-    let wf = ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+    let mut wf = ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+    let mut release_route: Option<ta_submit::routing::SubmitRoute> = None;
+    match super::release_set::route_for_goal(&target_dir, &wf.submit, goal) {
+        Ok(route) => {
+            println!("[dry-run] Target: {}", route.describe());
+            wf.submit = route.submit.clone();
+            if matches!(route.kind, ta_submit::routing::RouteKind::Release { .. }) {
+                release_route = Some(route);
+            }
+        }
+        Err(e) => println!("[dry-run] Target: a real apply would be REFUSED: {e}"),
+    }
     let adapter = ta_submit::select_adapter(&target_dir, &wf.submit);
     if adapter.name() == "none" {
         println!("[dry-run] VCS: no adapter detected; files would be copied with no VCS steps.");
+    } else if let Some(route) = &release_route {
+        let branch = adapter
+            .current_branch()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let release_branch = route.target_branch();
+        if branch == release_branch {
+            println!(
+                "[dry-run] Branch: on release branch '{release_branch}' -- would commit there."
+            );
+        } else {
+            println!(
+                "[dry-run] Branch: on '{branch}' -- would switch to release branch \
+                 '{release_branch}' BEFORE writing any file, commit there, and switch back."
+            );
+        }
+        if git_push || git_review {
+            println!(
+                "[dry-run] Push/PR: deferred -- `ta release-set cut` pushes once and opens the one PR."
+            );
+        }
     } else {
         let branch = adapter
             .current_branch()
@@ -8013,23 +8148,75 @@ fn apply_package(
     // v0.17.11.29: this runs for --no-submit too. A protected branch is never written to,
     // with or without a commit; `--no-submit` leaves the changes uncommitted on the
     // feature branch instead of in the working tree of `main`.
+    // Release set: where this goal's commit goes (hotfix > open release > configured target).
+    // Decided once, before anything is written, and reused by the submit block below.
+    let route = {
+        let wf_path = target_dir.join(".ta/workflow.toml");
+        let wf_config = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+        super::release_set::route_for_goal(&target_dir, &wf_config.submit, goal)?
+    };
+    let on_release = matches!(route.kind, ta_submit::routing::RouteKind::Release { .. });
+    if on_release || matches!(route.kind, ta_submit::routing::RouteKind::Hotfix { .. }) {
+        eprintln!("[apply] Release set: {}", route.describe());
+    }
     let (original_branch, preflight_branch) = {
         use ta_submit::{select_adapter, WorkflowConfig};
         let wf_path = target_dir.join(".ta/workflow.toml");
-        let wf_config = WorkflowConfig::load_or_default(&wf_path);
+        let mut wf_config = WorkflowConfig::load_or_default(&wf_path);
+        wf_config.submit = route.submit.clone();
         let adapter = select_adapter(&target_dir, &wf_config.submit);
-        if adapter.name() != "none" {
+        // The base-staleness check compares HEAD with origin/<default>. A release branch is
+        // meant to trail main until `ta release-set cut` merges main in, so it is skipped there.
+        if adapter.name() != "none" && !on_release {
             // Before anything is written: a base behind origin makes a PR that
             // shows newer upstream work as deletions.
             super::apply_base::enforce_current_base(&target_dir, id)?;
         }
-        let pre = ensure_off_protected_branch(
-            adapter.as_ref(),
-            &CommitContext::from(goal),
-            &wf_config.submit,
-            git_commit,
-            id,
-        )?;
+        // A hotfix branches from the working tree's HEAD. On the release branch that would
+        // put the whole release into a PR that is meant to carry one fix, so refuse.
+        if matches!(
+            route.kind,
+            ta_submit::routing::RouteKind::Hotfix {
+                bypassed_release: Some(_),
+                ..
+            }
+        ) {
+            let release_branch = ta_goal::release_set::ReleaseSetStore::new(&target_dir)
+                .open_release()
+                .ok()
+                .flatten()
+                .map(|r| r.branch);
+            if let (Some(rb), Ok(cur)) = (release_branch, adapter.current_branch()) {
+                if cur == rb {
+                    anyhow::bail!(
+                        "This draft is a hotfix (it goes to {} with its own PR) but the working \
+                         tree is on release branch '{rb}': the hotfix branch would carry the \
+                         whole release. Nothing was changed. Run `git switch {}` and re-run \
+                         `ta draft apply {id}`.",
+                        wf_config.submit.git.target_branch,
+                        wf_config.submit.git.target_branch
+                    );
+                }
+            }
+        }
+        let pre = if on_release {
+            ensure_on_release_branch(
+                adapter.as_ref(),
+                &CommitContext::from(goal),
+                &wf_config.submit,
+                route.target_branch(),
+                git_commit,
+                id,
+            )?
+        } else {
+            ensure_off_protected_branch(
+                adapter.as_ref(),
+                &CommitContext::from(goal),
+                &wf_config.submit,
+                git_commit,
+                id,
+            )?
+        };
         (pre.original_branch, pre.working_branch)
     };
 
@@ -9348,7 +9535,28 @@ fn apply_package(
 
         // Load workflow config if it exists.
         let workflow_config_path = target_dir.join(".ta/workflow.toml");
-        let workflow_config = WorkflowConfig::load_or_default(&workflow_config_path);
+        let mut workflow_config = WorkflowConfig::load_or_default(&workflow_config_path);
+        // Release set: the adapter, branch naming, push and PR all follow the routed target.
+        workflow_config.submit = route.submit.clone();
+        // Under an open release nothing is pushed and no PR opens per goal: the push and the
+        // one PR to main are deferred to `ta release-set cut`.
+        let (git_push, git_review) = if route.defers_push() {
+            if git_push || git_review {
+                println!(
+                    "[apply] Release '{}' is open: the push and the PR are deferred to \
+                     `ta release-set cut` (this goal is committed locally onto {}).",
+                    match &route.kind {
+                        ta_submit::routing::RouteKind::Release { release_name, .. } =>
+                            release_name.as_str(),
+                        _ => "",
+                    },
+                    route.target_branch()
+                );
+            }
+            (false, false)
+        } else {
+            (git_push, git_review)
+        };
 
         // Select adapter via registry (auto-detects VCS if config is default "none").
         let adapter: Box<dyn SourceAdapter> = select_adapter(&target_dir, &workflow_config.submit);
@@ -9775,6 +9983,26 @@ fn apply_package(
                     }
                 }
 
+                // Release set: this goal is now on the release branch (or, for a hotfix, on
+                // its own branch to main). Record it so `ta release-set status` and the cut
+                // PR list it. The commit stands even if the record cannot be written.
+                if let Some(sha) = vcs_commit_sha.as_deref() {
+                    if let Err(e) = super::release_set::record_applied(
+                        &target_dir,
+                        goal,
+                        &pkg.package_id.to_string(),
+                        Some(sha),
+                        &route.kind,
+                    ) {
+                        eprintln!(
+                            "[release] Warning: the goal was committed ({}) but could not be \
+                             recorded in the release state: {e}. Run `ta release-set status`; \
+                             the commit is on the branch either way.",
+                            &sha[..sha.len().min(8)]
+                        );
+                    }
+                }
+
                 // Pre-push version agreement check (v0.17.0.12.3).
                 // Verify that Cargo.toml and CLAUDE.md agree on the version BEFORE
                 // pushing, so CI's version-check job doesn't catch a drift first.
@@ -9916,12 +10144,13 @@ fn apply_package(
                             anyhow::bail!(
                                 "PR creation failed: {}\n\n\
                                  Branch '{}' was pushed successfully. To create the PR manually:\n\
-                                 \n  gh pr create --head {} --base main\n\
+                                 \n  gh pr create --head {} --base {}\n\
                                  \nOr retry automatically once the issue is resolved:\n\
                                  \n  ta draft reopen-review {}",
                                 e,
                                 branch_display,
                                 branch_display,
+                                workflow_config.submit.git.target_branch,
                                 short_id,
                             );
                         }
@@ -13160,7 +13389,16 @@ fn draft_pr_status(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
             );
             println!("To create the missing PR:");
             println!("  ta draft reopen-review {}", &package_id.to_string()[..8]);
-            println!("  gh pr create --head {} --base main", vcs.branch);
+            let target_branch = ta_submit::WorkflowConfig::load_or_default(
+                &config.workspace_root.join(".ta/workflow.toml"),
+            )
+            .submit
+            .git
+            .target_branch;
+            println!(
+                "  gh pr create --head {} --base {}",
+                vcs.branch, target_branch
+            );
         }
     }
 
@@ -13220,9 +13458,10 @@ fn draft_reopen_review(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
     if adapter.name() == "none" {
         anyhow::bail!(
             "No VCS adapter detected in {}.\n\
-             Create the PR manually:\n  gh pr create --head {} --base main",
+             Create the PR manually:\n  gh pr create --head {} --base {}",
             target_dir.display(),
             branch,
+            workflow_config.submit.git.target_branch,
         );
     }
 
@@ -13264,10 +13503,11 @@ fn draft_reopen_review(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
             anyhow::bail!(
                 "PR creation failed: {}\n\n\
                  Branch '{}' is on the remote. Create the PR manually:\n\
-                 \n  gh pr create --head {} --base main",
+                 \n  gh pr create --head {} --base {}",
                 e,
                 branch,
                 branch,
+                workflow_config.submit.git.target_branch,
             );
         }
     }
@@ -15080,6 +15320,431 @@ fn run() {
             "velocity-history.jsonl should not be dirty on main after apply: {}",
             wt_dirty
         );
+    }
+
+    // ── release-set: apply routing end to end (local bare origin + mock `gh`) ──────────────
+
+    /// Serializes tests that prepend a mock `gh` to the process PATH.
+    #[cfg(unix)]
+    static GH_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    fn rs_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = clear_git_env(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir),
+        )
+        .output()
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Puts a mock `gh` first on PATH for the lifetime of the value; restores PATH on drop.
+    #[cfg(unix)]
+    struct MockGh {
+        old_path: Option<std::ffi::OsString>,
+        log: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl MockGh {
+        fn install(dir: &std::path::Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let log = dir.join("gh.log");
+            let script = format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                   --version) echo 'gh version 2.0.0 (test-stub)'; exit 0 ;;\n\
+                   pr)\n\
+                     case \"$2\" in\n\
+                       list) echo '[]'; exit 0 ;;\n\
+                       create)\n\
+                         printf 'ARGS:' >> '{log}'\n\
+                         for a in \"$@\"; do printf '[%s]' \"$a\" >> '{log}'; done\n\
+                         printf '\\n' >> '{log}'\n\
+                         echo 'https://example.test/pr/1'\n\
+                         exit 0 ;;\n\
+                       *) exit 0 ;;\n\
+                     esac ;;\n\
+                   *) exit 1 ;;\n\
+                 esac\n",
+                log = log.display()
+            );
+            let path = bin.join("gh");
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::read(&path).unwrap();
+            let old_path = std::env::var_os("PATH");
+            let mut new_path = std::ffi::OsString::from(bin.as_os_str());
+            if let Some(old) = &old_path {
+                new_path.push(":");
+                new_path.push(old);
+            }
+            std::env::set_var("PATH", new_path);
+            Self { old_path, log }
+        }
+
+        /// One entry per `gh pr create` call: its args as `[a][b]...`.
+        fn pr_creates(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.starts_with("ARGS:"))
+                .map(|l| l.to_string())
+                .collect()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for MockGh {
+        fn drop(&mut self) {
+            match &self.old_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// A git project on `main` with a local bare `origin`, one pushed commit, and the given
+    /// `.ta/workflow.toml`.
+    #[cfg(unix)]
+    fn release_scratch_project(tmp: &std::path::Path, workflow_toml: &str) -> std::path::PathBuf {
+        let project = tmp.join("project");
+        let origin = tmp.join("origin.git");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&origin).unwrap();
+        rs_git(&origin, &["init", "--bare", "-b", "main"]);
+        rs_git(&project, &["init", "-b", "main"]);
+        rs_git(&project, &["config", "user.email", "test@test.com"]);
+        rs_git(&project, &["config", "user.name", "Test"]);
+        std::fs::write(project.join("README.md"), "# Scratch\n").unwrap();
+        std::fs::create_dir_all(project.join(".ta")).unwrap();
+        std::fs::write(project.join(".ta/workflow.toml"), workflow_toml).unwrap();
+        rs_git(&project, &["add", "-A"]);
+        rs_git(&project, &["commit", "-m", "initial"]);
+        rs_git(
+            &project,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        rs_git(&project, &["push", "-u", "origin", "main"]);
+        project
+    }
+
+    #[cfg(unix)]
+    fn start_goal_only(
+        config: &GatewayConfig,
+        project: &std::path::Path,
+        title: &str,
+        objective: &str,
+    ) -> uuid::Uuid {
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: title.to_string(),
+                source: Some(project.to_path_buf()),
+                objective: objective.to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            config,
+        )
+        .unwrap();
+        GoalRunStore::new(&config.goals_dir)
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|g| g.title == title && !g.is_macro)
+            .expect("goal was created")
+            .goal_run_id
+    }
+
+    /// Build + approve + apply the draft of `goal_id` (after writing `file` in its staging
+    /// copy) with `--git-commit --push --review` all requested.
+    #[cfg(unix)]
+    fn write_and_apply(
+        config: &GatewayConfig,
+        goal_id: uuid::Uuid,
+        file: &str,
+    ) -> anyhow::Result<()> {
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goal = store.get(goal_id).unwrap().unwrap();
+        std::fs::write(goal.workspace_path.join(file), format!("{file}\n")).unwrap();
+        build_package(config, &goal_id.to_string(), "summary", false).unwrap();
+        let pkg_id = load_all_packages(config)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.goal.goal_id == goal_id.to_string())
+            .expect("a draft for the goal")
+            .package_id
+            .to_string();
+        approve_package(config, &pkg_id, "tester", false).unwrap();
+        apply_package(
+            config,
+            &pkg_id,
+            None,
+            true, // git_commit
+            true, // push (deferred to `release-set cut` while a release is open)
+            true, // review (no per-goal PR while a release is open)
+            true, // skip_verify
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+    }
+
+    /// Acceptance: start a release, land two goals (commits on the release branch, no PR, no
+    /// push), flag an off-track goal, land a hotfix on main with its reason, cut = one push and
+    /// one `gh pr create --base main`.
+    #[cfg(unix)]
+    #[test]
+    fn release_set_lands_goals_on_the_release_branch_and_cuts_one_pr() {
+        use super::super::release_set as rs_cmd;
+        use ta_goal::release_set::{ReleaseSetStore, ReleaseStatus};
+
+        let _lock = GH_PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let gh = MockGh::install(tmp.path());
+        let project = release_scratch_project(tmp.path(), "[verify]\ncommands = [\"exit 0\"]\n");
+        let config = GatewayConfig::for_project(&project);
+        let origin = tmp.path().join("origin.git");
+
+        // 1. Start the release.
+        rs_cmd::start(
+            &config,
+            "0.18",
+            "Ship the billing invoice export",
+            Some("wf-goal-1"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            rs_git(&project, &["branch", "--show-current"]),
+            "release/0.18"
+        );
+        let store = ReleaseSetStore::new(&project);
+        let open = store.open_release().unwrap().expect("an open release");
+        assert_eq!(open.branch, "release/0.18");
+
+        // 2. Two on-track goals land as commits on the release branch: no ta/* branch, no
+        //    push, no PR, even though push + review were requested.
+        let goal_a = start_goal_only(
+            &config,
+            &project,
+            "Billing invoice export",
+            "Add the invoice export to the billing release",
+        );
+        write_and_apply(&config, goal_a, "invoice.txt").unwrap();
+        let goal_b = start_goal_only(
+            &config,
+            &project,
+            "Billing tax report export",
+            "Export the tax report for billing",
+        );
+        write_and_apply(&config, goal_b, "tax.txt").unwrap();
+        assert_eq!(rs_git(&project, &["branch", "--list", "ta/*"]), "");
+        let subjects = rs_git(&project, &["log", "release/0.18", "--format=%s"]);
+        assert!(subjects.contains("Billing invoice export"), "{subjects}");
+        assert!(subjects.contains("Billing tax report export"), "{subjects}");
+        assert_eq!(
+            rs_git(&project, &["rev-list", "--count", "main..release/0.18"]),
+            "2"
+        );
+        assert_eq!(rs_git(&project, &["rev-list", "--count", "main"]), "1");
+        assert_eq!(
+            rs_git(&project, &["branch", "--show-current"]),
+            "release/0.18"
+        );
+        assert_eq!(
+            rs_git(&origin, &["branch", "--list", "release/*"]),
+            "",
+            "nothing may be pushed before `release-set cut`"
+        );
+        assert!(
+            gh.pr_creates().is_empty(),
+            "no per-goal PR: {:?}",
+            gh.pr_creates()
+        );
+        let landed = store.open_release().unwrap().unwrap();
+        assert_eq!(landed.goals_landed.len(), 2);
+        assert!(landed.goals_landed.iter().any(|g| g.goal_id == goal_a));
+        assert!(landed.goals_landed.iter().any(|g| g.goal_id == goal_b));
+
+        // 3. An off-track goal gets advice (recorded, not blocked).
+        let goal_c = start_goal_only(
+            &config,
+            &project,
+            "Redesign the company logo",
+            "New colours and typography for the brand mark",
+        );
+        let goals = GoalRunStore::new(&config.goals_dir).unwrap();
+        let c = goals.get(goal_c).unwrap().unwrap();
+        let info = c
+            .release
+            .as_ref()
+            .expect("goal is stamped with the release");
+        assert!(!info.off_track_reasons.is_empty(), "expected drift advice");
+        let a = goals.get(goal_a).unwrap().unwrap();
+        assert!(a.release.as_ref().unwrap().off_track_reasons.is_empty());
+        let after_c = store.open_release().unwrap().unwrap();
+        assert_eq!(after_c.off_track.len(), 1);
+        assert_eq!(after_c.off_track[0].goal_id, goal_c);
+
+        // 4. A hotfix goes to main with its own PR and records its reason.
+        rs_git(&project, &["switch", "main"]);
+        let hotfix_id = {
+            let _guard =
+                rs_cmd::CliHotfixGuard::set(Some("checkout is down in production".to_string()));
+            start_goal_only(
+                &config,
+                &project,
+                "Fix checkout crash",
+                "Stop the crash on empty carts",
+            )
+        };
+        let hot = goals.get(hotfix_id).unwrap().unwrap();
+        assert_eq!(
+            hot.release
+                .as_ref()
+                .and_then(|r| r.hotfix_reason.as_deref()),
+            Some("checkout is down in production")
+        );
+        assert!(hot.release.as_ref().unwrap().off_track_reasons.is_empty());
+        write_and_apply(&config, hotfix_id, "hotfix.txt").unwrap();
+        assert_eq!(rs_git(&project, &["branch", "--show-current"]), "main");
+        assert!(
+            !rs_git(&origin, &["branch", "--list", "ta/*"]).is_empty(),
+            "the hotfix branch is pushed"
+        );
+        let hotfix_prs = gh.pr_creates();
+        assert_eq!(hotfix_prs.len(), 1, "{hotfix_prs:?}");
+        assert!(
+            hotfix_prs[0].contains("[--base][main]"),
+            "{}",
+            hotfix_prs[0]
+        );
+        let with_hotfix = store.open_release().unwrap().unwrap();
+        assert_eq!(with_hotfix.hotfixes.len(), 1);
+        assert_eq!(
+            with_hotfix.hotfixes[0].reason,
+            "checkout is down in production"
+        );
+        assert!(with_hotfix.hotfixes[0].commit.is_some());
+
+        // 5. Cut: merge main in, gate, ONE push, ONE `gh pr create` to main.
+        rs_cmd::cut(&config).unwrap();
+        let prs = gh.pr_creates();
+        let release_prs: Vec<_> = prs
+            .iter()
+            .filter(|l| l.contains("[--head][release/0.18]"))
+            .collect();
+        assert_eq!(release_prs.len(), 1, "exactly one release PR: {prs:?}");
+        assert!(release_prs[0].contains("[--base][main]"));
+        assert!(release_prs[0].contains("Ship the billing invoice export"));
+        assert!(
+            std::fs::read_to_string(&gh.log)
+                .unwrap()
+                .contains("release-set gate"),
+            "the PR body carries the evidence line"
+        );
+        assert_eq!(prs.len(), 2, "hotfix PR + release PR only: {prs:?}");
+        assert_eq!(
+            rs_git(&origin, &["rev-parse", "release/0.18"]),
+            rs_git(&project, &["rev-parse", "release/0.18"]),
+            "origin has the release branch tip"
+        );
+        assert_eq!(rs_git(&project, &["branch", "--show-current"]), "main");
+        assert!(
+            store.open_release().unwrap().is_none(),
+            "the release is cut"
+        );
+        let cut = store.load().unwrap().expect("cut release is kept");
+        assert_eq!(cut.status, ReleaseStatus::Cut);
+        assert_eq!(cut.pr_url.as_deref(), Some("https://example.test/pr/1"));
+        let umbrella = goals
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|g| g.is_macro)
+            .expect("umbrella goal");
+        assert!(umbrella.sub_goal_ids.contains(&goal_a));
+        assert!(umbrella.sub_goal_ids.contains(&goal_b));
+        assert!(!umbrella.sub_goal_ids.contains(&hotfix_id));
+    }
+
+    /// `cut` must refuse on a failing gate, naming the command, before anything is pushed.
+    #[cfg(unix)]
+    #[test]
+    fn release_set_cut_refuses_on_a_failing_gate_and_pushes_nothing() {
+        use super::super::release_set as rs_cmd;
+        use ta_goal::release_set::ReleaseSetStore;
+
+        let _lock = GH_PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let gh = MockGh::install(tmp.path());
+        let project =
+            release_scratch_project(tmp.path(), "[release_set]\ngate_commands = [\"exit 3\"]\n");
+        let config = GatewayConfig::for_project(&project);
+        let origin = tmp.path().join("origin.git");
+
+        rs_cmd::start(&config, "0.19", "Ship the thing", None, &[]).unwrap();
+        std::fs::write(project.join("work.txt"), "work\n").unwrap();
+        rs_git(&project, &["add", "work.txt"]);
+        rs_git(&project, &["commit", "-m", "work on the release"]);
+
+        let err = rs_cmd::cut(&config).unwrap_err().to_string();
+        assert!(
+            err.contains("exit 3"),
+            "must name the failing command: {err}"
+        );
+        assert_eq!(rs_git(&origin, &["branch", "--list", "release/*"]), "");
+        assert!(gh.pr_creates().is_empty());
+        let store = ReleaseSetStore::new(&project);
+        assert!(
+            store.open_release().unwrap().is_some(),
+            "a refused cut leaves the release open"
+        );
+    }
+
+    /// A hotfix draft must not be applied from the release branch (its branch would carry the
+    /// whole release); nothing is changed when it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn release_set_hotfix_apply_refuses_on_the_release_branch() {
+        use super::super::release_set as rs_cmd;
+
+        let _lock = GH_PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let _gh = MockGh::install(tmp.path());
+        let project = release_scratch_project(tmp.path(), "[verify]\ncommands = [\"exit 0\"]\n");
+        let config = GatewayConfig::for_project(&project);
+
+        rs_cmd::start(&config, "0.20", "Ship the thing", None, &[]).unwrap();
+        let hotfix_id = {
+            let _guard = rs_cmd::CliHotfixGuard::set(Some("prod is down".to_string()));
+            start_goal_only(&config, &project, "Fix prod", "Stop the outage")
+        };
+        let err = write_and_apply(&config, hotfix_id, "fix.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git switch main"), "{err}");
+        assert!(!project.join("fix.txt").exists(), "nothing was applied");
+        assert_eq!(rs_git(&project, &["branch", "--list", "ta/*"]), "");
     }
 
     /// v0.14.16 — Branch restore: after `ta draft apply --git-commit`, the working

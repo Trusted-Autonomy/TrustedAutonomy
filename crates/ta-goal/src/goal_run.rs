@@ -186,6 +186,22 @@ impl GoalRunState {
             return true;
         }
 
+        // Release umbrella goal (`ta release-set start`): it is created in
+        // `custom:release_open`, stays there for the life of the open release
+        // and completes when the release is cut. It is deliberately not
+        // Running/Configured, so the watchdog never treats it as an owner-less
+        // agent run and the daemon never counts it as active work.
+        if let GoalRunState::Custom { tag } = next {
+            if tag == RELEASE_OPEN_TAG {
+                return matches!(self, GoalRunState::Created);
+            }
+        }
+        if let GoalRunState::Custom { tag } = self {
+            if tag == RELEASE_OPEN_TAG {
+                return matches!(next, GoalRunState::Completed);
+            }
+        }
+
         // v0.17.0.12.7: `Custom { tag: "conflict_resolution" }` — entered when
         // `ta draft apply` hits an unresolved shared-file merge conflict
         // (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md). Uses the `Custom`
@@ -636,7 +652,17 @@ pub struct GoalRun {
     /// `None` on goals launched before the abstraction existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_effort: Option<ModelEffortRecord>,
+
+    /// Release-set membership (`ta release-set`): which open release this goal
+    /// started under, the drift advice recorded at start, and the hotfix
+    /// reason when the goal opted out of the release. `None` when no release
+    /// was open at goal start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<crate::release_set::GoalReleaseInfo>,
 }
+
+/// `GoalRunState::Custom` tag of a release umbrella goal while its release is open.
+pub const RELEASE_OPEN_TAG: &str = "release_open";
 
 fn is_zero_f64(v: &f64) -> bool {
     *v == 0.0
@@ -975,6 +1001,7 @@ impl GoalRun {
             start_branch: None,
             objective_file_content: None,
             model_effort: None,
+            release: None,
             agent_model: String::new(),
         }
     }

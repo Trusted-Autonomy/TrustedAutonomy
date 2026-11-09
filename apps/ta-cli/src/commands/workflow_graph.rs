@@ -202,6 +202,8 @@ impl ActionNode for AutoApproveAction {
             no_replay_actions: true,
             allow_stale_base: false,
             detach: false,
+            hotfix: false,
+            hotfix_reason: None,
         };
         draft::execute(&cmd, &self.config).map_err(|e| GraphError::NodeExecution {
             node_id: "auto_approve".to_string(),

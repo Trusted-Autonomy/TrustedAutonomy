@@ -11536,6 +11536,27 @@ Status note: items 1 to 3 are built and tested; the report only shows a recommen
 
 #### Version: `0.17.12-alpha.33`
 
+### v0.17.12.34 - Release branches, one release goal, cut by merging to main
+<!-- status: in_progress -->
+**Depends on**: v0.17.12.33
+
+**Goal**: Stop spending GitHub Actions minutes on one PR per goal. One open release per project; every goal commits onto `release/<name>`; the release is cut with ONE PR to main. A hotfix is the recorded exception.
+
+1. [x] State: `.ta/release-set.json` (id, name, branch, base commit, release goal, status, timestamps, landed goals, hotfixes, off-track goals); at most one open release; machine-local and git-ignored.
+2. [x] CLI: `ta release-set start|status [--json]|cut`. `cut` merges main in, runs the gate (refuses naming the failing command), pushes once, opens one PR to main with the evidence line. `ta release` stays the publish pipeline.
+3. [x] Routing: `ta run`, goal start, `ta draft apply --git-commit` and the submit adapter target the release branch; apply commits locally and defers push/review to `cut`; precedence hotfix, then open release, then configured `target_branch`. The printed `gh pr create` hints use the real target.
+4. [x] `--hotfix` with mandatory `--hotfix-reason` on `ta run` and `ta draft apply`; recorded in the release state; refused from the release branch at apply.
+5. [x] Drift advice (plan phase + keyword overlap, deterministic, advice only): printed at goal start, recorded on the goal, in `ta draft view`, in `ta release-set status`, and in the CoS wake context together with the release goal and branch.
+6. [x] The release goal is an umbrella macro goal (`is_macro`, `sub_goal_ids`, `parent_macro_id`); Wayfinder status mapping treats it as in progress.
+7. [x] `ta release-set status --json` stable schema, documented in docs/USAGE.md. CLAUDE.md Git Workflow and docs/USAGE.md updated.
+8. [x] Tests: state machine, routing precedence, hotfix, drift advice, cut refusal on a failing gate, and an end-to-end scratch repo with a local bare origin and a mock `gh` (two goals land, no PR, hotfix, off-track advice, one push, one PR).
+9. [ ] VT Wayfinder poller (VT repo, out of scope here): read `ta release-set status --json` per project, mirror `release.goal` / `goals_landed` / `off_track` / `hotfixes` / `ahead` / `behind` into the Wayfinder goal named by `release.goal.wayfinder_goal_id`, and report the cut PR URL.
+10. [ ] Model-based supervisor drift judgement (today's check is deterministic keyword and phase overlap only).
+11. [ ] Windows run of the cut path (the tests that use a mock `gh` shell script are unix-only).
+12. [ ] `ta run --hotfix` for `--phases` / `--sub-goals` launches (refused today; single-goal launches only).
+
+**Effort**: M.
+
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: deferred -->
 

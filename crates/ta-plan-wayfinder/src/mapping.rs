@@ -114,6 +114,10 @@ pub fn goal_state_to_wayfinder(state: &GoalRunState) -> (&'static str, Option<St
             Some(format!("ta_awaiting_input: {question_preview}")),
         ),
         GoalRunState::Failed { reason } => (STATUS_ON_HOLD, Some(format!("ta_failed: {reason}"))),
+        // A release umbrella goal is open work in progress, not stuck.
+        GoalRunState::Custom { tag } if tag == ta_goal::goal_run::RELEASE_OPEN_TAG => {
+            (STATUS_IN_PROGRESS, None)
+        }
         GoalRunState::Custom { tag } => (STATUS_ON_HOLD, Some(format!("ta_custom: {tag}"))),
         // `GoalRunState` is `#[non_exhaustive]` (future variants can be
         // added without a semver break) — an unrecognized future variant
@@ -208,6 +212,15 @@ mod tests {
         });
         assert_eq!(status, STATUS_ON_HOLD);
         assert_eq!(hold_reason.as_deref(), Some("ta_custom: waiting_for_ci"));
+    }
+
+    #[test]
+    fn release_umbrella_goal_is_in_progress_not_on_hold() {
+        let (status, hold_reason) = goal_state_to_wayfinder(&GoalRunState::Custom {
+            tag: ta_goal::goal_run::RELEASE_OPEN_TAG.to_string(),
+        });
+        assert_eq!(status, STATUS_IN_PROGRESS);
+        assert_eq!(hold_reason, None);
     }
 
     #[test]
