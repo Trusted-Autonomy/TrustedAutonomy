@@ -1,5 +1,13 @@
 ## Unreleased
 
+**Release sets: one release branch, one PR to main**
+
+- **New `ta release-set start|status|cut`.** `start <name> --goal "<objective>" [--wayfinder-goal <id>] [--phase <id>...]` creates `release/<name>` from `main` (refuses a dirty tree or a second open release). While a release is open, `ta run`, `ta goal start` and `ta draft apply --git-commit` commit onto the release branch; the push and the pull request are deferred. `ta release-set cut` merges the latest `main` in, runs the verify gate (`[release_set] gate_commands`, else `[verify] commands`; refuses and names the failing command), pushes once and opens one PR to `main` with the evidence line. `status --json` has a stable schema for Wayfinder. `ta release` is unchanged (publish pipeline).
+- **`--hotfix --hotfix-reason "<why>"`** on `ta run` and `ta draft apply` sends a goal to `main` with its own PR as before, and records it in the release state. A hotfix is never flagged as drifting.
+- **Drift advice.** At goal start TA compares the goal with the release goal (plan phase membership + keyword overlap, no model call) and prints a warning, records it on the goal, in `ta draft view` and in `ta release-set status`, and shows it to the CoS (the wake context now includes the release goal and branch). Advice only; nothing is blocked.
+- **The release goal is an umbrella (macro) goal** in `ta goal list`; Wayfinder maps it to `in_progress` while open.
+- Fixed: the `gh pr create --head ... --base main` hints printed after apply now name the real target branch.
+
 **Lazy copy-on-write staging**
 
 - **New `[staging] strategy = "lazy"`.** Staging is populated with directory-level `clonefile` (APFS) or per-file reflinks (Btrfs/XFS); ext4, NTFS, other volumes and Windows fall back to the full copy and the goal output says why. A metadata baseline stored outside staging (`.ta/staging-baselines/<goal-id>.json`) lets `ta draft build` open only files the agent wrote, deleted, renamed or added. Goal start no longer SHA-256s the whole source tree in this mode. Default stays `full`. Design and measurements: `docs/design/lazy-cow-staging.md`.

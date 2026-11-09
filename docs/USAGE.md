@@ -9167,6 +9167,58 @@ This exits non-zero if `Cargo.toml` doesn't match the phase semver after apply. 
 ta draft apply <draft-id> --phase v0.15.13.6 --validate-version
 ```
 
+### Release Sets (one release branch, one PR)
+
+A goal does not get its own pull request. A project has at most one open **release**: every goal commits onto `release/<name>`, and the release is cut with ONE PR to `main`. (`ta release` is the separate publish pipeline below: version, tag, notes. `ta release-set` is the branch workflow.)
+
+```bash
+# Open the release (human only; clean tree required; creates release/0.18 from main)
+ta release-set start 0.18 --goal "Ship the billing export" --wayfinder-goal wf-123 --phase v0.18.1
+
+ta run "Add invoice export" --phase v0.18.1     # commits onto release/0.18; no PR
+ta draft apply <id> --git-commit                # local commit on the release branch; push deferred
+
+ta release-set status          # branch, goal, landed goals, off-track goals, ahead/behind main
+ta release-set status --json   # same, for Wayfinder (schema below)
+
+ta release-set cut             # merge main in, verify gate, push once, ONE PR to main
+```
+
+`cut` merges the latest `main` into the release branch (a conflict is aborted and reported), runs the gate, pushes the branch once, and opens one PR to `main` titled from the release goal with the gate evidence line in the body. If the gate fails, `cut` refuses before pushing and names each failing command. The gate is `[release_set] gate_commands` in `.ta/workflow.toml`, falling back to `[verify] commands`; with neither, `cut` warns and says so in the evidence line. If `gh` fails after the push, re-run `cut` (the push is then a no-op).
+
+**Hotfix exception.** `ta run "Fix checkout crash" --hotfix --hotfix-reason "prod is down"` and `ta draft apply <id> --hotfix --hotfix-reason "prod is down"` target `main` with their own PR, as before, and are recorded as hotfixes. Both flags are required together. Apply a hotfix from `main`: from the release branch it is refused (its branch would carry the release). `ta run --hotfix` covers single-goal launches, not `--phases` or `--sub-goals`.
+
+**Routing precedence:** `--hotfix`, then the open release branch, then `[submit.git] target_branch`.
+
+**Drift advice.** When a goal starts, TA compares its title, objective and plan phase with the release goal (plan-phase membership plus keyword overlap; no model call). A goal that does not look related prints a warning, is recorded on the goal, shown in `ta draft view` and `ta release-set status`, and appears in the chief-of-staff context (which also names the release goal and branch). It is advice; nothing is blocked. Hotfix goals are never flagged.
+
+**The release goal** is an umbrella (macro) goal in `ta goal list`; goals started under the release attach to it as sub-goals. It completes at `cut`.
+
+**State** lives in `.ta/release-set.json` (machine-local, git-ignored; lock in `.ta/release-set.lock`).
+
+`ta release-set status --json` schema (stable):
+
+```json
+{
+  "release": {
+    "id": "...", "name": "0.18", "branch": "release/0.18",
+    "status": "open",                       // "open" | "cut"
+    "base_branch": "main", "base_commit": "<sha>",
+    "created_at": "<rfc3339>", "cut_at": null, "pr_url": null,
+    "goal": { "title": "...", "objective": "...", "wayfinder_goal_id": null,
+              "plan_phases": [], "goal_run_id": "<uuid>" },
+    "goals_landed": [ { "goal_id": "<uuid>", "title": "...", "plan_phase": null,
+                        "draft_id": null, "commit": "<sha>", "landed_at": "<rfc3339>" } ],
+    "hotfixes":     [ { "goal_id": "<uuid>", "title": "...", "reason": "...",
+                        "commit": "<sha>|null", "recorded_at": "<rfc3339>" } ],
+    "off_track":    [ { "goal_id": "<uuid>", "title": "...", "reasons": ["..."],
+                        "flagged_at": "<rfc3339>" } ],
+    "ahead": 2, "behind": 0,                // null when git cannot say
+    "merges_to_main": 1
+  }
+}
+```
+
 ### Release Pipeline
 
 TA includes a YAML-driven release pipeline:

@@ -137,7 +137,16 @@ pub fn hotfix_reason_from_flags(hotfix: bool, reason: Option<&str>) -> Result<Op
 
 fn git_cmd(root: &Path) -> Command {
     let mut c = Command::new("git");
-    c.arg("-C").arg(root).env("GIT_TERMINAL_PROMPT", "0");
+    // `ta run` points agents at their staging copy with GIT_DIR/GIT_WORK_TREE; these commands
+    // always mean the project repository at `root`.
+    c.arg("-C")
+        .arg(root)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_CEILING_DIRECTORIES");
     c
 }
 
@@ -277,7 +286,7 @@ fn short_id(id: Uuid) -> String {
 
 // ── start ────────────────────────────────────────────────────────────────────
 
-fn start(
+pub(crate) fn start(
     config: &GatewayConfig,
     name: &str,
     objective: &str,
@@ -427,7 +436,7 @@ fn ahead_behind(root: &Path, rs: &ReleaseSet, remote: &str) -> (Option<u64>, Opt
     (ahead, behind)
 }
 
-fn status(config: &GatewayConfig, json: bool) -> Result<()> {
+pub(crate) fn status(config: &GatewayConfig, json: bool) -> Result<()> {
     let root = config.workspace_root.as_path();
     let store = ReleaseSetStore::new(root);
     let Some(rs) = store.load()? else {
@@ -545,7 +554,7 @@ fn status(config: &GatewayConfig, json: bool) -> Result<()> {
 
 // ── cut ──────────────────────────────────────────────────────────────────────
 
-fn cut(config: &GatewayConfig) -> Result<()> {
+pub(crate) fn cut(config: &GatewayConfig) -> Result<()> {
     super::human_auth::require_human_for("release-set cut")?;
     let root = config.workspace_root.as_path();
     let store = ReleaseSetStore::new(root);
@@ -765,28 +774,13 @@ fn cut_on_release_branch(config: &GatewayConfig, rs: &ReleaseSet) -> Result<(Str
     // 5. ONE PR to main.
     let body = pr_body(rs, &evidence);
     println!("[release-set] Opening the release PR ({branch} -> {main})...");
-    let out = Command::new("gh")
-        .current_dir(root)
-        .args([
-            "pr",
-            "create",
-            "--base",
-            &main,
-            "--head",
-            &branch,
-            "--title",
-            &rs.goal.title,
-            "--body",
-            &body,
-        ])
-        .output()
-        .map_err(|e| {
-            anyhow!(
-                "could not run `gh` ({e}). {branch} IS pushed. Install/authenticate the GitHub \
+    let out = run_gh_pr_create(root, &main, &branch, &rs.goal.title, &body).map_err(|e| {
+        anyhow!(
+            "could not run `gh` ({e}). {branch} IS pushed. Install/authenticate the GitHub \
                  CLI and run `ta release-set cut` again (the push is then a no-op), or open the \
                  PR yourself: gh pr create --base {main} --head {branch}"
-            )
-        })?;
+        )
+    })?;
     if !out.status.success() {
         bail!(
             "`gh pr create --base {main} --head {branch}` failed: {}. {branch} IS pushed. Fix gh \
@@ -851,6 +845,33 @@ fn pr_body(rs: &ReleaseSet, evidence: &str) -> String {
     b
 }
 
+/// `gh pr create` for the release PR. A script that was written an instant ago can fail to
+/// start with ETXTBSY while another thread still holds its write handle; retry that briefly.
+fn run_gh_pr_create(
+    root: &Path,
+    base: &str,
+    head: &str,
+    title: &str,
+    body: &str,
+) -> std::io::Result<std::process::Output> {
+    let mut attempt = 0;
+    loop {
+        let res = Command::new("gh")
+            .current_dir(root)
+            .args([
+                "pr", "create", "--base", base, "--head", head, "--title", title, "--body", body,
+            ])
+            .output();
+        match res {
+            Err(e) if e.raw_os_error() == Some(26) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            other => return other,
+        }
+    }
+}
+
 // ── goal start ───────────────────────────────────────────────────────────────
 
 /// Called when a goal is created (`ta goal start`, `ta run`): link it under the release's
@@ -892,6 +913,15 @@ pub fn stamp_new_goal(goal: &mut GoalRun, project_root: &Path, goals: &GoalRunSt
              PR (reason: {reason}). It is recorded in the release state.",
             rs.name, rs.base_branch
         );
+        if let Some(cur) = current_branch(goal.source_dir.as_deref().unwrap_or(project_root)) {
+            if cur == rs.branch {
+                eprintln!(
+                    "[release] Note: the source tree is on release branch '{cur}'. A hotfix must \
+                     branch from {}: `git switch {}` before starting and applying it.",
+                    rs.base_branch, rs.base_branch
+                );
+            }
+        }
         return Ok(());
     }
 
