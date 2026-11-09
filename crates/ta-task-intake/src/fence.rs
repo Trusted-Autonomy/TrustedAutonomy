@@ -8,69 +8,12 @@
 //! prefix on every line) under a label that says the content is data.
 
 use ta_goal::provenance::fence_untrusted;
+/// Strips escape sequences, control, zero-width and bidirectional characters.
+/// The one implementation lives in [`ta_goal::untrusted`] so every sink that puts
+/// outside text in front of a model or a terminal behaves the same.
+pub use ta_goal::untrusted::sanitize;
 
 use crate::model::{ListReport, RequestBody, RequestView};
-
-/// Strip everything that is not safe to print: ANSI/OSC escape sequences, C0
-/// and C1 control characters (keeping `\n` and `\t`), zero-width characters,
-/// bidirectional overrides/isolates and line or paragraph separators.
-pub fn sanitize(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => skip_escape(&mut chars),
-            '\u{9b}' => skip_csi(&mut chars),
-            '\n' | '\t' => out.push(c),
-            c if c.is_control() => {}
-            '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{feff}' => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    // Parameter and intermediate bytes, then one final byte in 0x40..=0x7e.
-    for c in chars.by_ref() {
-        if ('\u{40}'..='\u{7e}').contains(&c) {
-            break;
-        }
-    }
-}
-
-fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    match chars.peek().copied() {
-        Some('[') => {
-            chars.next();
-            skip_csi(chars);
-        }
-        // OSC / DCS / PM / APC: runs to BEL or ST (ESC \).
-        Some(']') | Some('P') | Some('^') | Some('_') => {
-            chars.next();
-            while let Some(c) = chars.next() {
-                if c == '\u{7}' {
-                    break;
-                }
-                if c == '\u{1b}' {
-                    if chars.peek() == Some(&'\\') {
-                        chars.next();
-                    }
-                    break;
-                }
-            }
-        }
-        // Two-byte escape.
-        Some(_) => {
-            chars.next();
-        }
-        None => {}
-    }
-}
 
 /// Plain-text rendering of a request's untrusted fields, one `key: value`
 /// block, suitable as the content of a fence.
@@ -159,28 +102,4 @@ pub fn render_report(report: &ListReport) -> String {
         out.push('\n');
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strips_ansi_osc_and_controls_but_keeps_newline_and_tab() {
-        let s = "a\u{1b}[31mred\u{1b}[0m\u{1b}]0;title\u{7}b\u{7}\rc\nd\te\u{0}\u{9b}31mf";
-        assert_eq!(sanitize(s), "aredbc\nd\tef");
-    }
-
-    #[test]
-    fn strips_bidi_and_zero_width() {
-        let s = "safe\u{202e}evil\u{2066}x\u{2069}\u{200b}\u{feff}\u{2028}end";
-        assert_eq!(sanitize(s), "safeevilxend");
-    }
-
-    #[test]
-    fn unterminated_escape_at_end_does_not_panic() {
-        assert_eq!(sanitize("x\u{1b}"), "x");
-        assert_eq!(sanitize("x\u{1b}[12"), "x");
-        assert_eq!(sanitize("x\u{1b}]no terminator"), "x");
-    }
 }

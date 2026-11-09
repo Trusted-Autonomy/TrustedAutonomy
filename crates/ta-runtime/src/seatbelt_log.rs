@@ -120,6 +120,8 @@ struct Shared {
     lines_seen: AtomicU64,
     live_denials: AtomicU64,
     recovered_denials: AtomicU64,
+    live_occurrences: AtomicU64,
+    recovered_occurrences: AtomicU64,
 }
 
 impl Shared {
@@ -159,6 +161,14 @@ impl Shared {
         match source {
             Source::Live => self.live_denials.fetch_add(1, Ordering::Relaxed),
             Source::Persisted => self.recovered_denials.fetch_add(1, Ordering::Relaxed),
+        };
+        match source {
+            Source::Live => self
+                .live_occurrences
+                .fetch_add(u64::from(violation.count), Ordering::Relaxed),
+            Source::Persisted => self
+                .recovered_occurrences
+                .fetch_add(u64::from(violation.count), Ordering::Relaxed),
         };
         (self.on_violation)(violation);
     }
@@ -205,6 +215,11 @@ pub struct CaptureReport {
     pub live_denials: u64,
     /// Tagged denials the live stream missed that the persisted log had.
     pub recovered_denials: u64,
+    /// Refusals the live reports stand for: a report the kernel collapsed ("N
+    /// duplicate reports") counts N here and 1 in `live_denials`.
+    pub live_occurrences: u64,
+    /// Refusals the recovered reports stand for.
+    pub recovered_occurrences: u64,
     /// Raw `Sandbox` lines the live stream delivered.
     pub stream_lines: u64,
     /// Why capture is not verified, when it is not. Empty when healthy.
@@ -303,6 +318,8 @@ impl ViolationTail {
             lines_seen: AtomicU64::new(0),
             live_denials: AtomicU64::new(0),
             recovered_denials: AtomicU64::new(0),
+            live_occurrences: AtomicU64::new(0),
+            recovered_occurrences: AtomicU64::new(0),
         });
         let reader = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
@@ -531,6 +548,8 @@ impl ViolationTail {
             reconciled,
             live_denials: self.shared.live_denials.load(Ordering::Relaxed),
             recovered_denials: self.shared.recovered_denials.load(Ordering::Relaxed),
+            live_occurrences: self.shared.live_occurrences.load(Ordering::Relaxed),
+            recovered_occurrences: self.shared.recovered_occurrences.load(Ordering::Relaxed),
             stream_lines: self.lines_seen(),
             problems,
         };
@@ -640,6 +659,8 @@ mod tests {
             lines_seen: AtomicU64::new(0),
             live_denials: AtomicU64::new(0),
             recovered_denials: AtomicU64::new(0),
+            live_occurrences: AtomicU64::new(0),
+            recovered_occurrences: AtomicU64::new(0),
         });
         (shared, got)
     }
@@ -730,6 +751,8 @@ mod tests {
             reconciled: true,
             live_denials: 3,
             recovered_denials: 1,
+            live_occurrences: 3,
+            recovered_occurrences: 1,
             stream_lines: 40,
             problems: vec![],
         };
