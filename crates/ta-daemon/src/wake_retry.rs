@@ -973,7 +973,7 @@ where
                 );
             }
             rec.last_error = tail_lines(&err, 40);
-            let lf = crate::launch_failed::failure_from_error(&err);
+            let lf = crate::launch_failed::failure_from_error(&err, ids.project_root);
             let permanent = lf.code.is_permanent();
             rec.launch_failure = Some(lf);
             rec.next_eligible_at = failed_at
@@ -1189,7 +1189,9 @@ async fn report_launch_failed(
     };
     let failure = match (&rec.launch_failure, rec.last_error.is_empty()) {
         (Some(f), _) => f.clone(),
-        (None, false) => crate::launch_failed::failure_from_error(&rec.last_error),
+        (None, false) => {
+            crate::launch_failed::failure_from_error(&rec.last_error, ids.project_root)
+        }
         (None, true) => ta_goal::launch_failure::LaunchFailure {
             code: ta_goal::launch_failure::LaunchFailureCode::Crashed,
             detail: format!(
@@ -1347,9 +1349,18 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            // A Wayfinder-managed project: what `vt-install` writes.
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+            std::fs::write(
+                dir.path().join(".ta").join("workflow.toml"),
+                "[plan.wayfinder]\nbase_url = \"http://localhost:3010\"\norg_id = \"o\"\n\
+                 project_id = \"p-1\"\ncredential_name = \"wf\"\n",
+            )
+            .unwrap();
             Self {
                 clock: t0(),
-                dir: tempfile::tempdir().unwrap(),
+                dir,
                 transport,
                 policy: WakeRetryPolicy::default(),
                 rate: LaunchRateGuard::default(),
@@ -2607,7 +2618,7 @@ mod tests {
         assert_launch_failed(&out[0], Code::NoLogin);
         let fix = out[0]["fix"].as_str().unwrap();
         assert!(
-            fix.contains("Wayfinder Settings > Agent login")
+            fix.starts_with("Open Wayfinder Settings, Agent login, and log in on this computer")
                 && fix.contains("ta agent-login login claude-code"),
             "{fix}"
         );
