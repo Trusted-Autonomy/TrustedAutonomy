@@ -1939,6 +1939,7 @@ mod tests {
     }
 
     /// What the Claude CLI prints on stdout when it has no login, then exits 1.
+    #[cfg(unix)]
     const AUTH_FAILED_STREAM: &str = concat!(
         r#"{"type":"system","subtype":"init","model":"claude-sonnet"}"#,
         "\n",
