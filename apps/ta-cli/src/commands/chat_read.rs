@@ -66,12 +66,62 @@ fn check(
     project: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
+    let home = dirs::home_dir();
+    let j = judge(root, policy, path, project, home.as_deref())?;
+    let (allowed, resolved, reason, rule) = (j.allowed, j.resolved, j.reason, j.rule);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": path,
+                "resolved": display_path(&resolved),
+                "allowed": allowed,
+                "rule": rule,
+                "reason": reason,
+            }))?
+        );
+    } else {
+        println!(
+            "{}: {}",
+            if allowed { "ALLOWED" } else { "DENIED" },
+            display_path(&resolved)
+        );
+        println!("  why: {reason}");
+        if !allowed {
+            println!(
+                "  to change it: edit `[chat.read]` (`allow` / `deny`) in {}/.ta/workflow.toml \
+                 (built-in protected locations cannot be changed).",
+                root.display()
+            );
+        }
+    }
+    if !allowed {
+        // Distinct non-zero exit for scripts; the text above already said why.
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// The verdict for `path`, with the reason a person needs to act on it.
+struct Judgement {
+    allowed: bool,
+    resolved: std::path::PathBuf,
+    reason: String,
+    rule: Option<String>,
+}
+
+fn judge(
+    root: &Path,
+    policy: &ReadPolicy,
+    path: &str,
+    project: Option<&str>,
+    home: Option<&Path>,
+) -> anyhow::Result<Judgement> {
     let base = policy
         .root_of_label(project)
         .map_err(|why| anyhow::anyhow!("{why}"))?;
-    let home = dirs::home_dir();
-    let verdict = policy.decide_requested(&base, home.as_deref(), path);
-
+    let verdict = policy.decide_requested(&base, home, path);
     // The policy engine's secrets backstop applies on top of the lists, exactly as in
     // the gateway: compile the chat manifest and evaluate the same request.
     let (allowed, resolved, reason, rule) = match verdict {
@@ -110,38 +160,12 @@ fn check(
             refusal.rule.clone(),
         ),
     };
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "path": path,
-                "resolved": display_path(&resolved),
-                "allowed": allowed,
-                "rule": rule,
-                "reason": reason,
-            }))?
-        );
-    } else {
-        println!(
-            "{}: {}",
-            if allowed { "ALLOWED" } else { "DENIED" },
-            display_path(&resolved)
-        );
-        println!("  why: {reason}");
-        if !allowed {
-            println!(
-                "  to change it: edit `[chat.read]` (`allow` / `deny`) in {}/.ta/workflow.toml \
-                 (built-in protected locations cannot be changed).",
-                root.display()
-            );
-        }
-    }
-    if !allowed {
-        // Distinct non-zero exit for scripts; the text above already said why.
-        std::process::exit(1);
-    }
-    Ok(())
+    Ok(Judgement {
+        allowed,
+        resolved,
+        reason,
+        rule,
+    })
 }
 
 /// Why the policy engine refuses a read of `resolved` for a chat session, if it does.
@@ -225,4 +249,75 @@ fn list(policy: &ReadPolicy, json: bool) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ta_policy::read_policy::{ReadEnv, ReadPolicy};
+
+    fn policy(root: &Path, home: &Path, allow: &[&str], deny: &[&str]) -> ReadPolicy {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        ReadPolicy::from_config(
+            &ReadEnv {
+                project_root: root.to_path_buf(),
+                home: Some(home.to_path_buf()),
+                state_dir: None,
+                office_yaml: root.join("office.yaml"),
+            },
+            &s(allow),
+            &s(deny),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn check_names_the_rule_behind_every_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(home.join("notes/private")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join("other")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "x").unwrap();
+        std::fs::write(home.join("notes/a.md"), "x").unwrap();
+        std::fs::write(home.join("notes/private/b.md"), "x").unwrap();
+        std::fs::write(home.join(".ssh/id"), "x").unwrap();
+        std::fs::write(home.join("other/c.md"), "x").unwrap();
+        let p = policy(&root, &home, &["~/notes"], &["~/notes/private"]);
+        let judge_of = |path: &str| judge(&root, &p, path, None, Some(&home)).unwrap();
+
+        let j = judge_of("src/lib.rs");
+        assert!(
+            j.allowed && j.reason.contains("project root"),
+            "{}",
+            j.reason
+        );
+
+        let j = judge_of("~/notes/a.md");
+        assert!(
+            j.allowed && j.reason.contains("\"~/notes\""),
+            "{}",
+            j.reason
+        );
+
+        let j = judge_of("~/notes/private/b.md");
+        assert!(!j.allowed, "deny beats allow");
+        assert_eq!(j.rule.as_deref(), Some("~/notes/private"));
+        assert!(j.reason.contains("deny"), "{}", j.reason);
+
+        let j = judge_of("~/other/c.md");
+        assert!(!j.allowed && j.reason.contains("[chat.read]") && j.reason.contains("allow"));
+
+        let j = judge_of("~/.ssh/id");
+        assert!(
+            !j.allowed && j.reason.contains("built-in hard deny"),
+            "{}",
+            j.reason
+        );
+
+        let j = judge_of("~/notes/../other/c.md");
+        assert!(!j.allowed && j.reason.contains(".."), "{}", j.reason);
+    }
 }

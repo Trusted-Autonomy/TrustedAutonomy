@@ -11,9 +11,14 @@
 **Chief of Staff read access**
 
 - **Fixed: the Chief of Staff could not read Wayfinder, the wiki or the plan.** The gateway read tools looked for `.ta/workflow.toml` and `.ta/wiki-resources.toml` in the staging copy, which has neither, and answered "no Wayfinder configuration". They now read the source project root, and plan-status names the path it looked at and why it found nothing.
-- **Chat mode no longer copies the project.** The CoS gets a thin session directory, reads the real project read-only through `ta_fs_read` (new `project` argument) and the read tools, and its scratch writes are discarded. The OS sandbox grants read-only (no write) on the project root; `.ta`, `.git`, the state directory and credentials stay unreadable.
-- **Capability grant.** A chat launch mints a read grant (read on `fs://project/**` plus the named read tools) into the credential broker; a session without it keeps the old refusal.
-- **`[chat] readable_projects`** in `.ta/workflow.toml` lets the CoS read other projects (absolute path or a name from `office.yaml`), read-only with the same deny-list. Default empty.
+- **Chat mode no longer copies the project.** The CoS gets a thin session directory and reads the real project read-only through `ta_fs_read`, `ta_fs_list` and the read tools. `.ta`, `.git`, the state directory and credentials stay unreadable.
+- **`[chat.read] allow` / `deny` in `.ta/workflow.toml`** give the CoS a read allow list and deny list over any file or folder: absolute paths, `~/path`, project names from `office.yaml`, globs. Deny beats allow, an empty allow means the project root only, symlink escapes and `..` are refused, a built-in protected list (`~/.ssh`, `~/.aws`, `~/.gnupg`, Keychains, browser profiles, `.ta`, `.git`, the TA state directory) can never be allowed, and a deny inside an allowed root hides only that subtree. `[chat] readable_projects` still works as an alias for `allow`.
+- **One policy, three layers.** The compiled policy is encoded in the biscuit read grant (the gateway rebuilds it from the token, so a config edit mid-session changes nothing), enforced in `ta_fs_read` / `ta_fs_list`, and mirrored into the sandbox profile (macOS also confines reads under your home to the allowed roots and toolchain directories; Linux/Windows details in docs/USAGE.md).
+- **No write of any kind for the CoS.** `ta_fs_write` is no longer on the chat tool surface (its handler also refuses), the capability manifest has no write grant, and scratch writes are gone.
+- **`ta_fs_list`** lists real directories in chat mode and hides denied entries.
+- **`ta_wayfinder_*` take an optional `project`** naming a registered project in `allow`: that project's `[plan.wayfinder]` pin and credential, read-only.
+- **New `ta chat-read check <path>` / `ta chat-read list`** say whether a path would be readable and which rule decides.
+- Fixed: Seatbelt `file-read*` re-allows did not override a `file-read-data` deny; confined profiles now emit both.
 
 **Lazy copy-on-write staging**
 
