@@ -11603,6 +11603,23 @@ Status note: items 1 to 3 are built and tested; the report only shows a recommen
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.36`
+
+### v0.17.12.37 - Login failures are launch failures, quiet defaults
+<!-- status: done -->
+**Depends on**: v0.17.12.36
+
+**Goal**: An agent that could not authenticate ends as a FAILED launch with the login fix in its reason, is never retried, and is refused before launch when its login is known to be missing; a default optimizer that is not installed or never started stays quiet. Source: Wayfinder finding 059 items A and C.
+
+1. [x] Stream failure detection (`ta_goal::launch_failure::stream_failure`): structural only. An assistant line with `error: authentication_failed`, or a `result` line with `is_error: true` that is an auth failure (401/403, auth wording) or spent no tokens and no money. Free text about logins never counts. `LaunchEvidence.stream_failure` classifies as `no_login` (or `login_invalid` when the probe says a login is stored), a zero-spend error as `crashed`.
+2. [x] Headless run path (`ta run --headless`, including `--chat-mode`): the agent output pump records the stream failure; a run whose stream says it could not log in is marked failed with the reason and fix, prints `ta-launch-failure: code=no_login`, and exits non-zero instead of `Chat session finished: no draft needed` / `ta-run-finished: result=no_changes`.
+3. [x] Wake listener: reads the agent stream on stdout; a no-changes finish or a clean exit with a stream failure is a failed launch, the goal `ta draft build` completed is failed to agree, and the daemon logs an error with the reason code and the fix. `wake_retry` already treats `no_login` and `login_invalid` as permanent (launched once, `launch_failed` published at once); a regression test pins one launch and that the next message still runs.
+4. [x] Pre-launch check: when the sandbox scrubs the environment, a login-framework agent with no login in the environment it would get (the `ta agent-login list` state) or a rejected stored login is refused before spawn, with the same classification, marker and `launch_failed` outcome and no model call. Agents no framework serves are never refused.
+5. [x] Item C: the built-in default `headroom` is skipped once with one info line and a `disabled` status when not installed; a default that fails before ever passing a health check is turned off after the first failure; an explicit `[compression.plugin]` keeps the warning. Nothing writes headroom into a fresh project's config.
+6. [x] Reproduced and verified with a stub `claude` (never a real model) on a /tmp scratch project through `ta run --headless --chat-mode`: before the fix exit 0 and "Chat session finished: no draft needed"; after, goal `failed`, `no_login`, exit 1, and the pre-launch refusal when no login exists. Daemon wake path covered by unit tests with a fake `ta`; the daemon itself was not run.
+
+**Effort**: S.
+
+#### Version: `0.17.12-alpha.37`
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: deferred -->
 

@@ -147,6 +147,127 @@ pub struct LaunchEvidence<'a> {
     /// One already-redacted line of evidence (typically the last stderr line)
     /// to quote in `detail`.
     pub evidence_line: Option<&'a str>,
+    /// What the agent's own stream-json output reported, when it reported a failure.
+    pub stream_failure: Option<StreamFailureKind>,
+}
+
+/// What an agent's own stream-json output said went wrong. The agent can exit
+/// with a plain failure after printing these, with TA's own markers absent, so
+/// the launcher reads them from the stream instead of trusting the exit status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFailureKind {
+    /// The agent said it is not logged in (`Not logged in - Please run /login`).
+    NotLoggedIn,
+    /// The vendor refused the credential (`authentication_failed`, a 401 or 403,
+    /// an expired or invalid key).
+    AuthRejected,
+    /// The session ended with an API error result and spent no tokens and no
+    /// money, so the model never did any work.
+    ErrorWithoutWork,
+}
+
+fn assistant_text(v: &serde_json::Value) -> String {
+    v.get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+fn auth_kind(lower_text: &str, status: Option<u64>) -> StreamFailureKind {
+    if status.is_some_and(|s| s == 401 || s == 403)
+        || contains_any(lower_text, INVALID_LOGIN_NEEDLES)
+    {
+        StreamFailureKind::AuthRejected
+    } else if lower_text.contains("not logged in") || lower_text.contains("please run /login") {
+        StreamFailureKind::NotLoggedIn
+    } else {
+        StreamFailureKind::AuthRejected
+    }
+}
+
+/// What one line of an agent's stream-json stdout says about its own failure.
+/// Only structured fields count (an `authentication_failed` error on an
+/// assistant message; an `is_error` result), never free text an agent printed
+/// as part of its work, so a task that merely talks about logins is not a
+/// failure. Lines that are not JSON are ignored.
+pub fn stream_failure(line: &str) -> Option<StreamFailureKind> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let error_field = v.get("error").and_then(|e| e.as_str()).unwrap_or_default();
+    let auth_error = error_field == "authentication_failed";
+    match v.get("type").and_then(|t| t.as_str())? {
+        "assistant" if auth_error => {
+            Some(auth_kind(&assistant_text(&v).to_ascii_lowercase(), None))
+        }
+        "result" if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) => {
+            let text = v
+                .get("result")
+                .and_then(|r| r.as_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let status = v.get("api_error_status").and_then(|s| s.as_u64());
+            let text_is_auth = contains_any(&text, INVALID_LOGIN_NEEDLES)
+                || contains_any(&text, NO_LOGIN_NEEDLES)
+                || text.contains("please run /login");
+            if auth_error || text_is_auth || status.is_some_and(|s| s == 401 || s == 403) {
+                return Some(auth_kind(&text, status));
+            }
+            let tokens: u64 = v
+                .get("usage")
+                .and_then(|u| u.as_object())
+                .map(|u| u.values().filter_map(|n| n.as_u64()).sum())
+                .unwrap_or(0);
+            let cost = v
+                .get("total_cost_usd")
+                .and_then(|c| c.as_f64())
+                .unwrap_or(0.0);
+            (tokens == 0 && cost == 0.0).then_some(StreamFailureKind::ErrorWithoutWork)
+        }
+        _ => None,
+    }
+}
+
+/// The most telling failure in an agent's stream-json output (a login problem
+/// beats a plain error result), or `None` when no line reported one.
+pub fn stream_failure_in(text: &str) -> Option<StreamFailureKind> {
+    let rank = |k: &StreamFailureKind| match k {
+        StreamFailureKind::NotLoggedIn => 0,
+        StreamFailureKind::AuthRejected => 1,
+        StreamFailureKind::ErrorWithoutWork => 2,
+    };
+    text.lines().filter_map(stream_failure).min_by_key(rank)
+}
+
+impl StreamFailureKind {
+    /// A fixed, secret-free sentence for logs and the goal's failure reason.
+    pub fn describe(self) -> &'static str {
+        match self {
+            StreamFailureKind::NotLoggedIn => {
+                "the agent reported it is not logged in (authentication_failed)"
+            }
+            StreamFailureKind::AuthRejected => {
+                "the agent reported that its login was rejected (authentication_failed or HTTP 401/403)"
+            }
+            StreamFailureKind::ErrorWithoutWork => {
+                "the agent's session ended with an API error and spent no tokens and no money"
+            }
+        }
+    }
+
+    /// True when the failure is about the login rather than a plain API error.
+    pub fn is_login(self) -> bool {
+        !matches!(self, StreamFailureKind::ErrorWithoutWork)
+    }
 }
 
 /// The framework id `ta agent-login login <id>` takes for an agent id.
@@ -352,6 +473,19 @@ pub fn classify(ev: &LaunchEvidence<'_>) -> LaunchFailureCode {
     let did_work = ev.output_lines.is_some_and(|n| n > 0);
     if !did_work && contains_any(&lower, MISSING_NEEDLES) {
         return LaunchFailureCode::AgentMissing;
+    }
+    // The agent's own stream said it could not authenticate: a login problem
+    // whatever the exit status or the rest of the output was.
+    match ev.stream_failure {
+        Some(StreamFailureKind::NotLoggedIn) => return LaunchFailureCode::NoLogin,
+        Some(StreamFailureKind::AuthRejected) => {
+            return if ev.login == Some(LoginState::Missing) {
+                LaunchFailureCode::NoLogin
+            } else {
+                LaunchFailureCode::LoginInvalid
+            };
+        }
+        _ => {}
     }
     if contains_any(&lower, INVALID_LOGIN_NEEDLES) {
         return LaunchFailureCode::LoginInvalid;
@@ -701,5 +835,74 @@ mod tests {
             "bwrap: Can't mkdir /x: Read-only file system"
         ));
         assert!(!sandbox_denial("agent said hello"));
+    }
+
+    /// The exact shape the Claude CLI prints when it has no login.
+    const NOT_LOGGED_IN_ASSISTANT: &str = r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed"}"#;
+    const NOT_LOGGED_IN_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"result":"Not logged in · Please run /login","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+
+    #[test]
+    fn an_authentication_failed_stream_is_a_login_failure() {
+        assert_eq!(
+            stream_failure(NOT_LOGGED_IN_ASSISTANT),
+            Some(StreamFailureKind::NotLoggedIn)
+        );
+        assert_eq!(
+            stream_failure(NOT_LOGGED_IN_RESULT),
+            Some(StreamFailureKind::NotLoggedIn)
+        );
+        let rejected = r#"{"type":"result","is_error":true,"api_error_status":401,"result":"Invalid API key · Please run /login","usage":{"input_tokens":0}}"#;
+        assert_eq!(
+            stream_failure(rejected),
+            Some(StreamFailureKind::AuthRejected)
+        );
+        let text =
+            format!("{{\"type\":\"system\"}}\n{NOT_LOGGED_IN_ASSISTANT}\n{NOT_LOGGED_IN_RESULT}\n");
+        assert_eq!(
+            stream_failure_in(&text),
+            Some(StreamFailureKind::NotLoggedIn)
+        );
+    }
+
+    #[test]
+    fn talking_about_logins_or_failing_after_working_is_not_a_launch_failure() {
+        // Free text and ordinary assistant messages never count.
+        assert_eq!(stream_failure("Not logged in · Please run /login"), None);
+        let talk = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"the user is not logged in, so I fixed the banner"}]}}"#;
+        assert_eq!(stream_failure(talk), None);
+        // An API error after the agent spent tokens is a failed run, not a launch.
+        let after_work = r#"{"type":"result","is_error":true,"api_error_status":529,"result":"Overloaded","total_cost_usd":0.42,"usage":{"input_tokens":900,"output_tokens":40}}"#;
+        assert_eq!(stream_failure(after_work), None);
+        let ok = r#"{"type":"result","is_error":false,"result":"done","usage":{"input_tokens":5}}"#;
+        assert_eq!(stream_failure(ok), None);
+    }
+
+    #[test]
+    fn an_error_result_that_spent_nothing_is_a_failed_launch() {
+        let overloaded = r#"{"type":"result","is_error":true,"api_error_status":529,"result":"Overloaded","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+        assert_eq!(
+            stream_failure(overloaded),
+            Some(StreamFailureKind::ErrorWithoutWork)
+        );
+        let mut e = ev("");
+        e.stream_failure = Some(StreamFailureKind::ErrorWithoutWork);
+        e.output_lines = Some(2);
+        assert_eq!(classify(&e), LaunchFailureCode::Crashed);
+    }
+
+    #[test]
+    fn a_stream_login_failure_classifies_as_no_login_with_the_fix() {
+        let mut e = ev("");
+        e.exit_code = Some(1);
+        e.output_lines = Some(3);
+        e.stream_failure = Some(StreamFailureKind::NotLoggedIn);
+        let f = classify_and_describe(&e);
+        assert_eq!(f.code, LaunchFailureCode::NoLogin);
+        assert!(f.fix.contains("ta agent-login login claude-code"), "{f:?}");
+        // A rejected credential is `login_invalid`, or `no_login` when none is stored.
+        e.stream_failure = Some(StreamFailureKind::AuthRejected);
+        assert_eq!(classify(&e), LaunchFailureCode::LoginInvalid);
+        e.login = Some(LoginState::Missing);
+        assert_eq!(classify(&e), LaunchFailureCode::NoLogin);
     }
 }
