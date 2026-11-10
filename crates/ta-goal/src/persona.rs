@@ -35,8 +35,9 @@ pub struct PersonaCapabilities {
     pub read_only: bool,
     /// Launch this persona as a read-only chat-mode session (equivalent to
     /// `ta run --chat-mode`). The agent's capability manifest becomes the
-    /// compiled chat manifest (read anywhere in the workspace, write only to
-    /// `.ta/chat-scratch/`, no git/email/external grants), its TA MCP server
+    /// compiled chat manifest (read-only: no write grant of any kind, no
+    /// git/email/external grants; what it reads beyond the project is the
+    /// project's `[chat.read]` allow/deny policy), its TA MCP server
     /// runs locked to that chat session, and its effective tool surface is
     /// `allowed_tools` intersected with the chat-mode profile: any mutating
     /// tool listed in `allowed_tools` is stripped with a warning, and every

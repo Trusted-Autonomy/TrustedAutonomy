@@ -1058,6 +1058,15 @@ enum Commands {
         #[command(subcommand)]
         command: commands::sandbox::SandboxCommands,
     },
+    /// See what the chat-mode Chief of Staff may read, and why a path is allowed or denied.
+    ///
+    /// `ta chat-read check <path>` prints ALLOWED or DENIED and the rule that decided it;
+    /// `ta chat-read list` prints the compiled `[chat.read]` allow and deny lists and the
+    /// built-in protected locations.
+    ChatRead {
+        #[command(subcommand)]
+        command: commands::chat_read::ChatReadCommands,
+    },
     /// Manage the project behavioral constitution (.ta/constitution.md).
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
@@ -2438,6 +2447,7 @@ fn dispatch_raw(
         Commands::Constitution { command } => commands::constitution::execute(command, config),
         Commands::Rules { command } => commands::rules::execute(command, config),
         Commands::Sandbox { command } => commands::sandbox::execute(command, config),
+        Commands::ChatRead { command } => commands::chat_read::execute(command, config),
         Commands::Memory { command } => commands::memory::execute(command, config),
         Commands::Adapter { command } => commands::adapter::execute(command, project_root),
         Commands::Install => commands::install::execute(project_root),

@@ -72,6 +72,12 @@ pub struct TaskListParams {
     /// differs from it is rejected.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional: the name of ANOTHER project the owner made readable (a project
+    /// registered in office.yaml and listed in `[chat.read] allow`). Reads that
+    /// project's own Wayfinder pin, with its own credential, read-only. Omit for
+    /// this session's project.
+    #[serde(default)]
+    pub project: Option<String>,
     /// Optional status filter: open, in_progress, done, cancelled or on_hold.
     #[serde(default)]
     pub status: Option<String>,
@@ -88,6 +94,12 @@ pub struct TaskGetParams {
     /// Do NOT set. The project is fixed by this chat session.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional: the name of ANOTHER project the owner made readable (a project
+    /// registered in office.yaml and listed in `[chat.read] allow`). Reads that
+    /// project's own Wayfinder pin, with its own credential, read-only. Omit for
+    /// this session's project.
+    #[serde(default)]
+    pub project: Option<String>,
     /// The Wayfinder task id (from `ta_wayfinder_task_list`).
     pub task_id: String,
 }
@@ -97,6 +109,12 @@ pub struct GoalListParams {
     /// Do NOT set. The project is fixed by this chat session.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional: the name of ANOTHER project the owner made readable (a project
+    /// registered in office.yaml and listed in `[chat.read] allow`). Reads that
+    /// project's own Wayfinder pin, with its own credential, read-only. Omit for
+    /// this session's project.
+    #[serde(default)]
+    pub project: Option<String>,
     /// Optional status filter: active, completed or archived.
     #[serde(default)]
     pub status: Option<String>,
@@ -113,6 +131,12 @@ pub struct KpiMetricListParams {
     /// Do NOT set. The project is fixed by this chat session.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional: the name of ANOTHER project the owner made readable (a project
+    /// registered in office.yaml and listed in `[chat.read] allow`). Reads that
+    /// project's own Wayfinder pin, with its own credential, read-only. Omit for
+    /// this session's project.
+    #[serde(default)]
+    pub project: Option<String>,
     /// The goal whose KPI metrics to list (from `ta_wayfinder_goal_list`).
     /// Wayfinder's REST API lists metrics per goal; for every metric in the
     /// project at once use `ta_wayfinder_kpi_summary`.
@@ -127,6 +151,12 @@ pub struct KpiSummaryParams {
     /// Do NOT set. The project is fixed by this chat session.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional: the name of ANOTHER project the owner made readable (a project
+    /// registered in office.yaml and listed in `[chat.read] allow`). Reads that
+    /// project's own Wayfinder pin, with its own credential, read-only. Omit for
+    /// this session's project.
+    #[serde(default)]
+    pub project: Option<String>,
     /// Max metrics, 1 to 100 (default 25). Worst pace first.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -137,6 +167,12 @@ pub struct KpiListParams {
     /// Do NOT set. The project is fixed by this chat session.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Optional: the name of ANOTHER project the owner made readable (a project
+    /// registered in office.yaml and listed in `[chat.read] allow`). Reads that
+    /// project's own Wayfinder pin, with its own credential, read-only. Omit for
+    /// this session's project.
+    #[serde(default)]
+    pub project: Option<String>,
     /// Max items, 1 to 100 (default 50).
     #[serde(default)]
     pub limit: Option<usize>,
@@ -209,6 +245,7 @@ impl ReadContext {
 fn load_context(
     state: &Arc<Mutex<GatewayState>>,
     tool: &str,
+    project: Option<&str>,
     requested: Option<&str>,
 ) -> Result<ReadContext, McpError> {
     // Project configuration (`.ta/workflow.toml`, the credential vault) lives
@@ -218,11 +255,44 @@ fn load_context(
         let locked = state
             .lock()
             .map_err(|e| McpError::internal_error(format!("{tool}: lock poisoned: {e}"), None))?;
-        (
-            locked.read_tool_root(tool)?,
-            locked.config.credential_vault_use_keychain,
-            locked.chat_wayfinder_project_id.clone(),
-        )
+        let own_root = locked.read_tool_root(tool)?;
+        match project {
+            None => (
+                own_root,
+                locked.config.credential_vault_use_keychain,
+                locked.chat_wayfinder_project_id.clone(),
+            ),
+            // Another project's Wayfinder data: only a project the owner registered
+            // in office.yaml AND listed in `[chat.read] allow` (so it is in the
+            // biscuit-derived policy), never an arbitrary path. That project's own
+            // `[plan.wayfinder]` pin and credential apply; the wake pin belongs to
+            // THIS session's project and does not. Strictly read-only GETs.
+            Some(name) => {
+                let other = locked
+                    .chat_read
+                    .as_ref()
+                    .and_then(|c| c.policy.registered_project(name))
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            format!(
+                                "{tool}: project '{name}' is not readable from this session. \
+                                 Only a project registered in office.yaml and listed under \
+                                 `allow` in [chat.read] of the project's .ta/workflow.toml can \
+                                 be named; omit `project` to read this session's own Wayfinder \
+                                 project."
+                            ),
+                            None,
+                        )
+                    })?;
+                tracing::info!(
+                    tool,
+                    project = name,
+                    root = %other.display(),
+                    "chat Wayfinder read of another allowed project (read-only)"
+                );
+                (other, locked.config.credential_vault_use_keychain, None)
+            }
+        }
     };
 
     let workflow_toml = workspace_root.join(".ta").join("workflow.toml");
@@ -482,7 +552,12 @@ pub fn handle_task_list(
         params.title_contains.as_deref(),
     )?;
     let limit = effective_limit(TASK_LIST, params.limit, DEFAULT_LIST_LIMIT)?;
-    let ctx = load_context(state, TASK_LIST, params.project_id.as_deref())?;
+    let ctx = load_context(
+        state,
+        TASK_LIST,
+        params.project.as_deref(),
+        params.project_id.as_deref(),
+    )?;
     let project_id = ctx.project_id.clone();
 
     let raw = ctx.read(TASK_LIST, move |c| c.get_project_json(&["tasks"], &[]))?;
@@ -516,7 +591,12 @@ pub fn handle_task_get(
     params: TaskGetParams,
 ) -> Result<CallToolResult, McpError> {
     validate_id(TASK_GET, "task_id", &params.task_id)?;
-    let ctx = load_context(state, TASK_GET, params.project_id.as_deref())?;
+    let ctx = load_context(
+        state,
+        TASK_GET,
+        params.project.as_deref(),
+        params.project_id.as_deref(),
+    )?;
     let project_id = ctx.project_id.clone();
     let task_id = params.task_id.clone();
 
@@ -585,7 +665,12 @@ pub fn handle_goal_list(
     validate_filter(GOAL_LIST, "status", params.status.as_deref())?;
     validate_filter(GOAL_LIST, "name_contains", params.name_contains.as_deref())?;
     let limit = effective_limit(GOAL_LIST, params.limit, DEFAULT_LIST_LIMIT)?;
-    let ctx = load_context(state, GOAL_LIST, params.project_id.as_deref())?;
+    let ctx = load_context(
+        state,
+        GOAL_LIST,
+        params.project.as_deref(),
+        params.project_id.as_deref(),
+    )?;
     let project_id = ctx.project_id.clone();
 
     let raw = ctx.read(GOAL_LIST, move |c| c.get_project_json(&["goals"], &[]))?;
@@ -618,7 +703,12 @@ pub fn handle_kpi_metric_list(
 ) -> Result<CallToolResult, McpError> {
     validate_id(KPI_METRIC_LIST, "goal_id", &params.goal_id)?;
     let limit = effective_limit(KPI_METRIC_LIST, params.limit, DEFAULT_LIST_LIMIT)?;
-    let ctx = load_context(state, KPI_METRIC_LIST, params.project_id.as_deref())?;
+    let ctx = load_context(
+        state,
+        KPI_METRIC_LIST,
+        params.project.as_deref(),
+        params.project_id.as_deref(),
+    )?;
     let project_id = ctx.project_id.clone();
     let goal_id = params.goal_id.clone();
 
@@ -665,7 +755,12 @@ pub fn handle_kpi_summary(
     params: KpiSummaryParams,
 ) -> Result<CallToolResult, McpError> {
     let limit = effective_limit(KPI_SUMMARY, params.limit, DEFAULT_SUMMARY_LIMIT)?;
-    let ctx = load_context(state, KPI_SUMMARY, params.project_id.as_deref())?;
+    let ctx = load_context(
+        state,
+        KPI_SUMMARY,
+        params.project.as_deref(),
+        params.project_id.as_deref(),
+    )?;
     let project_id = ctx.project_id.clone();
     let limit_str = limit.to_string();
 
@@ -727,7 +822,12 @@ pub fn handle_kpi_list(
     params: KpiListParams,
 ) -> Result<CallToolResult, McpError> {
     let limit = effective_limit(KPI_LIST, params.limit, DEFAULT_LIST_LIMIT)?;
-    let ctx = load_context(state, KPI_LIST, params.project_id.as_deref())?;
+    let ctx = load_context(
+        state,
+        KPI_LIST,
+        params.project.as_deref(),
+        params.project_id.as_deref(),
+    )?;
     let project_id = ctx.project_id.clone();
     let pin = project_id.clone();
 
@@ -993,6 +1093,15 @@ mod tests {
         f: &Fixture,
         grant_tools: Option<&[&str]>,
     ) -> (Arc<Mutex<GatewayState>>, tempfile::TempDir) {
+        chat_state_allowing(f, grant_tools, vec![])
+    }
+
+    /// [`chat_state`] whose read grant also carries these `[chat.read]` allow rules.
+    fn chat_state_allowing(
+        f: &Fixture,
+        grant_tools: Option<&[&str]>,
+        allow: Vec<ta_policy::read_policy::ReadRule>,
+    ) -> (Arc<Mutex<GatewayState>>, tempfile::TempDir) {
         let session_dir = tempfile::tempdir().unwrap();
         let mut config = GatewayConfig::for_project(session_dir.path());
         config.credential_vault_use_keychain = false;
@@ -1003,8 +1112,9 @@ mod tests {
             None => (None, None),
             Some(tools) => {
                 let access = ta_policy::ChatReadAccess {
-                    project: true,
-                    readable_projects: vec![],
+                    project_root: Some(f.dir.path().canonicalize().unwrap()),
+                    allow,
+                    deny: vec![],
                     tools: tools.iter().map(|t| t.to_string()).collect(),
                 };
                 let token = crate::chat_launch::mint_chat_read_grant(
@@ -1045,6 +1155,85 @@ mod tests {
         let out = json_of(handle_task_list(&state, TaskListParams::default()));
         assert_eq!(out["tasks"][0]["id"], "t9", "{out}");
         assert_eq!(f.mock.paths(), vec!["/api/projects/proj-1/tasks"]);
+    }
+
+    /// A registered project named in `[chat.read] allow` is read through ITS OWN
+    /// `[plan.wayfinder]` pin and credential (read-only GETs); an unlisted name,
+    /// a name that is only an allowed path (not a registered project), and a
+    /// project_id mismatch are all refused with no request sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_cos_reads_another_registered_projects_wayfinder_with_its_own_pin() {
+        use ta_policy::read_policy::{ReadRule, RuleKind};
+        let own = fixture_for("proj-own", None).await;
+        let other = fixture_for("proj-other", None).await;
+        other.mock.route(
+            "/api/projects/proj-other/tasks",
+            200,
+            json!([task("o1", "Other project task", "open", 3)]),
+        );
+        let root = other.dir.path().canonicalize().unwrap();
+        let rule = |label: &str, registered: bool| ReadRule {
+            kind: RuleKind::Path,
+            pattern: root.display().to_string(),
+            source: label.to_string(),
+            label: Some(label.to_string()),
+            registered,
+        };
+        let (state, _s) = chat_state_allowing(
+            &own,
+            Some(ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS),
+            vec![rule("other", true), rule("notes", false)],
+        );
+
+        let out = json_of(handle_task_list(
+            &state,
+            TaskListParams {
+                project: Some("other".into()),
+                ..Default::default()
+            },
+        ));
+        assert_eq!(out["tasks"][0]["id"], "o1", "{out}");
+        assert_eq!(other.mock.paths(), vec!["/api/projects/proj-other/tasks"]);
+        assert!(
+            own.mock.paths().is_empty(),
+            "the session's own server is not asked"
+        );
+
+        // Allowed as a path only: not a registered project, so no Wayfinder data.
+        let err = err_of(handle_task_list(
+            &state,
+            TaskListParams {
+                project: Some("notes".into()),
+                ..Default::default()
+            },
+        ));
+        assert!(
+            err.contains("not readable") && err.contains("[chat.read]"),
+            "{err}"
+        );
+        // Not listed at all.
+        let err = err_of(handle_kpi_list(
+            &state,
+            KpiListParams {
+                project: Some("nope".into()),
+                ..Default::default()
+            },
+        ));
+        assert!(err.contains("not readable"), "{err}");
+        // The other project's pin still binds: a different project_id is refused.
+        let err = err_of(handle_task_list(
+            &state,
+            TaskListParams {
+                project: Some("other".into()),
+                project_id: Some("proj-own".into()),
+                ..Default::default()
+            },
+        ));
+        assert!(
+            err.contains("proj-other") && err.contains("proj-own"),
+            "{err}"
+        );
+        assert_eq!(other.mock.paths().len(), 1, "no further request was sent");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1439,6 +1628,7 @@ mod tests {
                 &f.state,
                 TaskGetParams {
                     project_id: Some("proj-2".into()),
+                    project: None,
                     task_id: "t".into(),
                 },
             ),
@@ -1453,6 +1643,7 @@ mod tests {
                 &f.state,
                 KpiMetricListParams {
                     project_id: Some("proj-2".into()),
+                    project: None,
                     goal_id: "g".into(),
                     limit: None,
                 },
@@ -1461,6 +1652,7 @@ mod tests {
                 &f.state,
                 KpiSummaryParams {
                     project_id: Some("proj-2".into()),
+                    project: None,
                     limit: None,
                 },
             ),
@@ -1468,6 +1660,7 @@ mod tests {
                 &f.state,
                 KpiListParams {
                     project_id: Some("proj-2".into()),
+                    project: None,
                     limit: None,
                 },
             ),

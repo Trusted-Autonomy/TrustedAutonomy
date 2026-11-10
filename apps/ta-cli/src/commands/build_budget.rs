@@ -143,6 +143,7 @@ pub fn describe(goal_id: &str, dir: &Path, breach: &Breach, action: BuildBudgetA
 }
 
 /// `(pid, ppid)` pairs from `ps -A -o pid=,ppid=` output; unparsable lines are skipped.
+#[cfg_attr(not(unix), allow(dead_code))] // the only caller, `process_table`, is Unix-only
 pub fn parse_ps_table(out: &str) -> Vec<(u32, u32)> {
     out.lines()
         .filter_map(|l| {
@@ -153,6 +154,7 @@ pub fn parse_ps_table(out: &str) -> Vec<(u32, u32)> {
 }
 
 /// `root` followed by every process descended from it, parents before children.
+#[cfg_attr(not(unix), allow(dead_code))] // the callers are the Unix-only signalling path
 pub fn tree_pids(root: u32, table: &[(u32, u32)]) -> Vec<u32> {
     let mut out = vec![root];
     let mut seen: HashSet<u32> = HashSet::from([root]);

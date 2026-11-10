@@ -11579,6 +11579,47 @@ Status note: items 1 to 3 are built and tested; the report only shows a recommen
 **Effort**: M.
 
 #### Version: `0.17.12-alpha.35`
+
+### v0.17.12.36 - Chief of Staff read allow/deny lists
+<!-- status: in_progress -->
+**Depends on**: v0.17.12.35
+
+**Goal**: The chat-mode Chief of Staff has a read ALLOW list and a DENY list over arbitrary files and folders (other projects, a notes folder, a Documents subfolder, registered projects' Wayfinder data), still with no project copy, with ALL write access blocked in every layer, and the whole policy carried by the biscuit capability token. One compiled policy feeds the gateway tools, the token and the OS sandbox profile.
+
+1. [x] `[chat.read] allow` / `deny` in `.ta/workflow.toml` (absolute path, `~/path`, project name from `office.yaml`, glob); `readable_projects` is kept only as an alias merged into `allow`. Deny beats allow; empty `allow` is the project root only; canonicalisation refuses symlink escape and `..`; a built-in hard deny (the sandbox's protected-home list, `.ta/`, `.git`, the TA state dir) cannot be overridden; a deny inside an allowed root hides only that subtree. Engine: `ta_policy::read_policy` (single implementation; `ta-runtime` re-exports its constants).
+2. [x] Gateway: `ta_fs_read`, `ta_fs_list` (now lists real directories, hides denied entries, reports the hidden count) and the `project` argument enforce the policy rebuilt from the TOKEN, not from config; unit tests prove a mid-session config edit changes nothing and a token without a path refuses it. Refusals name the `[chat.read]` key.
+3. [x] Token: the read grant encodes the compiled allow and deny rules (`ChatReadAccess::from_policy`, strict `from_scopes`); the manifest grants `fs.read` only and no write verb on any resource.
+4. [x] Sandbox: Seatbelt profile gets allowed roots read-only, explicit denies, and an opt-in home read confinement (`SandboxPolicy.read_confine`, `file-read-data` re-allows; a wildcard `file-read*` allow does not beat a specific `file-read-data` deny, found and fixed with the conformance suite). Extended Seatbelt conformance test run on macOS with real `sandbox-exec`: allowed outside-root path reads, denied subtree and unlisted home path do not, built-in locations do not, writes refused on every granted path, `sh` and `git` still start.
+5. [x] Writes blocked at the access level: `ta_fs_write` removed from the chat tool surface and its handler refuses when reached; a router test pins the exact set of non-read-only chat tools (three whiteboard coordination tools); the persona/`allowed_tools` path cannot reintroduce a write tool (`a_persona_cannot_reintroduce_a_write_tool`); scratch writes removed.
+6. [x] Cross-project Wayfinder: an `allow` entry naming a registered project lets every `ta_wayfinder_*` tool take `project`, resolving that project's `[plan.wayfinder]` pin and its credential from TA custody, read-only. Unit-tested against a fake Wayfinder; not exercised end to end. No Wayfinder-side change was needed for this.
+7. [x] `ta chat-read check <path>` and `ta chat-read list`.
+8. [x] Real launch path run on macOS: `ta run --chat-mode --headless` on a /tmp scratch project with a fake local Wayfinder and a stub agent (never a real model) through the real sandbox and the `ta mcp-bridge`/gateway: config resolved from the real root, allowed outside file read, denied and unlisted and built-in paths refused with the config key named, `ta_fs_write` absent, direct OS writes refused. The daemon wake path is covered by the shared `build_ta_run_args` unit test (`--headless --chat-mode`); the daemon itself was not run.
+9. [ ] Linux bwrap and Landlock: `fs_view` already mounts `allow_read` read-only and masks `deny_paths` from the same profile, with unit coverage; not run on Linux. Globs are expanded once at launch.
+10. [ ] Windows: AppContainer grants no read on arbitrary roots (reads go through the out-of-sandbox gateway and the token); not run on Windows.
+11. [ ] macOS reads outside the user's home stay allow-all by Seatbelt default: an allow/deny entry outside the home is enforced by the gateway and token, not by the sandbox's read rules. Decide whether to confine more of the filesystem (agent compatibility unverified for a real Claude Code run under home confinement and its toolchain re-allow list).
+12. [ ] Wayfinder-side: a read-scoped service-account token per project (so a CoS credential cannot be used for writes by construction) is a Wayfinder change; TA only issues GETs today.
+13. [ ] Move `[chat.read]` to owner state policy: agents cannot change `.ta/workflow.toml` through drafts today, but a draft applied by the owner could widen it.
+
+**Effort**: M.
+
+#### Version: `0.17.12-alpha.36`
+
+### v0.17.12.37 - Login failures are launch failures, quiet defaults
+<!-- status: done -->
+**Depends on**: v0.17.12.36
+
+**Goal**: An agent that could not authenticate ends as a FAILED launch with the login fix in its reason, is never retried, and is refused before launch when its login is known to be missing; a default optimizer that is not installed or never started stays quiet. Source: Wayfinder finding 059 items A and C.
+
+1. [x] Stream failure detection (`ta_goal::launch_failure::stream_failure`): structural only. An assistant line with `error: authentication_failed`, or a `result` line with `is_error: true` that is an auth failure (401/403, auth wording) or spent no tokens and no money. Free text about logins never counts. `LaunchEvidence.stream_failure` classifies as `no_login` (or `login_invalid` when the probe says a login is stored), a zero-spend error as `crashed`.
+2. [x] Headless run path (`ta run --headless`, including `--chat-mode`): the agent output pump records the stream failure; a run whose stream says it could not log in is marked failed with the reason and fix, prints `ta-launch-failure: code=no_login`, and exits non-zero instead of `Chat session finished: no draft needed` / `ta-run-finished: result=no_changes`.
+3. [x] Wake listener: reads the agent stream on stdout; a no-changes finish or a clean exit with a stream failure is a failed launch, the goal `ta draft build` completed is failed to agree, and the daemon logs an error with the reason code and the fix. `wake_retry` already treats `no_login` and `login_invalid` as permanent (launched once, `launch_failed` published at once); a regression test pins one launch and that the next message still runs.
+4. [x] Pre-launch check: when the sandbox scrubs the environment, a login-framework agent with no login in the environment it would get (the `ta agent-login list` state) or a rejected stored login is refused before spawn, with the same classification, marker and `launch_failed` outcome and no model call. Agents no framework serves are never refused.
+5. [x] Item C: the built-in default `headroom` is skipped once with one info line and a `disabled` status when not installed; a default that fails before ever passing a health check is turned off after the first failure; an explicit `[compression.plugin]` keeps the warning. Nothing writes headroom into a fresh project's config.
+6. [x] Reproduced and verified with a stub `claude` (never a real model) on a /tmp scratch project through `ta run --headless --chat-mode`: before the fix exit 0 and "Chat session finished: no draft needed"; after, goal `failed`, `no_login`, exit 1, and the pre-launch refusal when no login exists. Daemon wake path covered by unit tests with a fake `ta`; the daemon itself was not run.
+
+**Effort**: S.
+
+#### Version: `0.17.12-alpha.37`
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: deferred -->
 

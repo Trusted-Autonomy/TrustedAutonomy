@@ -4900,14 +4900,14 @@ pub fn execute(
     };
 
     match launch_result {
-        Ok((exit, _)) if (headless || quiet) && headless_agent_never_started(&agent_tokens_out) => {
-            // The agent process ran but wrote nothing: it never reached its model
-            // session (for example the sandbox denied its login helper). That is a
-            // failed launch, not a finished goal with an empty draft.
-            let reason = ta_goal::agent_start::never_started_reason(
-                Some(agent_tokens_out.output_lines),
-                None,
-            );
+        Ok((exit, _))
+            if (headless || quiet) && headless_agent_failed_to_start(&agent_tokens_out) =>
+        {
+            // The agent process ran but never reached real work: it wrote nothing (for
+            // example the sandbox denied its login helper), or its own stream says it could
+            // not authenticate (`authentication_failed`, "Not logged in", a 401) or ended
+            // with an API error that spent nothing. That is a failed launch, not a finished
+            // goal with an empty draft.
             let failure = ta_goal::launch_failure::classify_and_describe(
                 &ta_goal::launch_failure::LaunchEvidence {
                     agent,
@@ -4915,9 +4915,23 @@ pub fn execute(
                     exit_code: exit.code(),
                     output_lines: Some(agent_tokens_out.output_lines),
                     login: Some(ta_runtime::login_probe::default_probe().status(agent)),
+                    stream_failure: agent_tokens_out.stream_failure,
                     ..Default::default()
                 },
             );
+            // A stream failure's reason names the fix, because that is the text the goal
+            // shows (`ta goal status`) and the poller's hold reason repeats.
+            let reason = match agent_tokens_out.stream_failure {
+                Some(kind) => format!(
+                    "{}, so it did no work. {}",
+                    kind.describe(),
+                    failure.headline()
+                ),
+                None => ta_goal::agent_start::never_started_reason(
+                    Some(agent_tokens_out.output_lines),
+                    None,
+                ),
+            };
             mark_goal_agent_never_started(config, goal.goal_run_id, &reason, exit.code(), &failure);
             print_launch_failure(agent, &agent_config.command, goal.goal_run_id, &failure);
             {
@@ -6526,14 +6540,78 @@ fn headless_agent_never_started(tokens: &AgentTokens) -> bool {
     ta_goal::agent_start::never_started(tokens.output_lines, None)
 }
 
+/// A headless agent that never started its model session, or whose own stream says it
+/// could not authenticate or ended with an API error that spent nothing.
+fn headless_agent_failed_to_start(tokens: &AgentTokens) -> bool {
+    headless_agent_never_started(tokens) || tokens.stream_failure.is_some()
+}
+
+/// A launch refused before anything was spawned because the agent's login is known to
+/// be missing or rejected: no model call was made. Carried inside the `io::Error` the
+/// launch returns so [`launch_error_failure`] reports the exact classified failure.
+#[derive(Debug)]
+struct LoginRefused {
+    failure: ta_goal::LaunchFailure,
+}
+
+impl std::fmt::Display for LoginRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Launch refused before the agent started, so no model call was made. {}",
+            self.failure.headline()
+        )
+    }
+}
+
+impl std::error::Error for LoginRefused {}
+
+/// The failure to refuse a launch of `agent` with, when its login is KNOWN to be missing
+/// or rejected (the state `ta agent-login list` shows: no variable in `env`, nothing
+/// stored, or a stored login the vendor rejected). `None` when a login is reachable and
+/// for any agent no login framework serves (a stub, a local model), which is never
+/// refused. `env` is the environment the agent will actually get.
+fn known_bad_login_failure(
+    store: &ta_credentials::agent_login::LoginStore,
+    catalog: &ta_credentials::agent_login::Catalog,
+    agent: &str,
+    command: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<ta_goal::LaunchFailure> {
+    use ta_credentials::agent_login::{status_for_agent, AgentLogin};
+    if catalog.serving(agent).is_empty() {
+        return None;
+    }
+    let login = match status_for_agent(store, catalog, agent, env) {
+        AgentLogin::Present => return None,
+        AgentLogin::Missing => ta_goal::LoginState::Missing,
+        AgentLogin::Invalid => ta_goal::LoginState::Invalid,
+    };
+    Some(ta_goal::launch_failure::classify_and_describe(
+        &ta_goal::launch_failure::LaunchEvidence {
+            agent,
+            command: Some(command),
+            output_lines: Some(0),
+            login: Some(login),
+            ..Default::default()
+        },
+    ))
+}
+
 /// Classify a launch error from the runtime (the agent could not be started at
-/// all: spawn failed, sandbox refused) into a `launch_failed` reason.
+/// all: spawn failed, sandbox refused, login known missing) into a `launch_failed` reason.
 fn launch_error_failure(
     agent: &str,
     command: &str,
     err: &std::io::Error,
     is_not_found: bool,
 ) -> ta_goal::LaunchFailure {
+    if let Some(refused) = err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<LoginRefused>())
+    {
+        return refused.failure.clone();
+    }
     let text = if is_not_found {
         format!("'{command}' command not found ({err})")
     } else {
@@ -6629,6 +6707,9 @@ fn mark_goal_agent_never_started(
 struct AgentTokens {
     tracker: ta_goal::spend::UsageTracker,
     budget_abort: Option<ta_goal::BudgetAbort>,
+    /// The failure the agent's own stream reported (`authentication_failed`, an
+    /// `is_error` result that spent nothing), if any.
+    stream_failure: Option<ta_goal::launch_failure::StreamFailureKind>,
     /// Lines the agent wrote to stdout (its stream-json transcript). Zero means
     /// the agent never started its model session.
     output_lines: usize,
@@ -7347,6 +7428,29 @@ fn launch_agent_via_runtime(
                 project_root_opt.as_deref(),
                 &mut env,
             );
+            // The sandboxed agent can reach only what is in `env` now. When that is known
+            // to hold no login, refuse here instead of spending a model call to be told so.
+            if let Ok(catalog) =
+                ta_credentials::agent_login::Catalog::load(project_root_opt.as_deref())
+            {
+                if let Some(failure) = known_bad_login_failure(
+                    &ta_credentials::agent_login::LoginStore::open(),
+                    &catalog,
+                    &agent_name,
+                    &config.command,
+                    &|k| env.get(k).cloned(),
+                ) {
+                    tracing::error!(
+                        goal_id = %goal_id,
+                        agent = %agent_name,
+                        reason_code = %failure.code,
+                        fix = %failure.fix,
+                        "refusing to launch: the agent's login is known to be missing or rejected, \
+                         so it could not authenticate; no model call was made"
+                    );
+                    return Err(std::io::Error::other(LoginRefused { failure }));
+                }
+            }
         }
     }
     if let Some(plan) = &sandbox_plan {
@@ -7699,6 +7803,14 @@ fn pump_agent_output(
     let mut usd_ceiling_unpriced_warned = false;
     for line in lines {
         tokens.output_lines += 1;
+        if let Some(kind) = ta_goal::launch_failure::stream_failure(&line) {
+            // A login problem outranks a plain error result; keep the strongest seen.
+            let keep_old =
+                matches!(tokens.stream_failure, Some(old) if old.is_login() && !kind.is_login());
+            if !keep_old {
+                tokens.stream_failure = Some(kind);
+            }
+        }
         tokens.tracker.observe_line(&line);
         emit(&line);
         if budget_limits.is_unlimited() {
@@ -17868,6 +17980,116 @@ mod spend_tests {
         ));
         assert_eq!(working.output_lines, 2);
         assert!(!headless_agent_never_started(&working));
+    }
+
+    /// What the Claude CLI prints on stdout when it has no login, then exits 1.
+    const AUTH_FAILED_LINES: [&str; 3] = [
+        r#"{"type":"system","subtype":"init","model":"claude-sonnet"}"#,
+        r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed"}"#,
+        r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"result":"Not logged in · Please run /login","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    ];
+
+    fn pumped(lines: &[&str]) -> AgentTokens {
+        let mut tokens = AgentTokens::default();
+        pump_agent_output(
+            lines.iter().map(|l| l.to_string()),
+            &mut tokens,
+            ta_goal::spend::BudgetLimits::default(),
+            &ta_goal::PriceTable::builtin(),
+            uuid::Uuid::new_v4(),
+            |_| {},
+            || {},
+        );
+        tokens
+    }
+
+    /// Finding 059 blocker A: an agent that printed output (so it "started") but whose stream
+    /// says it could not authenticate is a failed launch, not a finished goal with an empty
+    /// draft. Before the fix only a silent agent was caught.
+    #[test]
+    fn an_agent_whose_stream_says_it_could_not_log_in_failed_to_start() {
+        let tokens = pumped(&AUTH_FAILED_LINES);
+        assert_eq!(tokens.output_lines, 3, "the agent printed output");
+        assert!(
+            !headless_agent_never_started(&tokens),
+            "this is not the silent case"
+        );
+        assert_eq!(
+            tokens.stream_failure,
+            Some(ta_goal::launch_failure::StreamFailureKind::NotLoggedIn)
+        );
+        assert!(headless_agent_failed_to_start(&tokens));
+
+        let failure = ta_goal::launch_failure::classify_and_describe(
+            &ta_goal::launch_failure::LaunchEvidence {
+                agent: "claude-code",
+                output_lines: Some(tokens.output_lines),
+                stream_failure: tokens.stream_failure,
+                ..Default::default()
+            },
+        );
+        assert_eq!(failure.code, ta_goal::LaunchFailureCode::NoLogin);
+        assert!(
+            failure
+                .headline()
+                .contains("ta agent-login login claude-code"),
+            "{}",
+            failure.headline()
+        );
+    }
+
+    #[test]
+    fn an_agent_that_worked_or_only_talked_about_logins_did_not_fail_to_start() {
+        let talk = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Not logged in is what the banner says; I fixed it"}]}}"#;
+        let done = r#"{"type":"result","is_error":false,"result":"ok","total_cost_usd":0.2,"usage":{"input_tokens":10,"output_tokens":4}}"#;
+        let tokens = pumped(&[talk, done]);
+        assert_eq!(tokens.stream_failure, None);
+        assert!(!headless_agent_failed_to_start(&tokens));
+    }
+
+    #[test]
+    fn a_zero_spend_api_error_result_is_a_failed_start() {
+        let overloaded = r#"{"type":"result","is_error":true,"api_error_status":529,"result":"Overloaded","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let tokens = pumped(&[overloaded]);
+        assert_eq!(
+            tokens.stream_failure,
+            Some(ta_goal::launch_failure::StreamFailureKind::ErrorWithoutWork)
+        );
+    }
+
+    /// The pre-launch check: a framework agent with no login in the environment it would get
+    /// is refused with the same classified failure; a present login or an agent no framework
+    /// serves is never refused.
+    #[test]
+    fn a_known_missing_login_is_refused_before_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ta_credentials::agent_login::LoginStore::with(dir.path(), false);
+        let catalog = ta_credentials::agent_login::Catalog::load_from(None, None).unwrap();
+
+        let none = |_: &str| None;
+        let f = known_bad_login_failure(&store, &catalog, "claude-code", "claude", &none)
+            .expect("no login anywhere: refuse");
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::NoLogin);
+        assert!(f.fix.contains("ta agent-login login claude-code"), "{f:?}");
+
+        // The refusal rides inside the launch error and comes out as the same failure.
+        let err = std::io::Error::other(LoginRefused { failure: f.clone() });
+        assert_eq!(
+            launch_error_failure("claude-code", "claude", &err, false),
+            f
+        );
+        assert!(err.to_string().contains("no model call was made"), "{err}");
+
+        let with_token = |k: &str| (k == "CLAUDE_CODE_OAUTH_TOKEN").then(|| "tok".to_string());
+        assert!(
+            known_bad_login_failure(&store, &catalog, "claude-code", "claude", &with_token)
+                .is_none(),
+            "a login in the environment is a login"
+        );
+        assert!(
+            known_bad_login_failure(&store, &catalog, "stub-agent", "stub", &none).is_none(),
+            "an agent no login framework serves is never refused"
+        );
     }
 
     #[test]

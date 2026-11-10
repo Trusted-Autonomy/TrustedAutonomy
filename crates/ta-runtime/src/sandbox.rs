@@ -100,6 +100,30 @@ pub struct SandboxPolicy {
     /// Tag the macOS profile appends to every denial in the unified log, so
     /// violations can be attributed to this goal.
     pub violation_tag: Option<String>,
+
+    /// macOS read confinement (opt-in; empty = reads stay allow-all with only the
+    /// targeted denies). See [`ReadConfine`].
+    pub read_confine: ReadConfine,
+}
+
+/// macOS Seatbelt read confinement.
+///
+/// The profile's reads are allow-all with targeted denies, because a deny-default
+/// read set cannot even start `/usr/bin/true`. A chat-mode session must not be able
+/// to read arbitrary files of the user's, so it opts into a narrower rule: file
+/// CONTENT reads (`file-read-data`, which includes listing a directory) under each
+/// `roots` subtree are denied, then re-allowed for `allow` subtrees (the owner's
+/// `[chat.read]` roots, the project root, toolchain locations) and the profile's
+/// `allow_read`. Reads outside every `roots` subtree are untouched, and metadata
+/// (`stat`: whether a path exists) stays readable everywhere. The protected-path
+/// denies and the write rules come after, so deny still wins and nothing here grants
+/// write. Other providers ignore this: bubblewrap never mounts what is not listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ReadConfine {
+    /// Subtrees whose content reads are denied by default (the user's home).
+    pub roots: Vec<PathBuf>,
+    /// Subtrees re-allowed inside `roots`, read-only (toolchains the agent runs from).
+    pub allow: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +172,7 @@ impl SandboxPolicy {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         }
     }
 
@@ -568,6 +593,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         };
         let working_dir = std::path::Path::new("/tmp/ta-staging/abc123");
         let profile = policy.generate_macos_profile(working_dir);
@@ -602,6 +628,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
         let wrapped = policy.apply(req);
@@ -629,6 +656,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         };
         let req = dummy_request(std::path::Path::new("/tmp/staging"));
         let wrapped = policy.apply(req.clone());
@@ -688,6 +716,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         };
         let guard = policy.post_spawn_apply(1234);
         assert!(
@@ -716,6 +745,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         };
         // PID 0 / 0xFFFFFFFF are never valid on any platform.
         let guard = policy.post_spawn_apply(0);

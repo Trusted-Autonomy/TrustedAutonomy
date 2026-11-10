@@ -2191,6 +2191,11 @@ mod tests {
         )
         .unwrap();
         assert!(args.contains(&"--chat-mode".to_string()), "{:?}", args);
+        // `ta run --headless --chat-mode` is the path that starts the no-copy session
+        // (run.rs: start_chat_goal_without_copy, the biscuit read grant, the sandbox
+        // read policy); the daemon adds no copy-making flag of its own.
+        assert!(args.contains(&"--headless".to_string()), "{:?}", args);
+        assert!(!args.iter().any(|a| a.contains("copy")), "{:?}", args);
         assert_eq!(flag_value(&args, "--origin"), Some("cos"));
         assert_eq!(flag_value(&args, "--persona"), Some("chief-of-staff"));
     }

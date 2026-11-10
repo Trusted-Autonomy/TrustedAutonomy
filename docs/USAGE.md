@@ -411,8 +411,8 @@ ta run "What changed in the auth module?" --headless --chat-mode --persona chief
 
 What a chat-mode launch gets:
 
-- **Capability manifest**: the compiled chat manifest. It can read anywhere in the workspace (secret files such as `.env` and keys stay blocked), write only under `.ta/chat-scratch/` (discarded with the staging copy), and has no git, email or other external-action grants.
-- **A chat-locked TA MCP server**: the agent's `ta serve` process is started from `.ta/mcp-agent-chat.json` and locked to one chat session. Only chat-safe tools are registered (workspace reads, scratch writes, status queries, wiki reads, community reads, whiteboard presence and handoff). Goal, draft, plan, wiki-write, task and external-action tools do not exist on that server, and the `ta_fs_*` tools reject any `goal_run_id` other than the session's own. The session id is written into the agent's CLAUDE.md and the server's instructions.
+- **Capability manifest**: the compiled chat manifest. It can read the project root and whatever `[chat.read]` allows (see [Chief of Staff Read Access](#chief-of-staff-read-access); secret files such as `.env` and keys stay blocked), has no write grant at all (not even a scratch directory), and has no git, email or other external-action grants.
+- **A chat-locked TA MCP server**: the agent's `ta serve` process is started from `.ta/mcp-agent-chat.json` and locked to one chat session. Only chat-safe tools are registered (file reads and directory listings under the read policy, status queries, wiki reads, community reads, whiteboard presence and handoff). `ta_fs_write` is not registered and the handler refuses even if it were reached. Goal, draft, plan, wiki-write, task and external-action tools do not exist on that server, and the `ta_fs_*` tools reject any `goal_run_id` other than the session's own. The session id is written into the agent's CLAUDE.md and the server's instructions.
 - **Tool surface = allowed_tools intersected with the chat-mode profile**, never the union. Mutating entries (for example `Bash(*)`, `mcp__ta__ta_goal_start`, `mcp__ta__ta_wiki_update`) are stripped and reported as a `[warn]` line plus a `tracing` warning. A wildcard such as `mcp__ta__*` is narrowed to the chat-safe tools it covers. A security-posture `max_allowed_tools` ceiling, when set, narrows the result again.
 - **No built-in tool exists**: every chat-mode `claude` launch passes `--tools ""`, an allowlist with nothing in it, so the agent has none of Claude Code's built-in tools (not `Bash`, `Read`, `Write`, `Edit`, `WebFetch`, and also not `ListAgents`, `SendMessage`, `CronCreate`, `RemoteTrigger` or any built-in added in a later Claude Code release). Its whole tool list is the chat-safe `mcp__ta__*` tools.
 - **Only TA's MCP server**: the launch also passes `--strict-mcp-config --mcp-config .ta/mcp-agent-chat.json`, so MCP servers from your user settings and claude.ai connectors (Gmail, Linear, and so on) are not loaded.
@@ -652,6 +652,10 @@ Added fields (existing fields are unchanged): `state_name` and `poller_state` (o
 When `ta run` fails to start an agent it prints a headline and one identifier-only line on stderr, `ta-launch-failure: code=<code> agent=<id> command=<id> goal=<uuid>`. The daemon reads it to name the code and goal; it is a hint, and a `crashed` hint is refined from the agent's own stderr when the daemon can see it. The daemon then updates the goal's `launch_failure` so the goal and the published message always agree.
 
 **An agent that ran and changed nothing is not a launch failure.** If the agent started, ran and exited without producing any file changes, there is nothing to review: `ta run` still reports "No changes detected" (exit status 1) and prints `ta-run-finished: result=no_changes goal=<uuid>`, the goal is completed with no draft (`poller_state: finished`), the wake message is acked, and no `launch_failed` is published. The exception is the sandbox: if the same run's stderr shows the sandbox blocking something (for example `Operation not permitted` on a path outside the project), that is why nothing changed, so the launch is reported as `sandbox_denied` with the denied path in `detail` (`... (denied path: /Users/you/outside/notes.txt)`), and the goal is marked failed with the same `launch_failure`. A non-zero exit with no such marker (a crash, a missing binary, a rejected login) stays a `launch_failed` with the matching code.
+
+**A login failure is a launch failure, never a finished launch.** An agent that could not authenticate also leaves nothing to review, but it did not finish anything. TA treats these as a failed launch: the agent's own stream shows `authentication_failed` (or a result with `is_error` and a 401/403), it says "Not logged in" / "Please run /login", or the agent's stored login is missing or rejected. The goal is marked `failed`, the daemon publishes `launch_failed` with code `no_login` (or `login_invalid` when a stored login was rejected), and `fix` says to run `ta agent-login login claude-code` (or use Wayfinder Settings > Agent login). It is never retried: a missing login stays missing, so the first attempt is the only one. The daemon log gets an error line with the reason code and the fix. A zero-token, zero-cost run that ended with an API error result is a failed launch too (`crashed`, which is retried, because an overloaded API can clear). Only the structured fields of the agent's stream count; a reply that merely talks about logins does not.
+
+**A known-missing login is refused before launch.** When the sandbox scrubs the environment, TA checks the same state `ta agent-login list` shows, for the environment the agent would actually get. If a login-framework agent has no login there (or its stored login was rejected), `ta run` refuses to start it, prints the same `no_login` headline and `ta-launch-failure` marker, and marks the goal failed. No model call is made. Agents with no login framework (a stub, a local model) are never refused.
 
 **`poller_state` follows the process, not only the record.** A goal recorded as `running` or `finalizing` whose `ta run` and agent processes have all exited is reported `failed` (with a `failure_reason` explaining that its processes are gone) instead of `running` for ever; a goal with a live process, or one whose draft build is pending (`DraftPending`), stays `running`. The `stamp.goal_id` of a published `launch_failed` is the real goal TA created for the candidate, or `none-created` when the launch died before any goal existed.
 
@@ -6284,19 +6288,51 @@ On Windows the box has two layers, and `ta run` prints which ones it got on the 
 
 ### Chief of Staff Read Access
 
-The chat-mode Chief of Staff (CoS) reads your real project, read-only, with no copy of it.
+The chat-mode Chief of Staff (CoS) reads your real project and any other files and folders you name, read-only, with no project copy. It can **not** write anything: no write tool is registered on its MCP server, its capability token carries no write grant, and the OS sandbox gives it no write outside its own session directory.
 
-- **Config comes from the real project.** `ta_wayfinder_*`, the wiki tools and plan-status read `.ta/workflow.toml`, `.ta/wiki-resources.toml` and the plan file from the source project root. If plan-status finds nothing it prints the path it looked at and why.
-- **Files.** `ta_fs_read` reads a file under the real project root (its optional `project` argument names a project from `readable_projects`). `.ta/`, `.git/` and the secret deny-list (`.env`, keys, credentials) stay unreadable, and a symlink that leaves the root is refused. Nothing in the project can be written: the MCP surface offers only read tools and the sandbox gives no write on the root. Scratch writes go to the session directory and are discarded.
-- **The grant.** At launch `ta run` mints a read grant for the session: read on `fs://project/**` and on the named read tools, nothing else. A session without that grant gets the old refusal.
-- **Other projects.** To let the CoS read another project, list it in the source project's `.ta/workflow.toml`:
+**The read policy.** Put it in the project's `.ta/workflow.toml`:
 
-  ```toml
-  [chat]
-  readable_projects = ["/Users/me/development/other-repo", "wayfinder"]   # absolute path or a name from office.yaml
-  ```
+```toml
+[chat.read]
+allow = [
+  "~/notes",                                  # ~/path: your home directory
+  "/Users/me/Documents/specs",                # an absolute path (Windows: C:\Users\me\Docs)
+  "other-repo",                               # a project name from office.yaml (also gives access to its Wayfinder data)
+  "/Users/me/development/*/docs",             # a glob
+]
+deny = [
+  "~/notes/private",                          # hides just this subtree of an allowed root
+  "**/*.pdf",                                 # a glob starting with **/ matches under any directory
+]
+```
 
-  Each listed root is read exactly like the main one (read-only, same deny-list). Nothing else outside the root is readable. A name or path that does not resolve stops the launch with a message naming it.
+Each entry is an absolute path, `~/path`, the name of a project registered in `office.yaml` (a bare word with no `/`), or a glob. A relative path or glob (anything with a `/`) is taken relative to the project root, except a glob that starts with `**/`, which matches under any directory. An allow entry must exist; a deny entry may name a path that does not exist yet. An entry that does not resolve (a typo, an unknown project name, `..`, the whole home directory, the filesystem root) stops the launch with a message naming the entry and this key; it is never silently dropped, because a dropped `deny` would widen access.
+
+The rules, exactly:
+
+1. **The project root is always readable.** An empty or missing `allow` means the project root only.
+2. **Deny beats allow.** A path matched by any `deny` entry is refused, however many `allow` entries cover it. A `deny` inside an allowed root hides just that subtree; its siblings stay readable.
+3. **Paths are canonicalised.** Symlinks are resolved first, so a link inside an allowed folder that points outside it is refused, and any `..` in a requested path is refused outright. On case-insensitive volumes (macOS, Windows) matching ignores case.
+4. **Built-in protected locations can never be allowed.** Whatever the lists say, these are refused: the project's `.ta/` and `.git` internals (and those of any allowed root), the TA state directory, `~/.ssh`, `~/.aws`, `~/.gnupg`, the macOS Keychains, browser profiles and cookies, shell history, and credential files (the sandbox's protected-home list), and an allow entry that would cover the whole home directory. Secret files such as `.env`, keys and `*.pem` are blocked by the policy engine on top of that.
+5. **Nothing is writable** through any entry.
+
+`readable_projects` under `[chat]` is the earlier spelling of `allow`: it is still read and merged into `[chat.read] allow`, so existing configs keep working, but new configs should use `[chat.read]`.
+
+**Debugging the policy.** `ta chat-read check <path>` prints `ALLOWED` or `DENIED` and why (the matching `allow` entry, the `deny` entry, the built-in location, or that nothing lists it) and exits non-zero when denied. `ta chat-read list` prints the compiled project root, allow and deny entries and the built-in protected list. Both build the policy the way `ta run --chat-mode` does and show what a *new* session would get.
+
+**Where the policy is enforced.** One compiled policy, three layers:
+
+- **The token.** `ta run` mints a read grant (a biscuit in the credential broker) for the session, bound to its identity, that encodes the compiled allow and deny rules. The gateway rebuilds the policy from the token, never from config, so editing `.ta/workflow.toml` mid-session changes nothing until the next launch, and a token that does not list a path cannot read it.
+- **The gateway tools.** `ta_fs_read` and `ta_fs_list` (and `ta_fs_read`'s optional `project` argument, which names an allowed project) check every path against that policy. `ta_fs_list` lists a real directory and omits denied entries, reporting only how many were hidden. A refusal names the config key to change. `ta_wayfinder_*`, the wiki tools and plan-status read their configuration from the real project root.
+- **The OS sandbox.** The sandbox profile is built from the same policy: allowed roots read-only, every `deny` entry and the protected locations denied, no write anywhere but the session directory.
+
+**Another project's Wayfinder data.** If an `allow` entry names a project registered in `office.yaml`, every `ta_wayfinder_*` tool accepts an optional `project` argument naming it. TA then uses *that* project's `.ta/workflow.toml` `[plan.wayfinder]` pin and the credential it names, from TA's credential custody, with read-only requests. A path-only entry is not a Wayfinder project, and an unregistered or unlisted name is refused.
+
+**What each platform enforces.**
+
+- **macOS.** The Seatbelt profile confines content reads under your home directory: everything in it is unreadable except the project root, the allowed roots, the agent runtime's toolchain directories (`~/.local`, `~/.claude/local`, `~/.nvm`, `~/.volta`, `~/.bun`, `~/.deno`, `~/.cargo`, `~/.rustup`, `~/.asdf`, `~/.pyenv`, `~/.npm-global`, `~/.nix-profile`) and the session's own directory. The conformance suite proves an allowed folder outside the project reads, a denied subtree and an unlisted home path do not, the protected locations do not, writes fail everywhere, and `sh` and `git` still start. Known limits: a file's existence and size (`stat`) stay visible; reads outside your home directory (`/usr`, `/opt`, `/private/tmp`, other volumes) stay allowed by the platform default, so an allowed or denied path **outside your home** is enforced by the gateway and the token, not by the sandbox's read rules (the sandbox still blocks every write and the denied subtrees you list); a glob is expanded once, at launch.
+- **Linux (bubblewrap).** Allowed roots are bind-mounted read-only and denied subtrees and protected locations are masked. Globs are expanded once at launch. This path has not been run for this feature.
+- **Windows.** The AppContainer grants the agent no read access to arbitrary folders, so only the project and the files TA grants are visible to it directly; the CoS reads your allowed paths only through the out-of-sandbox gateway under the token, and write access is denied by default in the container. The read rules above are enforced in the gateway on Windows; this path has not been run for this feature.
 
 **Which agent and model each role uses** (no build needed):
 
@@ -6368,7 +6404,7 @@ ta status                           # a badge under each active agent, e.g. "san
 **Honest limits per platform.**
 
 - An empty denial list from `ta sandbox explain <goal-id>` on macOS is **not** proof that nothing was denied. The Seatbelt profile refuses the operation every time, but the report comes through the macOS unified log, which drops entries on some runs. The command says so whenever it prints an empty list on macOS.
-- macOS confines writes by allowlist and reads by denylist. Files in your home directory that are not on the deny list remain readable.
+- macOS confines writes by allowlist and reads by denylist. Files in your home directory that are not on the deny list remain readable, except in a chat-mode (Chief of Staff) session, whose profile confines reads under your home to the project, `[chat.read]` and toolchain directories (see Chief of Staff Read Access).
 - There are no per-class allowlists of programs the agent may run. Every class can run anything it can read.
 - A reviewer's staging copy is still writable. The reviewer class gets no extra writes, but TA does not yet mount its staging directory read-only, so a reviewer can change files in its own copy (its draft shows them).
 - Linux without bubblewrap uses Landlock and seccomp only: no private process list, and the network is limited only on kernels with Landlock ABI 4 (Linux 6.7 or later).
@@ -19416,6 +19452,8 @@ To resume after suspension:
 ```bash
 ta compression enable   # clears suspended state; supervisor retries within 5 s
 ```
+
+**The default optimizer is optional and quiet.** When you have not written a `[compression.plugin]` block, headroom is only the built-in default, and it is not part of every install. If its binary is not on `PATH`, the daemon does not start it: it logs one info line, writes a `disabled` status with a notice (`ta compression status` shows it), prints no warning and never restarts anything. If the default is installed but fails before it ever passed a health check, it is turned off after that first failure with one info line instead of crash-looping five times. An optimizer you configured yourself in `[compression.plugin]` keeps the loud behaviour: a missing binary prints a warning, and repeated crashes follow the five-in-five-minutes rule above.
 
 ### Custom Optimizer Plugins
 

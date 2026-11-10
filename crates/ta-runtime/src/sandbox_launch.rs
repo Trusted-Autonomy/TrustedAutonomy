@@ -20,7 +20,7 @@
 // sections 4, 7, 9.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -630,12 +630,15 @@ pub struct SandboxProfile {
     /// Exact files readable although they lie inside a denied tree: the goal's
     /// own system-prompt file. Read-only.
     pub read_files: Vec<PathBuf>,
-    /// Project roots the session may read and never write (the real project and any
-    /// `[chat] readable_projects` entry). Set only by [`SandboxProfile::with_project_read_roots`].
+    /// Roots the session may read and never write (the real project and every
+    /// `[chat.read]` allow entry). Set only by [`SandboxProfile::with_read_policy`].
     /// Each lies outside the class ceiling on purpose: the chat class reads project
     /// content, but only here, read-only, and every protected path inside a root
     /// (`.ta`, `.git`, the credential deny list) stays in `deny_paths` and wins.
     pub read_roots: Vec<PathBuf>,
+    /// macOS only: content reads under `roots` are denied unless re-allowed (see
+    /// [`crate::sandbox::ReadConfine`]). Set only by [`SandboxProfile::with_read_policy`].
+    pub read_confine: crate::sandbox::ReadConfine,
     pub unix_sockets: Vec<PathBuf>,
     /// The per-goal egress proxy is available to this launch.
     pub egress_proxy: bool,
@@ -831,6 +834,7 @@ impl SandboxProfile {
             deny_paths,
             read_files,
             read_roots: Vec::new(),
+            read_confine: Default::default(),
             unix_sockets,
             egress_proxy: ctx.egress_proxy,
             persona_applied,
@@ -866,19 +870,57 @@ impl SandboxProfile {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: Some(crate::seatbelt::violation_tag(&self.goal_id)),
+            read_confine: self.read_confine.clone(),
         }
     }
 }
 
 impl SandboxProfile {
-    /// Grant read-only access to project roots (the real project and the readable
-    /// projects of a chat session). Fails soft per root, loudly: a root that is relative,
+    /// Apply a chat session's compiled read policy (the SAME `ta_policy::read_policy`
+    /// engine the gateway tools and the biscuit grant use): read-only access to every
+    /// allowed root, every deny entry added to `deny_paths` (denied for read AND write,
+    /// and wins over any allow), and, on macOS, content reads under the user's home
+    /// denied unless re-allowed ([`crate::sandbox::ReadConfine`]). Nothing here adds a
+    /// write path. `confine_roots` are the subtrees to confine (the user's home) and
+    /// `confine_allow` the toolchain locations re-allowed inside them; both are only
+    /// consulted by the macOS provider.
+    pub fn with_read_policy(
+        mut self,
+        view: &ta_policy::read_policy::SandboxReadView,
+        confine_roots: &[PathBuf],
+        confine_allow: &[PathBuf],
+    ) -> Self {
+        self = self.with_project_read_roots(&view.read_roots);
+        for d in &view.deny {
+            let d = normalize(d);
+            if !d.is_absolute() || d.components().count() < 2 {
+                self.warnings.push(format!(
+                    "ignored read deny path {}: it must be an absolute path below the \
+                     filesystem root",
+                    d.display()
+                ));
+                continue;
+            }
+            if !self.deny_paths.contains(&d) {
+                self.deny_paths.push(d);
+            }
+        }
+        self.warnings.extend(view.notes.iter().cloned());
+        self.read_confine = crate::sandbox::ReadConfine {
+            roots: confine_roots.iter().map(|p| normalize(p)).collect(),
+            allow: confine_allow.iter().map(|p| normalize(p)).collect(),
+        };
+        self
+    }
+
+    /// Grant read-only access to roots (the real project and the allowed roots
+    /// of a chat session); see [`SandboxProfile::with_read_policy`]. Fails soft per root, loudly: a root that is relative,
     /// is a filesystem root, or lies inside a protected path is dropped with a warning
     /// (deny wins). For every kept root, its `.ta` and `.git` are added to `deny_paths`,
     /// so a read grant on a project never exposes TA state or VCS internals. Nothing here
     /// adds a write path: a root that also appears in `allow_write` is dropped from the
     /// read set and reported, so "read-only" can never be quietly read-write.
-    pub fn with_project_read_roots(mut self, roots: &[PathBuf]) -> Self {
+    fn with_project_read_roots(mut self, roots: &[PathBuf]) -> Self {
         let ci = filesystem_is_case_insensitive();
         for root in roots {
             let root = normalize(root);
@@ -925,58 +967,48 @@ impl SandboxProfile {
     }
 }
 
-/// Credential stores, browser profiles and shell history under `$HOME` that
-/// no agent needs. This is still a denylist: anything not named here (another
-/// project's source tree, for instance) stays readable on macOS, so reads are
-/// not described as confined there.
-pub const HOME_PROTECTED: &[&str] = &[
-    // TA's own per-user human state: the `ta login` credential (`credential`,
-    // 0600, present when file custody holds it), its digest and the custody
-    // choice. An agent that could read `credential` could present it as the
-    // human (docs/security/KEY-CUSTODY.md).
-    ".config/ta/human",
-    // Keys, tokens and cloud credentials.
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".azure",
-    ".config/gcloud",
-    ".config/gh",
-    ".config/git/credentials",
-    ".git-credentials",
-    ".docker",
-    ".kube",
-    ".netrc",
-    ".npmrc",
-    ".yarnrc",
-    ".pypirc",
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
-    ".terraform.d/credentials.tfrc.json",
-    ".local/share/keyrings",
-    ".password-store",
-    // macOS stores.
-    "Library/Keychains",
-    "Library/Cookies",
-    "Library/Mail",
-    "Library/Messages",
-    "Library/Safari",
-    "Library/Application Support/Google/Chrome",
-    "Library/Application Support/Firefox",
-    "Library/Application Support/BraveSoftware",
-    "Library/Application Support/Microsoft Edge",
-    "Library/Application Support/Arc",
-    "Library/Application Support/1Password",
-    "Library/Group Containers/group.com.apple.notes",
-    // Linux browser profiles and shell history.
-    ".config/google-chrome",
-    ".config/chromium",
-    ".mozilla",
-    ".bash_history",
-    ".zsh_history",
-    ".python_history",
-    ".node_repl_history",
+/// Directories under the user's home that an agent runtime executes from. Re-allowed
+/// (read-only) inside the macOS home read confinement, because a confined home with no
+/// toolchain in it cannot start the agent. Everything else under home stays unreadable
+/// unless the owner's `[chat.read]` allows it.
+pub const CHAT_CONFINE_TOOLCHAIN_DIRS: &[&str] = &[
+    ".local",
+    ".claude/local",
+    ".nvm",
+    ".volta",
+    ".bun",
+    ".deno",
+    ".cargo",
+    ".rustup",
+    ".asdf",
+    ".pyenv",
+    ".npm-global",
+    ".nix-profile",
 ];
+
+/// The macOS read confinement of a chat session: `(confine roots, re-allowed toolchain
+/// dirs)`. The root is the user's home; empty on other platforms and when the home is
+/// unknown (reads stay as the platform provides them; bubblewrap mounts only what is
+/// listed and AppContainer grants nothing outside the container).
+pub fn chat_read_confinement(user_home: Option<&Path>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    match user_home {
+        Some(home) if cfg!(target_os = "macos") && home.is_absolute() => (
+            vec![home.to_path_buf()],
+            CHAT_CONFINE_TOOLCHAIN_DIRS
+                .iter()
+                .map(|d| home.join(d))
+                .collect(),
+        ),
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+// The credential-store list and the path helpers are defined once, in
+// `ta_policy::read_policy`, which the chat read policy also builds its built-in
+// hard deny from; the sandbox re-exports them so there is one definition.
+pub use ta_policy::read_policy::{
+    filesystem_is_case_insensitive, normalize, path_within, HOME_PROTECTED,
+};
 
 /// Paths denied for read and write regardless of any allowance.
 pub fn protected_paths(ctx: &LaunchContext) -> Vec<PathBuf> {
@@ -990,51 +1022,6 @@ pub fn protected_paths(ctx: &LaunchContext) -> Vec<PathBuf> {
         }
     }
     out
-}
-
-fn filesystem_is_case_insensitive() -> bool {
-    cfg!(any(target_os = "macos", target_os = "windows"))
-}
-
-/// Lexical normalization: drops `.`, resolves `..` without touching the disk.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// True when `path` equals or lies inside `base`, comparing components
-/// (never string prefixes, so `.tax` is not inside `.ta`).
-pub fn path_within(path: &Path, base: &Path, case_insensitive: bool) -> bool {
-    let p = normalize(path);
-    let b = normalize(base);
-    let mut pi = p.components();
-    for bc in b.components() {
-        match pi.next() {
-            Some(pc) => {
-                let same = if case_insensitive {
-                    pc.as_os_str()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case(&bc.as_os_str().to_string_lossy())
-                } else {
-                    pc == bc
-                };
-                if !same {
-                    return false;
-                }
-            }
-            None => return false,
-        }
-    }
-    true
 }
 
 // ── Decision ───────────────────────────────────────────────────────────────

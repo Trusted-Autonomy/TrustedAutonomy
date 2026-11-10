@@ -777,13 +777,18 @@ fn run_and_record_launch(
     // The agent ran, exited and left nothing to review (`ta draft build` printed
     // the no-changes marker and completed the goal). That is a finished launch,
     // not a failed one -- unless the stderr shows the sandbox blocked what the
-    // agent tried, which is why it changed nothing.
+    // agent tried, which is why it changed nothing, or the agent's own stream says
+    // it could not authenticate (a login failure leaves nothing to review either,
+    // and is the reason, not a finish).
     let no_changes_goal = ta_goal::launch_failure::parse_no_changes_marker(&stderr);
     let sandbox_denied = ta_goal::launch_failure::sandbox_denial(&stderr);
+    let stream_failure =
+        ta_goal::launch_failure::stream_failure_in(&String::from_utf8_lossy(&output.stdout));
     if !timed_out
         && !marked
         && never_started.is_none()
         && !sandbox_denied
+        && stream_failure.is_none()
         && no_changes_goal.is_some()
     {
         tracing::info!(
@@ -802,6 +807,7 @@ fn run_and_record_launch(
         && output.status.success()
         && never_started.is_none()
         && !marked
+        && stream_failure.is_none()
         && !(no_changes_goal.is_some() && sandbox_denied)
     {
         return Ok(output);
@@ -833,6 +839,7 @@ fn run_and_record_launch(
             login,
             log_path: Some(&log_str),
             evidence_line: quoted.as_deref(),
+            stream_failure,
         });
     let goal_for_record = marker
         .as_ref()
@@ -852,12 +859,19 @@ fn run_and_record_launch(
             log_path.display()
         )
     } else {
-        let why = match never_started {
-            Some(_) => format!(
+        let why = match (&stream_failure, never_started) {
+            (Some(kind), _) => format!(
+                "the launch FAILED, it did not finish: {}, so the agent did no work. ({}) \
+                 What to do: {}",
+                kind.describe(),
+                failure.detail,
+                failure.fix
+            ),
+            (None, Some(_)) => format!(
                 "the agent never started: {}",
                 ta_goal::agent_start::never_started_reason(None, Some(&stderr))
             ),
-            None => "ta run failed".to_string(),
+            (None, None) => "ta run failed".to_string(),
         };
         tracing::error!(
             session = %session_id,
@@ -865,6 +879,7 @@ fn run_and_record_launch(
             msg_id = %msg_id,
             exit_code = ?output.status.code(),
             reason_code = %failure.code,
+            fix = %failure.fix,
             log = %log_path.display(),
             "wake_listener: {why}"
         );
@@ -1921,6 +1936,115 @@ mod tests {
         let after = goals.get(goal.goal_run_id).unwrap().unwrap();
         assert_eq!(after.poller_state(), "failed");
         assert_eq!(after.launch_failure.as_ref(), Some(&f));
+    }
+
+    /// What the Claude CLI prints on stdout when it has no login, then exits 1.
+    #[cfg(unix)]
+    const AUTH_FAILED_STREAM: &str = concat!(
+        r#"{"type":"system","subtype":"init","model":"claude-sonnet"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"result":"Not logged in · Please run /login","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+        "\n",
+    );
+
+    /// Finding 059 blocker A. Before the fix the daemon logged "the agent ran and finished
+    /// without changing anything ... a finished launch, not a failed one" for this exact
+    /// output (an agent that printed `authentication_failed`, `ta draft build` printed the
+    /// no-changes marker) and acked the message. It must be a failed `no_login` launch whose
+    /// fix names `ta agent-login login claude-code`, and the goal `ta draft build` completed
+    /// must be failed to agree.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_that_could_not_log_in_is_a_failed_launch_not_a_finished_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(tmp.path());
+        let goals = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "t",
+            "o",
+            "claude-code",
+            std::path::PathBuf::from("/w"),
+            std::path::PathBuf::from("/s"),
+        );
+        goal.transition(ta_goal::GoalRunState::Configured).unwrap();
+        goal.transition(ta_goal::GoalRunState::Running).unwrap();
+        goal.transition(ta_goal::GoalRunState::Finalizing {
+            exit_code: 1,
+            finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
+        })
+        .unwrap();
+        goal.transition(ta_goal::GoalRunState::Completed).unwrap();
+        goals.save(&goal).unwrap();
+        let script = format!(
+            "cat <<'STREAM'\n{AUTH_FAILED_STREAM}STREAM\n\
+             echo 'Agent exited with status 1. Building draft anyway...'\n\
+             echo 'ta-run-finished: result=no_changes goal={}' >&2\n\
+             echo 'Error: No changes detected in staging workspace.' >&2\nexit 1",
+            goal.goal_run_id
+        );
+        let err = raw_launch(tmp.path(), &script)
+            .expect_err("a login failure is a failed launch, never a finished one")
+            .to_string();
+        let f = crate::launch_failed::decode_error(&err).expect("classified");
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::NoLogin, "{f:?}");
+        assert!(f.fix.contains("ta agent-login login claude-code"), "{f:?}");
+        assert!(f.code.is_permanent(), "a login failure is never retried");
+        let after = goals.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(after.poller_state(), "failed");
+        assert_eq!(after.launch_failure.as_ref(), Some(&f));
+    }
+
+    /// No `ta` marker of any kind on stderr (an older `ta run`, or one that died before
+    /// printing it): the stream alone classifies the launch as `no_login`.
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_login_failure_without_any_ta_marker_is_still_no_login() {
+        let f = classified_launch(
+            &format!("cat <<'STREAM'\n{AUTH_FAILED_STREAM}STREAM\nexit 1"),
+            &[],
+            Duration::from_secs(30),
+        );
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::NoLogin, "{f:?}");
+    }
+
+    /// A zero-token, zero-cost API error result is a failed launch too, but one a retry
+    /// can help (an overloaded API), so it is `crashed`, not a login failure.
+    #[cfg(unix)]
+    #[test]
+    fn an_api_error_result_that_spent_nothing_is_a_failed_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let overloaded = r#"{"type":"result","is_error":true,"api_error_status":529,"result":"Overloaded","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let err = raw_launch(
+            tmp.path(),
+            &format!(
+                "echo '{overloaded}'\n\
+                 echo 'ta-run-finished: result=no_changes' >&2\nexit 1"
+            ),
+        )
+        .expect_err("an error result that did no work is a failed launch")
+        .to_string();
+        let f = crate::launch_failed::decode_error(&err).expect("classified");
+        assert_eq!(f.code, ta_goal::LaunchFailureCode::Crashed, "{f:?}");
+    }
+
+    /// Talking about logins is not a login failure: an agent whose work was reviewing a login
+    /// page, and that changed nothing, still finished.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_that_merely_mentions_logins_still_finished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let talk = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The user is not logged in on that page; no change needed. Please run /login is a fine message."}]}}"#;
+        raw_launch(
+            tmp.path(),
+            &format!(
+                "echo '{talk}'\n\
+                 echo 'ta-run-finished: result=no_changes' >&2\nexit 1"
+            ),
+        )
+        .expect("an agent that only mentioned logins finished");
     }
 
     /// The reproduction, hermetic: a candidate is dispatched to a daemon whose

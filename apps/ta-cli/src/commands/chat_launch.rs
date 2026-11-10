@@ -214,7 +214,7 @@ pub(crate) fn report_chat_mode_plan(plan: &ChatModeLaunchPlan, quiet: bool) {
         session_id = %plan.session_id,
         source = plan.source,
         allowed = ?plan.allowed_tools,
-        "launching in chat mode (read-only manifest, scratch-only writes, native tools denied)"
+        "launching in chat mode (read-only manifest, no write grant, native tools denied)"
     );
     if !quiet {
         println!(
@@ -287,30 +287,32 @@ pub(crate) fn chat_mode_agent_env(
 ///
 /// The grant is a biscuit minted here, in `ta run` (outside the agent's sandbox), from the
 /// project's broker key. It is bound to this session's policy identity and carries the read
-/// scopes the Chief of Staff gets: the project root, every `[chat] readable_projects` entry
-/// of `project_root/.ta/workflow.toml`, and the named read tools
+/// scopes the Chief of Staff gets: the project root, the COMPILED `[chat.read]` allow and deny
+/// lists of `project_root/.ta/workflow.toml` (the same policy the gateway enforces and the OS
+/// sandbox profile is built from), and the named read tools
 /// ([`ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS`]). It carries no write, commit, email or
-/// network scope. A `readable_projects` entry that cannot be resolved refuses the launch
-/// (naming the entry) instead of being dropped, because it is an explicit widening of access.
+/// network scope. An entry that cannot be resolved refuses the launch (naming the
+/// entry) instead of being dropped: a dropped allow narrows silently, and a dropped deny would
+/// WIDEN access.
 pub(crate) fn chat_mode_read_env(
     plan: &ChatModeLaunchPlan,
     project_root: &Path,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let readable = ta_mcp_gateway::chat_launch::load_readable_projects(project_root).map_err(|e| {
+    let policy = ta_mcp_gateway::chat_launch::load_read_policy(project_root).map_err(|e| {
         anyhow::anyhow!(
-            "Cannot launch chat-mode session: {e}. Fix `[chat] readable_projects` in {}/.ta/workflow.toml \
-             (an absolute path or a project name registered in office.yaml) and re-launch.",
+            "Cannot launch chat-mode session: {e}. Fix `[chat.read]` (`allow` / `deny`) in {}/.ta/workflow.toml \
+             (an absolute path, ~/path, a project name registered in office.yaml, or a glob) and re-launch. \
+             `ta chat-read check <path>` shows how a path is judged.",
             project_root.display()
         )
     })?;
-    let access = ta_policy::ChatReadAccess {
-        project: true,
-        readable_projects: readable.iter().map(|p| p.label.clone()).collect(),
-        tools: ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS
+    let access = ta_policy::ChatReadAccess::from_policy(
+        &policy,
+        ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS
             .iter()
             .map(|t| (*t).to_string())
             .collect(),
-    };
+    );
     let policy_id = ta_mcp_gateway::chat_launch::chat_policy_id(&plan.agent_id, plan.session_id);
     let token =
         ta_mcp_gateway::chat_launch::mint_chat_read_grant(project_root, &policy_id, &access)
@@ -441,17 +443,20 @@ pub(crate) fn chat_mode_context_section(plan: &ChatModeLaunchPlan) -> String {
         "\n## Chat Mode (read-only)\n\n\
          This session runs in TA chat mode. Use only the TA MCP tools available to you; \
          native shell and file tools are disabled.\n\n\
-         - Pass `goal_run_id = \"{}\"` to `ta_fs_read`, `ta_fs_list`, `ta_fs_diff` and `ta_fs_write`.\n\
-         - You read the real project, read-only: `ta_fs_read` takes the project's files \
-         (relative paths) and, for a project named in `[chat] readable_projects`, a `project` \
-         argument. `ta_plan_status` and the Wayfinder and wiki read tools use the project's \
-         real configuration. There is no project copy.\n\
-         - Writes are allowed only under `{}/` (your private scratch) and are discarded \
-         when the session ends.\n\
+         - Pass `goal_run_id = \"{}\"` to `ta_fs_read` and `ta_fs_list`.\n\
+         - You read the real project and the resources its owner allowed, read-only. \
+         `ta_fs_read` and `ta_fs_list` take a path relative to the project, an absolute path \
+         or `~/path`; they refuse what is not in the project root or the `[chat.read] allow` \
+         list, what the `deny` list hides, and the built-in protected locations (`.ta/`, `.git`, \
+         credential stores), and a refusal names the key that decided. A `project` argument \
+         reads relative to another allowed project. `ta_plan_status` and the Wayfinder and \
+         wiki read tools use the project's real configuration (`project` on the Wayfinder \
+         tools reads another allowed, registered project). There is no project copy.\n\
+         - You cannot write anything, anywhere: there is no write tool and the sandbox \
+         mounts every readable location read-only.\n\
          - You cannot start goals, build or apply drafts, change the plan, edit the wiki, \
          update tasks, or take external actions. Answer in your reply instead.\n",
-        plan.session_id,
-        ta_policy::CHAT_SCRATCH_DIR
+        plan.session_id
     )
 }
 
@@ -851,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_read_env_mints_a_grant_for_the_project_and_its_readable_projects_only() {
+    fn chat_read_env_mints_a_grant_carrying_the_compiled_allow_and_deny_lists() {
         let allowed: Vec<String> = Vec::new();
         let plan = plan_chat_mode_launch(&inputs(&allowed)).unwrap().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -860,7 +865,7 @@ mod tests {
         std::fs::write(
             project.path().join(".ta/workflow.toml"),
             format!(
-                "[chat]\nreadable_projects = [\"{}\"]\n",
+                "[chat.read]\nallow = ['{0}']\ndeny = ['{0}/private']\n",
                 other.path().display()
             ),
         )
@@ -881,8 +886,18 @@ mod tests {
         let access =
             ta_mcp_gateway::chat_launch::verify_chat_read_grant(project.path(), token, &policy_id)
                 .unwrap();
-        assert!(access.project);
-        assert_eq!(access.readable_projects.len(), 1);
+        assert_eq!(
+            access.project_root.as_deref(),
+            Some(project.path().canonicalize().unwrap().as_path())
+        );
+        assert_eq!(access.allow.len(), 1, "{:?}", access.allow);
+        assert_eq!(access.deny.len(), 1, "{:?}", access.deny);
+        // The grant carries the COMPILED rules (canonical paths), so a later config
+        // edit cannot change what this session reads.
+        assert_eq!(
+            access.allow[0].pattern,
+            other.path().canonicalize().unwrap().display().to_string()
+        );
         for t in ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS {
             assert!(access.tools.iter().any(|x| x == t), "{t} missing");
         }
@@ -903,21 +918,34 @@ mod tests {
     }
 
     #[test]
-    fn chat_read_env_refuses_to_launch_with_an_unresolvable_readable_project() {
+    fn chat_read_env_refuses_to_launch_with_an_unresolvable_allow_or_deny_entry() {
         let allowed: Vec<String> = Vec::new();
         let plan = plan_chat_mode_launch(&inputs(&allowed)).unwrap().unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join(".ta")).unwrap();
         std::fs::write(
             project.path().join(".ta/workflow.toml"),
-            "[chat]\nreadable_projects = [\"/definitely/not/a/project-root\"]\n",
+            "[chat.read]\nallow = [\"/definitely/not/a/project-root\"]\n",
         )
         .unwrap();
         let err = chat_mode_read_env(&plan, project.path())
             .unwrap_err()
             .to_string();
         assert!(err.contains("/definitely/not/a/project-root"), "{err}");
-        assert!(err.contains("readable_projects"), "{err}");
+        assert!(err.contains("[chat.read]"), "{err}");
+        // A deny entry that is malformed refuses too: dropping it would widen access.
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            "[chat.read]\ndeny = [\"../escape\"]\n",
+        )
+        .unwrap();
+        let err = chat_mode_read_env(&plan, project.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("../escape") && err.contains("[chat.read]"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -926,7 +954,9 @@ mod tests {
         let plan = plan_chat_mode_launch(&inputs(&allowed)).unwrap().unwrap();
         let section = chat_mode_context_section(&plan);
         assert!(section.contains("read-only"));
-        assert!(section.contains("readable_projects"));
+        assert!(section.contains("[chat.read]"));
+        assert!(section.contains("cannot write anything"));
+        assert!(!section.contains("ta_fs_write"));
         assert!(
             section.contains("no project copy") || section.contains("There is no project copy")
         );
