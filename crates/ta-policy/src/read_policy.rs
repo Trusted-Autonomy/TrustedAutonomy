@@ -492,15 +492,293 @@ pub fn resolve_entries(
         if entry.is_empty() {
             return Err(err("it is empty".to_string()));
         }
-        let rule = resolve_one(entry, list, env, &main_root, &hard, &out).map_err(err)?;
-        if !out
-            .iter()
-            .any(|r| r.kind == rule.kind && r.pattern == rule.pattern)
-        {
-            out.push(rule);
-        }
+        let rule =
+            resolve_one(entry, list, env, &main_root, &hard, &out).map_err(|f| err(f.message()))?;
+        push_unique(&mut out, rule);
     }
     Ok(out)
+}
+
+fn push_unique(out: &mut Vec<ReadRule>, rule: ReadRule) {
+    if !out
+        .iter()
+        .any(|r| r.kind == rule.kind && r.pattern == rule.pattern)
+    {
+        out.push(rule);
+    }
+}
+
+// ── Layers: project file + per-machine overlay ─────────────────────────────
+
+/// Where a list entry comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrySource {
+    /// `[chat.read]` in the project's `.ta/workflow.toml` (shared by every install).
+    Project,
+    /// The per-machine overlay file (`chat-read.toml` in the TA state directory).
+    Machine,
+}
+
+impl EntrySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntrySource::Project => "project",
+            EntrySource::Machine => "machine",
+        }
+    }
+}
+
+/// What TA made of one entry on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryState {
+    /// Resolved and part of the effective policy.
+    Applied,
+    /// TA cannot resolve it now (missing path, unregistered project name).
+    Unresolved,
+    /// A protected place, the whole home folder or the filesystem root: never allowed.
+    Refused,
+}
+
+impl EntryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryState::Applied => "applied",
+            EntryState::Unresolved => "unresolved",
+            EntryState::Refused => "refused",
+        }
+    }
+}
+
+/// One entry of one list with its resolution result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    pub entry: String,
+    pub list: ListKind,
+    pub source: EntrySource,
+    pub state: EntryState,
+    /// TA's reason when the state is not `Applied`.
+    pub detail: Option<String>,
+    /// The resolved rule when the state is `Applied`.
+    pub rule: Option<ReadRule>,
+}
+
+impl ListKind {
+    pub fn as_str(self) -> &'static str {
+        self.key()
+    }
+}
+
+/// The per-machine overlay: the two lists the poller (or `ta chat-read machine set`)
+/// owns. Stored as TOML `allow = [...]` / `deny = [...]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineLists {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl MachineLists {
+    /// Parse the overlay file text. `path` only names the file in the error.
+    pub fn parse(text: &str, path: &Path) -> Result<Self, ReadPolicyError> {
+        toml::from_str(text).map_err(|e| {
+            ReadPolicyError(format!(
+                "the machine read-list file {} did not parse: {e}. Delete it or rewrite it with \
+                 `ta chat-read machine set` (it holds only `allow = [...]` and `deny = [...]`).",
+                path.display()
+            ))
+        })
+    }
+
+    /// The file contents written by `ta chat-read machine set`.
+    pub fn render(&self) -> String {
+        let mut out = String::from(
+            "# Per-machine Chief of Staff read lists. Written by `ta chat-read machine set`\n\
+             # (the Wayfinder poller). Added to `[chat.read]` of the project's\n\
+             # .ta/workflow.toml; deny beats allow; the built-in protected places stay refused.\n",
+        );
+        for (key, list) in [("allow", &self.allow), ("deny", &self.deny)] {
+            out.push_str(&format!("{key} = ["));
+            for (i, e) in list.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&toml_string(e));
+            }
+            out.push_str("]\n");
+        }
+        out
+    }
+}
+
+/// A TOML basic string.
+fn toml_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The entries of both layers, in the order they are compiled: project first, then
+/// the machine overlay.
+#[derive(Debug, Clone, Copy)]
+pub struct Layers<'a> {
+    pub project_allow: &'a [String],
+    pub project_deny: &'a [String],
+    pub machine: &'a MachineLists,
+}
+
+/// Compile both layers. Effective lists are the UNION (project first); deny beats
+/// allow at decision time, so a deny in either layer wins over an allow in either.
+///
+/// A PROJECT entry that cannot be applied is an error (the repo file is the owner's
+/// explicit widening; a typo must be loud) unless `strict_project` is false, in
+/// which case it is only reported. A MACHINE entry that cannot be applied is never
+/// an error: it is skipped and reported (a folder the owner deleted must not stop the
+/// Chief of Staff from launching, and the skipped allow can only narrow access; a
+/// skipped deny is reported so the person can fix it).
+pub fn compile_layers(
+    env: &ReadEnv,
+    layers: Layers<'_>,
+    strict_project: bool,
+) -> Result<(ReadPolicy, Vec<ListedEntry>), ReadPolicyError> {
+    let main_root = canonicalize_lenient(&env.project_root);
+    let hard = hard_paths(env, &main_root);
+    let mut listed: Vec<ListedEntry> = Vec::new();
+    let mut rules: [Vec<ReadRule>; 2] = [Vec::new(), Vec::new()];
+    for (slot, list) in [(0usize, ListKind::Allow), (1usize, ListKind::Deny)] {
+        let (project, machine) = match list {
+            ListKind::Allow => (layers.project_allow, &layers.machine.allow),
+            ListKind::Deny => (layers.project_deny, &layers.machine.deny),
+        };
+        for (source, entries) in [
+            (EntrySource::Project, project),
+            (EntrySource::Machine, machine.as_slice()),
+        ] {
+            for raw in entries {
+                let entry = raw.trim();
+                let outcome = if entry.is_empty() {
+                    Err(ResolveFailure::Unresolved("it is empty".to_string()))
+                } else {
+                    resolve_one(entry, list, env, &main_root, &hard, &rules[slot])
+                };
+                match outcome {
+                    Ok(rule) => {
+                        listed.push(ListedEntry {
+                            entry: entry.to_string(),
+                            list,
+                            source,
+                            state: EntryState::Applied,
+                            detail: None,
+                            rule: Some(rule.clone()),
+                        });
+                        push_unique(&mut rules[slot], rule);
+                    }
+                    Err(failure) => {
+                        let state = failure.state();
+                        let why = failure.message();
+                        if source == EntrySource::Project && strict_project {
+                            let key = list.key();
+                            return Err(ReadPolicyError(format!(
+                                "[chat.read] {key} entry '{entry}' is unusable: {why}. Fix \
+                                 `{key}` under [chat.read] in {}/.ta/workflow.toml (an absolute \
+                                 path, ~/path, a project name registered in office.yaml, or a \
+                                 glob).",
+                                env.project_root.display()
+                            )));
+                        }
+                        listed.push(ListedEntry {
+                            entry: entry.to_string(),
+                            list,
+                            source,
+                            state,
+                            detail: Some(why),
+                            rule: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let [allow, deny] = rules;
+    let policy = ReadPolicy::new(
+        &env.project_root,
+        allow,
+        deny,
+        env.home.as_deref(),
+        env.state_dir.as_deref(),
+    );
+    Ok((policy, listed))
+}
+
+/// Resolve ONE entry for `list` against `env` without compiling a whole policy and
+/// without writing anything. `current` are the rules already in force; an entry that
+/// is already among them is not held against itself (project-name labels must be
+/// unique).
+pub fn resolve_single(
+    entry: &str,
+    list: ListKind,
+    env: &ReadEnv,
+    current: &[ReadRule],
+) -> (EntryState, Option<String>) {
+    let main_root = canonicalize_lenient(&env.project_root);
+    let hard = hard_paths(env, &main_root);
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return (EntryState::Unresolved, Some("it is empty".to_string()));
+    }
+    let others: Vec<ReadRule> = current
+        .iter()
+        .filter(|r| r.source != entry)
+        .cloned()
+        .collect();
+    match resolve_one(entry, list, env, &main_root, &hard, &others) {
+        Ok(_) => (EntryState::Applied, None),
+        Err(f) => (f.state(), Some(f.message())),
+    }
+}
+
+/// Why one entry cannot be applied. `Refused` is a place that may never be readable
+/// (the home folder as a whole, the filesystem root, a built-in protected place, `..`);
+/// `Unresolved` is an entry this machine cannot resolve right now (a missing path, an
+/// unregistered project name, an unusable name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolveFailure {
+    Refused(String),
+    Unresolved(String),
+}
+
+impl ResolveFailure {
+    fn message(self) -> String {
+        match self {
+            ResolveFailure::Refused(m) | ResolveFailure::Unresolved(m) => m,
+        }
+    }
+    fn state(&self) -> EntryState {
+        match self {
+            ResolveFailure::Refused(_) => EntryState::Refused,
+            ResolveFailure::Unresolved(_) => EntryState::Unresolved,
+        }
+    }
+}
+
+impl From<String> for ResolveFailure {
+    fn from(m: String) -> Self {
+        ResolveFailure::Unresolved(m)
+    }
 }
 
 fn resolve_one(
@@ -510,7 +788,7 @@ fn resolve_one(
     main_root: &Path,
     hard: &[HardPath],
     existing: &[ReadRule],
-) -> Result<ReadRule, String> {
+) -> Result<ReadRule, ResolveFailure> {
     let ci = filesystem_is_case_insensitive();
     let is_path_like =
         entry.contains(['/', '\\']) || has_glob_chars(entry) || entry.starts_with('.');
@@ -527,7 +805,9 @@ fn resolve_one(
             home.join(rest)
         }
     } else if entry.starts_with('~') {
-        return Err("`~user` is not supported; use ~/path or an absolute path".to_string());
+        return Err("`~user` is not supported; use ~/path or an absolute path"
+            .to_string()
+            .into());
     } else if Path::new(entry).is_absolute() {
         PathBuf::from(entry)
     } else if is_path_like {
@@ -542,11 +822,25 @@ fn resolve_one(
         .components()
         .any(|c| matches!(c, Component::ParentDir))
     {
-        return Err("it contains `..`, which is refused; write the real path".to_string());
+        return Err(ResolveFailure::Refused(
+            "it contains `..`, which is refused; write the real path".to_string(),
+        ));
     }
 
     let (kind, pattern) = if has_glob_chars(&text) && !registered {
-        (RuleKind::Glob, glob_pattern(&text, entry)?)
+        let (pattern, literal) = glob_pattern(&text, entry)?;
+        if list == ListKind::Allow {
+            if let Some(h) = literal
+                .as_ref()
+                .and_then(|l| hard.iter().find(|h| path_within(l, &h.path, ci)))
+            {
+                return Err(ResolveFailure::Refused(format!(
+                    "the glob starts inside {}, which can never be read (built-in hard deny)",
+                    h.what
+                )));
+            }
+        }
+        (RuleKind::Glob, pattern)
     } else {
         let canonical = if list == ListKind::Allow {
             std::fs::canonicalize(&expanded)
@@ -561,25 +855,27 @@ fn resolve_one(
         let canonical = PathBuf::from(&pattern);
         if list == ListKind::Allow {
             if canonical.parent().is_none() {
-                return Err("the filesystem root cannot be allowed".to_string());
+                return Err(ResolveFailure::Refused(
+                    "the filesystem root cannot be allowed".to_string(),
+                ));
             }
             if env
                 .home
                 .as_ref()
                 .is_some_and(|h| std::fs::canonicalize(h).is_ok_and(|h| h == canonical))
             {
-                return Err(
+                return Err(ResolveFailure::Refused(
                     "the home directory cannot be allowed as a whole; list the folders you want \
                      read (for example ~/notes)"
                         .to_string(),
-                );
+                ));
             }
             if let Some(h) = hard.iter().find(|h| path_within(&canonical, &h.path, ci)) {
-                return Err(format!(
+                return Err(ResolveFailure::Refused(format!(
                     "{} lies inside {}, which can never be read (built-in hard deny)",
                     canonical.display(),
                     h.what
-                ));
+                )));
             }
         }
     }
@@ -602,13 +898,15 @@ fn resolve_one(
             return Err(format!(
                 "its name '{l}' is not usable as a project label (letters, digits, '.', '_' and \
                  '-' only)"
-            ));
+            )
+            .into());
         }
         if existing.iter().any(|r| r.label.as_deref() == Some(l)) {
             return Err(format!(
                 "another entry already uses the project label '{l}'; register one of them \
                  under a different name"
-            ));
+            )
+            .into());
         }
     }
     let _ = main_root;
@@ -623,12 +921,13 @@ fn resolve_one(
 
 /// Build the absolute glob for `text` (an absolute path containing glob characters):
 /// the literal leading components are canonicalized and escaped, the rest kept as is.
-/// A pattern that starts with `**/` is anchored "anywhere" (`/**/...`).
-fn glob_pattern(text: &str, entry: &str) -> Result<String, String> {
+/// A pattern that starts with `**/` is anchored "anywhere" (`/**/...`). Also returns
+/// the canonical literal prefix (`None` for an anywhere glob).
+fn glob_pattern(text: &str, entry: &str) -> Result<(String, Option<PathBuf>), ResolveFailure> {
     if entry.starts_with("**/") || entry.starts_with("**\\") {
         let rest = entry[3..].replace('\\', "/");
         Pattern::new(&rest).map_err(|e| format!("the glob is invalid: {e}"))?;
-        return Ok(format!("/**/{rest}"));
+        return Ok((format!("/**/{rest}"), None));
     }
     let path = Path::new(text);
     let mut literal = PathBuf::new();
@@ -642,15 +941,15 @@ fn glob_pattern(text: &str, entry: &str) -> Result<String, String> {
         }
     }
     if tail.is_empty() {
-        return Err("the glob has no wildcard".to_string());
+        return Err("the glob has no wildcard".to_string().into());
     }
     let literal = canonicalize_lenient(&literal);
     if literal.parent().is_none() {
-        return Err(
+        return Err(ResolveFailure::Refused(
             "a glob must start inside a real directory (not the filesystem root); anchor it, \
              for example ~/notes/**/*.md"
                 .to_string(),
-        );
+        ));
     }
     let mut pattern = Pattern::escape(&to_slash(&literal));
     for part in &tail {
@@ -658,7 +957,7 @@ fn glob_pattern(text: &str, entry: &str) -> Result<String, String> {
         pattern.push_str(part);
     }
     Pattern::new(&pattern).map_err(|e| format!("the glob is invalid: {e}"))?;
-    Ok(pattern)
+    Ok((pattern, Some(literal)))
 }
 
 // ── Hard deny ──────────────────────────────────────────────────────────────
@@ -1415,5 +1714,167 @@ mod tests {
         assert!(path_within(Path::new("/a/b/c"), Path::new("/a/b"), false));
         assert!(!path_within(Path::new("/a/bc"), Path::new("/a/b"), false));
         assert!(path_within(Path::new("/A/B"), Path::new("/a/b"), true));
+    }
+
+    // ── layers: project file + machine overlay ─────────────────────────────
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn layered(
+        f: &Fx,
+        project: (&[&str], &[&str]),
+        machine: (&[&str], &[&str]),
+        strict: bool,
+    ) -> Result<(ReadPolicy, Vec<ListedEntry>), ReadPolicyError> {
+        let m = MachineLists {
+            allow: strings(machine.0),
+            deny: strings(machine.1),
+        };
+        compile_layers(
+            &env(f),
+            Layers {
+                project_allow: &strings(project.0),
+                project_deny: &strings(project.1),
+                machine: &m,
+            },
+            strict,
+        )
+    }
+
+    #[test]
+    fn layers_union_and_deny_beats_allow_across_layers() {
+        let f = fx();
+        // project allows notes, machine denies notes/private (machine deny wins)
+        let (p, _) = layered(&f, (&["~/notes"], &[]), (&[], &["~/notes/private"]), true).unwrap();
+        assert!(p.decide(&f.home.join("notes/a.md")).is_allowed());
+        assert!(!p.decide(&f.home.join("notes/private/b.md")).is_allowed());
+        // machine allows notes, project denies notes/private (project deny wins)
+        let (p, _) = layered(&f, (&[], &["~/notes/private"]), (&["~/notes"], &[]), true).unwrap();
+        assert!(p.decide(&f.home.join("notes/public/c.md")).is_allowed());
+        assert!(!p.decide(&f.home.join("notes/private/b.md")).is_allowed());
+        // the same path allowed in one layer and denied in the other: denied
+        let (p, _) = layered(&f, (&["~/notes"], &[]), (&[], &["~/notes"]), true).unwrap();
+        assert!(!p.decide(&f.home.join("notes/a.md")).is_allowed());
+        // union: each layer contributes its own root
+        let (p, _) = layered(&f, (&["~/notes"], &[]), (&["~/other"], &[]), true).unwrap();
+        assert!(p.decide(&f.home.join("notes/a.md")).is_allowed());
+        assert!(p.decide(&f.home.join("other/o.md")).is_allowed());
+    }
+
+    #[test]
+    fn machine_entries_that_cannot_apply_are_reported_not_fatal() {
+        let f = fx();
+        let (p, listed) = layered(
+            &f,
+            (&["~/notes"], &[]),
+            (&["~/nope", "~", "~/.ssh", "/"], &[]),
+            true,
+        )
+        .unwrap();
+        let state = |e: &str| {
+            listed
+                .iter()
+                .find(|l| l.entry == e && l.source == EntrySource::Machine)
+                .unwrap()
+                .clone()
+        };
+        let nope = state("~/nope");
+        assert_eq!(nope.state, EntryState::Unresolved);
+        assert!(nope.detail.unwrap().contains("cannot be resolved"));
+        let home = state("~");
+        assert_eq!(home.state, EntryState::Refused);
+        assert!(home.detail.unwrap().contains("home directory"));
+        let ssh = state("~/.ssh");
+        assert_eq!(ssh.state, EntryState::Refused);
+        assert!(ssh.detail.unwrap().contains("hard deny"));
+        assert_eq!(state("/").state, EntryState::Refused);
+        // The project entry still applies and the floor is intact.
+        assert!(p.decide(&f.home.join("notes/a.md")).is_allowed());
+        assert!(!p.decide(&f.home.join(".ssh/id_ed25519")).is_allowed());
+        assert!(!p.decide(&f.home.join("other/o.md")).is_allowed());
+    }
+
+    #[test]
+    fn a_project_entry_that_cannot_apply_is_an_error_only_when_strict() {
+        let f = fx();
+        let err = layered(&f, (&["~/nope"], &[]), (&[], &[]), true)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("~/nope") && err.contains("workflow.toml"),
+            "{err}"
+        );
+        let (_, listed) = layered(&f, (&["~/nope"], &[]), (&[], &[]), false).unwrap();
+        assert_eq!(listed[0].source, EntrySource::Project);
+        assert_eq!(listed[0].state, EntryState::Unresolved);
+    }
+
+    #[test]
+    fn dotdot_and_globs_into_protected_places_are_refused() {
+        let f = fx();
+        let (_, listed) = layered(
+            &f,
+            (&[], &[]),
+            (
+                &["~/notes/../other", "~/.ssh/**/*.pub", "~/notes/**/*.md"],
+                &[],
+            ),
+            true,
+        )
+        .unwrap();
+        assert_eq!(listed[0].state, EntryState::Refused);
+        assert!(listed[0].detail.as_deref().unwrap().contains(".."));
+        assert_eq!(listed[1].state, EntryState::Refused);
+        assert_eq!(listed[2].state, EntryState::Applied);
+    }
+
+    #[test]
+    fn a_machine_allow_cannot_make_a_symlink_out_of_its_root_readable() {
+        #[cfg(unix)]
+        {
+            let f = fx();
+            std::os::unix::fs::symlink(f.base.join("outside"), f.home.join("notes/link")).unwrap();
+            let (p, _) = layered(&f, (&[], &[]), (&["~/notes"], &[]), true).unwrap();
+            assert!(p.decide(&f.home.join("notes/a.md")).is_allowed());
+            assert!(!p.decide(&f.home.join("notes/link/z.md")).is_allowed());
+        }
+    }
+
+    #[test]
+    fn resolve_single_does_not_hold_an_entry_against_itself() {
+        let f = fx();
+        let reg = f.base.join("office.yaml");
+        fs::write(
+            &reg,
+            format!(
+                "projects:\n  other:\n    path: {}\n",
+                f.home.join("other").display()
+            ),
+        )
+        .unwrap();
+        let mut e = env(&f);
+        e.office_yaml = reg;
+        let (policy, listed) = compile_layers(
+            &e,
+            Layers {
+                project_allow: &[],
+                project_deny: &[],
+                machine: &MachineLists {
+                    allow: strings(&["other"]),
+                    deny: vec![],
+                },
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(listed[0].state, EntryState::Applied);
+        let (state, _) = resolve_single("other", ListKind::Allow, &e, &policy.allow);
+        assert_eq!(state, EntryState::Applied);
+        let (state, detail) = resolve_single("unregistered", ListKind::Allow, &e, &policy.allow);
+        assert_eq!(state, EntryState::Unresolved);
+        assert!(detail.unwrap().contains("unregistered"));
     }
 }

@@ -49,6 +49,9 @@ pub const POSTURE_ENV: &str = "TA_POSTURE";
 pub const POSTURE_FILENAME: &str = "posture";
 /// File (inside `<project>/.ta/`) that holds the non-secret project id.
 pub const PROJECT_ID_FILENAME: &str = "project-id";
+/// File (inside the project state directory) that holds the per-machine Chief of
+/// Staff read lists.
+pub const CHAT_READ_FILENAME: &str = "chat-read.toml";
 /// Marker (inside the project state directory) naming the project path that owns it.
 const PROJECT_PATH_MARKER: &str = "project-path";
 use crate::keychain::CONTROL_PLANE_SERVICE as KEYRING_SERVICE;
@@ -372,6 +375,14 @@ impl ProjectState {
     /// outlives the goal.
     pub fn agent_homes_dir(&self) -> PathBuf {
         self.dir.join("agent-homes")
+    }
+    /// Per-machine Chief of Staff read lists (`allow = [...]`, `deny = [...]`):
+    /// the overlay the Wayfinder poller writes through `ta chat-read machine set`,
+    /// merged with `[chat.read]` of the project's `.ta/workflow.toml`. Outside the
+    /// project tree (the repo file is shared by every install; a path is one
+    /// computer's) and inside the state directory, which no agent can read or write.
+    pub fn chat_read_path(&self) -> PathBuf {
+        self.dir.join(CHAT_READ_FILENAME)
     }
 }
 
