@@ -622,8 +622,10 @@ When a goal started for a Wayfinder candidate (or any external-intake candidate)
 ```json
 {"candidate_id":"wayfinder-task:T-42#n-1","outcome":"launch_failed","kind":"launch_failed",
  "reason_code":"no_login","detail":"the agent said it is not logged in (claude-code)",
- "fix":"Log in from Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"}
+ "fix":"Open Wayfinder Settings, Agent login, and log in on this computer. If you run TA by hand, run: ta agent-login login claude-code"}
 ```
+
+For a login failure (`no_login`, `login_invalid`) the `fix` depends on the project. In a Wayfinder-managed project (its `.ta/workflow.toml` has a `[plan.wayfinder]` table with a `project_id`, which `vt-install` writes) it says first to open Wayfinder Settings, Agent login, and log in on this computer, and second gives the CLI line for people running TA by hand. In any other project it is just `Run: ta agent-login login claude-code`. The reason codes are the same either way.
 
 `detail` is what happened and `fix` is what to do; neither ends with a full stop, so a reader can join them. Both are built by TA from identifiers and exit codes, never copied from agent output, so they carry no secret. The message is signed with the daemon's own `ta-daemon` role (see `[whiteboard] outcome_roles`). An agent cannot send `launch_failed`: the agent token path refuses it, and an unsigned one is refused by the verifier.
 
@@ -653,7 +655,7 @@ When `ta run` fails to start an agent it prints a headline and one identifier-on
 
 **An agent that ran and changed nothing is not a launch failure.** If the agent started, ran and exited without producing any file changes, there is nothing to review: `ta run` still reports "No changes detected" (exit status 1) and prints `ta-run-finished: result=no_changes goal=<uuid>`, the goal is completed with no draft (`poller_state: finished`), the wake message is acked, and no `launch_failed` is published. The exception is the sandbox: if the same run's stderr shows the sandbox blocking something (for example `Operation not permitted` on a path outside the project), that is why nothing changed, so the launch is reported as `sandbox_denied` with the denied path in `detail` (`... (denied path: /Users/you/outside/notes.txt)`), and the goal is marked failed with the same `launch_failure`. A non-zero exit with no such marker (a crash, a missing binary, a rejected login) stays a `launch_failed` with the matching code.
 
-**A login failure is a launch failure, never a finished launch.** An agent that could not authenticate also leaves nothing to review, but it did not finish anything. TA treats these as a failed launch: the agent's own stream shows `authentication_failed` (or a result with `is_error` and a 401/403), it says "Not logged in" / "Please run /login", or the agent's stored login is missing or rejected. The goal is marked `failed`, the daemon publishes `launch_failed` with code `no_login` (or `login_invalid` when a stored login was rejected), and `fix` says to run `ta agent-login login claude-code` (or use Wayfinder Settings > Agent login). It is never retried: a missing login stays missing, so the first attempt is the only one. The daemon log gets an error line with the reason code and the fix. A zero-token, zero-cost run that ended with an API error result is a failed launch too (`crashed`, which is retried, because an overloaded API can clear). Only the structured fields of the agent's stream count; a reply that merely talks about logins does not.
+**A login failure is a launch failure, never a finished launch.** An agent that could not authenticate also leaves nothing to review, but it did not finish anything. TA treats these as a failed launch: the agent's own stream shows `authentication_failed` (or a result with `is_error` and a 401/403), it says "Not logged in" / "Please run /login", or the agent's stored login is missing or rejected. The goal is marked `failed`, the daemon publishes `launch_failed` with code `no_login` (or `login_invalid` when a stored login was rejected), and `fix` says to open Wayfinder Settings, Agent login, and log in on this computer in a Wayfinder-managed project, or to run `ta agent-login login claude-code` (that CLI line is the only text outside one). It is never retried: a missing login stays missing, so the first attempt is the only one. The daemon log gets an error line with the reason code and the fix. A zero-token, zero-cost run that ended with an API error result is a failed launch too (`crashed`, which is retried, because an overloaded API can clear). Only the structured fields of the agent's stream count; a reply that merely talks about logins does not.
 
 **A known-missing login is refused before launch.** When the sandbox scrubs the environment, TA checks the same state `ta agent-login list` shows, for the environment the agent would actually get. If a login-framework agent has no login there (or its stored login was rejected), `ta run` refuses to start it, prints the same `no_login` headline and `ta-launch-failure` marker, and marks the goal failed. No model call is made. Agents with no login framework (a stub, a local model) are never refused.
 
@@ -6318,7 +6320,24 @@ The rules, exactly:
 
 `readable_projects` under `[chat]` is the earlier spelling of `allow`: it is still read and merged into `[chat.read] allow`, so existing configs keep working, but new configs should use `[chat.read]`.
 
-**Debugging the policy.** `ta chat-read check <path>` prints `ALLOWED` or `DENIED` and why (the matching `allow` entry, the `deny` entry, the built-in location, or that nothing lists it) and exits non-zero when denied. `ta chat-read list` prints the compiled project root, allow and deny entries and the built-in protected list. Both build the policy the way `ta run --chat-mode` does and show what a *new* session would get.
+**Per-computer lists (the machine overlay).** The project file is shared with the repository. What one computer may additionally read or must never read is kept in a per-user file that only that computer has, and that Wayfinder Settings edits (the poller never writes `.ta/workflow.toml`):
+
+```toml
+# <TA state dir>/projects/<project-id>/chat-read.toml   (mode 0600)
+allow = ["~/Documents/specs"]
+deny  = ["~/Documents/specs/private"]
+```
+
+`ta chat-read machine show` prints the exact path (`machine_file`) and what is in it. The effective policy is the project file's `[chat.read]` plus this overlay, with the rules above unchanged: deny beats allow across both files, the built-in protected list is a floor neither can lower, and the whole home folder and protected places are refused. The state directory is itself protected, so the agent cannot read or change this file. The overlay is read when a session starts; a running session keeps the policy in its token. A machine entry that no longer resolves (a deleted folder) is skipped with a warning at launch instead of stopping the Chief of Staff; the same typo in the project file still stops the launch. A corrupt overlay stops the launch with the file path and the fix, because silently dropping a deny would widen access.
+
+**Debugging and scripting the policy.**
+
+- `ta chat-read check <path>` prints `ALLOWED` or `DENIED` and why (the matching `allow` entry and whether it came from the project file or this computer's list, the `deny` entry, the built-in location, or that nothing lists it) and exits non-zero when denied.
+- `ta chat-read list` prints the compiled project root, every allow and deny entry with its source (`project` or `machine`) and state, and the built-in protected list. `--json` is the machine form: `{"allow":[{"entry","source":"project"|"machine","state":"applied"|"unresolved"|"refused","detail":str|null}],"deny":[...],"protected":[...],"machine_file":"..."}`. `applied` means the policy uses it; `unresolved` means TA cannot resolve it (a missing path, an unknown registered project), with the reason in `detail`; `refused` means it is a protected place, the whole home folder or `..`, with the reason.
+- `ta chat-read resolve <entry> --list allow|deny [--json]` answers `{"entry","state","detail","list"}` for one entry without writing anything.
+- `ta chat-read machine set [--allow E]... [--deny E]... [--json]` atomically replaces the overlay (temp file and rename, mode 0600) and prints the per-entry results in the shape of `list`, plus `written`. `refused` entries are never written, an `unresolved` allow entry is not written, and an `unresolved` deny entry is written (a deny for a path that does not exist yet is harmless). An empty call clears the overlay.
+- `ta chat-read machine show [--json]` prints the overlay: `{"allow","deny","machine_file","exists"}`.
+- All of these accept `--project-root <dir>` and build the policy the way `ta run --chat-mode` does, so they show what a *new* session would get.
 
 **Where the policy is enforced.** One compiled policy, three layers:
 

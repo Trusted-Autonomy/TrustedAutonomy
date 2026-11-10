@@ -840,6 +840,7 @@ fn run_and_record_launch(
             log_path: Some(&log_str),
             evidence_line: quoted.as_deref(),
             stream_failure,
+            wayfinder_managed: ta_submit::WorkflowConfig::is_wayfinder_managed(project_root),
         });
     let goal_for_record = marker
         .as_ref()

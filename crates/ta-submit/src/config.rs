@@ -2704,6 +2704,18 @@ impl WorkflowConfig {
         Ok(config)
     }
 
+    /// True when `project_root` is a Wayfinder-managed project: the VT installer
+    /// (`vt-install`) wrote a `[plan.wayfinder]` table with a non-empty `project_id`
+    /// into its `.ta/workflow.toml`. That table is the same marker the daemon's wake
+    /// listener pins a Chief of Staff session to. A missing or unreadable file means
+    /// "not managed".
+    pub fn is_wayfinder_managed(project_root: &std::path::Path) -> bool {
+        Self::load(&project_root.join(".ta").join("workflow.toml"))
+            .ok()
+            .and_then(|w| w.plan.wayfinder)
+            .is_some_and(|c| !c.project_id.trim().is_empty())
+    }
+
     /// Read `path` and merge any local override file on top, without
     /// deserializing into [`WorkflowConfig`].
     fn load_merged_value(
@@ -2790,6 +2802,38 @@ fn merge_toml_values(base: &mut toml::Value, overrides: toml::Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wayfinder_managed_means_a_plan_wayfinder_project_id_in_workflow_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(
+            !WorkflowConfig::is_wayfinder_managed(root),
+            "no workflow.toml: not managed"
+        );
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        let wf = root.join(".ta").join("workflow.toml");
+        std::fs::write(&wf, "[submit]\nadapter = \"none\"\n").unwrap();
+        assert!(!WorkflowConfig::is_wayfinder_managed(root));
+        let table = |id: &str| {
+            format!(
+                "[plan.wayfinder]\nbase_url = \"http://localhost:3010\"\norg_id = \"o\"\n\
+                 project_id = \"{id}\"\ncredential_name = \"wf\"\n"
+            )
+        };
+        std::fs::write(&wf, table("  ")).unwrap();
+        assert!(
+            !WorkflowConfig::is_wayfinder_managed(root),
+            "an empty project_id is not a pairing"
+        );
+        std::fs::write(&wf, table("p-1")).unwrap();
+        assert!(WorkflowConfig::is_wayfinder_managed(root));
+        std::fs::write(&wf, "not = [valid").unwrap();
+        assert!(
+            !WorkflowConfig::is_wayfinder_managed(root),
+            "an unreadable file is not managed"
+        );
+    }
+
     #[test]
     fn cleanup_defaults_are_conservative() {
         let c = WorkflowConfig::default().cleanup;

@@ -4916,6 +4916,9 @@ pub fn execute(
                     output_lines: Some(agent_tokens_out.output_lines),
                     login: Some(ta_runtime::login_probe::default_probe().status(agent)),
                     stream_failure: agent_tokens_out.stream_failure,
+                    wayfinder_managed: ta_submit::WorkflowConfig::is_wayfinder_managed(
+                        &config.source_root(),
+                    ),
                     ..Default::default()
                 },
             );
@@ -5111,7 +5114,13 @@ pub fn execute(
             // Nobody is at the terminal to read guidance: record why on the goal and
             // say it on stderr, where the launcher (daemon, poller) looks.
             let unattended_failure = (headless || quiet).then(|| {
-                let failure = launch_error_failure(agent, &agent_config.command, &e, is_not_found);
+                let failure = launch_error_failure(
+                    agent,
+                    &agent_config.command,
+                    &e,
+                    is_not_found,
+                    ta_submit::WorkflowConfig::is_wayfinder_managed(&config.source_root()),
+                );
                 mark_goal_agent_never_started(
                     config,
                     goal.goal_run_id,
@@ -6577,6 +6586,7 @@ fn known_bad_login_failure(
     agent: &str,
     command: &str,
     env: &dyn Fn(&str) -> Option<String>,
+    wayfinder_managed: bool,
 ) -> Option<ta_goal::LaunchFailure> {
     use ta_credentials::agent_login::{status_for_agent, AgentLogin};
     if catalog.serving(agent).is_empty() {
@@ -6593,6 +6603,7 @@ fn known_bad_login_failure(
             command: Some(command),
             output_lines: Some(0),
             login: Some(login),
+            wayfinder_managed,
             ..Default::default()
         },
     ))
@@ -6605,6 +6616,7 @@ fn launch_error_failure(
     command: &str,
     err: &std::io::Error,
     is_not_found: bool,
+    wayfinder_managed: bool,
 ) -> ta_goal::LaunchFailure {
     if let Some(refused) = err
         .get_ref()
@@ -6621,6 +6633,7 @@ fn launch_error_failure(
         agent,
         command: Some(command),
         stderr: &text,
+        wayfinder_managed,
         ..Default::default()
     })
 }
@@ -7439,6 +7452,9 @@ fn launch_agent_via_runtime(
                     &agent_name,
                     &config.command,
                     &|k| env.get(k).cloned(),
+                    project_root_opt
+                        .as_deref()
+                        .is_some_and(ta_submit::WorkflowConfig::is_wayfinder_managed),
                 ) {
                     tracing::error!(
                         goal_id = %goal_id,
@@ -18067,27 +18083,48 @@ mod spend_tests {
         let catalog = ta_credentials::agent_login::Catalog::load_from(None, None).unwrap();
 
         let none = |_: &str| None;
-        let f = known_bad_login_failure(&store, &catalog, "claude-code", "claude", &none)
+        let f = known_bad_login_failure(&store, &catalog, "claude-code", "claude", &none, false)
             .expect("no login anywhere: refuse");
         assert_eq!(f.code, ta_goal::LaunchFailureCode::NoLogin);
-        assert!(f.fix.contains("ta agent-login login claude-code"), "{f:?}");
+        assert!(
+            f.fix.starts_with("Run: ta agent-login login claude-code"),
+            "outside a Wayfinder project the CLI line is the fix: {f:?}"
+        );
+        let managed =
+            known_bad_login_failure(&store, &catalog, "claude-code", "claude", &none, true)
+                .expect("no login anywhere: refuse");
+        assert!(
+            managed.fix.starts_with(
+                "Open Wayfinder Settings, Agent login, and log in on this computer. \
+                 If you run TA by hand, run: ta agent-login login claude-code"
+            ),
+            "{managed:?}"
+        );
+        assert_eq!(managed.code, f.code, "reason codes are unchanged");
 
         // The refusal rides inside the launch error and comes out as the same failure.
         let err = std::io::Error::other(LoginRefused { failure: f.clone() });
         assert_eq!(
-            launch_error_failure("claude-code", "claude", &err, false),
+            launch_error_failure("claude-code", "claude", &err, false, false),
             f
         );
         assert!(err.to_string().contains("no model call was made"), "{err}");
 
         let with_token = |k: &str| (k == "CLAUDE_CODE_OAUTH_TOKEN").then(|| "tok".to_string());
         assert!(
-            known_bad_login_failure(&store, &catalog, "claude-code", "claude", &with_token)
-                .is_none(),
+            known_bad_login_failure(
+                &store,
+                &catalog,
+                "claude-code",
+                "claude",
+                &with_token,
+                false
+            )
+            .is_none(),
             "a login in the environment is a login"
         );
         assert!(
-            known_bad_login_failure(&store, &catalog, "stub-agent", "stub", &none).is_none(),
+            known_bad_login_failure(&store, &catalog, "stub-agent", "stub", &none, false).is_none(),
             "an agent no login framework serves is never refused"
         );
     }
@@ -18096,13 +18133,13 @@ mod spend_tests {
     fn a_launch_error_is_classified_for_the_goal_and_the_marker() {
         use ta_goal::LaunchFailureCode as C;
         let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file");
-        let f = launch_error_failure("claude-code", "claude", &missing, true);
+        let f = launch_error_failure("claude-code", "claude", &missing, true, false);
         assert_eq!(f.code, C::AgentMissing);
         assert!(f.detail.contains("claude"), "{f:?}");
         let denied = std::io::Error::other(
             "Launch refused by the sandbox policy (goal g): posture strict denies network",
         );
-        let f = launch_error_failure("claude-code", "claude", &denied, false);
+        let f = launch_error_failure("claude-code", "claude", &denied, false, false);
         assert_eq!(f.code, C::SandboxDenied);
         // What is printed is identifiers only and round-trips to the same code.
         let goal = uuid::Uuid::new_v4();

@@ -62,10 +62,13 @@ pub fn decode_error(err: &str) -> Option<LaunchFailure> {
 
 /// The failure for a launch error: the one the daemon encoded, else classified
 /// from the text (a plain error from a launcher that did not classify).
-pub fn failure_from_error(err: &str) -> LaunchFailure {
+/// `project_root` decides whether a login failure's fix leads with Wayfinder Settings
+/// (a Wayfinder-managed project) or with the CLI line.
+pub fn failure_from_error(err: &str, project_root: &Path) -> LaunchFailure {
     decode_error(err).unwrap_or_else(|| {
         classify_and_describe(&LaunchEvidence {
             stderr: err,
+            wayfinder_managed: ta_submit::WorkflowConfig::is_wayfinder_managed(project_root),
             ..Default::default()
         })
     })
@@ -370,10 +373,13 @@ mod tests {
         assert_eq!(decode_error(&forged), None);
         // A plain error is classified from its text instead.
         assert_eq!(
-            failure_from_error("'claude' command not found").code,
+            failure_from_error("'claude' command not found", Path::new("/nonexistent")).code,
             LaunchFailureCode::AgentMissing
         );
-        assert_eq!(failure_from_error("boom").code, LaunchFailureCode::Crashed);
+        assert_eq!(
+            failure_from_error("boom", Path::new("/nonexistent")).code,
+            LaunchFailureCode::Crashed
+        );
     }
 
     #[test]

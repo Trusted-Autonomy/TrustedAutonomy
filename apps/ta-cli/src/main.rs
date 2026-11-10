@@ -34,8 +34,9 @@ use ta_mcp_gateway::GatewayConfig;
     about
 )]
 struct Cli {
-    /// Project root directory (defaults to current directory).
-    #[arg(long, default_value = ".")]
+    /// Project root directory (defaults to current directory). May also follow the
+    /// subcommand: `ta chat-read list --json --project-root <dir>`.
+    #[arg(long, default_value = ".", global = true)]
     project_root: PathBuf,
 
     /// Accept terms of use non-interactively (for CI/scripted usage).
@@ -2723,6 +2724,7 @@ fn command_prints_json(cmd: Option<&Commands>) -> bool {
         Some(Commands::State { command }) => commands::state_dir::prints_json(command),
         Some(Commands::AgentLogin { command }) => commands::agent_login::prints_json(command),
         Some(Commands::ReleaseSet { command }) => commands::release_set::prints_json(command),
+        Some(Commands::ChatRead { command }) => commands::chat_read::prints_json(command),
         _ => false,
     }
 }

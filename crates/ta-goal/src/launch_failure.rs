@@ -149,6 +149,11 @@ pub struct LaunchEvidence<'a> {
     pub evidence_line: Option<&'a str>,
     /// What the agent's own stream-json output reported, when it reported a failure.
     pub stream_failure: Option<StreamFailureKind>,
+    /// The launch belongs to a Wayfinder-managed project (its `.ta/workflow.toml`
+    /// has a `[plan.wayfinder]` project, which is what `vt-install` writes). A login
+    /// failure's fix then points at the Wayfinder Settings flow first and at the CLI
+    /// second; elsewhere the CLI line comes first and Wayfinder is not mentioned.
+    pub wayfinder_managed: bool,
 }
 
 /// What an agent's own stream-json output said went wrong. The agent can exit
@@ -524,6 +529,26 @@ fn one_line(s: &str) -> String {
     t
 }
 
+/// The sentence a person acts on for a login failure. In a Wayfinder-managed project
+/// the login is a Wayfinder flow (Settings, Agent login, "Log in on this computer": the
+/// poller opens the sign-in window here and stores the login in TA custody), so that
+/// comes first and the CLI line is the second sentence for people running TA by hand.
+/// Outside such a project the CLI line is the fix.
+fn login_fix(framework: &str, again: bool, wayfinder_managed: bool) -> String {
+    if wayfinder_managed {
+        format!(
+            "Open Wayfinder Settings, Agent login, and log in{} on this computer. If you run TA by hand, run: ta agent-login login {framework}",
+            if again { " again" } else { "" }
+        )
+    } else {
+        if again {
+            format!("Run again: ta agent-login login {framework} (the stored login was rejected)")
+        } else {
+            format!("Run: ta agent-login login {framework}")
+        }
+    }
+}
+
 /// Build the explanation for `code` from the evidence.
 pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailure {
     let agent = if ev.agent.is_empty() {
@@ -546,15 +571,11 @@ pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailu
     let (detail, fix) = match code {
         LaunchFailureCode::NoLogin => (
             format!("{agent} has no usable login, so it could not start"),
-            format!(
-                "Log in from Wayfinder Settings > Agent login, or run: ta agent-login login {framework}"
-            ),
+            login_fix(framework, false, ev.wayfinder_managed),
         ),
         LaunchFailureCode::LoginInvalid => (
             format!("the login for {agent} was rejected, so it could not start{quoted}"),
-            format!(
-                "Log in again from Wayfinder Settings > Agent login, or run: ta agent-login login {framework}"
-            ),
+            login_fix(framework, true, ev.wayfinder_managed),
         ),
         LaunchFailureCode::AgentMissing => {
             let cmd = ev.command.filter(|c| !c.is_empty()).unwrap_or(agent);
@@ -586,10 +607,7 @@ pub fn describe(code: LaunchFailureCode, ev: &LaunchEvidence<'_>) -> LaunchFailu
                     "Read the launch log under .ta/logs/wake-launches/, fix the cause, then retry"
                         .to_string()
                 });
-            (
-                format!("{agent} {exit} before doing any work{quoted}"),
-                log,
-            )
+            (format!("{agent} {exit} before doing any work{quoted}"), log)
         }
         LaunchFailureCode::TimedOut => {
             let after = ev
@@ -787,12 +805,75 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(
-            nl.fix.contains(
-                "Wayfinder Settings > Agent login, or run: ta agent-login login claude-code"
-            ),
-            "{nl:?}"
-        );
+        assert_eq!(nl.fix, "Run: ta agent-login login claude-code", "{nl:?}");
+    }
+
+    #[test]
+    fn a_login_failure_in_a_wayfinder_project_leads_with_wayfinder_then_the_cli_line() {
+        for (code, again) in [
+            (LaunchFailureCode::NoLogin, ""),
+            (LaunchFailureCode::LoginInvalid, " again"),
+        ] {
+            let f = describe(
+                code,
+                &LaunchEvidence {
+                    agent: "claude-code",
+                    wayfinder_managed: true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                f.fix,
+                format!(
+                    "Open Wayfinder Settings, Agent login, and log in{again} on this computer. If you run TA by hand, run: ta agent-login login claude-code"
+                )
+            );
+            // Wayfinder first, CLI second.
+            assert!(
+                f.fix.find("Wayfinder Settings").unwrap()
+                    < f.fix.find("ta agent-login login").unwrap(),
+                "{f:?}"
+            );
+            assert!(
+                f.headline()
+                    .contains("Open Wayfinder Settings, Agent login"),
+                "{}",
+                f.headline()
+            );
+            // The reason code is unchanged by where the project lives.
+            let plain = describe(
+                code,
+                &LaunchEvidence {
+                    agent: "claude-code",
+                    ..Default::default()
+                },
+            );
+            assert_eq!(plain.code, f.code);
+            assert!(!plain.fix.contains("Wayfinder"), "{plain:?}");
+            assert!(plain.fix.contains("ta agent-login login claude-code"));
+        }
+    }
+
+    #[test]
+    fn non_login_failures_do_not_change_in_a_wayfinder_project() {
+        let ev = |managed| LaunchEvidence {
+            agent: "claude-code",
+            command: Some("claude"),
+            wayfinder_managed: managed,
+            ..Default::default()
+        };
+        for code in [
+            LaunchFailureCode::AgentMissing,
+            LaunchFailureCode::SandboxDenied,
+            LaunchFailureCode::Crashed,
+            LaunchFailureCode::TimedOut,
+        ] {
+            assert_eq!(
+                describe(code, &ev(true)),
+                describe(code, &ev(false)),
+                "{code:?}"
+            );
+        }
     }
 
     #[test]

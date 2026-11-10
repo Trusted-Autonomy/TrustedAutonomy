@@ -11620,6 +11620,21 @@ Status note: items 1 to 3 are built and tested; the report only shows a recommen
 **Effort**: S.
 
 #### Version: `0.17.12-alpha.37`
+
+### v0.17.12.38 - Per-computer Chief of Staff read lists
+<!-- status: in_progress -->
+**Depends on**: v0.17.12.37
+
+**Goal**: What the Chief of Staff may read is set per computer (Wayfinder Settings edits it for each install) without editing the shared project file. Source: Wayfinder notes 065, 066 and 067.
+
+1. [x] Machine overlay `<TA state dir>/projects/<project-id>/chat-read.toml` (`allow`, `deny`, mode 0600, atomic replace). Effective policy = project `[chat.read]` plus overlay; deny beats allow; the built-in floor, whole home and protected places cannot be lowered. Engine: `ta_policy::read_policy::{MachineLists, Layers, compile_layers, resolve_single}`; the gateway reads it at launch (`chat_launch::load_read_listing`).
+2. [x] CLI contract for the poller: `ta chat-read list --json`, `resolve <entry> --list allow|deny --json`, `machine set [--allow E]... [--deny E]... --json`, `machine show --json`, with per-entry `state` `applied|unresolved|refused`, `source` and `detail`.
+3. [x] Login launch failures in a Wayfinder-managed project (`[plan.wayfinder]` `project_id` in `.ta/workflow.toml`) say first "Open Wayfinder Settings, Agent login, and log in on this computer" and second the CLI line; elsewhere the CLI line first. Reason codes unchanged.
+4. [ ] Linux and Windows are not run: the overlay feeds the same compiled policy as the project file, but only macOS Seatbelt was exercised.
+
+**Effort**: S.
+
+#### Version: `0.17.12-alpha.38`
 ### v0.18.0 — SA Enterprise Credential Store Plugin
 <!-- status: deferred -->
 

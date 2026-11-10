@@ -250,7 +250,14 @@ pub fn verify_chat_read_grant(
 /// read hard deny: a chat session never reads TA's own state.
 pub fn project_state_dir(project_root: &Path) -> Option<PathBuf> {
     let locator = ta_credentials::state::StateLocator::from_env().ok()?;
-    ta_credentials::state::ProjectState::locate(project_root, &locator)
+    project_state_dir_in(project_root, &locator)
+}
+
+fn project_state_dir_in(
+    project_root: &Path,
+    locator: &ta_credentials::state::StateLocator,
+) -> Option<PathBuf> {
+    ta_credentials::state::ProjectState::locate(project_root, locator)
         .ok()
         .flatten()
         .map(|s| s.dir)
@@ -263,32 +270,177 @@ pub fn read_env(project_root: &Path) -> ta_policy::read_policy::ReadEnv {
         .with_state_dir(project_state_dir(project_root))
 }
 
-/// Compile the chat read policy of `project_root` from its `.ta/workflow.toml`:
-/// `[chat.read] allow` / `deny` (plus the `readable_projects` alias). This is the
+/// The per-machine overlay file of `project_root`: `<state dir>/projects/<project-id>/
+/// chat-read.toml`. When the project has no state directory yet (nothing was ever
+/// stored for it) the id is not minted by a read; the returned path then carries a
+/// placeholder id segment and does not exist.
+pub fn machine_lists_path(
+    project_root: &Path,
+    locator: &ta_credentials::state::StateLocator,
+) -> PathBuf {
+    match ta_credentials::state::ProjectState::locate(project_root, locator) {
+        Ok(Some(state)) => state.chat_read_path(),
+        _ => locator
+            .projects_dir()
+            .join("<project-id, assigned on first write>")
+            .join(ta_credentials::state::CHAT_READ_FILENAME),
+    }
+}
+
+/// Read the overlay at `path`. A missing file is empty lists; a file that does not
+/// parse is an error (a broken overlay must not silently drop a `deny`).
+pub fn read_machine_lists(
+    path: &Path,
+) -> Result<ta_policy::read_policy::MachineLists, GatewayError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => ta_policy::read_policy::MachineLists::parse(&text, path)
+            .map_err(|e| GatewayError::Other(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(GatewayError::Other(format!(
+            "could not read the machine read-list file {}: {e}. Check its permissions, or \
+             rewrite it with `ta chat-read machine set`.",
+            path.display()
+        ))),
+    }
+}
+
+/// Atomically replace the overlay of `project_root` (temp file, fsync, rename; mode
+/// 0600 on Unix). Creates the project's state directory on first use. Returns the path
+/// written.
+pub fn write_machine_lists(
+    project_root: &Path,
+    locator: &ta_credentials::state::StateLocator,
+    lists: &ta_policy::read_policy::MachineLists,
+) -> Result<PathBuf, GatewayError> {
+    let state = ta_credentials::state::ProjectState::open(project_root, locator).map_err(|e| {
+        GatewayError::Other(format!(
+            "could not open the TA state directory of {} to store the machine read lists: {e}",
+            project_root.display()
+        ))
+    })?;
+    let path = state.chat_read_path();
+    ta_credentials::state_dir::write_atomic_private(&path, lists.render().as_bytes()).map_err(
+        |e| {
+            GatewayError::Other(format!(
+                "could not write the machine read lists to {}: {e}. Check that the directory \
+                 is writable by your user (the state directory is chosen by TA_STATE_DIR or \
+                 `ta state relocate`).",
+                path.display()
+            ))
+        },
+    )?;
+    Ok(path)
+}
+
+/// `[chat.read] allow` / `deny` (plus the `readable_projects` alias) of the project's
+/// `.ta/workflow.toml`; empty when the file does not exist.
+pub fn project_lists(project_root: &Path) -> Result<(Vec<String>, Vec<String>), GatewayError> {
+    let workflow_toml = project_root.join(".ta").join("workflow.toml");
+    if !workflow_toml.is_file() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let workflow = ta_submit::WorkflowConfig::load(&workflow_toml).map_err(|e| {
+        GatewayError::Other(format!(
+            "could not read [chat.read] allow/deny: {} did not parse: {e}. Fix the TOML and \
+             re-launch.",
+            workflow_toml.display()
+        ))
+    })?;
+    Ok((workflow.chat.read_allow(), workflow.chat.read_deny()))
+}
+
+/// Both layers of the read policy with the resolution of every entry.
+pub struct ReadListing {
+    pub policy: ta_policy::read_policy::ReadPolicy,
+    pub entries: Vec<ta_policy::read_policy::ListedEntry>,
+    pub machine: ta_policy::read_policy::MachineLists,
+    pub machine_file: PathBuf,
+    pub env: ta_policy::read_policy::ReadEnv,
+}
+
+/// Compile the read policy of `project_root`: `[chat.read]` of its
+/// `.ta/workflow.toml` (plus the `readable_projects` alias) as the base, UNION the
+/// per-machine overlay. Deny beats allow across both; the built-in hard-deny floor is
+/// unchanged. `strict_project` makes an unusable project entry an error (the launch
+/// path); `false` reports it per entry (`ta chat-read list`).
+pub fn load_read_listing(
+    project_root: &Path,
+    strict_project: bool,
+) -> Result<ReadListing, GatewayError> {
+    let locator = ta_credentials::state::StateLocator::from_env().ok();
+    load_read_listing_in(project_root, locator.as_ref(), strict_project)
+}
+
+/// [`load_read_listing`] with an explicit state locator (`None`: no state directory
+/// can be determined, so there is no overlay and no state dir to protect).
+pub fn load_read_listing_in(
+    project_root: &Path,
+    locator: Option<&ta_credentials::state::StateLocator>,
+    strict_project: bool,
+) -> Result<ReadListing, GatewayError> {
+    let (allow, deny) = project_lists(project_root)?;
+    let (machine, machine_file) = match locator {
+        Some(locator) => {
+            let path = machine_lists_path(project_root, locator);
+            (read_machine_lists(&path)?, path)
+        }
+        None => (
+            Default::default(),
+            PathBuf::from("<no TA state directory could be determined>"),
+        ),
+    };
+    let env = ta_policy::read_policy::ReadEnv::for_project(project_root)
+        .with_state_dir(locator.and_then(|l| project_state_dir_in(project_root, l)));
+    let (policy, entries) = ta_policy::read_policy::compile_layers(
+        &env,
+        ta_policy::read_policy::Layers {
+            project_allow: &allow,
+            project_deny: &deny,
+            machine: &machine,
+        },
+        strict_project,
+    )
+    .map_err(|e| GatewayError::Other(e.to_string()))?;
+    Ok(ReadListing {
+        policy,
+        entries,
+        machine,
+        machine_file,
+        env,
+    })
+}
+
+/// Compile the chat read policy of `project_root`: `[chat.read] allow` / `deny` of its
+/// `.ta/workflow.toml` (plus the `readable_projects` alias) UNION the per-machine
+/// overlay (`chat-read.toml` in the project's TA state directory). This is the
 /// ONE place config becomes a policy; the launcher mints the result into the
 /// biscuit read grant, the sandbox profile is built from it, and
 /// `ta chat-read check` explains it. No config file means project root only.
-/// An entry that cannot be resolved is an error naming the entry and the key: the
-/// lists are the owner's explicit widening of read access, so a typo must be
-/// loud, not dropped.
+/// A PROJECT entry that cannot be resolved is an error naming the entry and the key:
+/// the lists are the owner's explicit widening of read access, so a typo must be
+/// loud, not dropped. A MACHINE entry that cannot be applied (a folder the owner
+/// deleted since) is skipped with a warning so the Chief of Staff still launches; it
+/// is reported by `ta chat-read list`.
 pub fn load_read_policy(
     project_root: &Path,
 ) -> Result<ta_policy::read_policy::ReadPolicy, GatewayError> {
-    let workflow_toml = project_root.join(".ta").join("workflow.toml");
-    let (allow, deny) = if workflow_toml.is_file() {
-        let workflow = ta_submit::WorkflowConfig::load(&workflow_toml).map_err(|e| {
-            GatewayError::Other(format!(
-                "could not read [chat.read] allow/deny: {} did not parse: {e}. Fix the TOML and \
-                 re-launch.",
-                workflow_toml.display()
-            ))
-        })?;
-        (workflow.chat.read_allow(), workflow.chat.read_deny())
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    ta_policy::read_policy::ReadPolicy::from_config(&read_env(project_root), &allow, &deny)
-        .map_err(|e| GatewayError::Other(e.to_string()))
+    let listing = load_read_listing(project_root, true)?;
+    for e in &listing.entries {
+        if e.source == ta_policy::read_policy::EntrySource::Machine
+            && e.state != ta_policy::read_policy::EntryState::Applied
+        {
+            tracing::warn!(
+                list = e.list.as_str(),
+                entry = %e.entry,
+                state = e.state.as_str(),
+                detail = e.detail.as_deref().unwrap_or(""),
+                machine_file = %listing.machine_file.display(),
+                "a machine chat-read entry is not applied to this launch; \
+                 `ta chat-read list` shows why"
+            );
+        }
+    }
+    Ok(listing.policy)
 }
 
 #[cfg(test)]
