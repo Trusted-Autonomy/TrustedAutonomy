@@ -2,54 +2,35 @@
 //
 // Builds the narrow "chat mode" CapabilityManifest described in
 // wayfinder/docs/superpowers/specs/2026-10-03-multi-project-vt-agnostic-coordination-design.md
-// §8: read anywhere in project context, write only to an ephemeral
-// scratch path, no grants for git/email/Drive/social tools. Composed
-// from two `PolicyCompiler::compile()` calls (broad-read +
-// narrow-scratch-write) rather than extending the compiler itself,
-// since `CompilerOptions` applies one `resource_scope` uniformly to
-// every grant produced by a single `compile()` call — composition, not
-// modification, of an already-tested security-critical path.
-//
-// Ephemeral scratch path convention (newly established by this module;
-// nothing matching this purpose existed anywhere in this codebase
-// before it): `.ta/chat-scratch/` relative to the workspace root. Any
-// future caller wiring this into a real goal/session launch path must
-// create this directory and treat its contents as disposable.
+// §8: read-only. A chat session has NO write grant of any kind: no scratch
+// directory, no project write, no git/email/Drive/social tool. The session's
+// own session directory is readable (`fs://workspace/**`); everything outside
+// it that the Chief of Staff may read is decided by the read allow/deny
+// policy ([`crate::read_policy::ReadPolicy`]) that the launcher mints into the
+// biscuit read grant ([`ChatReadAccess`]).
 //
 // Whiteboard delivery: NOT separately gated here, by design, not
 // oversight. Confirmed by source inspection
 // (`crates/ta-mcp-gateway/src/tools/whiteboard.rs`,
 // `crates/ta-daemon/src/api/whiteboard.rs`) that whiteboard read/write
 // operations have zero references to `PolicyEngine`/`CapabilityManifest`/
-// `ta_policy` anywhere — they are not currently checked against any
-// capability manifest at all. "Whiteboard delivery allowed" in chat
-// mode therefore requires no new grant type: nothing today would check
-// for one. If whiteboard access is ever brought under capability-manifest
-// gating, this module will need a corresponding grant added then.
+// `ta_policy` anywhere. They carry messages between agents, not file or
+// project content.
 //
 // No grants for git/email/Drive/social tools: this falls out of
-// default-deny with zero extra code — `chat_read_profile`/
-// `chat_scratch_write_profile` below simply never list any
-// `git_*`/`email_*`/`drive_*`/social-tool action in `bounded_actions`,
-// and `PolicyEngine::evaluate` denies any `(tool, verb)` pair with no
-// matching grant (confirmed directly: `crates/ta-policy/src/engine.rs`'s
-// `evaluate` denies when `self.manifests.get(&request.agent_id)` is
-// `None`, and `has_matching_grant` is a positive match against the
-// grants list with no separate allow-by-default path for anything).
+// default-deny with zero extra code (`PolicyEngine::evaluate` denies any
+// `(tool, verb)` pair with no matching grant).
+
+use std::path::{Path, PathBuf};
 
 use crate::alignment::{AlignmentProfile, AutonomyEnvelope, CoordinationConfig};
 use crate::capability::CapabilityManifest;
 use crate::compiler::{CompilerError, CompilerOptions, PolicyCompiler};
+use crate::read_policy::{
+    is_valid_label, scope_decode, scope_encode, ReadPolicy, ReadRule, READ_RESOURCE_SCOPE,
+};
 
-/// Relative path (from the workspace root) of the ephemeral scratch
-/// directory chat-mode write access is scoped to. Not an existing
-/// convention — established by this module.
-pub const CHAT_SCRATCH_DIR: &str = ".ta/chat-scratch";
-
-/// The chat-mode read `AlignmentProfile`: broad `fs_read`, no write of
-/// any kind. Write access is granted separately (see
-/// `chat_scratch_write_profile`), scoped by the caller to
-/// `CHAT_SCRATCH_DIR`, never to the rest of the workspace.
+/// The chat-mode read `AlignmentProfile`: broad `fs_read`, no write of any kind.
 fn chat_read_profile() -> AlignmentProfile {
     AlignmentProfile {
         principal: "chat-session".to_string(),
@@ -66,38 +47,10 @@ fn chat_read_profile() -> AlignmentProfile {
     }
 }
 
-/// The chat-mode scratch-write `AlignmentProfile`: one bounded action
-/// (`fs_write_patch`) — the caller must scope this with a
-/// `CompilerOptions.resource_scope` limited to `CHAT_SCRATCH_DIR`, never
-/// the broad workspace pattern used for `chat_read_profile`.
-fn chat_scratch_write_profile() -> AlignmentProfile {
-    AlignmentProfile {
-        principal: "chat-session".to_string(),
-        autonomy_envelope: AutonomyEnvelope {
-            bounded_actions: vec!["fs_write_patch".to_string()],
-            escalation_triggers: vec![],
-            forbidden_actions: vec![
-                "network_external".to_string(),
-                "credential_access".to_string(),
-            ],
-        },
-        constitution: "default-v1".to_string(),
-        coordination: CoordinationConfig::default(),
-    }
-}
-
-/// Compile the chat-mode `CapabilityManifest`: broad `fs_read` across
-/// `workspace_resource_scope`, plus narrow `fs_write_patch` scoped only
-/// to `{workspace_resource_scope}/.ta/chat-scratch/**` — never
-/// git/email/Drive/social tools (simply never granted, so default-deny
-/// handles them with no extra code; see this module's own header
-/// comment).
-///
-/// `workspace_resource_scope` is expected in the same shape
-/// `PolicyCompiler`'s own default uses elsewhere (e.g.
-/// `"fs://workspace/**"`) — a glob ending in `/**`, since the scratch
-/// pattern is derived by trimming that suffix and appending the scratch
-/// subdirectory.
+/// Compile the chat-mode `CapabilityManifest`: `fs_read` across
+/// `workspace_resource_scope` (the session directory) and nothing else. There is
+/// no write grant; git, email, Drive and social tools are simply never granted,
+/// so default-deny handles them.
 pub fn compile_chat_manifest(
     agent_id: &str,
     workspace_resource_scope: &str,
@@ -107,55 +60,21 @@ pub fn compile_chat_manifest(
         resource_scope: vec![workspace_resource_scope.to_string()],
         validity_hours,
     };
-    let mut manifest = PolicyCompiler::compile(agent_id, &chat_read_profile(), &read_options)?;
-
-    let scratch_pattern = format!(
-        "{}/{}/**",
-        workspace_resource_scope.trim_end_matches("/**"),
-        CHAT_SCRATCH_DIR
-    );
-    let write_options = CompilerOptions {
-        resource_scope: vec![scratch_pattern],
-        validity_hours,
-    };
-    let write_manifest =
-        PolicyCompiler::compile(agent_id, &chat_scratch_write_profile(), &write_options)?;
-
-    manifest.grants.extend(write_manifest.grants);
-    Ok(manifest)
+    PolicyCompiler::compile(agent_id, &chat_read_profile(), &read_options)
 }
 
-/// Biscuit scope carrying the right to read the real project root.
-pub const CHAT_SCOPE_PROJECT_READ: &str = "fs:read:project";
-const CHAT_SCOPE_READABLE_PREFIX: &str = "fs:read:readable:";
+/// Biscuit scope prefix carrying the canonical project root (readable always).
+pub const CHAT_SCOPE_PROJECT_READ_PREFIX: &str = "fs:read:project:";
+/// Biscuit scope prefix of one allow rule (`<kind>:<registered>:<label>:<pattern>:<source>`).
+pub const CHAT_SCOPE_ALLOW_PREFIX: &str = "fs:read:allow:";
+/// Biscuit scope prefix of one deny rule.
+pub const CHAT_SCOPE_DENY_PREFIX: &str = "fs:read:deny:";
 const CHAT_SCOPE_TOOL_PREFIX: &str = "tool:read:";
-
-/// Resource pattern the real project root's files are checked against.
-pub const CHAT_PROJECT_RESOURCE_SCOPE: &str = "fs://project/**";
-
-/// Resource URI prefix of one registry-listed readable project.
-pub fn chat_readable_resource_prefix(label: &str) -> String {
-    format!("fs://readable/{label}/")
-}
 
 /// Resource URI a read-only chat tool (a Wayfinder or wiki read, plan
 /// status, community lookup) is checked against.
 pub fn chat_tool_resource(tool: &str) -> String {
     format!("tool://{tool}")
-}
-
-/// A label naming one `[chat] readable_projects` entry. Labels become part
-/// of a policy resource URI and of a comma-joined biscuit scope list, so
-/// they are restricted to characters that can never be glob syntax, path
-/// separators or list separators.
-pub fn is_valid_readable_label(label: &str) -> bool {
-    !label.is_empty()
-        && label.len() <= 64
-        && label != "."
-        && label != ".."
-        && label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn is_valid_tool_name(tool: &str) -> bool {
@@ -166,45 +85,70 @@ fn is_valid_tool_name(tool: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// What a read-only chat session (the Chief of Staff) may read beyond its
-/// own session directory: the real project root, other registry-listed
-/// projects, and the named read tools that load project configuration
-/// (Wayfinder reads, wiki, plan status, community lookup).
+/// What a read-only chat session (the Chief of Staff) may read beyond its own
+/// session directory: the compiled read allow/deny policy and the named read
+/// tools that load project configuration (Wayfinder reads, wiki, plan status,
+/// community lookup).
 ///
 /// This is a grant, not a mode: it is minted by the launcher as a biscuit
-/// (scopes from [`ChatReadAccess::to_scopes`]), verified by the gateway, and
-/// then compiled into the session's capability manifest by
-/// [`compile_chat_manifest_with_read_access`], where the same
-/// `PolicyEngine` that already refuses writes enforces it. It never carries
-/// a write, commit, email or network capability: there is no field for one.
+/// (scopes from [`ChatReadAccess::to_scopes`]), verified by the gateway, and the
+/// gateway rebuilds its read policy from the verified scopes ONLY, never from live
+/// config, so editing `.ta/workflow.toml` mid-session cannot widen (or narrow) a
+/// running session. It never carries a write, commit, email or network capability:
+/// there is no field for one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChatReadAccess {
-    /// Read files of the real project root (`fs://project/**`).
-    pub project: bool,
-    /// Labels of registry-listed projects readable the same way.
-    pub readable_projects: Vec<String>,
+    /// Canonical root of the real project (always readable). `None` grants no file
+    /// reads at all.
+    pub project_root: Option<PathBuf>,
+    /// Resolved allow rules beyond the project root.
+    pub allow: Vec<ReadRule>,
+    /// Resolved deny rules (they beat every allow).
+    pub deny: Vec<ReadRule>,
     /// Bare MCP tool names (`ta_wayfinder_task_list`, ...) allowed to read
     /// project configuration from the real project root.
     pub tools: Vec<String>,
 }
 
 impl ChatReadAccess {
-    /// True when nothing is granted (the pre-grant chat session).
-    pub fn is_empty(&self) -> bool {
-        !self.project && self.readable_projects.is_empty() && self.tools.is_empty()
+    /// Compile `policy` and `tools` into a grant.
+    pub fn from_policy(policy: &ReadPolicy, tools: Vec<String>) -> Self {
+        Self {
+            project_root: Some(policy.project_root.clone()),
+            allow: policy.allow.clone(),
+            deny: policy.deny.clone(),
+            tools,
+        }
     }
 
-    /// The biscuit scopes expressing this grant. Order: project, readable
-    /// projects, tools.
+    /// True when nothing is granted (the pre-grant chat session).
+    pub fn is_empty(&self) -> bool {
+        self.project_root.is_none()
+            && self.allow.is_empty()
+            && self.deny.is_empty()
+            && self.tools.is_empty()
+    }
+
+    /// The biscuit scopes expressing this grant. Order: project root, allow
+    /// rules, deny rules, tools. Free-text fields are percent-encoded because the
+    /// broker joins scopes with `,`.
     pub fn to_scopes(&self) -> Vec<String> {
         let mut scopes = Vec::new();
-        if self.project {
-            scopes.push(CHAT_SCOPE_PROJECT_READ.to_string());
+        if let Some(root) = &self.project_root {
+            scopes.push(format!(
+                "{CHAT_SCOPE_PROJECT_READ_PREFIX}{}",
+                scope_encode(&root.to_string_lossy())
+            ));
         }
         scopes.extend(
-            self.readable_projects
+            self.allow
                 .iter()
-                .map(|l| format!("{CHAT_SCOPE_READABLE_PREFIX}{l}")),
+                .map(|r| format!("{CHAT_SCOPE_ALLOW_PREFIX}{}", r.to_scope_fields())),
+        );
+        scopes.extend(
+            self.deny
+                .iter()
+                .map(|r| format!("{CHAT_SCOPE_DENY_PREFIX}{}", r.to_scope_fields())),
         );
         scopes.extend(
             self.tools
@@ -214,37 +158,60 @@ impl ChatReadAccess {
         scopes
     }
 
-    /// Recover a grant from verified biscuit scopes. Scopes this module does
-    /// not define, and labels or tool names that are not well-formed, are
-    /// dropped (a grant can only ever be narrower than what was minted).
-    pub fn from_scopes<S: AsRef<str>>(scopes: &[S]) -> Self {
+    /// Recover a grant from verified biscuit scopes. Scopes outside this module's
+    /// namespaces are ignored. A scope INSIDE its namespaces that is malformed is an
+    /// error: silently dropping a deny rule would widen access, so the grant is
+    /// refused as a whole instead.
+    pub fn from_scopes<S: AsRef<str>>(scopes: &[S]) -> Result<Self, String> {
         let mut access = Self::default();
         for scope in scopes {
             let scope = scope.as_ref();
-            if scope == CHAT_SCOPE_PROJECT_READ {
-                access.project = true;
-            } else if let Some(label) = scope.strip_prefix(CHAT_SCOPE_READABLE_PREFIX) {
-                if is_valid_readable_label(label) {
-                    access.readable_projects.push(label.to_string());
-                }
+            if let Some(root) = scope.strip_prefix(CHAT_SCOPE_PROJECT_READ_PREFIX) {
+                let root = scope_decode(root)
+                    .filter(|r| Path::new(r).is_absolute())
+                    .ok_or_else(|| format!("malformed project-root read scope '{scope}'"))?;
+                access.project_root = Some(PathBuf::from(root));
+            } else if let Some(fields) = scope.strip_prefix(CHAT_SCOPE_ALLOW_PREFIX) {
+                access.allow.push(
+                    ReadRule::from_scope_fields(fields)
+                        .ok_or_else(|| format!("malformed allow scope '{scope}'"))?,
+                );
+            } else if let Some(fields) = scope.strip_prefix(CHAT_SCOPE_DENY_PREFIX) {
+                access.deny.push(
+                    ReadRule::from_scope_fields(fields)
+                        .ok_or_else(|| format!("malformed deny scope '{scope}'"))?,
+                );
             } else if let Some(tool) = scope.strip_prefix(CHAT_SCOPE_TOOL_PREFIX) {
                 if is_valid_tool_name(tool) {
                     access.tools.push(tool.to_string());
                 }
             }
         }
-        access
+        Ok(access)
+    }
+
+    /// The read policy this grant encodes; `None` when it grants no file reads.
+    /// `home` and `state_dir` only feed the built-in hard deny list.
+    pub fn read_policy(&self, home: Option<&Path>, state_dir: Option<&Path>) -> Option<ReadPolicy> {
+        let root = self.project_root.as_ref()?;
+        Some(ReadPolicy::new(
+            root,
+            self.allow.clone(),
+            self.deny.clone(),
+            home,
+            state_dir,
+        ))
     }
 }
 
 /// [`compile_chat_manifest`] plus the read grants of `access`:
 ///
-/// - `fs.read` on `fs://project/**` (the real project root);
-/// - `fs.read` on `fs://readable/<label>/**` for each readable project;
+/// - `fs.read` on `fs://read/**` when the grant carries a project root. WHICH
+///   paths are readable is decided by [`ReadPolicy`], rebuilt from the same token;
+///   the engine's secrets backstop still applies on top;
 /// - `tool.read` on `tool://<name>` for each named read tool.
 ///
-/// Nothing here is a write. The scratch-write grant of the base manifest is
-/// unchanged, so `fs.write_patch` on `fs://project/**` stays denied, as do
+/// Nothing here is a write: `fs.write_patch` on any resource stays denied, as do
 /// git, email and external network (never granted: default-deny).
 pub fn compile_chat_manifest_with_read_access(
     agent_id: &str,
@@ -254,14 +221,16 @@ pub fn compile_chat_manifest_with_read_access(
 ) -> Result<CapabilityManifest, CompilerError> {
     let mut manifest = compile_chat_manifest(agent_id, workspace_resource_scope, validity_hours)?;
 
-    for label in &access.readable_projects {
-        if !is_valid_readable_label(label) {
-            return Err(CompilerError::InvalidAction {
-                action: format!("fs_read on readable project '{label}'"),
-                message: "a readable project label may only contain letters, digits, '.', '_' \
-                          and '-'"
-                    .to_string(),
-            });
+    for rule in access.allow.iter().chain(&access.deny) {
+        if let Some(label) = &rule.label {
+            if !is_valid_label(label) {
+                return Err(CompilerError::InvalidAction {
+                    action: format!("fs_read on readable project '{label}'"),
+                    message: "a readable project label may only contain letters, digits, '.', \
+                              '_' and '-'"
+                        .to_string(),
+                });
+            }
         }
     }
     for tool in &access.tools {
@@ -275,17 +244,9 @@ pub fn compile_chat_manifest_with_read_access(
     }
 
     let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
-    let mut fs_scopes = Vec::new();
-    if access.project {
-        fs_scopes.push(CHAT_PROJECT_RESOURCE_SCOPE.to_string());
+    if access.project_root.is_some() {
+        groups.push(("fs_read", vec![READ_RESOURCE_SCOPE.to_string()]));
     }
-    fs_scopes.extend(
-        access
-            .readable_projects
-            .iter()
-            .map(|l| format!("{}**", chat_readable_resource_prefix(l))),
-    );
-    groups.push(("fs_read", fs_scopes));
     groups.push((
         "tool_read",
         access.tools.iter().map(|t| chat_tool_resource(t)).collect(),
@@ -323,128 +284,15 @@ pub fn compile_chat_manifest_with_read_access(
 mod tests {
     use super::*;
     use crate::engine::{PolicyDecision, PolicyEngine, PolicyRequest};
+    use crate::read_policy::RuleKind;
 
     const WORKSPACE: &str = "fs://workspace/**";
 
-    #[test]
-    fn manifest_has_broad_read_and_narrow_scratch_write_grants() {
-        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
-
-        let read_grant = manifest
-            .grants
-            .iter()
-            .find(|g| g.tool == "fs" && g.verb == "read")
-            .expect("expected an fs read grant");
-        assert_eq!(read_grant.resource_pattern, "fs://workspace/**");
-
-        let write_grant = manifest
-            .grants
-            .iter()
-            .find(|g| g.tool == "fs" && g.verb == "write_patch")
-            .expect("expected an fs write_patch grant");
-        assert_eq!(
-            write_grant.resource_pattern,
-            "fs://workspace/.ta/chat-scratch/**"
-        );
-    }
-
-    #[test]
-    fn policy_engine_allows_read_anywhere_in_workspace() {
-        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
+    fn engine_for(access: &ChatReadAccess) -> PolicyEngine {
+        let manifest = compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, access).unwrap();
         let mut engine = PolicyEngine::new();
         engine.load_manifest(manifest);
-
-        let decision = engine.evaluate(&PolicyRequest {
-            agent_id: "chat-agent".to_string(),
-            tool: "fs".to_string(),
-            verb: "read".to_string(),
-            target_uri: "fs://workspace/src/main.rs".to_string(),
-        });
-        assert_eq!(decision, PolicyDecision::Allow);
-    }
-
-    #[test]
-    fn policy_engine_allows_write_inside_scratch() {
-        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
-        let mut engine = PolicyEngine::new();
-        engine.load_manifest(manifest);
-
-        let decision = engine.evaluate(&PolicyRequest {
-            agent_id: "chat-agent".to_string(),
-            tool: "fs".to_string(),
-            verb: "write_patch".to_string(),
-            target_uri: "fs://workspace/.ta/chat-scratch/notes.md".to_string(),
-        });
-        assert_eq!(decision, PolicyDecision::Allow);
-    }
-
-    /// This is the test that actually proves the security boundary:
-    /// a write OUTSIDE the scratch path must be denied by the real
-    /// `PolicyEngine`, not merely absent from a hand-inspected grants
-    /// list.
-    #[test]
-    fn policy_engine_denies_write_outside_scratch() {
-        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
-        let mut engine = PolicyEngine::new();
-        engine.load_manifest(manifest);
-
-        let decision = engine.evaluate(&PolicyRequest {
-            agent_id: "chat-agent".to_string(),
-            tool: "fs".to_string(),
-            verb: "write_patch".to_string(),
-            target_uri: "fs://workspace/src/main.rs".to_string(),
-        });
-        assert!(
-            matches!(decision, PolicyDecision::Deny { .. }),
-            "expected Deny for a write outside the scratch path, got {:?}",
-            decision
-        );
-    }
-
-    #[test]
-    fn policy_engine_denies_git_push_with_no_grant() {
-        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
-        let mut engine = PolicyEngine::new();
-        engine.load_manifest(manifest);
-
-        let decision = engine.evaluate(&PolicyRequest {
-            agent_id: "chat-agent".to_string(),
-            tool: "git".to_string(),
-            verb: "push".to_string(),
-            target_uri: "fs://workspace/**".to_string(),
-        });
-        assert!(
-            matches!(decision, PolicyDecision::Deny { .. }),
-            "expected Deny for git push with no grant, got {:?}",
-            decision
-        );
-    }
-
-    #[test]
-    fn policy_engine_denies_email_send_with_no_grant() {
-        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
-        let mut engine = PolicyEngine::new();
-        engine.load_manifest(manifest);
-
-        let decision = engine.evaluate(&PolicyRequest {
-            agent_id: "chat-agent".to_string(),
-            tool: "email".to_string(),
-            verb: "send".to_string(),
-            target_uri: "mailto:someone@example.com".to_string(),
-        });
-        assert!(
-            matches!(decision, PolicyDecision::Deny { .. }),
-            "expected Deny for email send with no grant, got {:?}",
-            decision
-        );
-    }
-
-    fn cos_access() -> ChatReadAccess {
-        ChatReadAccess {
-            project: true,
-            readable_projects: vec!["sibling".to_string()],
-            tools: vec!["ta_wayfinder_task_list".to_string()],
-        }
+        engine
     }
 
     fn decide(engine: &PolicyEngine, tool: &str, verb: &str, target: &str) -> PolicyDecision {
@@ -456,33 +304,119 @@ mod tests {
         })
     }
 
+    fn rule(pattern: &str, source: &str, label: Option<&str>) -> ReadRule {
+        ReadRule {
+            kind: RuleKind::Path,
+            pattern: pattern.to_string(),
+            source: source.to_string(),
+            label: label.map(str::to_string),
+            registered: false,
+        }
+    }
+
+    fn cos_access() -> ChatReadAccess {
+        ChatReadAccess {
+            project_root: Some(PathBuf::from("/work/proj")),
+            allow: vec![rule("/work/notes", "~/notes", Some("notes"))],
+            deny: vec![rule("/work/notes/private", "~/notes/private", None)],
+            tools: vec!["ta_wayfinder_task_list".to_string()],
+        }
+    }
+
     #[test]
-    fn read_access_grants_project_read_and_named_tool_reads_only() {
-        let manifest =
-            compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &cos_access()).unwrap();
+    fn manifest_has_session_read_and_no_write_grant_at_all() {
+        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
+        let read_grant = manifest
+            .grants
+            .iter()
+            .find(|g| g.tool == "fs" && g.verb == "read")
+            .expect("expected an fs read grant");
+        assert_eq!(read_grant.resource_pattern, "fs://workspace/**");
+        assert!(
+            manifest.grants.iter().all(|g| g.verb == "read"),
+            "a chat manifest grants reads only: {:?}",
+            manifest.grants
+        );
+    }
+
+    #[test]
+    fn policy_engine_denies_every_write_verb_everywhere() {
+        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
         let mut engine = PolicyEngine::new();
         engine.load_manifest(manifest);
+        for target in [
+            "fs://workspace/src/main.rs",
+            "fs://workspace/.ta/chat-scratch/notes.md",
+            "fs://project/src/main.rs",
+        ] {
+            for verb in ["write_patch", "write", "apply", "delete"] {
+                let decision = engine.evaluate(&PolicyRequest {
+                    agent_id: "chat-agent".to_string(),
+                    tool: "fs".to_string(),
+                    verb: verb.to_string(),
+                    target_uri: target.to_string(),
+                });
+                assert!(
+                    matches!(decision, PolicyDecision::Deny { .. }),
+                    "{verb} on {target} must be denied, got {decision:?}"
+                );
+            }
+        }
+    }
 
+    #[test]
+    fn policy_engine_allows_read_anywhere_in_workspace() {
+        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(manifest);
+        let decision = engine.evaluate(&PolicyRequest {
+            agent_id: "chat-agent".to_string(),
+            tool: "fs".to_string(),
+            verb: "read".to_string(),
+            target_uri: "fs://workspace/src/main.rs".to_string(),
+        });
+        assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn policy_engine_denies_git_push_and_email_send_with_no_grant() {
+        let manifest = compile_chat_manifest("chat-agent", WORKSPACE, 1).unwrap();
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(manifest);
+        for (tool, verb, target) in [
+            ("git", "push", "fs://workspace/**"),
+            ("email", "send", "mailto:someone@example.com"),
+        ] {
+            let decision = engine.evaluate(&PolicyRequest {
+                agent_id: "chat-agent".to_string(),
+                tool: tool.to_string(),
+                verb: verb.to_string(),
+                target_uri: target.to_string(),
+            });
+            assert!(
+                matches!(decision, PolicyDecision::Deny { .. }),
+                "expected Deny for {tool}.{verb}, got {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_access_grants_reads_and_named_tool_reads_only() {
+        let engine = engine_for(&cos_access());
         assert_eq!(
-            decide(&engine, "fs", "read", "fs://project/src/main.rs"),
-            PolicyDecision::Allow
-        );
-        assert_eq!(
-            decide(&engine, "fs", "read", "fs://readable/sibling/README.md"),
+            decide(&engine, "fs", "read", "fs://read/work/proj/src/main.rs"),
             PolicyDecision::Allow
         );
         assert_eq!(
             decide(&engine, "tool", "read", "tool://ta_wayfinder_task_list"),
             PolicyDecision::Allow
         );
-        // No grant for a tool that was not named, nor for an unlisted project.
         for (tool, verb, target) in [
             ("tool", "read", "tool://ta_wiki_search"),
-            ("fs", "read", "fs://readable/other/README.md"),
             // Writes, commits, email, network: never granted.
+            ("fs", "write_patch", "fs://read/work/proj/src/main.rs"),
             ("fs", "write_patch", "fs://project/src/main.rs"),
-            ("fs", "write_patch", "fs://readable/sibling/x"),
-            ("fs", "apply", "fs://project/src/main.rs"),
+            ("fs", "apply", "fs://read/work/proj/src/main.rs"),
             ("git", "commit", "fs://project/**"),
             ("email", "send", "mailto:a@example.com"),
             ("network", "external", "https://example.com"),
@@ -498,16 +432,13 @@ mod tests {
     }
 
     #[test]
-    fn secrets_backstop_still_wins_over_the_project_read_grant() {
-        let manifest =
-            compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &cos_access()).unwrap();
-        let mut engine = PolicyEngine::new();
-        engine.load_manifest(manifest);
+    fn secrets_backstop_still_wins_over_the_read_grant() {
+        let engine = engine_for(&cos_access());
         for target in [
-            "fs://project/.env",
-            "fs://project/deploy/server.pem",
-            "fs://project/.ssh/id_ed25519",
-            "fs://readable/sibling/.env",
+            "fs://read/work/proj/.env",
+            "fs://read/work/notes/deploy/server.pem",
+            "fs://read/work/proj/.ssh/id_ed25519",
+            "fs://read/Users/me/.aws/credentials",
         ] {
             assert!(
                 matches!(
@@ -520,14 +451,10 @@ mod tests {
     }
 
     #[test]
-    fn without_read_access_the_manifest_has_no_project_or_tool_grants() {
-        let manifest =
-            compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &ChatReadAccess::default())
-                .unwrap();
-        let mut engine = PolicyEngine::new();
-        engine.load_manifest(manifest);
+    fn without_read_access_the_manifest_has_no_file_or_tool_grants() {
+        let engine = engine_for(&ChatReadAccess::default());
         assert!(matches!(
-            decide(&engine, "fs", "read", "fs://project/src/main.rs"),
+            decide(&engine, "fs", "read", "fs://read/work/proj/src/main.rs"),
             PolicyDecision::Deny { .. }
         ));
         assert!(matches!(
@@ -537,28 +464,61 @@ mod tests {
     }
 
     #[test]
-    fn scopes_round_trip_and_malformed_scopes_are_dropped() {
+    fn scopes_round_trip_and_are_comma_free() {
         let access = cos_access();
-        assert_eq!(ChatReadAccess::from_scopes(&access.to_scopes()), access);
+        let scopes = access.to_scopes();
+        assert!(scopes.iter().all(|s| !s.contains(',')), "{scopes:?}");
+        assert_eq!(ChatReadAccess::from_scopes(&scopes).unwrap(), access);
+        // A token without a rule yields a policy without it.
+        let narrow: Vec<&String> = scopes
+            .iter()
+            .filter(|s| !s.starts_with(CHAT_SCOPE_ALLOW_PREFIX))
+            .collect();
+        let narrowed = ChatReadAccess::from_scopes(&narrow).unwrap();
+        assert!(narrowed.allow.is_empty());
+        assert_eq!(narrowed.deny.len(), 1);
+    }
 
-        let hostile = ChatReadAccess::from_scopes(&[
+    #[test]
+    fn foreign_scopes_are_ignored_but_malformed_read_scopes_refuse_the_grant() {
+        let ok = ChatReadAccess::from_scopes(&[
             "fs:write:project",
-            "fs:read:readable:../etc",
-            "fs:read:readable:a/b",
-            "fs:read:readable:a*",
             "tool:read:Ta Evil",
             "email:send:all",
-        ]);
-        assert!(hostile.is_empty(), "{hostile:?}");
+        ])
+        .unwrap();
+        assert!(ok.is_empty(), "{ok:?}");
+        for bad in [
+            "fs:read:project:relative/path",
+            "fs:read:allow:p:1:x",
+            "fs:read:deny:z:0:::",
+            "fs:read:deny:p:0::%zz:x",
+            "fs:read:allow:p:0:a*b:/x:x",
+        ] {
+            assert!(
+                ChatReadAccess::from_scopes(&[bad]).is_err(),
+                "{bad} must refuse the grant"
+            );
+        }
+    }
+
+    #[test]
+    fn read_policy_is_rebuilt_from_the_token_alone() {
+        let access = cos_access();
+        let rebuilt = ChatReadAccess::from_scopes(&access.to_scopes()).unwrap();
+        let policy = rebuilt.read_policy(None, None).unwrap();
+        assert_eq!(policy.allow.len(), 1);
+        assert_eq!(policy.deny.len(), 1);
+        assert!(ChatReadAccess::default().read_policy(None, None).is_none());
     }
 
     #[test]
     fn malformed_labels_and_tool_names_are_refused_at_compile_time() {
-        for bad in ["", "a/b", "a*", "..", "x,y"] {
+        for bad in ["a/b", "a*", "..", "x,y"] {
             let access = ChatReadAccess {
-                project: false,
-                readable_projects: vec![bad.to_string()],
-                tools: vec![],
+                project_root: Some(PathBuf::from("/work/proj")),
+                allow: vec![rule("/work/x", "x", Some(bad))],
+                ..Default::default()
             };
             assert!(
                 compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &access).is_err(),
@@ -566,9 +526,8 @@ mod tests {
             );
         }
         let access = ChatReadAccess {
-            project: false,
-            readable_projects: vec![],
             tools: vec!["Bad Tool".to_string()],
+            ..Default::default()
         };
         assert!(compile_chat_manifest_with_read_access("cos", WORKSPACE, 1, &access).is_err());
     }

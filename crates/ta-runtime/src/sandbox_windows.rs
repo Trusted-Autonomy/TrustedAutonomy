@@ -1942,6 +1942,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         };
 
         let req = SpawnRequest {

@@ -23,13 +23,13 @@ pub fn handle_fs_read(
         .agent_for_goal(goal_run_id)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-    // A chat session holding a read grant reads the REAL project root (or a
-    // registry-listed project), read-only; it never reads a copy.
-    if let Some(roots) = state.chat_read_roots.clone() {
-        return read_chat_project_file(
-            &mut state,
-            &roots,
-            goal_run_id,
+    // A chat session holding a read grant reads the REAL allowed resources
+    // (project root and `[chat.read] allow` entries), read-only; it never reads
+    // a copy.
+    if let Some(chat) = state.chat_read.clone() {
+        return read_chat_file(
+            &state,
+            &chat,
             &agent_id,
             params.project.as_deref(),
             &params.path,
@@ -65,105 +65,184 @@ pub fn handle_fs_read(
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
-/// Read one file of a project a chat read grant covers.
+/// Largest file `ta_fs_read` returns whole in a chat session; a larger file is
+/// returned truncated, with a notice saying so.
+const CHAT_READ_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Most entries one `ta_fs_list` call returns.
+const CHAT_LIST_MAX_ENTRIES: usize = 2000;
+
+/// Resolve and authorize one path of a chat session, through the ONE compiled
+/// read policy (rebuilt from the biscuit grant) and then the policy engine
+/// (manifest grant plus the secrets backstop). Returns the canonical path.
 ///
-/// Order of refusals: the named project must be one the grant covers;
-/// policy (the manifest grant for that project, then the hard secrets
-/// backstop); path safety (lexical escapes and symlinks that resolve
-/// outside the project root); infrastructure paths (`.ta`, `.git`, and
-/// every other agent-infra or VCS-metadata directory, in any spelling and
-/// also when reached through a symlink). Only then is the file read.
-fn read_chat_project_file(
-    state: &mut GatewayState,
-    roots: &crate::server::ChatReadRoots,
-    goal_run_id: uuid::Uuid,
+/// Order of refusals: the named `project` must be readable; `..`; the built-in
+/// hard deny (TA state, `.git`, credential stores, browser profiles); the deny
+/// list; the allow list (symlinks are judged by where they lead); TA/VCS
+/// infrastructure below the admitting root; the manifest grant and secrets
+/// patterns. Every refusal says which config key decides.
+fn authorize_chat_path(
+    state: &GatewayState,
+    chat: &crate::server::ChatReadState,
+    tool: &str,
+    agent_id: &str,
+    project: Option<&str>,
+    path: &str,
+) -> Result<std::path::PathBuf, McpError> {
+    use ta_policy::read_policy::Verdict;
+    let base = chat
+        .policy
+        .root_of_label(project)
+        .map_err(|why| McpError::invalid_params(format!("{tool}: {why}"), None))?;
+    match chat
+        .policy
+        .decide_requested(&base, chat.home.as_deref(), path)
+    {
+        Verdict::Denied(refusal) => {
+            tracing::warn!(
+                tool,
+                path,
+                code = ?refusal.code,
+                rule = ?refusal.rule,
+                resolved = %refusal.resolved.display(),
+                "chat read refused by the read policy"
+            );
+            Err(McpError::invalid_request(
+                format!("{tool}: {}", refusal.message),
+                None,
+            ))
+        }
+        Verdict::Allowed { resolved, rule, .. } => {
+            let decision = state.check_chat_read_policy(agent_id, &resolved);
+            enforce_policy(&decision)?;
+            tracing::debug!(tool, path, rule = %rule, resolved = %resolved.display(), "chat read allowed");
+            Ok(resolved)
+        }
+    }
+}
+
+/// Read one file a chat read grant covers.
+fn read_chat_file(
+    state: &GatewayState,
+    chat: &crate::server::ChatReadState,
     agent_id: &str,
     project: Option<&str>,
     path: &str,
 ) -> Result<CallToolResult, McpError> {
-    let (label, root) = match project {
-        None => (None, roots.project_root.clone()),
-        Some(name) => {
-            let found = roots
-                .readable
-                .iter()
-                .find(|p| p.label == name)
-                .ok_or_else(|| {
-                    let listed: Vec<&str> =
-                        roots.readable.iter().map(|p| p.label.as_str()).collect();
-                    McpError::invalid_params(
-                        format!(
-                            "ta_fs_read: project '{name}' is not readable from this session. \
-                         Readable projects: {}. The owner lists them under [chat] \
-                         readable_projects in the project's .ta/workflow.toml; nothing outside \
-                         them (and the session's own project) can be read.",
-                            if listed.is_empty() {
-                                "none".to_string()
-                            } else {
-                                listed.join(", ")
-                            }
-                        ),
-                        None,
-                    )
-                })?;
-            (Some(found.label.clone()), found.root.clone())
-        }
-    };
-
-    let decision = state
-        .check_project_read_policy(agent_id, label.as_deref(), path)
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-    enforce_policy(&decision)?;
-
-    let resolved = ta_workspace::path_safety::resolve_within_root(&root, path).map_err(|reason| {
-        tracing::warn!(path, root = %root.display(), reason = %reason, "chat read refused: outside the project root");
-        McpError::invalid_request(
-            format!(
-                "ta_fs_read: '{path}' is refused: {reason}. A chat session reads only files \
-                 that really live inside the project root."
-            ),
-            None,
-        )
-    })?;
-    // The string check above sees spellings; this one sees where a symlink
-    // inside the root actually leads (`docs -> .git`).
-    let infra_refusal = |what: &str| {
-        tracing::warn!(
-            path,
-            what,
-            "chat read refused: protected infrastructure path"
-        );
-        McpError::invalid_request(
-            format!(
-                "ta_fs_read: '{path}' is refused: it is inside TA or VCS infrastructure \
-                 ({what}), which a chat session never reads."
-            ),
-            None,
-        )
-    };
-    if ta_workspace::path_safety::is_infrastructure_path(path) {
-        return Err(infra_refusal("by its path"));
-    }
-    if let (Ok(real), Ok(real_root)) = (resolved.canonicalize(), root.canonicalize()) {
-        if let Ok(rel) = real.strip_prefix(&real_root) {
-            if ta_workspace::path_safety::is_infrastructure_path(&rel.to_string_lossy()) {
-                return Err(infra_refusal("through a symlink"));
-            }
-        }
-    }
-
-    let connector = state.connectors.get_mut(&goal_run_id).ok_or_else(|| {
+    use std::io::Read;
+    let resolved = authorize_chat_path(state, chat, "ta_fs_read", agent_id, project, path)?;
+    let meta = std::fs::metadata(&resolved).map_err(|e| {
         McpError::invalid_params(
-            format!("no active connector for goal: {}", goal_run_id),
+            format!(
+                "ta_fs_read: cannot read '{}': {e}. Check the path (ta_fs_list shows what a \
+                 directory holds).",
+                ta_policy::read_policy::display_path(&resolved)
+            ),
             None,
         )
     })?;
-    let content = connector
-        .read_source(&root, path)
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(
-        String::from_utf8_lossy(&content).to_string(),
-    )]))
+    if !meta.is_file() {
+        return Err(McpError::invalid_params(
+            format!(
+                "ta_fs_read: '{}' is a directory, not a file. Use ta_fs_list to see what it \
+                 holds.",
+                ta_policy::read_policy::display_path(&resolved)
+            ),
+            None,
+        ));
+    }
+    let file = std::fs::File::open(&resolved).map_err(|e| {
+        McpError::internal_error(
+            format!(
+                "ta_fs_read: could not open '{}': {e}",
+                ta_policy::read_policy::display_path(&resolved)
+            ),
+            None,
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(CHAT_READ_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            McpError::internal_error(
+                format!(
+                    "ta_fs_read: could not read '{}': {e}",
+                    ta_policy::read_policy::display_path(&resolved)
+                ),
+                None,
+            )
+        })?;
+    let mut text = String::from_utf8_lossy(&bytes).to_string();
+    if meta.len() > CHAT_READ_MAX_BYTES {
+        text.push_str(&format!(
+            "\n[ta_fs_read: truncated at {CHAT_READ_MAX_BYTES} of {} bytes]",
+            meta.len()
+        ));
+    }
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+/// List one directory a chat read grant covers: entries the policy refuses are
+/// left out (and counted), not named.
+fn list_chat_dir(
+    state: &GatewayState,
+    chat: &crate::server::ChatReadState,
+    agent_id: &str,
+    project: Option<&str>,
+    path: &str,
+) -> Result<CallToolResult, McpError> {
+    use ta_policy::read_policy::Verdict;
+    let dir = authorize_chat_path(state, chat, "ta_fs_list", agent_id, project, path)?;
+    let shown = ta_policy::read_policy::display_path(&dir);
+    let read = std::fs::read_dir(&dir).map_err(|e| {
+        McpError::invalid_params(
+            format!("ta_fs_list: cannot list '{shown}': {e}. It must be an existing directory."),
+            None,
+        )
+    })?;
+    let mut entries = Vec::new();
+    let mut hidden = 0usize;
+    let mut truncated = false;
+    let mut names: Vec<std::fs::DirEntry> = read.flatten().collect();
+    names.sort_by_key(|e| e.file_name());
+    for entry in names {
+        let child = dir.join(entry.file_name());
+        // Judged by where the entry really leads (a symlink out of the allowed
+        // area is hidden), exactly as a read of it would be.
+        let allowed = matches!(chat.policy.decide(&child), Verdict::Allowed { .. })
+            && matches!(
+                state.check_chat_read_policy(agent_id, &child),
+                ta_policy::PolicyDecision::Allow
+            );
+        if !allowed {
+            hidden += 1;
+            continue;
+        }
+        if entries.len() >= CHAT_LIST_MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let meta = std::fs::metadata(&child).ok();
+        entries.push(serde_json::json!({
+            "name": entry.file_name().to_string_lossy(),
+            "kind": match &meta {
+                Some(m) if m.is_dir() => "dir",
+                Some(m) if m.is_file() => "file",
+                _ => "other",
+            },
+            "size": meta.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
+        }));
+    }
+    let response = serde_json::json!({
+        "path": shown,
+        "entries": entries,
+        "count": entries.len(),
+        "hidden_by_read_policy": hidden,
+        "truncated": truncated,
+    });
+    Ok(CallToolResult::success(vec![Content::json(response)
+        .map_err(|e| {
+            McpError::internal_error(e.to_string(), None)
+        })?]))
 }
 
 pub fn handle_fs_write(
@@ -195,6 +274,19 @@ pub fn handle_fs_write(
     state
         .check_chat_lock(goal_run_id)
         .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
+    // A chat-mode server never writes. The tool is not routed there at all and the
+    // chat manifest carries no write grant; this refusal is the third layer, so a
+    // router that is ever built wrongly still cannot stage a write.
+    if state.chat_lock.is_some() {
+        return Err(McpError::invalid_request(
+            "ta_fs_write: refused. This TA MCP server runs in chat mode, which is read-only: \
+             no tool writes anything. To change files, hand the work to a worker role \
+             (ta_whiteboard_outcome_send with outcome \"delegate\")."
+                .to_string(),
+            None,
+        ));
+    }
+
     let agent_id = state
         .agent_for_goal(goal_run_id)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -237,6 +329,27 @@ pub fn handle_fs_list(
     state
         .check_chat_lock(goal_run_id)
         .map_err(|e| McpError::invalid_request(e.to_string(), None))?;
+
+    if let Some(chat) = state.chat_read.clone() {
+        let agent_id = state
+            .agent_for_goal(goal_run_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        return list_chat_dir(
+            &state,
+            &chat,
+            &agent_id,
+            params.project.as_deref(),
+            params.path.as_deref().unwrap_or("."),
+        );
+    }
+    if params.project.is_some() || params.path.is_some() {
+        return Err(McpError::invalid_params(
+            "ta_fs_list: `path` and `project` are only available to a chat-mode session that \
+             holds a read grant. Omit them to list this goal's staged files."
+                .to_string(),
+            None,
+        ));
+    }
 
     let connector = state.connectors.get(&goal_run_id).ok_or_else(|| {
         McpError::invalid_params(

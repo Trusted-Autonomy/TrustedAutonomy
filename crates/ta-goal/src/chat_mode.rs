@@ -3,9 +3,10 @@
 //
 // A chat-mode launch (persona `chat_mode = true`, or `ta run --chat-mode`)
 // is a read-only session: the agent's policy identity and capability
-// manifest come from `ta_policy::compile_chat_manifest()` (read anywhere in
-// the workspace, write only to `.ta/chat-scratch/`, no git/email/external
-// grants), and its tool surface is limited to the TA MCP tools listed in
+// manifest come from `ta_policy::compile_chat_manifest()` (read-only: no
+// write grant of any kind, no git/email/external grants; what it may read
+// beyond the project is the owner's `[chat.read]` allow/deny policy, carried in
+// its biscuit read grant), and its tool surface is limited to the TA MCP tools listed in
 // `CHAT_MODE_MCP_TOOLS` below. There is no native-tool path around the
 // manifest: every native Claude Code tool (Bash, Read, Write, Edit, ...) is
 // denied outright.
@@ -38,10 +39,13 @@ pub const TA_MCP_TOOL_PREFIX: &str = "mcp__ta__";
 
 /// The complete set of TA MCP tools a chat-mode session may hold.
 ///
-/// Everything here is either read-only, writes only through the compiled
-/// chat manifest (`ta_fs_write`, which `PolicyEngine` limits to
-/// `.ta/chat-scratch/**`), or is team-session coordination delivery that
-/// the chat-mode spec explicitly allows (whiteboard presence/handoff).
+/// Everything here is either read-only or is team-session coordination
+/// delivery that the chat-mode spec explicitly allows (whiteboard
+/// presence/handoff, and the CoS's outcome channel). There is NO file write
+/// tool: `ta_fs_write` is not here, and the compiled chat manifest carries no
+/// write grant, so a write is refused by the tool surface, by the gateway and
+/// by the OS sandbox. The whiteboard tools and `ta_ask_human` carry messages,
+/// not file or project content.
 /// Nothing here creates goals, builds or applies drafts, edits the plan,
 /// edits the wiki, mutates tasks, or performs external actions. The six
 /// `ta_wayfinder_*` entries are read-only GETs against Wayfinder, pinned to
@@ -53,9 +57,6 @@ pub const CHAT_MODE_MCP_TOOLS: &[&str] = &[
     "ta_fs_read",
     "ta_fs_list",
     "ta_fs_diff",
-    // Scratch-only writes: the chat manifest grants fs_write_patch for
-    // `.ta/chat-scratch/**` and nothing else.
-    "ta_fs_write",
     // Read-only status queries.
     "ta_goal_status",
     "ta_goal_list",
@@ -406,11 +407,12 @@ mod tests {
     }
 
     /// The profile itself must never contain a tool that mutates anything
-    /// outside chat scratch: goal/draft/plan/wiki-write/task/external
+    /// at all (no file write of any kind): goal/draft/plan/wiki-write/task/external
     /// tools are all absent.
     #[test]
     fn chat_profile_contains_no_mutating_tools() {
         for forbidden in [
+            "ta_fs_write",
             "ta_goal_start",
             "ta_goal_inner",
             "ta_pr_build",
@@ -533,7 +535,7 @@ mod tests {
     #[test]
     fn intersection_is_never_a_union() {
         // Every result entry must be in BOTH inputs' coverage.
-        let persona = s(&["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_write", "Read(*)"]);
+        let persona = s(&["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_list", "Read(*)"]);
         let surface = resolve_chat_mode_tool_surface(&persona);
         let profile = chat_mode_allowed_tool_patterns();
         for t in &surface.allowed {
@@ -542,9 +544,32 @@ mod tests {
         }
         assert_eq!(
             surface.allowed,
-            s(&["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_write"])
+            s(&["mcp__ta__ta_fs_read", "mcp__ta__ta_fs_list"])
         );
         assert_eq!(surface.stripped, s(&["Read(*)"]));
+    }
+
+    /// A persona (or a config that edits one) cannot put a file-write tool back:
+    /// naming it, or granting the whole `mcp__ta__*` namespace, still resolves to a
+    /// surface with no write tool.
+    #[test]
+    fn a_persona_cannot_reintroduce_a_write_tool() {
+        for persona in [
+            s(&["mcp__ta__ta_fs_write"]),
+            s(&["mcp__ta__*"]),
+            s(&["mcp__ta__ta_fs_*", "mcp__ta__ta_fs_write", "Write(*)"]),
+        ] {
+            let surface = resolve_chat_mode_tool_surface(&persona);
+            assert!(
+                !surface
+                    .allowed
+                    .iter()
+                    .any(|p| p.contains("ta_fs_write") || p.contains("Write")),
+                "{persona:?} leaked a write tool: {:?}",
+                surface.allowed
+            );
+        }
+        assert!(!CHAT_MODE_MCP_TOOLS.contains(&"ta_fs_write"));
     }
 
     #[test]

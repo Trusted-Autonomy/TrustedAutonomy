@@ -120,6 +120,7 @@ fn world() -> World {
         egress_unix_socket: Some(relay.socket_path().to_path_buf()),
         windows: Default::default(),
         violation_tag: None,
+        read_confine: Default::default(),
     };
     World {
         _root: root,

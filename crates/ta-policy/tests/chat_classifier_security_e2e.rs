@@ -37,8 +37,8 @@ fn choice_backend(choice: &str) -> FixtureBackend {
 }
 
 /// A realistic chat message classifies via the real `ask()` entry point,
-/// and the resulting chat-mode manifest allows reads anywhere and scratch
-/// writes, but nothing else -- proving the two merged building blocks
+/// and the resulting chat-mode manifest allows reads and nothing else (no
+/// writes) -- proving the two merged building blocks
 /// (PR #632's classifier, PR #633's chat manifest) genuinely work together
 /// end to end, not just in isolation.
 #[test]
@@ -77,19 +77,24 @@ fn classify_then_enforce_chat_mode_session() {
         PolicyDecision::Allow
     );
 
-    // Write inside the ephemeral chat scratch dir: allowed.
-    assert_eq!(
-        engine.evaluate(&PolicyRequest {
-            agent_id: AGENT_ID.to_string(),
-            tool: "fs".to_string(),
-            verb: "write_patch".to_string(),
-            target_uri: format!(
-                "fs://workspace/{}/pr-633-summary.md",
-                ta_policy::CHAT_SCRATCH_DIR
+    // No write anywhere, scratch included: a chat session has no write grant.
+    for target in [
+        "fs://workspace/.ta-chat-scratch/pr-633-summary.md",
+        "fs://workspace/pr-633-summary.md",
+    ] {
+        assert!(
+            matches!(
+                engine.evaluate(&PolicyRequest {
+                    agent_id: AGENT_ID.to_string(),
+                    tool: "fs".to_string(),
+                    verb: "write_patch".to_string(),
+                    target_uri: target.to_string(),
+                }),
+                PolicyDecision::Deny { .. }
             ),
-        }),
-        PolicyDecision::Allow
-    );
+            "{target} must not be writable"
+        );
+    }
 
     // Write to a real source file: denied.
     assert!(matches!(
@@ -172,7 +177,7 @@ fn prompt_injection_cannot_escalate_past_the_compiled_manifest() {
     );
 
     // Confirm the session is not simply broken -- its real, intended
-    // capability (read anywhere, write to scratch) still works, so this is
+    // capability (read-only) still works, so this is
     // a targeted deny, not a side effect of a malformed manifest.
     assert_eq!(
         engine.evaluate(&PolicyRequest {

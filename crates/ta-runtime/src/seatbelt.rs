@@ -28,13 +28,25 @@
 // with a symlinked prefix silently never matches, so every path is resolved
 // through `canonical` before it is emitted.
 //
-// ## Reads are NOT confined
+// ## Reads
 //
-// Reads are allow-all with targeted denies, because a deny-default read set
-// cannot start `/usr/bin/true` and agent toolchains live in too many places
-// to enumerate. Anything not named in the deny set (for example another
-// project's source tree) remains readable. This profile does not enforce
-// `fs.read_confined`, and nothing may describe macOS reads as confined.
+// Reads are allow-all with targeted denies by default, because a deny-default
+// read set cannot start `/usr/bin/true` and agent toolchains live in too many
+// places to enumerate. Anything not named in the deny set (for example another
+// project's source tree) remains readable, and nothing may describe the default
+// macOS reads as confined.
+//
+// A profile can OPT IN to confinement of chosen subtrees (`policy.read_confine`,
+// used for chat-mode sessions, whose confine root is the user's home): content
+// reads (`file-read-data`, which includes listing a directory) under those roots are
+// denied (section 3b), then re-allowed for `allow_read` and the toolchain locations;
+// the protected-path denies come after and still win. Seatbelt resolves a
+// specific operation (`file-read-data`) before a wildcard (`file-read*`) whatever the
+// rule order, so inside a confined profile every re-allow and every deny that must
+// beat it is ALSO emitted as `file-read-data`; a wildcard rule alone would be silently
+// overridden (verified on macOS by the conformance suite). Only those roots are
+// confined: reads elsewhere (`/usr`, `/opt/homebrew`, `/private/tmp`, ...) stay
+// allow-all, and `stat` of any path (does it exist) is still allowed.
 
 use std::path::{Path, PathBuf};
 
@@ -225,6 +237,28 @@ pub fn generate(policy: &SandboxPolicy, working_dir: &Path) -> String {
     }
     l.push(r#"(allow file-write* file-ioctl (regex #"^/dev/ttys[0-9]+$"))"#.into());
 
+    // 3b. Opt-in read confinement (chat sessions). Content reads under each confine
+    // root are denied, then re-allowed for the allowed roots (`allow_read`, which holds
+    // the project root and every `[chat.read]` root) and the toolchain locations. All
+    // of it comes BEFORE the targeted denies below, so a denied subtree or a protected
+    // path inside a re-allowed root still loses. `file-read-metadata` is not denied
+    // (stat of a path still works; the content and a directory listing do not).
+    let confine = !policy.read_confine.roots.is_empty();
+    if confine {
+        for root in &policy.read_confine.roots {
+            l.push(format!(
+                r#"(deny file-read-data (subpath "{}"))"#,
+                sb_path(root)
+            ));
+        }
+        for p in policy.allow_read.iter().chain(&policy.read_confine.allow) {
+            l.push(format!(
+                r#"(allow file-read-data (subpath "{}"))"#,
+                sb_path(p)
+            ));
+        }
+    }
+
     // 4. Targeted denies (read AND write). Drop duplicates after canonicalizing.
     let mut denied: Vec<String> = Vec::new();
     for p in &policy.deny_paths {
@@ -235,6 +269,9 @@ pub fn generate(policy: &SandboxPolicy, working_dir: &Path) -> String {
     }
     for s in &denied {
         l.push(format!(r#"(deny file-read* file-write* (subpath "{s}"))"#));
+        if confine {
+            l.push(format!(r#"(deny file-read-data (subpath "{s}"))"#));
+        }
     }
 
     // 5. Writes: deny-default; grants come after the denies. Declared
@@ -242,17 +279,32 @@ pub fn generate(policy: &SandboxPolicy, working_dir: &Path) -> String {
     l.push(format!(
         r#"(allow file-read* file-write* (subpath "{workspace}"))"#
     ));
+    if confine {
+        l.push(format!(r#"(allow file-read-data (subpath "{workspace}"))"#));
+    }
     for p in policy.allow_write.iter().chain(policy.goal_paths.iter()) {
         l.push(format!(
             r#"(allow file-read* file-write* (subpath "{}"))"#,
             sb_path(p)
         ));
+        if confine {
+            l.push(format!(
+                r#"(allow file-read-data (subpath "{}"))"#,
+                sb_path(p)
+            ));
+        }
     }
 
     // 5b. Read-only files inside a denied tree (the goal's system prompt): exact
     // paths, read only, after the denies so they win.
     for p in &policy.goal_read_files {
         l.push(format!(r#"(allow file-read* (literal "{}"))"#, sb_path(p)));
+        if confine {
+            l.push(format!(
+                r#"(allow file-read-data (literal "{}"))"#,
+                sb_path(p)
+            ));
+        }
     }
 
     // 6. Network. A grant of "*" is the owner's explicit open-network choice
@@ -317,6 +369,7 @@ mod tests {
             egress_unix_socket: None,
             windows: Default::default(),
             violation_tag: None,
+            read_confine: Default::default(),
         }
     }
 
@@ -371,6 +424,65 @@ mod tests {
         {
             assert!(line.contains(r#"(with message "ta:goal-1")"#), "{line}");
         }
+    }
+
+    #[test]
+    fn read_confinement_is_opt_in_and_ordered_between_the_broad_allow_and_the_denies() {
+        // Default: reads allow-all, no content-read deny anywhere.
+        let plain = generate(&policy(), Path::new("/private/tmp/ws"));
+        assert!(!plain.contains("file-read-data"), "{plain}");
+
+        let mut p = policy();
+        p.read_confine.roots = vec![PathBuf::from("/Users/someone")];
+        p.read_confine.allow = vec![PathBuf::from("/Users/someone/.local")];
+        p.allow_read = vec![PathBuf::from("/Users/someone/notes")];
+        p.deny_paths = vec![PathBuf::from("/Users/someone/notes/private")];
+        let out = generate(&p, Path::new("/private/tmp/ws"));
+        let broad = pos(&out, "(allow file-read*)");
+        let confine = pos(&out, r#"(deny file-read-data (subpath "/Users/someone"))"#);
+        let notes = pos(
+            &out,
+            r#"(allow file-read-data (subpath "/Users/someone/notes"))"#,
+        );
+        let tool = pos(
+            &out,
+            r#"(allow file-read-data (subpath "/Users/someone/.local"))"#,
+        );
+        let denied = pos(
+            &out,
+            r#"(deny file-read* file-write* (subpath "/Users/someone/notes/private"))"#,
+        );
+        let writes = pos(
+            &out,
+            r#"(allow file-read* file-write* (subpath "/private/tmp/ws"))"#,
+        );
+        assert!(
+            broad < confine && confine < notes && confine < tool,
+            "{out}"
+        );
+        assert!(
+            notes < denied,
+            "a denied subtree must come after the allow: {out}"
+        );
+        assert!(denied < writes, "{out}");
+        // A wildcard deny cannot beat a file-read-data re-allow, so the same subtree
+        // is also denied as file-read-data, and a workspace inside a denied tree is
+        // re-allowed as file-read-data too.
+        let denied_data = pos(
+            &out,
+            r#"(deny file-read-data (subpath "/Users/someone/notes/private"))"#,
+        );
+        assert!(notes < denied_data && denied_data < writes, "{out}");
+        assert!(
+            out.contains(r#"(allow file-read-data (subpath "/private/tmp/ws"))"#),
+            "{out}"
+        );
+        // Metadata is never denied, and no write rule is emitted for a read root.
+        assert!(!out.contains("file-read-metadata (subpath"), "{out}");
+        assert!(
+            !out.contains(r#"(allow file-read* file-write* (subpath "/Users/someone/notes"))"#),
+            "{out}"
+        );
     }
 
     #[test]

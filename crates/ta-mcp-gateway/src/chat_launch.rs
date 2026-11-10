@@ -243,154 +243,52 @@ pub fn verify_chat_read_grant(
             verified.agent_id
         )));
     }
-    Ok(ta_policy::ChatReadAccess::from_scopes(&scopes))
+    ta_policy::ChatReadAccess::from_scopes(&scopes).map_err(rejected)
 }
 
-/// One entry of `[chat] readable_projects`, resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadableProject {
-    /// The name the agent passes as `project` to `ta_fs_read`: a registered
-    /// project's name, or the directory's own name for an absolute path.
-    pub label: String,
-    /// Canonical absolute root.
-    pub root: PathBuf,
+/// The TA state directory of `project_root`, when one exists. Part of the built-in
+/// read hard deny: a chat session never reads TA's own state.
+pub fn project_state_dir(project_root: &Path) -> Option<PathBuf> {
+    let locator = ta_credentials::state::StateLocator::from_env().ok()?;
+    ta_credentials::state::ProjectState::locate(project_root, &locator)
+        .ok()
+        .flatten()
+        .map(|s| s.dir)
 }
 
-/// Resolve `[chat] readable_projects` from the source project's
-/// `.ta/workflow.toml` (default: none). Names resolve through the project
-/// registry (`office.yaml`, or `$TA_OFFICE_CONFIG`).
-pub fn load_readable_projects(project_root: &Path) -> Result<Vec<ReadableProject>, GatewayError> {
-    let workflow_toml = project_root.join(".ta").join("workflow.toml");
-    if !workflow_toml.is_file() {
-        return Ok(Vec::new());
-    }
-    let workflow = ta_submit::WorkflowConfig::load(&workflow_toml).map_err(|e| {
-        GatewayError::Other(format!(
-            "could not read [chat] readable_projects: {} did not parse: {e}. Fix the TOML and \
-             re-launch.",
-            workflow_toml.display()
-        ))
-    })?;
-    let office = std::env::var_os("TA_OFFICE_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| project_root.join("office.yaml"));
-    resolve_readable_projects(project_root, &workflow.chat.readable_projects, &office)
+/// The environment (home, state dir, project registry) the read policy of
+/// `project_root` is compiled against.
+pub fn read_env(project_root: &Path) -> ta_policy::read_policy::ReadEnv {
+    ta_policy::read_policy::ReadEnv::for_project(project_root)
+        .with_state_dir(project_state_dir(project_root))
 }
 
-/// Resolve `entries` (absolute paths or registered project names) to
-/// canonical roots. An entry that cannot be resolved is an error naming the
-/// entry, what was tried and what to change: the registry is the owner's
-/// explicit widening of read access, so a typo must be loud, not dropped.
-pub fn resolve_readable_projects(
+/// Compile the chat read policy of `project_root` from its `.ta/workflow.toml`:
+/// `[chat.read] allow` / `deny` (plus the `readable_projects` alias). This is the
+/// ONE place config becomes a policy; the launcher mints the result into the
+/// biscuit read grant, the sandbox profile is built from it, and
+/// `ta chat-read check` explains it. No config file means project root only.
+/// An entry that cannot be resolved is an error naming the entry and the key: the
+/// lists are the owner's explicit widening of read access, so a typo must be
+/// loud, not dropped.
+pub fn load_read_policy(
     project_root: &Path,
-    entries: &[String],
-    office_yaml: &Path,
-) -> Result<Vec<ReadableProject>, GatewayError> {
-    let main_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    let mut out: Vec<ReadableProject> = Vec::new();
-    for raw in entries {
-        let entry = raw.trim();
-        let err = |why: String| {
+) -> Result<ta_policy::read_policy::ReadPolicy, GatewayError> {
+    let workflow_toml = project_root.join(".ta").join("workflow.toml");
+    let (allow, deny) = if workflow_toml.is_file() {
+        let workflow = ta_submit::WorkflowConfig::load(&workflow_toml).map_err(|e| {
             GatewayError::Other(format!(
-                "[chat] readable_projects entry '{entry}' is unusable: {why}. Fix \
-                 `readable_projects` in {}/.ta/workflow.toml (an absolute project path, or a \
-                 project name registered in office.yaml).",
-                project_root.display()
+                "could not read [chat.read] allow/deny: {} did not parse: {e}. Fix the TOML and \
+                 re-launch.",
+                workflow_toml.display()
             ))
-        };
-        if entry.is_empty() {
-            return Err(err("it is empty".to_string()));
-        }
-        let path = if Path::new(entry).is_absolute() {
-            PathBuf::from(entry)
-        } else {
-            registered_project_path(office_yaml, entry).map_err(err)?
-        };
-        let root = path
-            .canonicalize()
-            .map_err(|e| err(format!("{} cannot be resolved: {e}", path.display())))?;
-        if !root.is_dir() {
-            return Err(err(format!("{} is not a directory", root.display())));
-        }
-        if root.parent().is_none() {
-            return Err(err("the filesystem root is not a project".to_string()));
-        }
-        if home_dir().is_some_and(|h| h.canonicalize().is_ok_and(|h| h == root)) {
-            return Err(err(
-                "the home directory is not a project; list the project directory itself"
-                    .to_string(),
-            ));
-        }
-        if root == main_root {
-            return Err(err(
-                "it is the main project, which is always readable".to_string()
-            ));
-        }
-        let label = if Path::new(entry).is_absolute() {
-            root.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            entry.to_string()
-        };
-        if !ta_policy::is_valid_readable_label(&label) {
-            return Err(err(format!(
-                "its name '{label}' is not usable as a project label (letters, digits, '.', '_' \
-                 and '-' only); register the project in office.yaml under a simple name and \
-                 list that name"
-            )));
-        }
-        if out.iter().any(|p| p.label == label) {
-            return Err(err(format!(
-                "another entry already uses the label '{label}'; register one of them under a \
-                 different name"
-            )));
-        }
-        out.push(ReadableProject { label, root });
-    }
-    Ok(out)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
-/// `projects.<name>.path` from a project registry file (`office.yaml`).
-fn registered_project_path(office_yaml: &Path, name: &str) -> Result<PathBuf, String> {
-    let text = std::fs::read_to_string(office_yaml).map_err(|e| {
-        format!(
-            "it is not an absolute path, and no project registry could be read at {} ({e})",
-            office_yaml.display()
-        )
-    })?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| {
-        format!(
-            "the project registry {} did not parse: {e}",
-            office_yaml.display()
-        )
-    })?;
-    let path = doc
-        .get("projects")
-        .and_then(|p| p.get(name))
-        .and_then(|p| p.get("path"))
-        .and_then(|p| p.as_str())
-        .ok_or_else(|| {
-            format!(
-                "no project named '{name}' is registered in {}",
-                office_yaml.display()
-            )
         })?;
-    if let Some(rest) = path.strip_prefix("~/") {
-        return home_dir()
-            .map(|h| h.join(rest))
-            .ok_or_else(|| format!("registered path '{path}' needs HOME, which is not set"));
-    }
-    Ok(PathBuf::from(path))
+        (workflow.chat.read_allow(), workflow.chat.read_deny())
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    ta_policy::read_policy::ReadPolicy::from_config(&read_env(project_root), &allow, &deny)
+        .map_err(|e| GatewayError::Other(e.to_string()))
 }
 
 #[cfg(test)]
@@ -486,9 +384,23 @@ mod tests {
     }
 
     fn read_access() -> ta_policy::ChatReadAccess {
+        use ta_policy::read_policy::{ReadRule, RuleKind};
         ta_policy::ChatReadAccess {
-            project: true,
-            readable_projects: vec!["other".to_string()],
+            project_root: Some(PathBuf::from("/work/proj")),
+            allow: vec![ReadRule {
+                kind: RuleKind::Path,
+                pattern: "/work/other".to_string(),
+                source: "~/other".to_string(),
+                label: Some("other".to_string()),
+                registered: false,
+            }],
+            deny: vec![ReadRule {
+                kind: RuleKind::Glob,
+                pattern: "/work/other/**/secret, 1".to_string(),
+                source: "~/other/**/secret, 1".to_string(),
+                label: None,
+                registered: false,
+            }],
             tools: vec!["ta_plan_status".to_string()],
         }
     }
@@ -521,69 +433,40 @@ mod tests {
         assert!(forged.contains("rejected"), "{forged}");
     }
 
-    fn registry(dir: &Path, body: &str) -> PathBuf {
-        let p = dir.join("office.yaml");
-        std::fs::write(&p, body).unwrap();
-        p
-    }
-
     #[test]
-    fn readable_projects_default_empty_and_resolve_paths_and_registered_names() {
+    fn read_policy_comes_from_chat_read_lists_and_the_alias_and_typos_are_loud() {
         let base = tempfile::tempdir().unwrap();
         let main = base.path().join("main");
-        let other = base.path().join("other");
-        let named = base.path().join("named-dir");
-        for d in [&main, &other, &named] {
+        let notes = base.path().join("notes");
+        let alias = base.path().join("alias");
+        for d in [main.join(".ta"), notes.clone(), alias.clone()] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let office = registry(
-            base.path(),
-            &format!("projects:\n  wayfinder:\n    path: {}\n", named.display()),
-        );
-        assert!(resolve_readable_projects(&main, &[], &office)
-            .unwrap()
-            .is_empty());
-        let got = resolve_readable_projects(
-            &main,
-            &[other.display().to_string(), "wayfinder".to_string()],
-            &office,
-        )
-        .unwrap();
-        assert_eq!(got[0].label, "other");
-        assert_eq!(got[0].root, other.canonicalize().unwrap());
-        assert_eq!(got[1].label, "wayfinder");
-        assert_eq!(got[1].root, named.canonicalize().unwrap());
-    }
-
-    #[test]
-    fn readable_projects_typos_and_dangerous_entries_are_loud() {
-        let base = tempfile::tempdir().unwrap();
-        let main = base.path().join("main");
-        let other = base.path().join("other");
-        std::fs::create_dir_all(&main).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        let office = registry(base.path(), "projects: {}\n");
-        let one = |entry: &str| {
-            resolve_readable_projects(&main, &[entry.to_string()], &office)
-                .unwrap_err()
-                .to_string()
-        };
-        assert!(one("nope").contains("no project named 'nope'"));
-        assert!(one("").contains("empty"));
+        let wf = |body: &str| std::fs::write(main.join(".ta/workflow.toml"), body).unwrap();
+        // No config: project root only.
+        std::fs::remove_dir_all(main.join(".ta")).unwrap();
+        let p = load_read_policy(&main).unwrap();
+        assert!(p.allow.is_empty() && p.deny.is_empty());
+        std::fs::create_dir_all(main.join(".ta")).unwrap();
+        wf(&format!(
+            "[chat]\nreadable_projects = [\"{}\"]\n[chat.read]\nallow = [\"{}\"]\ndeny = [\"{}\"]\n",
+            alias.display(),
+            notes.display(),
+            notes.join("private").display()
+        ));
+        let p = load_read_policy(&main).unwrap();
+        assert_eq!(p.allow.len(), 2);
+        assert_eq!(p.deny.len(), 1);
+        wf("[chat.read]\nallow = [\"nope\"]\n");
+        let err = load_read_policy(&main).unwrap_err().to_string();
         assert!(
-            one(&base.path().join("missing").display().to_string()).contains("cannot be resolved")
+            err.contains("[chat.read] allow") && err.contains("workflow.toml"),
+            "{err}"
         );
-        assert!(one(&main.display().to_string()).contains("always readable"));
-        assert!(one("/").contains("filesystem root"));
-        let dup = resolve_readable_projects(
-            &main,
-            &[other.display().to_string(), other.display().to_string()],
-            &office,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(dup.contains("already uses the label"), "{dup}");
-        // Every error names the file to fix.
-        assert!(one("nope").contains("workflow.toml"));
+        wf("[chat.read\n");
+        assert!(load_read_policy(&main)
+            .unwrap_err()
+            .to_string()
+            .contains("did not parse"));
     }
 }

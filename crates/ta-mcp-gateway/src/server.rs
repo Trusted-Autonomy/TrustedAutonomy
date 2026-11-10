@@ -9,7 +9,7 @@
 // This file contains state, config, CallerMode, and ServerHandler dispatch.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -110,11 +110,13 @@ pub struct FsWriteParams {
 pub struct FsReadParams {
     /// The UUID of the goal run.
     pub goal_run_id: String,
-    /// Relative path within the workspace.
+    /// Relative path within the workspace. In a chat-mode session: a path
+    /// relative to the project root, an absolute path, or `~/path`, subject to
+    /// the session's read allow/deny lists.
     pub path: String,
-    /// Chat mode only: which project to read. Omit for the session's own
-    /// project; pass the name of a project listed in `[chat]
-    /// readable_projects` to read that one instead (read-only, same rules).
+    /// Chat mode only: which readable project to read relative paths from. Omit
+    /// for the session's own project; pass the name of a readable project (see the
+    /// error message of a refused read for the names) to read relative to it.
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -124,6 +126,15 @@ pub struct FsReadParams {
 pub struct FsListParams {
     /// The UUID of the goal run.
     pub goal_run_id: String,
+    /// Chat mode only: the directory to list (relative to the project root, an
+    /// absolute path, or `~/path`). Default: the project root. Entries the
+    /// session may not read are left out.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Chat mode only: which readable project relative paths are resolved
+    /// against. Omit for the session's own project.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Parameters for `ta_fs_diff`.
@@ -438,20 +449,18 @@ pub struct GatewayState {
     /// Policy identity (`<agent>:chat:<session>`) of the locked chat
     /// session, once locked. Read-tool grants are checked against it.
     pub chat_policy_id: Option<String>,
-    /// The projects a chat session's read grant covers: the real project
-    /// root and the registry-listed projects whose labels the grant names.
+    /// The read allow/deny policy a chat session's read grant encodes, rebuilt
+    /// from the VERIFIED biscuit scopes only (never from live config).
     /// `None` when the session holds no read grant.
-    pub chat_read_roots: Option<ChatReadRoots>,
+    pub chat_read: Option<ChatReadState>,
 }
 
-/// Roots a chat session's read grant covers (see
-/// `GatewayState::chat_read_roots`).
+/// The compiled read policy of a chat session (see `GatewayState::chat_read`).
 #[derive(Debug, Clone)]
-pub struct ChatReadRoots {
-    /// The real project root (canonical).
-    pub project_root: PathBuf,
-    /// Registry-listed projects the grant names, with canonical roots.
-    pub readable: Vec<crate::chat_launch::ReadableProject>,
+pub struct ChatReadState {
+    pub policy: ta_policy::read_policy::ReadPolicy,
+    /// `$HOME`, for `~/` in tool arguments.
+    pub home: Option<PathBuf>,
 }
 
 /// Caller mode determines what operations the MCP gateway allows.
@@ -607,7 +616,7 @@ impl GatewayState {
             chat_lock: None,
             chat_wayfinder_project_id: None,
             chat_policy_id: None,
-            chat_read_roots: None,
+            chat_read: None,
         })
     }
 
@@ -799,13 +808,12 @@ impl GatewayState {
     }
 
     /// Start a chat-mode session: a `GoalRun` whose capability manifest
-    /// comes from `ta_policy::compile_chat_manifest()` (broad `fs_read`,
-    /// `fs_write_patch` scoped only to `ta_policy::CHAT_SCRATCH_DIR`)
-    /// instead of a developer profile. This deliberately reuses the exact
+    /// comes from `ta_policy::compile_chat_manifest()` (`fs_read` only: no
+    /// write grant of any kind) instead of a developer profile. This deliberately reuses the exact
     /// same `GoalRun`/`StagingWorkspace`/`FsConnector` machinery as
     /// `start_goal`/`start_goal_with_profile` so that `tools/fs.rs`'s
-    /// already-tested, already-enforced `ta_fs_read`/`ta_fs_write`/
-    /// `ta_fs_diff`/`ta_fs_list` handlers work against a chat session's
+    /// already-tested, already-enforced `ta_fs_read`/`ta_fs_diff`/
+    /// `ta_fs_list` handlers work against a chat session's
     /// `goal_run_id` with zero changes to that file.
     ///
     /// A chat session's `GoalRun` is transitioned to `Running` and left
@@ -975,7 +983,7 @@ impl GatewayState {
             )));
         }
         let policy_id = crate::chat_launch::chat_policy_id(&launch.agent_id, launch.session_id);
-        let (access, roots) = self.resolve_chat_read_grant(launch, &policy_id)?;
+        let (access, read_state) = self.resolve_chat_read_grant(launch, &policy_id)?;
         let goal = self.start_chat_session_with_access(
             &launch.agent_id,
             launch.session_id,
@@ -986,16 +994,16 @@ impl GatewayState {
         self.chat_lock = Some(goal.goal_run_id);
         self.chat_wayfinder_project_id = launch.wayfinder_project_id.clone();
         self.chat_policy_id = Some(policy_id);
-        if let Some(roots) = &roots {
-            self.config.project_root = Some(roots.project_root.clone());
+        if let Some(state) = &read_state {
+            self.config.project_root = Some(state.policy.project_root.clone());
         }
-        self.chat_read_roots = roots;
+        self.chat_read = read_state;
         tracing::info!(
             session_id = %goal.goal_run_id,
             agent_id = %launch.agent_id,
             policy_agent_id = %goal.agent_id,
             workspace_root = %self.config.workspace_root.display(),
-            "TA MCP server locked to chat-mode session (read-only manifest, scratch-only writes)"
+            "TA MCP server locked to chat-mode session (read-only manifest, no write grant)"
         );
         Ok(goal)
     }
@@ -1007,11 +1015,8 @@ impl GatewayState {
             Some(locked) if locked != goal_run_id => Err(GatewayError::PolicyDenied(format!(
                 "this TA MCP server runs in chat mode and is locked to chat session {}; \
                  goal_run_id {} was rejected. Pass goal_run_id \"{}\" to the ta_fs_* tools. \
-                 Chat mode can read the workspace and write only under {}/.",
-                locked,
-                goal_run_id,
-                locked,
-                ta_policy::CHAT_SCRATCH_DIR
+                 Chat mode is read-only: it has no write tool.",
+                locked, goal_run_id, locked
             ))),
             _ => Ok(()),
         }
@@ -1055,39 +1060,18 @@ impl GatewayState {
         Ok(self.policy_engine.evaluate(&request))
     }
 
-    /// Check policy for a read of `path` inside a project a chat read grant
-    /// covers: the real project root (`label == None`, resource
-    /// `fs://project/<path>`) or one registry-listed project (resource
-    /// `fs://readable/<label>/<path>`). Same path hygiene as
-    /// [`Self::check_policy`]; the same secrets backstop applies.
-    pub fn check_project_read_policy(
-        &self,
-        agent_id: &str,
-        label: Option<&str>,
-        path: &str,
-    ) -> Result<PolicyDecision, GatewayError> {
-        if let Err(reason) = ta_workspace::path_safety::validate_relative_path(path) {
-            return Ok(PolicyDecision::Deny {
-                reason: format!(
-                    "path '{path}' is not a project-relative path ({reason}). Pass a path \
-                     relative to the project root, e.g. 'src/main.rs'."
-                ),
-            });
-        }
-        let relative = normalize_workspace_relative(path);
-        let target_uri = match label {
-            None => format!("fs://project/{relative}"),
-            Some(label) => format!(
-                "{}{relative}",
-                ta_policy::chat_readable_resource_prefix(label)
-            ),
-        };
-        Ok(self.policy_engine.evaluate(&PolicyRequest {
+    /// Check the policy ENGINE for a read of the absolute, already read-policy
+    /// approved `path` by a chat session: the manifest must carry the `fs.read`
+    /// grant (`fs://read/**`, minted from the biscuit) and the engine's secrets
+    /// backstop (`.env`, keys, credential files) still applies on top of the
+    /// allow/deny lists.
+    pub fn check_chat_read_policy(&self, agent_id: &str, path: &Path) -> PolicyDecision {
+        self.policy_engine.evaluate(&PolicyRequest {
             agent_id: agent_id.to_string(),
             tool: "fs".to_string(),
             verb: "read".to_string(),
-            target_uri,
-        }))
+            target_uri: ta_policy::read_policy::read_resource(path),
+        })
     }
 
     /// The root a read tool that loads PROJECT CONFIGURATION (the Wayfinder
@@ -1135,15 +1119,17 @@ impl GatewayState {
         }
     }
 
-    /// Verify the launch's read grant and resolve the roots it covers.
-    /// No grant: an empty access and no roots (the session can read neither
-    /// the project nor its configuration). A grant that does not verify is
-    /// an error (fail closed, see `verify_chat_read_grant`).
+    /// Verify the launch's read grant and compile the read policy it encodes.
+    /// No grant: an empty access and no policy (the session can read neither
+    /// the project nor its configuration). A grant that does not verify is an
+    /// error (fail closed, see `verify_chat_read_grant`). The policy is rebuilt
+    /// from the verified scopes alone: a rule that is not in the token does not
+    /// exist for this session, whatever `.ta/workflow.toml` says now.
     fn resolve_chat_read_grant(
         &self,
         launch: &crate::chat_launch::ChatLaunch,
         policy_id: &str,
-    ) -> Result<(ta_policy::ChatReadAccess, Option<ChatReadRoots>), GatewayError> {
+    ) -> Result<(ta_policy::ChatReadAccess, Option<ChatReadState>), GatewayError> {
         let Some(token) = &launch.read_grant else {
             tracing::warn!(
                 session_id = %launch.session_id,
@@ -1161,36 +1147,28 @@ impl GatewayState {
                 crate::chat_launch::ENV_CHAT_PROJECT_ROOT
             ))
         })?;
-        let mut access =
-            crate::chat_launch::verify_chat_read_grant(&project_root, token, policy_id)?;
-        let canonical = project_root.canonicalize().map_err(|e| {
-            GatewayError::Other(format!(
-                "chat project root {} cannot be resolved: {e}. Re-launch from the project.",
-                project_root.display()
-            ))
-        })?;
-        let listed = crate::chat_launch::load_readable_projects(&canonical)?;
-        let mut readable = Vec::new();
-        for label in std::mem::take(&mut access.readable_projects) {
-            match listed.iter().find(|p| p.label == label) {
-                Some(p) => {
-                    access.readable_projects.push(label);
-                    readable.push(p.clone());
-                }
-                None => tracing::warn!(
-                    label = %label,
-                    "read grant names a readable project that [chat] readable_projects no \
-                     longer lists; it is not readable in this session"
-                ),
-            }
-        }
-        Ok((
-            access,
-            Some(ChatReadRoots {
-                project_root: canonical,
-                readable,
-            }),
-        ))
+        let access = crate::chat_launch::verify_chat_read_grant(&project_root, token, policy_id)?;
+        let Some(root) = access.project_root.clone() else {
+            // A token with tool scopes but no file-read scope: no policy.
+            return Ok((access, None));
+        };
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from);
+        let state_dir = crate::chat_launch::project_state_dir(&root);
+        let policy = access
+            .read_policy(home.as_deref(), state_dir.as_deref())
+            .ok_or_else(|| {
+                GatewayError::Other("chat read grant carries no project root".to_string())
+            })?;
+        tracing::info!(
+            project_root = %policy.project_root.display(),
+            allow_rules = policy.allow.len(),
+            deny_rules = policy.deny.len(),
+            "chat read policy rebuilt from the verified biscuit grant"
+        );
+        Ok((access, Some(ChatReadState { policy, home })))
     }
 
     /// Save a PR package to both in-memory cache and disk.
@@ -1392,6 +1370,16 @@ impl TaGatewayServer {
             .collect();
         for name in &removed {
             tool_router.remove_route(name);
+        }
+        // The file read tools of a chat session read the allowed real resources, not
+        // a staging copy: say so.
+        for (name, text) in [
+            ("ta_fs_read", CHAT_FS_READ_DESCRIPTION),
+            ("ta_fs_list", CHAT_FS_LIST_DESCRIPTION),
+        ] {
+            if let Some(route) = tool_router.map.get_mut(name) {
+                route.attr.description = Some(text.into());
+            }
         }
         // The Chief-of-Staff's outcome vocabulary is reply/delegate/done:
         // advertise exactly that (the handler also enforces it).
@@ -2507,11 +2495,10 @@ impl ServerHandler for TaGatewayServer {
                 },
                 instructions: Some(format!(
                     "Trusted Autonomy MCP server in read-only chat mode. Pass goal_run_id \
-                     \"{}\" to ta_fs_read/ta_fs_list/ta_fs_diff/ta_fs_write. You can read the \
-                     workspace; writes are allowed only under {}/ and are discarded. No goal, \
-                     draft, plan, wiki-write, task or external-action tools are available.",
-                    session_id,
-                    ta_policy::CHAT_SCRATCH_DIR
+                     \"{}\" to ta_fs_read/ta_fs_list. You can read the project and the \
+                     resources the owner allowed; you cannot write anything anywhere. No \
+                     goal, draft, plan, wiki-write, task or external-action tools are available.",
+                    session_id
                 )),
             };
         }
@@ -2535,6 +2522,19 @@ impl ServerHandler for TaGatewayServer {
         }
     }
 }
+
+/// What a chat session's `ta_fs_read` does (the generic description talks about a
+/// staging snapshot, which a chat session does not have).
+const CHAT_FS_READ_DESCRIPTION: &str = "Read a file, read-only. `path` is relative to the project \
+    root, absolute, or ~/path; it must be inside the project root or an entry of the owner's \
+    [chat.read] allow list and not hidden by the deny list or the built-in protected locations. \
+    Pass `project` to resolve a relative path against another readable project. A refusal names \
+    the config key that decides it.";
+
+/// What a chat session's `ta_fs_list` does.
+const CHAT_FS_LIST_DESCRIPTION: &str = "List a directory, read-only. `path` (default: the project \
+    root) is relative, absolute, or ~/path under the same read allow/deny lists as ta_fs_read; \
+    entries the session may not read are left out.";
 
 /// Canonical form of an already-validated workspace-relative path for the
 /// policy target URI: drops empty and `.` components so `./a//b` and `a/b`
@@ -2787,25 +2787,21 @@ mod tests {
         }
     }
 
-    /// The chat manifest's policy grants (the other half of the chat
-    /// surface) contain only fs reads and scratch-only writes: no git,
-    /// email, external, or other tool grants.
+    /// The chat manifest's policy grants (the other half of the chat surface)
+    /// contain only fs READS: no write verb of any kind, and no git, email,
+    /// external, or other tool grants.
     #[test]
-    fn h7_chat_manifest_grants_only_fs_read_and_scratch_write() {
+    fn h7_chat_manifest_grants_only_fs_read() {
         let manifest =
             ta_policy::compile_chat_manifest("cos:chat:x", "fs://workspace/**", 1).unwrap();
         assert!(!manifest.grants.is_empty());
         for grant in &manifest.grants {
             assert_eq!(grant.tool, "fs", "unexpected tool grant: {:?}", grant);
-            match grant.verb.as_str() {
-                "read" => {}
-                "write_patch" => assert!(
-                    grant.resource_pattern.contains(ta_policy::CHAT_SCRATCH_DIR),
-                    "write grant outside scratch: {:?}",
-                    grant
-                ),
-                other => panic!("unexpected verb '{}' in chat manifest: {:?}", other, grant),
-            }
+            assert_eq!(
+                grant.verb, "read",
+                "the chat manifest must carry no write grant: {:?}",
+                grant
+            );
         }
     }
 
@@ -2996,37 +2992,23 @@ mod tests {
             read_result.err()
         );
 
-        // Write inside the chat scratch dir: the real handler succeeds.
-        let scratch_path = format!("{}/notes.md", ta_policy::CHAT_SCRATCH_DIR);
-        let write_ok = handle_fs_write(
-            &server.state,
-            FsWriteParams {
-                goal_run_id: goal_run_id.clone(),
-                path: scratch_path,
-                content: "scratch notes".to_string(),
-            },
-        );
-        assert!(
-            write_ok.is_ok(),
-            "expected chat session to write inside chat-scratch, got {:?}",
-            write_ok.err()
-        );
-
-        // Write outside the scratch dir: the real handler rejects it,
-        // propagated from PolicyDecision::Deny through enforce_policy()
-        // into a real McpError.
-        let write_denied = handle_fs_write(
-            &server.state,
-            FsWriteParams {
-                goal_run_id: goal_run_id.clone(),
-                path: "src/main.rs".to_string(),
-                content: "malicious".to_string(),
-            },
-        );
-        assert!(
-            write_denied.is_err(),
-            "expected chat session write outside scratch to be denied"
-        );
+        // A chat session writes NOTHING: not inside the old scratch dir, not in
+        // the source tree. Each is refused by the real handler (the chat lock
+        // refuses first; the manifest carries no write grant either).
+        for path in [".ta/chat-scratch/notes.md", "src/main.rs"] {
+            let write_denied = handle_fs_write(
+                &server.state,
+                FsWriteParams {
+                    goal_run_id: goal_run_id.clone(),
+                    path: path.to_string(),
+                    content: "malicious".to_string(),
+                },
+            );
+            assert!(
+                write_denied.is_err(),
+                "expected a chat session write to '{path}' to be refused"
+            );
+        }
 
         // Reading a secrets-path file: denied the same way, proving Task 1's
         // backstop applies to chat sessions too (chat mode's broad fs_read
@@ -3181,13 +3163,9 @@ mod tests {
 
         let (server, _dir) = test_server();
         let outside = tempdir().unwrap();
-        // An absolute path whose tail even looks like the chat scratch dir:
-        // the scratch-only write grant must not be satisfiable by an
-        // absolute path anywhere on disk.
-        let target = outside
-            .path()
-            .join(ta_policy::CHAT_SCRATCH_DIR)
-            .join("pwned.txt");
+        // An absolute path anywhere on disk: a chat session has no write grant, so
+        // none can be satisfied (the old scratch directory no longer exists).
+        let target = outside.path().join(".ta/chat-scratch").join("pwned.txt");
         let goal_run_id = {
             let mut state = server.state.lock().unwrap();
             state
@@ -3494,8 +3472,8 @@ mod tests {
             assert_eq!(goal.origin.as_deref(), Some("chat"));
             goal.goal_run_id
         };
-        let path = format!("{}/notes.md", ta_policy::CHAT_SCRATCH_DIR);
-        let response = submit_draft_with_auto_approve_policy(&server, dir.path(), goal_id, &path);
+        let response =
+            submit_draft_with_auto_approve_policy(&server, dir.path(), goal_id, "notes.md");
         assert_ne!(response["status"], "auto_approved", "{}", response);
         assert!(response["auto_approve_blockers"]
             .to_string()
@@ -3519,7 +3497,7 @@ mod tests {
     }
 
     #[test]
-    fn h5_chat_session_scratch_write_still_works_and_reads_inside_workspace_still_work() {
+    fn h5_chat_session_reads_inside_workspace_and_cannot_write_scratch_or_anything_else() {
         use crate::server::{FsReadParams, FsWriteParams};
         use crate::tools::fs::{handle_fs_read, handle_fs_write};
 
@@ -3545,11 +3523,11 @@ mod tests {
             &server.state,
             FsWriteParams {
                 goal_run_id,
-                path: format!("./{}/scratch.md", ta_policy::CHAT_SCRATCH_DIR),
+                path: "./.ta/chat-scratch/scratch.md".to_string(),
                 content: "notes".to_string(),
             },
         )
-        .unwrap_or_else(|e| panic!("chat scratch write failed: {}", e.message));
+        .expect_err("a chat session has no scratch write any more");
     }
 
     #[test]
@@ -4129,10 +4107,6 @@ mod tests {
             assert_eq!(grant.tool, "fs", "unexpected non-fs grant: {:?}", grant);
             match grant.verb.as_str() {
                 "read" => assert_eq!(grant.resource_pattern, "fs://workspace/**"),
-                "write_patch" => assert_eq!(
-                    grant.resource_pattern,
-                    format!("fs://workspace/{}/**", ta_policy::CHAT_SCRATCH_DIR)
-                ),
                 other => panic!("unexpected verb '{}' in chat manifest: {:?}", other, grant),
             }
         }
@@ -4141,6 +4115,7 @@ mod tests {
             ("git", "push", "git://workspace/main"),
             ("email", "send", "email://someone@example.com"),
             ("fs", "write_patch", "fs://workspace/src/main.rs"),
+            ("fs", "write_patch", "fs://workspace/.ta/chat-scratch/x.md"),
             ("fs", "apply", "fs://workspace/src/main.rs"),
         ] {
             let decision = state.policy_engine.evaluate(&ta_policy::PolicyRequest {
@@ -4253,13 +4228,27 @@ mod tests {
     /// project (a separate directory) named by `TA_CHAT_PROJECT_ROOT`, and
     /// a biscuit read grant minted under that project's custody.
     /// `workflow_extra` is written to the project's `.ta/workflow.toml`
-    /// together with a `[chat] readable_projects` list of `readable`
-    /// (absolute paths); each is also named in the grant.
+    /// together with a `[chat.read]` table whose `allow` lists `readable`
+    /// (absolute paths). The grant is compiled from that file exactly as the
+    /// launcher does.
     fn chat_server_with_grant(
         agent: &str,
         workflow_extra: &str,
         project_files: &[(&str, &[u8])],
         readable: &[&std::path::Path],
+    ) -> (TaGatewayServer, tempfile::TempDir, tempfile::TempDir, Uuid) {
+        let allow: Vec<String> = readable.iter().map(|p| p.display().to_string()).collect();
+        chat_server_with_lists(agent, workflow_extra, project_files, &allow, &[])
+    }
+
+    /// Like [`chat_server_with_grant`] with explicit `[chat.read]` allow and
+    /// deny entries (any accepted entry form).
+    fn chat_server_with_lists(
+        agent: &str,
+        workflow_extra: &str,
+        project_files: &[(&str, &[u8])],
+        allow: &[String],
+        deny: &[String],
     ) -> (TaGatewayServer, tempfile::TempDir, tempfile::TempDir, Uuid) {
         let project = tempdir().unwrap();
         let session_dir = tempdir().unwrap();
@@ -4268,31 +4257,31 @@ mod tests {
             std::fs::create_dir_all(full_path.parent().unwrap()).unwrap();
             std::fs::write(&full_path, content).unwrap();
         }
-        let listed: Vec<String> = readable
-            .iter()
-            .map(|p| format!("\"{}\"", p.display()))
-            .collect();
+        let quote = |v: &[String]| {
+            v.iter()
+                .map(|p| format!("'{p}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         std::fs::create_dir_all(project.path().join(".ta")).unwrap();
         std::fs::write(
             project.path().join(".ta/workflow.toml"),
             format!(
-                "{workflow_extra}\n[chat]\nreadable_projects = [{}]\n",
-                listed.join(", ")
+                "{workflow_extra}\n[chat.read]\nallow = [{}]\ndeny = [{}]\n",
+                quote(allow),
+                quote(deny)
             ),
         )
         .unwrap();
         let session_id = Uuid::new_v4();
-        let access = ta_policy::ChatReadAccess {
-            project: true,
-            readable_projects: readable
-                .iter()
-                .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
-                .collect(),
-            tools: ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS
+        let policy = crate::chat_launch::load_read_policy(project.path()).unwrap();
+        let access = ta_policy::ChatReadAccess::from_policy(
+            &policy,
+            ta_goal::chat_mode::CHAT_SOURCE_READ_TOOLS
                 .iter()
                 .map(|t| t.to_string())
                 .collect(),
-        };
+        );
         let token = crate::chat_launch::mint_chat_read_grant(
             project.path(),
             &crate::chat_launch::chat_policy_id(agent, session_id),
@@ -4425,7 +4414,7 @@ mod tests {
             fs_read_text(&server, id, Some("other-proj"), "escape/secret.txt").unwrap_err();
         assert!(!listed_escape.contains("TOPSECRET-BODY"), "{listed_escape}");
         let infra = fs_read_text(&server, id, None, "docs/config").unwrap_err();
-        assert!(infra.contains("infrastructure"), "{infra}");
+        assert!(infra.contains("built-in hard deny"), "{infra}");
         // The listed root itself still reads fine.
         assert_eq!(
             fs_read_text(&server, id, Some("other-proj"), "ok.txt").unwrap(),
@@ -4476,6 +4465,161 @@ mod tests {
         for name in &a {
             assert!(ta_goal::chat_mode::is_chat_mode_mcp_tool(name), "{name}");
         }
+    }
+
+    /// Enumerates the live chat-mode tool router and proves no tool in it can
+    /// write a file or change the project: every routed tool is classified
+    /// read-only, except the three whiteboard coordination tools, which the
+    /// chat-mode spec allows and which exchange messages inside the team
+    /// session (they take no path and cannot touch a project file). The exact
+    /// set is pinned so a new write-capable tool cannot slip in unnoticed.
+    #[test]
+    fn chat_mode_router_exposes_no_write_capable_tool() {
+        use ta_goal::tool_surface::{classify_mcp_tool, ToolEffect};
+        let (granted, _p, _s, _id) = chat_server_with_grant("chief-of-staff", "", &[], &[]);
+        let (plain, _d) = chat_mode_server(&[], &chat_launch("chief-of-staff"));
+        for server in [&granted, &plain] {
+            let mut mutating: Vec<String> = Vec::new();
+            for name in server.tool_names() {
+                match classify_mcp_tool(&name) {
+                    Some(ToolEffect::ReadOnly) => {}
+                    Some(ToolEffect::Mutating) => mutating.push(name),
+                    None => panic!("chat tool '{name}' is not classified"),
+                }
+            }
+            mutating.sort();
+            assert_eq!(
+                mutating,
+                vec![
+                    "ta_whiteboard_handoff_receive",
+                    "ta_whiteboard_handoff_send",
+                    "ta_whiteboard_presence_register",
+                ],
+                "the only non-read-only chat tools are whiteboard coordination messages"
+            );
+            for write in [
+                "ta_fs_write",
+                "ta_pr_build",
+                "ta_draft",
+                "ta_goal_start",
+                "ta_plan",
+                "ta_external_action",
+                "ta_wiki_create",
+                "ta_wiki_update",
+                "ta_context",
+            ] {
+                assert!(!server.tool_router.has_route(write), "{write} is routed");
+            }
+        }
+    }
+
+    /// `ta_fs_write` is not routed in a chat server, and even the handler,
+    /// reached directly with a valid session id, refuses (the third layer),
+    /// with no file created anywhere.
+    #[test]
+    fn chat_mode_fs_write_handler_refuses_even_if_reached_directly() {
+        let (server, project, _s, id) = chat_server_with_grant("chief-of-staff", "", &[], &[]);
+        let target = project.path().join("created-by-chat.txt");
+        let err = tools::fs::handle_fs_write(
+            &server.state,
+            FsWriteParams {
+                goal_run_id: id.to_string(),
+                path: "created-by-chat.txt".to_string(),
+                content: "x".to_string(),
+            },
+        )
+        .unwrap_err()
+        .message
+        .to_string();
+        assert!(
+            err.contains("read-only") && err.contains("delegate"),
+            "{err}"
+        );
+        assert!(!target.exists());
+    }
+
+    /// The allow/deny lists end to end through the real `ta_fs_read` and
+    /// `ta_fs_list` handlers, built from `[chat.read]` the way the launcher
+    /// builds them: an allowed folder outside the project reads, a denied
+    /// subtree inside it does not (and is not even listed), an unlisted folder
+    /// does not, a built-in protected location never does, and every refusal
+    /// names the config key that decides.
+    #[test]
+    fn chat_read_lists_allow_outside_resources_and_deny_beats_allow() {
+        let notes_parent = tempdir().unwrap();
+        let notes = notes_parent.path().join("notes");
+        std::fs::create_dir_all(notes.join("private")).unwrap();
+        std::fs::write(notes.join("todo.md"), "buy milk").unwrap();
+        std::fs::write(notes.join("private/diary.md"), "TOPSECRET-DIARY").unwrap();
+        let unlisted = tempdir().unwrap();
+        std::fs::write(unlisted.path().join("x.txt"), "unlisted").unwrap();
+
+        let allow = vec![notes.display().to_string()];
+        let deny = vec![notes.join("private").display().to_string()];
+        let (server, _project, _s, id) = chat_server_with_lists(
+            "chief-of-staff",
+            "",
+            &[("README.md", b"project readme")],
+            &allow,
+            &deny,
+        );
+        let todo = notes.join("todo.md").display().to_string();
+        assert_eq!(fs_read_text(&server, id, None, &todo).unwrap(), "buy milk");
+        assert_eq!(
+            fs_read_text(&server, id, None, "README.md").unwrap(),
+            "project readme"
+        );
+
+        // Deny beats allow, and the refusal names the key.
+        let diary = notes.join("private/diary.md").display().to_string();
+        let err = fs_read_text(&server, id, None, &diary).unwrap_err();
+        assert!(!err.contains("TOPSECRET-DIARY"), "{err}");
+        assert!(err.contains("deny") && err.contains("[chat.read]"), "{err}");
+
+        // Not listed: refused, naming allow.
+        let other = unlisted.path().join("x.txt").display().to_string();
+        let err = fs_read_text(&server, id, None, &other).unwrap_err();
+        assert!(
+            err.contains("allow") && err.contains("[chat.read]"),
+            "{err}"
+        );
+
+        // Hard deny cannot be configured away: even with the project root's own
+        // `.ta` named in an allow entry it stays unreadable.
+        assert!(fs_read_text(&server, id, None, ".ta/workflow.toml").is_err());
+
+        // Listing the allowed folder leaves the denied subtree out.
+        let list = tools::fs::handle_fs_list(
+            &server.state,
+            FsListParams {
+                goal_run_id: id.to_string(),
+                path: Some(notes.display().to_string()),
+                project: None,
+            },
+        )
+        .unwrap();
+        let text = list.content[0].raw.as_text().unwrap().text.clone();
+        assert!(text.contains("todo.md"), "{text}");
+        assert!(!text.contains("\"name\":\"private\""), "{text}");
+        assert!(text.contains("\"hidden_by_read_policy\":1"), "{text}");
+    }
+
+    /// A token without a path refuses it even though the config on disk has
+    /// since changed: the gateway rebuilds the policy from the grant alone.
+    #[test]
+    fn chat_read_policy_comes_from_the_grant_not_from_later_config_edits() {
+        let extra = tempdir().unwrap();
+        std::fs::write(extra.path().join("f.txt"), "late").unwrap();
+        let (server, project, _s, id) = chat_server_with_lists("chief-of-staff", "", &[], &[], &[]);
+        // The owner edits the config after launch, adding the path.
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            format!("[chat.read]\nallow = ['{}']\n", extra.path().display()),
+        )
+        .unwrap();
+        let p = extra.path().join("f.txt").display().to_string();
+        let err = fs_read_text(&server, id, None, &p).unwrap_err();
+        assert!(err.contains("[chat.read]"), "{err}");
     }
 
     /// Plan status resolves PLAN.md from the real project root, and when
@@ -4681,11 +4825,11 @@ mod tests {
     }
 
     /// H12: through the real MCP tool handlers, a launched chat-mode
-    /// session can write only under chat scratch, cannot point the fs tools
+    /// session can write nothing at all, cannot point the fs tools
     /// at any other goal (even a broad developer-profile goal living in the
     /// same gateway), and cannot read secrets.
     #[test]
-    fn chat_mode_launch_cannot_write_outside_scratch_or_reach_another_goal() {
+    fn chat_mode_launch_cannot_write_anything_or_reach_another_goal() {
         use crate::server::{FsReadParams, FsWriteParams};
         use crate::tools::fs::{handle_fs_read, handle_fs_write};
 
@@ -4703,19 +4847,10 @@ mod tests {
         );
         assert!(read.is_ok(), "chat read failed: {:?}", read.err());
 
-        let scratch = handle_fs_write(
-            &server.state,
-            FsWriteParams {
-                goal_run_id: chat_id.clone(),
-                path: format!("{}/answer.md", ta_policy::CHAT_SCRATCH_DIR),
-                content: "draft answer".to_string(),
-            },
-        );
-        assert!(scratch.is_ok(), "scratch write failed: {:?}", scratch.err());
-
         for path in [
             "src/main.rs",
             "PLAN.md",
+            ".ta/chat-scratch/answer.md",
             ".ta/chat-scratch-evil/x",
             "../escape.txt",
         ] {

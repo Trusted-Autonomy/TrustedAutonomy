@@ -35,6 +35,7 @@ pub mod document;
 pub mod engine;
 pub mod error;
 pub mod exemption;
+pub mod read_policy;
 
 pub use alignment::{
     AgentSetupProposal, AlignmentProfile, AutonomyEnvelope, CoordinationConfig, Milestone,
@@ -47,9 +48,9 @@ pub use business_budget::{
 pub use capability::{CapabilityGrant, CapabilityManifest};
 pub use cascade::{CliOverrides, PolicyCascade};
 pub use chat_manifest::{
-    chat_readable_resource_prefix, chat_tool_resource, compile_chat_manifest,
-    compile_chat_manifest_with_read_access, is_valid_readable_label, ChatReadAccess,
-    CHAT_PROJECT_RESOURCE_SCOPE, CHAT_SCOPE_PROJECT_READ, CHAT_SCRATCH_DIR,
+    chat_tool_resource, compile_chat_manifest, compile_chat_manifest_with_read_access,
+    ChatReadAccess, CHAT_SCOPE_ALLOW_PREFIX, CHAT_SCOPE_DENY_PREFIX,
+    CHAT_SCOPE_PROJECT_READ_PREFIX,
 };
 pub use compiler::{CompilerError, CompilerOptions, PolicyCompiler};
 pub use constitution::{

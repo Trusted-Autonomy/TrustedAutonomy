@@ -431,19 +431,29 @@ pub fn plan(input: &PlanInput<'_>) -> Result<SandboxPlan, String> {
 
     let mut profile = SandboxProfile::compile(trusted.as_ref(), &project, &ctx);
     if input.chat {
-        // A chat-mode session reads the real project root (and any
-        // `[chat] readable_projects` root) through TA's read-only tools; the sandbox
-        // mirrors that: read-only on those roots, no write, `.ta`/`.git`/credentials
-        // still denied. The session's own directory stays its only workspace.
-        let mut roots = vec![input.project_root.to_path_buf()];
-        match ta_mcp_gateway::chat_launch::load_readable_projects(input.project_root) {
-            Ok(list) => roots.extend(list.into_iter().map(|p| p.root)),
-            Err(e) => warnings.push(format!(
-                "readable_projects could not be resolved for the sandbox profile: {e}. Only \
-                 the project root is granted read-only."
-            )),
-        }
-        profile = profile.with_project_read_roots(&roots);
+        // A chat-mode session reads the real project root and whatever `[chat.read]`
+        // allows (minus `deny`) through TA's read-only tools; the sandbox mirrors that
+        // from the SAME compiled policy: read-only on those roots, every deny entry
+        // and the built-in protected locations denied, no write anywhere but the
+        // session's own directory, and (macOS) content reads under the user's home
+        // refused unless allowed. A policy that cannot be compiled falls back to the
+        // project root alone, never to a wider set.
+        let view = match ta_mcp_gateway::chat_launch::load_read_policy(input.project_root) {
+            Ok(policy) => policy.sandbox_view(),
+            Err(e) => {
+                warnings.push(format!(
+                    "[chat.read] could not be resolved for the sandbox profile: {e}. Only the \
+                     project root is granted read-only."
+                ));
+                ta_policy::read_policy::SandboxReadView {
+                    read_roots: vec![input.project_root.to_path_buf()],
+                    ..Default::default()
+                }
+            }
+        };
+        let (confine_roots, confine_allow) =
+            ta_runtime::sandbox_launch::chat_read_confinement(ctx.user_home.as_deref());
+        profile = profile.with_read_policy(&view, &confine_roots, &confine_allow);
     }
     let scrubs_env = profile.requested;
     let wraps = profile.requested && provider != SandboxProvider::None;

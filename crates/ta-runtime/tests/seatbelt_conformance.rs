@@ -5,8 +5,10 @@
 //! `sandbox-exec` (for example an already sandboxed agent) skips the suite
 //! unless `TA_REQUIRE_SANDBOX_CONFORMANCE=1`, which CI sets so a skip is a failure.
 //!
-//! Reads are NOT confined on macOS (read-allow with targeted denies); the
+//! Reads are NOT confined on macOS by default (read-allow with targeted denies); the
 //! tests assert only the denies the profile claims, and that is all the docs claim.
+//! A chat-mode profile opts into confining the user's home (`read_confine`); its
+//! tests assert exactly that and the stated limit outside the home.
 #![cfg(target_os = "macos")]
 
 use std::net::TcpListener;
@@ -79,6 +81,7 @@ fn world() -> World {
         egress_unix_socket: None,
         windows: Default::default(),
         violation_tag: Some(seatbelt::violation_tag(&uuid::Uuid::new_v4().to_string())),
+        read_confine: Default::default(),
     };
     World {
         _root: root,
@@ -577,16 +580,38 @@ fn burst_of_hundred_denials_is_delivered_after_reconciliation() {
     );
 }
 
+/// Where the chat world's files live.
+struct ChatPaths {
+    project: PathBuf,
+    /// A second project outside the user's home, allowed by name.
+    other: PathBuf,
+    /// `<home>/notes`, allowed by `[chat.read] allow`.
+    notes: PathBuf,
+    /// `<home>/notes/private`, hidden by `[chat.read] deny`.
+    private: PathBuf,
+    /// `<home>/unlisted`: inside the home, named nowhere.
+    unlisted: PathBuf,
+    /// `<home>/.local/bin`: a toolchain location re-allowed inside the confined home.
+    toolchain: PathBuf,
+    /// Not under the confined home and not listed.
+    outside_home: PathBuf,
+}
+
 /// The profile a chat-mode Chief of Staff gets for the REAL project root (no copy):
-/// compiled by the same code `ta run` uses, with the project and one readable project
-/// granted read-only.
-fn chat_world() -> (World, PathBuf, PathBuf) {
+/// the policy is compiled by the SAME `ta_policy::read_policy` engine the gateway and
+/// the biscuit grant use (`allow` = the notes folder and another project, `deny` = a
+/// subtree of the notes folder), and the profile by the same code `ta run` uses,
+/// including the macOS home read confinement.
+fn chat_world() -> (World, ChatPaths) {
+    use ta_policy::read_policy::{ReadEnv, ReadPolicy};
     use ta_runtime::sandbox_launch::{
-        LaunchContext, ProjectRequest, RoleClass, SandboxPosture, SandboxProfile,
+        chat_read_confinement, LaunchContext, ProjectRequest, RoleClass, SandboxPosture,
+        SandboxProfile,
     };
     let mut w = world();
     let project = w.staging.ancestors().nth(3).unwrap().to_path_buf();
     let base = project.parent().unwrap().to_path_buf();
+    let home = base.join("home");
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::create_dir_all(project.join(".git")).unwrap();
     std::fs::write(project.join("README.md"), "real project file").unwrap();
@@ -596,6 +621,32 @@ fn chat_world() -> (World, PathBuf, PathBuf) {
     std::fs::create_dir_all(other.join(".ta")).unwrap();
     std::fs::write(other.join("notes.md"), "other project file").unwrap();
     std::fs::write(other.join(".ta/workflow.toml"), "other state").unwrap();
+    let notes = home.join("notes");
+    let private = notes.join("private");
+    let unlisted = home.join("unlisted");
+    let toolchain = home.join(".local/bin");
+    let outside_home = base.join("outside");
+    for d in [&private, &unlisted, &toolchain] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(notes.join("todo.md"), "buy milk").unwrap();
+    std::fs::write(private.join("diary.md"), "private diary").unwrap();
+    std::fs::write(unlisted.join("x.txt"), "unlisted file").unwrap();
+    std::fs::write(toolchain.join("agent-runtime"), "toolchain file").unwrap();
+    std::fs::write(outside_home.join("y.txt"), "outside file").unwrap();
+
+    let policy = ReadPolicy::from_config(
+        &ReadEnv {
+            project_root: project.clone(),
+            home: Some(home.clone()),
+            state_dir: Some(base.join("state")),
+            office_yaml: base.join("no-office.yaml"),
+        },
+        &[other.display().to_string(), notes.display().to_string()],
+        &[private.display().to_string()],
+    )
+    .unwrap();
+    let view = policy.sandbox_view();
 
     let ctx = LaunchContext {
         goal_id: "chat-g1".into(),
@@ -605,7 +656,7 @@ fn chat_world() -> (World, PathBuf, PathBuf) {
         staging: w.staging.clone(),
         state_dir: Some(base.join("state")),
         agent_home: w.agent_home.clone(),
-        user_home: Some(base.join("home")),
+        user_home: Some(home.clone()),
         mediation_socket: None,
         egress_proxy: false,
         persona: None,
@@ -615,22 +666,36 @@ fn chat_world() -> (World, PathBuf, PathBuf) {
         posture: Some(SandboxPosture::Balanced),
         ..Default::default()
     };
-    let profile = SandboxProfile::compile(None, &request, &ctx)
-        .with_project_read_roots(&[project.clone(), other.clone()]);
+    let (roots, allow) = chat_read_confinement(Some(&home));
+    assert_eq!(roots, vec![home.clone()], "macOS confines the home");
+    let profile =
+        SandboxProfile::compile(None, &request, &ctx).with_read_policy(&view, &roots, &allow);
     assert!(
-        profile.read_roots.len() == 2,
-        "both roots must be accepted: {:?}",
+        profile.read_roots.len() == 3,
+        "project, other project and notes must be accepted: {:?}",
         profile.warnings
     );
     let mut policy = profile.to_policy(SandboxProvider::MacosSandboxExec);
     policy.egress_proxy_port = w.policy.egress_proxy_port;
     w.policy = policy;
-    (w, project, other)
+    (
+        w,
+        ChatPaths {
+            project,
+            other,
+            notes,
+            private,
+            unlisted,
+            toolchain,
+            outside_home,
+        },
+    )
 }
 
 #[test]
 fn chat_session_reads_the_real_project_but_cannot_write_or_see_ta_state() {
-    let (w, project, other) = chat_world();
+    let (w, paths) = chat_world();
+    let ChatPaths { project, other, .. } = paths;
     if !can_run(&w) {
         return;
     }
@@ -703,4 +768,88 @@ fn chat_session_reads_the_real_project_but_cannot_write_or_see_ta_state() {
         !sandboxed(&w, &["read", s(&w.state_secret)]),
         "the TA state dir must stay unreadable"
     );
+}
+
+/// The read allow/deny lists through the real OS sandbox, on the profile `ta run`
+/// builds: an allowed path outside the project root is readable, a denied subtree of
+/// it is not, an unlisted path inside the confined home is not, the built-in
+/// protected locations are not, a toolchain location inside the home still is, and
+/// nothing is writable anywhere a read was granted.
+#[test]
+fn chat_read_allow_and_deny_lists_hold_under_the_real_sandbox() {
+    let (w, p) = chat_world();
+    if !can_run(&w) {
+        return;
+    }
+    let readable = |f: &Path| sandboxed(&w, &["read", s(f)]);
+    // Allowed outside the project root: control, then the sandbox.
+    let todo = p.notes.join("todo.md");
+    assert!(unsandboxed(&["read", s(&todo)]), "control");
+    assert!(
+        readable(&todo),
+        "an allowed folder outside the project must read"
+    );
+    assert!(
+        readable(&p.project.join("README.md")),
+        "the project root reads"
+    );
+    // Deny beats allow: the subtree of an allowed folder is hidden, its siblings not.
+    let diary = p.private.join("diary.md");
+    assert!(unsandboxed(&["read", s(&diary)]), "control");
+    assert!(!readable(&diary), "a denied subtree must not read");
+    // Unlisted: a file in the confined home that no entry names.
+    let unlisted = p.unlisted.join("x.txt");
+    assert!(unsandboxed(&["read", s(&unlisted)]), "control");
+    assert!(
+        !readable(&unlisted),
+        "an unlisted path in the home must not read"
+    );
+    // Built-in protected locations stay unreadable whatever the lists say.
+    assert!(!readable(&w.ssh_key), "~/.ssh");
+    assert!(!readable(&w.npmrc), "~/.npmrc");
+    assert!(!readable(&w.state_secret), "the TA state dir");
+    assert!(
+        !readable(&p.project.join(".git/config")),
+        "the project .git"
+    );
+    // The toolchain locations of the confined home still read, so the agent starts.
+    assert!(
+        readable(&p.toolchain.join("agent-runtime")),
+        "toolchain dir"
+    );
+    assert!(sandboxed(&w, &["exec", "/bin/sh", "-c", "exit 0"]));
+    assert!(sandboxed(&w, &["exec", "/usr/bin/git", "--version"]));
+    // Known limit, asserted so the docs cannot drift from the behaviour: outside the
+    // confined home reads stay allow-all with targeted denies (the OS profile is the
+    // second layer; the gateway tools and the token are the first).
+    assert!(
+        readable(&p.outside_home.join("y.txt")),
+        "outside the confined home macOS reads are not confined"
+    );
+    // Writes are refused everywhere a read was granted (and in the denied and
+    // unlisted places), and nothing changed on disk.
+    for f in [
+        p.notes.join("todo.md"),
+        p.notes.join("new.txt"),
+        diary.clone(),
+        unlisted.clone(),
+        p.project.join("README.md"),
+        p.project.join("new.txt"),
+        p.other.join("notes.md"),
+        p.other.join("new.txt"),
+        p.toolchain.join("agent-runtime"),
+        p.outside_home.join("new.txt"),
+    ] {
+        assert!(
+            !sandboxed(&w, &["write", s(&f)]),
+            "{} must not be writable",
+            f.display()
+        );
+    }
+    assert!(!p.notes.join("new.txt").exists());
+    assert!(!p.project.join("new.txt").exists());
+    assert!(!p.other.join("new.txt").exists());
+    assert_eq!(std::fs::read_to_string(&todo).unwrap(), "buy milk");
+    // The session's own directory is still its workspace.
+    assert!(sandboxed(&w, &["write", s(&w.staging.join("scratch.txt"))]));
 }

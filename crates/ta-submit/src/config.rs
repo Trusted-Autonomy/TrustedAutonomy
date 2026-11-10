@@ -1820,19 +1820,60 @@ impl Default for WikiConfig {
 /// `[chat]` section of `.ta/workflow.toml`.
 ///
 /// ```toml
-/// [chat]
-/// readable_projects = ["wayfinder", "/Users/me/development/other-project"]
+/// [chat.read]
+/// allow = ["~/notes", "wayfinder", "/Users/me/Documents/specs", "~/work/*/docs/**"]
+/// deny  = ["~/notes/private"]
 /// ```
 ///
-/// The Chief of Staff always reads its own project's root read-only. This
-/// list is the ONLY way to widen that: each entry is an absolute project
-/// path or the name of a project registered in `office.yaml`, and is
-/// readable exactly like the main root (read-only, same secret deny-list,
-/// symlinks out of it refused). Default empty: nothing else is readable.
+/// The Chief of Staff always reads its own project's root, read-only. `allow`
+/// widens that to other files and folders; `deny` hides parts of what `allow`
+/// (or the project root) would otherwise show. Entries are an absolute path,
+/// `~/path`, the name of a project registered in `office.yaml`, or a glob;
+/// relative entries are relative to the project root. Deny beats allow, and a
+/// built-in hard deny list (TA state, `.git`, credential stores, browser
+/// profiles) can never be opened by config. Nothing here can grant a write.
+///
+/// `readable_projects` is the earlier spelling of `[chat.read] allow` and is
+/// still accepted as an alias: it is merged into the allow list
+/// ([`ChatConfig::read_allow`]), the only place that reads it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatConfig {
     #[serde(default)]
+    pub read: ChatReadConfig,
+    /// Deprecated alias of `[chat.read] allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readable_projects: Vec<String>,
+}
+
+/// `[chat.read]`: the Chief of Staff's read allow and deny lists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatReadConfig {
+    /// Readable resources beyond the project root. Empty: project root only.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Resources hidden even when an allow entry (or the project root) covers
+    /// them.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl ChatConfig {
+    /// The allow entries in effect: `[chat.read] allow` followed by the
+    /// `readable_projects` alias, without duplicates.
+    pub fn read_allow(&self) -> Vec<String> {
+        let mut out = self.read.allow.clone();
+        for entry in &self.readable_projects {
+            if !out.contains(entry) {
+                out.push(entry.clone());
+            }
+        }
+        out
+    }
+
+    /// The deny entries in effect.
+    pub fn read_deny(&self) -> Vec<String> {
+        self.read.deny.clone()
+    }
 }
 
 /// Garbage collection / draft lifecycle configuration
@@ -3659,13 +3700,28 @@ on_max_iterations = "fail"
     }
 
     #[test]
-    fn chat_readable_projects_default_empty_and_parse() {
+    fn chat_read_lists_default_empty_and_parse() {
         let none: WorkflowConfig = toml::from_str("").unwrap();
-        assert!(none.chat.readable_projects.is_empty());
-        let some: WorkflowConfig =
-            toml::from_str("[chat]\nreadable_projects = [\"wayfinder\", \"/abs/other\"]\n")
-                .unwrap();
-        assert_eq!(some.chat.readable_projects, vec!["wayfinder", "/abs/other"]);
+        assert!(none.chat.read_allow().is_empty());
+        assert!(none.chat.read_deny().is_empty());
+        let some: WorkflowConfig = toml::from_str(
+            "[chat.read]\nallow = [\"~/notes\", \"wayfinder\"]\ndeny = [\"~/notes/private\"]\n",
+        )
+        .unwrap();
+        assert_eq!(some.chat.read_allow(), vec!["~/notes", "wayfinder"]);
+        assert_eq!(some.chat.read_deny(), vec!["~/notes/private"]);
+    }
+
+    #[test]
+    fn chat_readable_projects_alias_merges_into_allow_without_duplicates() {
+        let wf: WorkflowConfig = toml::from_str(
+            "[chat]\nreadable_projects = [\"wayfinder\", \"/abs/other\"]\n[chat.read]\nallow = [\"/abs/other\", \"~/notes\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            wf.chat.read_allow(),
+            vec!["/abs/other", "~/notes", "wayfinder"]
+        );
     }
 
     #[test]

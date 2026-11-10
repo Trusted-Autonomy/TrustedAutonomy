@@ -14,6 +14,7 @@ pub mod build_budget;
 pub mod build_cache;
 pub mod capabilities;
 pub mod chat_launch;
+pub mod chat_read;
 pub mod cleanup;
 pub mod community;
 pub mod compression;
