@@ -1,5 +1,11 @@
 ## Unreleased
 
+**Login failures are launch failures, quiet defaults**
+
+- **Fixed: an agent that could not log in looked like a finished launch.** A chat-mode or wake-listener launch whose agent printed `authentication_failed` / "Not logged in · Please run /login" (or a 401) used to end as `ta-run-finished: result=no_changes` and "a finished launch, not a failed one", and the goal completed. It is now a failed launch: the goal is `failed`, the daemon publishes `launch_failed` / `no_login` (or `login_invalid`) whose fix names `ta agent-login login claude-code`, it is launched once (never retried three times), and the daemon logs an error with the reason code and the fix. A zero-token, zero-cost run that ended with an API error result is a failed launch (`crashed`) too. Only structured stream fields count, so a reply that talks about logins does not.
+- **New: a known-missing login is refused before launch.** With a scrubbed sandbox environment, `ta run` checks the `ta agent-login list` state for the agent's login framework and refuses to start the agent when it is missing or rejected, with the same `launch_failed` classification and no model call.
+- **Fixed: the default `headroom` optimizer was noisy.** When headroom is only the built-in default and is not installed, the daemon skips it once with one info line and a `disabled` status (no terminal warning, nothing started). A default that is installed but fails before passing a health check is turned off after the first failure instead of crash-looping five times. An explicitly configured `[compression.plugin]` keeps the warning.
+
 **Release sets: one release branch, one PR to main**
 
 - **New `ta release-set start|status|cut`.** `start <name> --goal "<objective>" [--wayfinder-goal <id>] [--phase <id>...]` creates `release/<name>` from `main` (refuses a dirty tree or a second open release). While a release is open, `ta run`, `ta goal start` and `ta draft apply --git-commit` commit onto the release branch; the push and the pull request are deferred. `ta release-set cut` merges the latest `main` in, runs the verify gate (`[release_set] gate_commands`, else `[verify] commands`; refuses and names the failing command), pushes once and opens one PR to `main` with the evidence line. `status --json` has a stable schema for Wayfinder. `ta release` is unchanged (publish pipeline).

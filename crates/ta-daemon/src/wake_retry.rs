@@ -2613,6 +2613,47 @@ mod tests {
         );
     }
 
+    /// Finding 059 blocker A: the failure the wake listener builds when the agent's own
+    /// stream said `authentication_failed` is launched ONCE (never the old three times), is
+    /// published as `launch_failed` / `no_login` whose fix names the login command, and does
+    /// not block the next message: after the person logs in, the next dispatch launches.
+    #[tokio::test]
+    async fn an_authentication_failed_stream_is_launched_once_and_a_later_message_runs() {
+        let mut h = Harness::new().await;
+        let failure = ta_goal::launch_failure::classify_and_describe(
+            &ta_goal::launch_failure::LaunchEvidence {
+                output_lines: Some(3),
+                exit_code: Some(1),
+                stream_failure: Some(ta_goal::launch_failure::StreamFailureKind::NotLoggedIn),
+                ..Default::default()
+            },
+        );
+        let err = crate::launch_failed::encode_error(
+            &failure,
+            "the launch FAILED, it did not finish: authentication_failed",
+        );
+        let (launches, out) = fail_until_dead_lettered(&mut h, &err, candidate_payload()).await;
+        assert_eq!(launches, 1, "a missing login is not retried three times");
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_launch_failed(&out[0], Code::NoLogin);
+        assert!(out[0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("ta agent-login login claude-code"));
+
+        // The login was fixed; the next dispatch is launched normally.
+        h.transport
+            .stream_append("intake", candidate_payload())
+            .await
+            .unwrap();
+        let next = h.step_with(t0() + secs(10_000), Ok(())).await;
+        assert!(
+            matches!(next, Some(MessageOutcome::LaunchSucceeded)),
+            "{next:?}"
+        );
+        assert_eq!(h.launches.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn login_invalid_is_published_at_once() {
         let mut h = Harness::new().await;

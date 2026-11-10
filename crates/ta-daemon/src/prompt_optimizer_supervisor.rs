@@ -10,6 +10,10 @@
 //   3. Exponential backoff (1→60 s cap); after 5 failures in 5 min the optimizer is
 //      disabled for the session with one user-visible message (flap guard), never
 //      restarted forever. `ta compression enable` clears it.
+//      The built-in default plugin (nobody wrote `[compression.plugin]`) is optional: when
+//      its binary is not installed it is skipped once with one info line and never
+//      started, and when it fails before ever passing a health check it is turned off
+//      after that first failure instead of crash-looping.
 //   4. Writes status to `.ta/compression/status.json`, including restart count and
 //      the last failure.
 //
@@ -75,6 +79,20 @@ pub fn start(
     optimizers: OptimizersConfig,
     shutdown: Arc<Notify>,
 ) {
+    start_with(project_root, config, optimizers, shutdown, &|command| {
+        which::which(command).is_ok()
+    });
+}
+
+/// [`start`] with the "is this binary installed" check injected, so the not-installed
+/// path is testable on a machine that does have the plugin.
+fn start_with(
+    project_root: PathBuf,
+    config: CompressionConfig,
+    optimizers: OptimizersConfig,
+    shutdown: Arc<Notify>,
+    binary_exists: &dyn Fn(&str) -> bool,
+) {
     // `[optimizers.input] use = "none"|"rtk"` means no proxy-kind optimizer runs.
     let input_forbids_proxy = optimizers.input_wants_proxy() == Some(false);
     if !config.enabled || input_forbids_proxy {
@@ -91,24 +109,32 @@ pub fn start(
         return;
     }
 
+    let implicit = config.plugin.is_none();
     let plugin = config.effective_plugin();
     let status_dir = project_root.join(".ta").join("compression");
 
     // Verify the binary is findable before spawning.
-    if which::which(&plugin.command).is_err() {
-        eprintln!(
-            "Warning: context compression is enabled but the `{cmd}` binary was not found on PATH.\n\
-             \n  Check your [compression.plugin] configuration in .ta/daemon.toml:\n\
-             \n      [compression.plugin]\n      command = \"{cmd}\"    # must be on PATH\n\
-             \n  Or disable compression:\n\
-             \n      ta compression disable\n",
-            cmd = plugin.command
-        );
-        tracing::warn!(
-            command = %plugin.command,
-            plugin = %plugin.name,
-            "compression.enabled=true but plugin binary not found — running without compression"
-        );
+    if !binary_exists(&plugin.command) {
+        if implicit {
+            // Nobody asked for this plugin: it is the built-in default, and it is not
+            // installed (it is not part of every install). Skip it, once, with one info
+            // line; never start it, never crash-loop it, no warning on the terminal.
+            skip_absent_default(&status_dir, &plugin);
+        } else {
+            eprintln!(
+                "Warning: context compression is enabled but the `{cmd}` binary was not found on PATH.\n\
+                 \n  Check your [compression.plugin] configuration in .ta/daemon.toml:\n\
+                 \n      [compression.plugin]\n      command = \"{cmd}\"    # must be on PATH\n\
+                 \n  Or disable compression:\n\
+                 \n      ta compression disable\n",
+                cmd = plugin.command
+            );
+            tracing::warn!(
+                command = %plugin.command,
+                plugin = %plugin.name,
+                "compression.enabled=true but plugin binary not found — running without compression"
+            );
+        }
         return;
     }
 
@@ -121,8 +147,34 @@ pub fn start(
     );
 
     tokio::spawn(async move {
-        run_supervisor(plugin, status_dir, shutdown).await;
+        run_supervisor(plugin, status_dir, shutdown, implicit).await;
     });
+}
+
+/// The built-in default plugin's binary is not installed: record a `disabled` status with a
+/// notice (so `ta compression status` explains it) and log one info line. Nothing is
+/// started, so nothing can crash.
+fn skip_absent_default(status_dir: &Path, plugin: &PromptOptimizerPluginConfig) {
+    std::fs::create_dir_all(status_dir).ok();
+    begin_run(status_dir);
+    write_status(status_dir, "disabled", None, 0, Some(&plugin.name));
+    set_notice(
+        status_dir,
+        &format!(
+            "The default {name} optimizer is not installed (`{cmd}` is not on PATH), so \
+             context compression is off. Install it to turn compression on, or run \
+             `ta compression disable` to stop checking.",
+            name = plugin.name,
+            cmd = plugin.command
+        ),
+    );
+    tracing::info!(
+        plugin = %plugin.name,
+        command = %plugin.command,
+        "PromptOptimizerSupervisor: the default `{}` optimizer is not installed — skipping it \
+         (compression is off; nothing was started)",
+        plugin.name
+    );
 }
 
 /// Read the current supervisor status from disk.
@@ -211,6 +263,7 @@ async fn run_supervisor(
     plugin: PromptOptimizerPluginConfig,
     status_dir: PathBuf,
     shutdown: Arc<Notify>,
+    implicit: bool,
 ) {
     std::fs::create_dir_all(&status_dir).ok();
     // A new supervisor run starts with a restart count of zero but keeps the last failure,
@@ -221,6 +274,8 @@ async fn run_supervisor(
     let mut restart_count: u32 = 0;
     let mut suspended = false;
     let mut flap_guard = FlapGuard::default();
+    // Whether the plugin has passed a health check in this run.
+    let mut ever_healthy = false;
 
     loop {
         // ── Suspended: poll for a restart signal ─────────────────────────
@@ -288,6 +343,7 @@ async fn run_supervisor(
                     &mut suspended,
                     &mut flap_guard,
                     &shutdown,
+                    implicit && !ever_healthy,
                 )
                 .await;
                 continue;
@@ -341,6 +397,7 @@ async fn run_supervisor(
             &plugin.health_endpoint,
             &shutdown,
             &mut || {
+                ever_healthy = true;
                 if let Some(at) = &carried_failure_at {
                     if clear_carried_failure(&status_dir, at) {
                         tracing::info!(
@@ -399,6 +456,7 @@ async fn run_supervisor(
             &mut suspended,
             &mut flap_guard,
             &shutdown,
+            implicit && !ever_healthy,
         )
         .await;
     }
@@ -478,6 +536,10 @@ async fn monitor(
 
 // ─── Failure + backoff ────────────────────────────────────────────────────────
 
+/// `give_up_now` is true for the built-in default plugin (nobody configured it) that has
+/// never once passed a health check: it is switched off after this FIRST failure with a
+/// single info line, instead of crash-looping until the flap guard trips.
+#[allow(clippy::too_many_arguments)]
 async fn handle_failure(
     status_dir: &Path,
     plugin_name: &str,
@@ -486,9 +548,36 @@ async fn handle_failure(
     suspended: &mut bool,
     flap_guard: &mut FlapGuard,
     shutdown: &Arc<Notify>,
+    give_up_now: bool,
 ) {
     *restart_count = restart_count.saturating_add(1);
     record_failure(status_dir, reason);
+
+    if give_up_now {
+        let notice = format!(
+            "The default {plugin_name} optimizer could not start (last: {reason}) and is \
+             turned off for this session. Agents run without it. To use it, fix or install \
+             {plugin_name} and run `ta compression enable`; to silence this, run \
+             `ta compression disable`."
+        );
+        tracing::info!(
+            plugin = %plugin_name,
+            last_failure = %reason,
+            "PromptOptimizerSupervisor: the default optimizer never started, so it is turned \
+             off for this session instead of being restarted. Run `ta compression disable` to \
+             stop trying it"
+        );
+        *suspended = true;
+        write_status(
+            status_dir,
+            "suspended",
+            None,
+            *restart_count,
+            Some(plugin_name),
+        );
+        set_notice(status_dir, &notice);
+        return;
+    }
 
     if flap_guard.record(Instant::now()) {
         let notice = format!(
@@ -862,6 +951,7 @@ mod tests {
                 &mut suspended,
                 &mut guard,
                 &shutdown,
+                false,
             )
             .await;
         }
@@ -1020,5 +1110,130 @@ mod tests {
             r#"{"schema_version":1,"status":"running","pid":1,"restart_count":2,"updated_at":"x"}"#;
         let s: OptimizerStatus = serde_json::from_str(json).unwrap();
         assert!(s.last_failure.is_none() && s.notice.is_none());
+    }
+
+    // ---- finding 059 item C: a default optimizer that is absent or broken stays quiet ----
+
+    /// The built-in default (`headroom`, nobody configured it) is not installed: nothing is
+    /// spawned, one `disabled` status explains why, and there is no failure or restart.
+    #[test]
+    fn an_absent_default_plugin_is_skipped_once_and_never_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CompressionConfig::default();
+        assert!(config.plugin.is_none(), "the default is implicit");
+        // No tokio runtime exists in this test: reaching `tokio::spawn` would panic, so
+        // returning proves nothing was started.
+        start_with(
+            dir.path().to_path_buf(),
+            config,
+            OptimizersConfig::default(),
+            Arc::new(Notify::new()),
+            &|_| false,
+        );
+        let st = read_status(dir.path()).expect("a status explains the skip");
+        assert_eq!(st.status, "disabled");
+        assert_eq!(st.plugin_name.as_deref(), Some("headroom"));
+        assert_eq!(st.restart_count, 0);
+        assert!(st.last_failure.is_none(), "{st:?}");
+        let notice = st.notice.expect("the notice says what to do");
+        assert!(
+            notice.contains("not installed") && notice.contains("ta compression disable"),
+            "{notice}"
+        );
+    }
+
+    /// A plugin the person configured but whose binary is missing is still a mistake worth a
+    /// warning, and is not turned into a silent default skip.
+    #[test]
+    fn an_absent_configured_plugin_is_not_the_quiet_default_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CompressionConfig {
+            plugin: Some(PromptOptimizerPluginConfig {
+                command: "my-optimizer".to_string(),
+                ..config_plugin_for_tests()
+            }),
+            ..Default::default()
+        };
+        start_with(
+            dir.path().to_path_buf(),
+            config,
+            OptimizersConfig::default(),
+            Arc::new(Notify::new()),
+            &|_| false,
+        );
+        assert!(
+            read_status(dir.path()).is_none(),
+            "no default-skip status for an explicit plugin"
+        );
+    }
+
+    fn config_plugin_for_tests() -> PromptOptimizerPluginConfig {
+        CompressionConfig::default().effective_plugin()
+    }
+
+    /// An unproven default plugin that fails to start is turned off after the FIRST failure.
+    #[tokio::test]
+    async fn an_unproven_default_plugin_is_turned_off_after_one_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = Arc::new(Notify::new());
+        let (mut count, mut suspended, mut guard) = (0u32, false, FlapGuard::default());
+        handle_failure(
+            dir.path(),
+            "headroom",
+            "process exited with code 1",
+            &mut count,
+            &mut suspended,
+            &mut guard,
+            &shutdown,
+            true,
+        )
+        .await;
+        assert!(suspended, "one failure is enough for an unproven default");
+        assert_eq!(count, 1);
+        let st = read_status_file(dir.path()).unwrap();
+        assert_eq!(st.status, "suspended");
+        let notice = st.notice.unwrap();
+        assert!(notice.contains("ta compression"), "{notice}");
+    }
+
+    /// End to end through the supervisor: a default `headroom` that is on PATH but exits at
+    /// once is spawned exactly once, then suspended; it is not restarted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_crashing_default_plugin_is_started_once_not_five_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_dir = dir.path().join("compression");
+        let counter = dir.path().join("spawns");
+        let mut plugin = config_plugin_for_tests();
+        plugin.command = "sh".to_string();
+        plugin.args = vec![
+            "-c".to_string(),
+            format!("echo x >> {}; exit 3", counter.display()),
+        ];
+        let shutdown = Arc::new(Notify::new());
+        let task = tokio::spawn(run_supervisor(
+            plugin,
+            status_dir.clone(),
+            shutdown.clone(),
+            true,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(st) = read_status_file(&status_dir) {
+                if st.status == "suspended" {
+                    break st;
+                }
+            }
+            assert!(Instant::now() < deadline, "never suspended");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert_eq!(status.restart_count, 1);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "the plugin must be spawned once"
+        );
+        shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
     }
 }
